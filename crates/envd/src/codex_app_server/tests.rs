@@ -380,6 +380,30 @@ async fn run_input(
 	(result, rx.drain().collect())
 }
 
+/// Runs a turn whose permission prompts are all denied.
+async fn run_denied(
+	session: &mut Active,
+) -> (Result<TurnReport, ExecutorError>, Vec<DelegatedEvent>) {
+	run_input(session, &input(), &mut deny(), &CancellationToken::new()).await
+}
+
+/// Runs `input`, denying every permission prompt.
+async fn run_denied_input(
+	session: &mut Active,
+	input: &TurnInput,
+) -> (Result<TurnReport, ExecutorError>, Vec<DelegatedEvent>) {
+	run_input(session, input, &mut deny(), &CancellationToken::new()).await
+}
+
+/// Runs `input` under `cancel`, denying every permission prompt.
+async fn run_cancellable(
+	session: &mut Active,
+	input: &TurnInput,
+	cancel: &CancellationToken,
+) -> (Result<TurnReport, ExecutorError>, Vec<DelegatedEvent>) {
+	run_input(session, input, &mut deny(), cancel).await
+}
+
 async fn run(
 	session: &mut Active,
 	resolver: &mut Scripted,
@@ -710,10 +734,7 @@ async fn an_order_the_adapter_cannot_deliver_is_a_rewrite_and_ends_the_session()
 	let script = async {
 		peer.accept_turn("t1", true).await;
 	};
-	let ((result, _), ()) = tokio::join!(
-		run_input(&mut session, &reordered, &mut deny(), &CancellationToken::new()),
-		script
-	);
+	let ((result, _), ()) = tokio::join!(run_denied_input(&mut session, &reordered), script);
 	assert!(matches!(fail(result), ExecutorError::PromptRewritten { .. }));
 	assert!(!session.is_open());
 }
@@ -729,7 +750,7 @@ async fn a_line_that_is_not_json_is_a_malformed_stream() {
 		peer.accept_turn("t1", true).await;
 		peer.send("this is not json").await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::MalformedStream {
 		fault: FrameFault::NotJson,
 		..
@@ -746,7 +767,7 @@ async fn a_known_method_with_bad_params_is_a_missing_field() {
 			.send(&notification("turn/started", r#"{"threadId":"thr-1"}"#))
 			.await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::MalformedStream {
 		fault: FrameFault::MissingField { .. },
 		..
@@ -760,7 +781,7 @@ async fn json_that_is_not_json_rpc_is_an_unknown_message() {
 		peer.accept_turn("t1", true).await;
 		peer.send(r#"{"hello":"world"}"#).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::MalformedStream {
 		fault: FrameFault::UnknownMessage,
 		..
@@ -784,7 +805,7 @@ async fn an_oversized_line_fails_the_session() {
 		peer.accept_turn("t1", true).await;
 		peer.send(&"x".repeat(4096)).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::MalformedStream {
 		fault: FrameFault::Oversize { limit: 1024 },
 		..
@@ -800,7 +821,7 @@ async fn an_unknown_notification_is_reported_as_an_undeclared_event() {
 		peer.send(&turn_started("t1")).await;
 		peer.send(&notification("brandNew/feature", "{}")).await;
 	};
-	let ((result, events), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, events), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::UndeclaredEvent { .. }));
 	assert!(!session.is_open());
 	assert_eq!(events.len(), 1, "the started event was delivered before the failure");
@@ -823,7 +844,7 @@ async fn notifications_the_pinned_version_defines_but_the_model_ignores_do_not_f
 			.await;
 		peer.send(&turn_completed("t1", "completed")).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert_eq!(result.expect("completes").end, TurnEnd::Completed);
 	assert!(session.is_open());
 }
@@ -836,7 +857,7 @@ async fn a_peer_that_goes_away_mid_turn_is_a_crash_not_a_clean_end() {
 		peer.send(&turn_started("t1")).await;
 		peer.close().await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::Crashed { exit: ExitFact::Unknown, .. }));
 	assert!(!session.is_open());
 }
@@ -848,7 +869,7 @@ async fn a_silent_peer_is_hung_and_the_session_is_interrupted_then_ended() {
 		peer.accept_turn("t1", true).await;
 		peer.send(&turn_started("t1")).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::Hung { .. }));
 	assert!(!session.is_open());
 	let interrupt = peer.expect("turn/interrupt").await;
@@ -876,7 +897,7 @@ async fn a_cooperative_interrupt_settles_the_turn_and_keeps_the_session() {
 		peer.send(&turn_completed("t1", "interrupted")).await;
 	};
 	let ((result, events), ()) =
-		tokio::join!(run_input(&mut session, &input(), &mut deny(), &cancel), script);
+		tokio::join!(run_cancellable(&mut session, &input(), &cancel), script);
 	assert!(matches!(fail(result), ExecutorError::Cancelled { .. }));
 	assert!(session.is_open(), "the CLI settled inside the grace period");
 	assert!(events.iter().any(|event| matches!(
@@ -900,8 +921,7 @@ async fn an_ignored_interrupt_ends_the_session() {
 		peer.expect("turn/interrupt").await;
 		// ... and never settle.
 	};
-	let ((result, _), ()) =
-		tokio::join!(run_input(&mut session, &input(), &mut deny(), &cancel), script);
+	let ((result, _), ()) = tokio::join!(run_cancellable(&mut session, &input(), &cancel), script);
 	assert!(matches!(fail(result), ExecutorError::Cancelled { .. }));
 	assert!(!session.is_open(), "an unsettled interrupt means the tree is killed");
 }
@@ -1165,7 +1185,7 @@ async fn requests_with_no_omp_counterpart_are_refused_and_never_answered_with_a_
 		peer.send(&turn_completed("t1", "completed")).await;
 		answers
 	};
-	let ((result, _), answers) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), answers) = tokio::join!(run_denied(&mut session), script);
 	result.expect("refusals do not fail the turn");
 	assert!(
 		answers[0].contains(r#""success":false"#) && answers[0].contains(r#""contentItems":[]"#)
@@ -1189,7 +1209,7 @@ async fn an_unknown_server_request_is_refused_and_reported() {
 			.await;
 		peer.recv().await
 	};
-	let ((result, _), answer) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), answer) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::UndeclaredEvent { .. }));
 	assert!(answer.line.contains("-32601"));
 }
@@ -1264,7 +1284,7 @@ async fn deltas_tools_and_usage_are_normalized_and_usage_is_per_turn() {
 		peer.send(&usage(first, first)).await;
 		peer.send(&turn_completed("t1", "completed")).await;
 	};
-	let ((result, events), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, events), ()) = tokio::join!(run_denied(&mut session), script);
 	let report = result.expect("completes");
 	assert_eq!(report.end, TurnEnd::Completed);
 	assert_eq!(report.usage.input_tokens, 60, "cached input is its own dimension");
@@ -1320,7 +1340,7 @@ async fn deltas_tools_and_usage_are_normalized_and_usage_is_per_turn() {
 		.await;
 		peer.send(&turn_completed("t2", "completed")).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	let report = result.expect("second turn");
 	assert_eq!((report.usage.input_tokens, report.usage.output_tokens), (30, 5));
 	assert_eq!(report.usage.cache_read_tokens, 0);
@@ -1355,7 +1375,7 @@ async fn failures_are_typed() {
 			.await;
 			peer.send(&turn_completed("t1", "failed")).await;
 		};
-		let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+		let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 		let error = fail(result);
 		match (expected, &error) {
 			("auth_required", ExecutorError::AuthRequired { .. }) => {},
@@ -1381,7 +1401,7 @@ async fn a_second_turn_runs_on_the_same_session() {
 			peer.send(&turn_started(turn)).await;
 			peer.send(&turn_completed(turn, "completed")).await;
 		};
-		let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+		let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 		assert_eq!(result.expect("turn").turn.as_str(), turn);
 	}
 }
@@ -1393,7 +1413,7 @@ async fn an_event_of_another_turn_is_a_host_level_protocol_violation() {
 		peer.accept_turn("t1", true).await;
 		peer.send(&turn_started("t9")).await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::Protocol {
 		violation: ProtocolViolation::TurnMismatch { .. },
 		..
@@ -1414,7 +1434,7 @@ async fn the_rejection_of_turn_start_is_a_protocol_failure() {
 			))
 			.await;
 	};
-	let ((result, _), ()) = tokio::join!(run(&mut session, &mut deny()), script);
+	let ((result, _), ()) = tokio::join!(run_denied(&mut session), script);
 	assert!(matches!(fail(result), ExecutorError::Protocol {
 		violation: ProtocolViolation::RequestRejected { code: -32001 },
 		..
