@@ -1583,6 +1583,78 @@ mod tests {
 		assert!(sub.rulebook.iter().any(|row| row["name"] == "sub-only"));
 	}
 
+	#[test]
+	fn stream_rules_leave_prompt_facts_remain_readable_and_filter_by_agent() {
+		let (_temp, home, repo, project) = layout();
+		let config_root = home.join(".o2");
+		write(
+			&repo.join(".omp/rules/guard.md"),
+			"---\nalwaysApply: true\ncondition: ['forbidden', 'a(?=b)']\nscope: text\n---\nUse safe \
+			 output.\n",
+		);
+		write(
+			&repo.join(".omp/rules/reviewer.md"),
+			"---\ncondition: review\nscope: text\nagents: reviewer\n---\nReview-only rule.\n",
+		);
+		let rules = ActiveRules::discover(&project, &home, &config_root, &ClaudePlugins::default());
+
+		let facts = rules.prompt_facts(MAIN_AGENT);
+		assert!(
+			facts
+				.always_apply
+				.iter()
+				.all(|row| row["name"].as_str() != Some("guard")),
+			"a compiled condition removes the document from static prompt facts"
+		);
+		assert_eq!(
+			rules
+				.lookup("guard", MAIN_AGENT)
+				.expect("conditional documents remain available at rule://")
+				.content,
+			"Use safe output.\n"
+		);
+		assert_eq!(
+			rules
+				.stream_patterns(MAIN_AGENT)
+				.iter()
+				.map(|pattern| pattern.pattern.as_str())
+				.collect::<Vec<_>>(),
+			["forbidden", "a(?=b)"],
+			"the matcher receives every condition and reports invalid siblings"
+		);
+		let compiled = omp_agent::directors::stream_rules::StreamRuleSet::compile(
+			rules.stream_patterns(MAIN_AGENT),
+		);
+		assert_eq!(
+			compiled
+				.set
+				.expect("the valid sibling compiles")
+				.patterns()
+				.count(),
+			1
+		);
+		assert!(matches!(
+			compiled.warnings.as_slice(),
+			[omp_agent::directors::stream_rules::StreamRuleWarning::Condition { rule, index: 1, .. }]
+				if rule.as_str() == "guard"
+		));
+		assert!(
+			rules
+				.stream_patterns(MAIN_AGENT)
+				.iter()
+				.all(|pattern| pattern.name != "reviewer"),
+			"child-only rules never reach the main kernel"
+		);
+		assert_eq!(
+			rules
+				.stream_patterns(AgentName::from_ref("reviewer"))
+				.iter()
+				.map(|pattern| pattern.name.as_str())
+				.collect::<Vec<_>>(),
+			["guard", "reviewer"]
+		);
+	}
+
 	#[tokio::test]
 	async fn rule_url_reads_lists_and_completes() {
 		let (_temp, home, repo, project) = layout();

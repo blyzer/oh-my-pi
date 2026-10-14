@@ -104,13 +104,15 @@ pub enum StreamVerdict {
 /// Instruction to redirect an in-progress inference response.
 pub struct StreamInterrupt {
 	/// Tool call that triggered the redirect, if any.
-	pub culprit: Option<omp_ai::ToolCallId>,
+	pub culprit:       Option<omp_ai::ToolCallId>,
 	/// Whether partial assistant output remains in model context.
-	pub partial: PartialOutput,
+	pub partial:       PartialOutput,
 	/// Placeholder label for the triggering tool call.
-	pub label:   Str,
+	pub label:         Str,
+	/// Neutral placeholder label for the triggering call's siblings.
+	pub sibling_label: Str,
 	/// Durable effects to commit with the redirect.
-	pub effect:  StreamEffect,
+	pub effect:        StreamEffect,
 }
 
 /// Visibility of partial assistant output after a stream redirect.

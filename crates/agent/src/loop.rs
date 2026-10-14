@@ -3274,7 +3274,7 @@ impl<C: Inference> Kernel<C> {
 							crate::ToolScopedAbortReason::one(
 								Str::new(call_id.as_str()),
 								interrupt.label.clone(),
-								Str::new_static("another call was skipped after stream redirect"),
+								interrupt.sibling_label.clone(),
 							)
 						});
 						(scoped, Some((owner, interrupt)))
