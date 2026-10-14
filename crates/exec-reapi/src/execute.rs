@@ -870,7 +870,10 @@ mod tests {
 	use tonic::{Response, transport::Server};
 
 	use super::*;
-	use crate::{capabilities::Capabilities, proto::build::bazel::remote::execution::v2 as wire};
+	use crate::{
+		capabilities::Capabilities, cas::BlobSource,
+		proto::build::bazel::remote::execution::v2 as wire,
+	};
 
 	#[derive(Clone)]
 	struct Source {
@@ -927,9 +930,6 @@ mod tests {
 
 	#[tonic::async_trait]
 	impl wire::execution_server::Execution for Fake {
-		type ExecuteStream = OpStream;
-		type WaitExecutionStream = OpStream;
-
 		async fn execute(
 			&self,
 			_request: Request<wire::ExecuteRequest>,
@@ -993,8 +993,6 @@ mod tests {
 
 	#[tonic::async_trait]
 	impl bytestream::byte_stream_server::ByteStream for Fake {
-		type ReadStream = OpStream;
-
 		async fn write(
 			&self,
 			mut request: Request<tonic::Streaming<bytestream::WriteRequest>>,
@@ -1009,9 +1007,9 @@ mod tests {
 		async fn cancel_operation(
 			&self,
 			_request: Request<longrunning::CancelOperationRequest>,
-		) -> Result<Response<prost_types::Empty>, Status> {
+		) -> Result<Response<()>, Status> {
 			*self.cancelled.lock().await = true;
-			Ok(Response::new(prost_types::Empty {}))
+			Ok(Response::new(()))
 		}
 	}
 
