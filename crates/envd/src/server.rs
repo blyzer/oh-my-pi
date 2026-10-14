@@ -88,7 +88,7 @@ use super::{
 		AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse,
 		widened_effects_denial,
 	},
-	blobs::{BlobError, BlobHost, BlobId, BlobRead},
+	approval_relay::{ConnectionApprovals, OwnedApprovals},
 	browser_daemon::BrowserSettings,
 	docs::{
 		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHello,
@@ -126,6 +126,7 @@ use super::{
 	process_store::{ProcessStore, ShutdownAcknowledgement},
 	reflection_relay::{ConnectionReflection, OwnedReflection},
 	resource_materializer::{MaterializationError, ResourceMaterializer},
+	schedules::{DurableScheduleError, ScheduleDeliveryBackend},
 	search_backend::SearchBridgeHost,
 	site::{SiteError, SiteMaterializer, record_modules},
 	tool_document::{PrivilegedMutationFault, privileged_unlink, privileged_write},
