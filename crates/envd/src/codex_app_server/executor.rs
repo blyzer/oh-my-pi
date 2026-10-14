@@ -125,7 +125,7 @@ impl DelegatedExecutor for CodexExecutor {
 		let version = text
 			.split_whitespace()
 			.find_map(parse_version)
-			.ok_or_else(|| Self::missing())?;
+			.ok_or_else(Self::missing)?;
 		// Codex documents no side-effect-free login probe that is safe to run
 		// without reading credential state, so the login is reported as it is:
 		// unknown. The first turn surfaces `AuthRequired` if it is missing.
