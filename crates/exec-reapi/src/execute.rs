@@ -171,7 +171,7 @@ where
 			execution:    wire::execution_client::ExecutionClient::new(channel.clone()),
 			operations:   longrunning::operations_client::OperationsClient::new(channel),
 		};
-		let reply = clients_capabilities(&clients, &config, &endpoint).await?;
+		let reply = clients_capabilities(&clients, &config).await?;
 		let caps = capabilities::interpret(&reply).map_err(config_error)?;
 		let backend_caps = BackendCapabilities {
 			platforms:      Arc::new([config.platform]),

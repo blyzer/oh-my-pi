@@ -116,12 +116,6 @@ pub struct UploadPlan {
 	pub streamed: Vec<Digest>,
 }
 
-/// Whether a blob is small enough to travel inside a batch call.
-pub(crate) fn fits_batch(digest: Digest, capabilities: &Capabilities) -> bool {
-	let ceiling = capabilities.max_batch_bytes.unwrap_or(DEFAULT_BATCH_BYTES);
-	digest.size.saturating_add(BATCH_ENTRY_OVERHEAD) <= ceiling
-}
-
 /// Splits `missing` into batch calls and streamed uploads.
 ///
 /// A blob whose size plus overhead exceeds the batch ceiling cannot be in a
