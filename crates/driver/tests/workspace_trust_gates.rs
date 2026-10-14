@@ -223,6 +223,24 @@ struct Gateway {
 	_serving:   JoinHandle<()>,
 }
 
+/// The gateway's tool registry: the `eval` declaration the production
+/// environment advertises, so the gateway lowers the model's `eval` call.
+fn eval_declaration() -> omp_tool::Registry {
+	let mut registry = omp_tool::Registry::new();
+	registry
+		.register_worker(
+			omp_tools::eval::spec(sf!("eval")),
+			omp_tool::Presentation::Slot,
+			omp_tool::Claims {
+				precedence: omp_tool::Precedence::CORE,
+				claimant:   sf!("omp/core"),
+				replaces:   None,
+			},
+		)
+		.expect("eval declaration registers");
+	registry
+}
+
 impl Gateway {
 	async fn start(scratch: &Path) -> Self {
 		let mut compiled = Catalog::embedded().compiled().clone();
@@ -279,7 +297,7 @@ impl Gateway {
 		let rpc = InferenceRpc::new_for_test(
 			builder.build().expect("registry"),
 			sessions,
-			Arc::new(omp_tool::Registry::new()),
+			Arc::new(eval_declaration()),
 			responses,
 		);
 		let socket = scratch.join("gateway.sock");
