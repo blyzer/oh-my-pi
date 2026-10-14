@@ -33,3 +33,6 @@ __pycache__/
 .omp/config.toml.lock
 .omp/omp-*.md
 dist/
+
+# Local Bazel/BuildBuddy overrides may carry an API key header; never commit them.
+.bazelrc.user
