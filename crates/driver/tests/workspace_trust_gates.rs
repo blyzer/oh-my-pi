@@ -123,6 +123,11 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		SV_SANDBOX_MODE
 			.set(&con, ExecSandboxMode::Off)
 			.expect("sandbox off");
+		// `bash` is the vehicle of the eval proof, so no approval prompt may
+		// park it.
+		omp_envd::tool_settings::SV_TOOLS_APPROVAL
+			.set(&con, omp_con::Kv(vec![(sf!("bash"), omp_con::Value::Str(sf!("allow")))]))
+			.expect("allow bash");
 		let session = root.join("sessions/trust.oms");
 		Self { _scratch: scratch, home, data, project, session, con: Arc::new(con) }
 	}
