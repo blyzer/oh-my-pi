@@ -915,7 +915,7 @@ pub trait ParentSessionHost: Send + Sync {
 /// Session and artifact access never enters the child environment: `output()`
 /// uses the authenticated Read bridge against journal-derived agent/job views
 /// and the session CAS.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EvalSessionConfig {
 	/// Environment-authorized working directory for each cell.
 	pub cwd:              PathBuf,
@@ -1097,6 +1097,14 @@ impl SessionBridgeHost {
 		parents.insert(owner.clone(), ParentBinding { generation, parent });
 		drop(parents);
 		Ok(ParentBindingLease { parents: Arc::clone(&self.parents), owner, generation })
+	}
+
+	/// Returns the parent bound for a daemon-relayed eval owner.
+	pub(crate) fn parent_for_relay(
+		&self,
+		owner: &str,
+	) -> Result<Arc<dyn ParentSessionHost>, BridgeHostError> {
+		self.parent_for(owner).map(|(_, _, parent)| parent)
 	}
 
 	fn parent_for(

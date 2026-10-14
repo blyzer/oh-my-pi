@@ -23,6 +23,9 @@ mod editor_base;
 /// by the editor's connection (ADR 0037 §4).
 pub mod editor_sync;
 pub mod eval;
+/// Parent-session eval operations relayed between an attached daemon and
+/// session.
+mod eval_parent_relay;
 pub mod exec;
 mod exec_network_diag;
 mod exec_sandbox;
@@ -1086,6 +1089,12 @@ impl ProjectEnvironment {
 			&shutdown,
 			&mut tasks,
 		);
+		eval_parent_relay::spawn_eval_parent_pump(
+			&client,
+			Arc::clone(&eval_bridge),
+			&shutdown,
+			&mut tasks,
+		);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		let lifecycle = ProjectLifecycle { shutdown: Some(shutdown), tasks, abort_tasks, server };
 		// The connection that runs this session's environment tools must
@@ -1657,10 +1666,15 @@ const fn attached_features(edit_repair: bool) -> &'static [&'static str] {
 		&[
 			omp_env::APPROVAL_RELAY_CAPABILITY,
 			omp_env::REFLECTION_RELAY_CAPABILITY,
+			omp_env::EVAL_PARENT_RELAY_CAPABILITY,
 			omp_env::EDIT_REPAIR_CAPABILITY,
 		]
 	} else {
-		&[omp_env::APPROVAL_RELAY_CAPABILITY, omp_env::REFLECTION_RELAY_CAPABILITY]
+		&[
+			omp_env::APPROVAL_RELAY_CAPABILITY,
+			omp_env::REFLECTION_RELAY_CAPABILITY,
+			omp_env::EVAL_PARENT_RELAY_CAPABILITY,
+		]
 	}
 }
 
@@ -2399,17 +2413,30 @@ mod tests {
 		assert!(plain.props.is_none());
 
 		let attached = client_hello(None, attached_features(false), None);
-		assert_eq!(attached.capabilities, ["approval-relay", "reflection-relay"]);
+		assert_eq!(attached.capabilities, [
+			"approval-relay",
+			"reflection-relay",
+			"eval-parent-relay"
+		]);
 		assert!(attached.props.is_none());
 
 		let repair = client_hello(None, attached_features(true), None);
-		assert_eq!(repair.capabilities, ["approval-relay", "reflection-relay", "edit-repair"]);
+		assert_eq!(repair.capabilities, [
+			"approval-relay",
+			"reflection-relay",
+			"eval-parent-relay",
+			"edit-repair"
+		]);
 		assert!(repair.props.is_none());
 
 		let model = sf!("smol");
 		let model_only =
 			client_hello(Some(ApprovalMode::Write), attached_features(false), Some(&model));
-		assert_eq!(model_only.capabilities, ["approval-relay", "reflection-relay"]);
+		assert_eq!(model_only.capabilities, [
+			"approval-relay",
+			"reflection-relay",
+			"eval-parent-relay"
+		]);
 		assert_eq!(model_only.approval_mode, ProtoApprovalMode::Write as i32);
 		let model = model_only
 			.props

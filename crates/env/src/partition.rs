@@ -189,6 +189,8 @@ async fn route(
 						routes.reflections.remove(&(frame.request_id, answer.query_id));
 						Some(("reflection", answer.query_id))
 					},
+					Some(client_frame::Body::EvalParentProgress(_))
+					| Some(client_frame::Body::EvalParentResult(_)) => None,
 					_ => None,
 				};
 				if let Some((relay, query_id)) = relayed {
@@ -356,6 +358,8 @@ fn route_client_frame(
 				.unwrap_or(remote),
 			None,
 		),
+		Some(client_frame::Body::EvalParentProgress(_))
+		| Some(client_frame::Body::EvalParentResult(_)) => (remote, None),
 		// Only the environment relays approvals, so only it holds this
 		// connection's session grants.
 		Some(client_frame::Body::RevokeApprovalGrants(_)) => (remote, None),
@@ -408,7 +412,8 @@ const fn opens_response_route(frame: &ClientFrame) -> bool {
 		Some(
 			client_frame::Body::AcpDocumentAnswer(_)
 				| client_frame::Body::ApprovalAnswer(_)
-				| client_frame::Body::ReflectionAnswer(_)
+				| client_frame::Body::EvalParentResult(_)
+				| client_frame::Body::EvalParentProgress(_)
 				| client_frame::Body::RevokeApprovalGrants(_)
 		)
 	)

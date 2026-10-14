@@ -24,13 +24,13 @@ pub use client::{
 	APPROVAL_RELAY_CAPABILITY, AcpRequest, ActiveExecControl, ApprovalQueryEvent, BlobDownload,
 	BlobDownloadEvent, BlobUpload, CLIENT_FEATURES, ClientError, DapStream, DapStreamEvent,
 	DataScope, DataStream, DataStreamItem, DocumentEvents, DocumentLease, DocumentRead,
-	EDIT_REPAIR_CAPABILITY, EnvClient, ExecEvent, ExecRun, ExtensionEnvClient,
-	InProcessEnvTransport, Invocation, InvocationEvent, InvocationGrant, InvocationPrincipal,
-	LspEvents, LspStreamEvent, McpSubscription, McpSubscriptionEvent, ProcessAttachment,
-	ProcessAttachmentEvent, REFLECTION_RELAY_CAPABILITY, ReflectionQueryEvent, RequestStream,
-	ResourceCompletionEvent, ResourceCompletionStream, ResumableBlobTransfer, SearchEvent,
-	SearchStream, StreamLost, TransactionId, TransactionOutcome, VerifiedBlobTransfer, WalkEvent,
-	WalkStream, WorkerEnvClient,
+	EDIT_REPAIR_CAPABILITY, EVAL_PARENT_RELAY_CAPABILITY, EnvClient, EvalParentQueryEvent,
+	ExecEvent, ExecRun, ExtensionEnvClient, InProcessEnvTransport, Invocation, InvocationEvent,
+	InvocationGrant, InvocationPrincipal, LspEvents, LspStreamEvent, McpSubscription,
+	McpSubscriptionEvent, ProcessAttachment, ProcessAttachmentEvent, REFLECTION_RELAY_CAPABILITY,
+	ReflectionQueryEvent, RequestStream, ResourceCompletionEvent, ResourceCompletionStream,
+	ResumableBlobTransfer, SearchEvent, SearchStream, StreamLost, TransactionId, TransactionOutcome,
+	VerifiedBlobTransfer, WalkEvent, WalkStream, WorkerEnvClient,
 };
 pub use guard::{RunGuard, WorkerLease};
 /// Generated blob protocol messages accepted by scoped blob operations.

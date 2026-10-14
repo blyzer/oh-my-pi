@@ -89,7 +89,6 @@ use super::{
 		widened_effects_denial,
 	},
 	approval_relay::{ConnectionApprovals, OwnedApprovals},
-	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
 	docs::{
 		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHello,
@@ -100,6 +99,7 @@ use super::{
 	eval::{
 		BridgeHostError, ParentBindingLease, ParentSessionHost, PreludeInvoker, SessionBridgeHost,
 	},
+	eval_parent_relay::{ConnectionEvalParent, OwnedEvalParent},
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
 	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
@@ -125,7 +125,6 @@ use super::{
 	presence::{PresenceError, PresenceLease, PresenceRegistry},
 	process_store::{ProcessStore, ShutdownAcknowledgement},
 	reflection_relay::{ConnectionReflection, OwnedReflection},
-	resource_materializer::{MaterializationError, ResourceMaterializer},
 	schedules::{DurableScheduleError, ScheduleDeliveryBackend},
 	search_backend::SearchBridgeHost,
 	site::{SiteError, SiteMaterializer, record_modules},
@@ -3541,6 +3540,18 @@ impl EnvServer {
 		self.eval_bridge.bind_sdk_parent(owner, parent)
 	}
 
+	async fn bind_eval_relay(
+		&self,
+		request_id: u64,
+		principal: &pb::InvocationScope,
+		relay: &ConnectionEvalParent,
+	) -> Result<(OwnedEvalParent, ParentBindingLease), BridgeHostError> {
+		let owner = Str::from(principal.session_id.as_str());
+		let parent = relay.fetch_config(request_id, owner.clone()).await?;
+		let lease = self.bind_eval_sdk_parent(owner, Arc::new(parent.clone()))?;
+		Ok((parent, lease))
+	}
+
 	/// Returns the late-bound memory reflection bridge.
 	pub(crate) fn reflection_bridge(&self) -> Arc<ReflectionBridgeHost> {
 		Arc::clone(&self.reflection_bridge)
@@ -4483,6 +4494,21 @@ impl EnvServer {
 			.await;
 			return;
 		}
+		match &body {
+			client_frame::Body::EvalParentProgress(progress) => {
+				if let Some(relay) = &connection.eval_parent {
+					relay.answer_progress(frame.request_id, progress.clone());
+				}
+				return;
+			},
+			client_frame::Body::EvalParentResult(result) => {
+				if let Some(relay) = &connection.eval_parent {
+					relay.answer_result(frame.request_id, result.clone());
+				}
+				return;
+			},
+			_ => {},
+		}
 		let worker_scope = connection.host.as_ref().is_some_and(|host| {
 			scope.as_ref().is_some_and(|scope| {
 				connection
@@ -5137,6 +5163,29 @@ impl EnvServer {
 					.as_ref()
 					.filter(|scope| !scope.session_id.is_empty() && !scope.agent_id.is_empty());
 				let owner = Some(connection.invocation_owner(principal));
+				let (eval_parent, eval_parent_lease) = if let (Some(principal), Some(relay)) =
+					(principal, connection.eval_parent.as_ref())
+				{
+					match self
+						.bind_eval_relay(frame.request_id, principal, relay)
+						.await
+					{
+						Ok((parent, lease)) => (Some(parent), Some(lease)),
+						Err(error) => {
+							connection.quotas.release_exec();
+							send_error(
+								responses,
+								frame.request_id,
+								pb::ProtocolErrorCode::Internal,
+								&error.to_string(),
+							)
+							.await;
+							return;
+						},
+					}
+				} else {
+					(None, None)
+				};
 				let approvals = connection.owned_approvals(frame.request_id);
 				let reflection = connection.owned_reflection(frame.request_id);
 				match self
@@ -5150,8 +5199,10 @@ impl EnvServer {
 						connection
 							.requests
 							.insert(frame.request_id, RequestState::Exec {
-								exec:   exec.clone(),
+								exec: exec.clone(),
 								cancel: cancel.clone(),
+								eval_parent,
+								eval_parent_lease,
 							});
 						send_body(responses, frame.request_id, server_frame::Body::ExecStarted(started))
 							.await;
@@ -7559,6 +7610,24 @@ impl EnvServer {
 			.await;
 			return;
 		}
+		let (eval_parent, eval_parent_lease) =
+			if let (Some(principal), Some(relay)) = (principal, connection.eval_parent.as_ref()) {
+				match self.bind_eval_relay(request_id, principal, relay).await {
+					Ok((parent, lease)) => (Some(parent), Some(lease)),
+					Err(error) => {
+						send_error(
+							responses,
+							request_id,
+							pb::ProtocolErrorCode::Internal,
+							&error.to_string(),
+						)
+						.await;
+						return;
+					},
+				}
+			} else {
+				(None, None)
+			};
 		if let Some(open_request) = connection.invocation_ids.get(&invocation_id).copied() {
 			// A terminal invocation only awaits its `Finished` sweep; its id is
 			// free for a replacement open (the client observed the terminal
@@ -7727,6 +7796,8 @@ impl EnvServer {
 					edit_repair,
 					acp,
 					delivery: delivery.clone(),
+					eval_parent,
+					eval_parent_lease,
 					cancel: cancel.clone(),
 				}),
 			);
@@ -8487,6 +8558,7 @@ struct ConnectionState {
 	/// Relays the memory reflections of the `reflect` calls this connection
 	/// issues, directly or through its commands' `dyn`; present under the
 	/// same conditions for its own capability.
+	eval_parent:      Option<ConnectionEvalParent>,
 	reflection:       Option<ConnectionReflection>,
 	host:             Option<HostKey>,
 	authority:        Arc<AuthorityTable>,
@@ -8498,7 +8570,7 @@ struct ConnectionState {
 enum RequestState {
 	Invocation(InvocationState),
 	InvocationFinishing,
-	Exec { exec: Bytes, cancel: CancellationToken },
+	Exec { exec: Bytes, cancel: CancellationToken, eval_parent: Option<OwnedEvalParent> },
 	ProcessAttach { cancel: CancellationToken },
 	BlobPut(BlobUpload),
 	BlobGet { cancel: CancellationToken },
@@ -8514,20 +8586,22 @@ enum RequestState {
 /// what its judgment resolved from live state is what its executor reaches.
 enum InvocationState {
 	Native {
-		id:             Str,
-		feed:           omp_tool::InvocationFeed,
-		lifecycle:      Arc<NativeLifecycle>,
-		admission:      AdmissionGate,
-		pending_commit: Option<pb::ArgsCommitted>,
-		effects:        Effects,
-		pins:           Option<Arc<InvocationPins>>,
-		confinement:    Confinement,
-		execution:      InvocationExecutionPolicy,
-		request_scope:  Option<bool>,
-		edit_repair:    Option<ConnectionEditRepairRoute>,
-		acp:            InvocationAcpRoutes,
-		delivery:       VerdictDelivery,
-		cancel:         CancellationToken,
+		id:                Str,
+		feed:              omp_tool::InvocationFeed,
+		lifecycle:         Arc<NativeLifecycle>,
+		admission:         AdmissionGate,
+		pending_commit:    Option<pb::ArgsCommitted>,
+		effects:           Effects,
+		pins:              Option<Arc<InvocationPins>>,
+		confinement:       Confinement,
+		execution:         InvocationExecutionPolicy,
+		request_scope:     Option<bool>,
+		edit_repair:       Option<ConnectionEditRepairRoute>,
+		acp:               InvocationAcpRoutes,
+		delivery:          VerdictDelivery,
+		eval_parent:       Option<OwnedEvalParent>,
+		eval_parent_lease: Option<ParentBindingLease>,
+		cancel:            CancellationToken,
 	},
 	Worker {
 		id:             Str,
@@ -8656,6 +8730,7 @@ impl ConnectionState {
 			hello_props: hello.props,
 			acp_documents: None,
 			approvals: None,
+			eval_parent: None,
 			reflection: None,
 			host: policy.host.clone(),
 			authority,
@@ -8724,6 +8799,12 @@ impl ConnectionState {
 			.contains(omp_env::REFLECTION_RELAY_CAPABILITY)
 		{
 			self.reflection = Some(ConnectionReflection::new(responses.clone()));
+		}
+		if self
+			.capabilities
+			.contains(omp_env::EVAL_PARENT_RELAY_CAPABILITY)
+		{
+			self.eval_parent = Some(ConnectionEvalParent::new(responses.clone()));
 		}
 	}
 
@@ -9214,7 +9295,7 @@ impl ConnectionState {
 		match state {
 			RequestState::Invocation(_) => unreachable!("invocations were handled without removal"),
 			RequestState::InvocationFinishing => {},
-			RequestState::Exec { exec, cancel } => {
+			RequestState::Exec { exec, cancel, .. } => {
 				let _ = exec_host.cancel(&exec);
 				cancel.cancel();
 			},
@@ -9297,6 +9378,9 @@ impl ConnectionState {
 		if let Some(approvals) = &self.approvals {
 			approvals.disconnect();
 		}
+		if let Some(eval_parent) = &self.eval_parent {
+			eval_parent.disconnect();
+		}
 		if let Some(reflection) = &self.reflection {
 			reflection.disconnect();
 		}
@@ -9328,7 +9412,7 @@ impl ConnectionState {
 					cancel.cancel();
 				},
 				RequestState::InvocationFinishing => {},
-				RequestState::Exec { exec, cancel } => {
+				RequestState::Exec { exec, cancel, .. } => {
 					let _ = exec_host.cancel(&exec);
 					cancel.cancel();
 					self.quotas.release_exec();

@@ -32,24 +32,22 @@ use omp_proto::{
 		v1,
 		v1::{
 			self as env_wire, AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, Admission,
-			AdmitInvocation, ApprovalAnswer, ApprovalDecision, ApprovalQuery, ArgText, ArgsCommitted,
-			AttachOutput, BlobGetComplete, CancelRequest, ClientFrame, ClientHello,
 			CloseSessionRequest, CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
 			CurrentWorktreeResult, DataEvent, DataRequest, DataResponse, DestroyWorktree, DetachExec,
-			EditRepairAnswer, EditRepairQuery, EvalResetRequest, EventStreamError, EventStreamKind,
-			ExecRequest, ExecStarted, ExitEvent, GetProcess, HttpRequest, HttpResponse, Interrupt,
-			InvocationScope, InvokeAccepted, InvokeTool, ListProcesses, MaterializeSite,
-			MergeWorktree, OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame,
-			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
-			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
-			ReflectionAnswer, ReflectionQuery, RegisterPresence, ReleasePresence, ResourceCompletion,
-			RestartProcess, Retire, RevokeApprovalGrants, SearchComplete, SearchMatchMsg,
-			SearchRequest, SendInput, ServerFrame, ServerHello, SignalProcess, SignalRequest,
-			SiteMaterialized, StartProcess, StdinFrame, StopProcess, Update, Verdict, WalkComplete,
-			WalkEntry, WalkRequest, WorktreeResult, cancel_request, client_frame, data_event,
-			data_request, data_response, document_op, document_result, exec_session_op,
-			exec_session_result, mcp_op, mcp_result, resource_op, server_frame, stdin_frame,
-			workspace_op, workspace_result, worktree_op,
+			EditRepairAnswer, EditRepairQuery, EvalParentCancel, EvalParentOpen, EvalParentProgress,
+			EvalParentResult, EvalResetRequest, EventStreamError, EventStreamKind, ExecRequest,
+			ExecStarted, ExitEvent, GetProcess, HttpRequest, HttpResponse, Interrupt, InvocationScope,
+			InvokeAccepted, InvokeTool, ListProcesses, MaterializeSite, MergeWorktree,
+			OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame, PresenceRegistered,
+			PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList, ProcessOutput,
+			ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode, ReflectionAnswer,
+			ReflectionQuery, RegisterPresence, ReleasePresence, ResourceCompletion, SearchRequest,
+			SendInput, ServerFrame, ServerHello, SignalProcess, SignalRequest, SiteMaterialized,
+			StartProcess, StdinFrame, StopProcess, Update, Verdict, WalkComplete, WalkEntry,
+			WalkRequest, WorktreeResult, cancel_request, client_frame, data_event, data_request,
+			data_response, document_op, document_result, exec_session_op, exec_session_result, mcp_op,
+			mcp_result, resource_op, server_frame, stdin_frame, workspace_op, workspace_result,
+			worktree_op,
 		},
 	},
 };
@@ -169,6 +167,14 @@ pub enum ClientError {
 		/// Connection-unique query identifier assigned by the daemon.
 		query_id:   u64,
 	},
+	/// An eval-parent result named a query this client no longer holds open.
+	#[error("eval parent query {query_id} on request {request_id} is no longer open")]
+	EvalParentQueryClosed {
+		/// Request carrying the query.
+		request_id: u64,
+		/// Connection-unique query identifier.
+		query_id:   u64,
+	},
 }
 
 /// `ClientHello` capability that asks the host to send syntax-repair queries.
@@ -191,14 +197,21 @@ pub const APPROVAL_RELAY_CAPABILITY: &str = "approval-relay";
 /// [`EnvClient::reflection_queries`]. It is one of the [`CLIENT_FEATURES`],
 /// not a DATA grant.
 pub const REFLECTION_RELAY_CAPABILITY: &str = "reflection-relay";
+/// `ClientHello` capability that asks the daemon to relay parent-session eval
+/// operations to this session.
+pub const EVAL_PARENT_RELAY_CAPABILITY: &str = "eval-parent-relay";
 
 /// `ClientHello` capabilities that name client features rather than DATA
 /// grants.
 ///
 /// A host strips them before it resolves the grants a hello requests, so a
 /// connection that advertises only client features keeps its default grants.
-pub const CLIENT_FEATURES: &[&str] =
-	&[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY, REFLECTION_RELAY_CAPABILITY];
+pub const CLIENT_FEATURES: &[&str] = &[
+	EDIT_REPAIR_CAPABILITY,
+	APPROVAL_RELAY_CAPABILITY,
+	REFLECTION_RELAY_CAPABILITY,
+	EVAL_PARENT_RELAY_CAPABILITY,
+];
 
 /// A terminal loss of event-stream continuity.
 #[derive(Clone, Debug)]
@@ -456,9 +469,12 @@ struct ClientInner {
 	/// keyed by `(request_id, query_id)`. Usually empty; only the response
 	/// router and `answer_approval` touch it, so one lock never contends.
 	open_approvals:         Mutex<FastHashSet<(u64, u64)>>,
-	/// Relayed reflection queries delivered and not yet answered or
-	/// withdrawn, keyed by `(request_id, query_id)` like `open_approvals`.
+	/// Relayed reflection queries delivered and not yet answered or withdrawn,
+	/// keyed by `(request_id, query_id)` like `open_approvals`.
 	open_reflections:       Mutex<FastHashSet<(u64, u64)>>,
+	/// Relayed eval-parent operations delivered and not yet answered or
+	/// withdrawn, keyed by `(request_id, query_id)`.
+	open_eval_parents:      Mutex<FastHashSet<(u64, u64)>>,
 	hello_waiter:           Mutex<Option<Sender<ServerFrame>>>,
 	info:                   Mutex<Option<ServerHello>>,
 	owner_last_transaction: Mutex<Option<TransactionId>>,
@@ -467,6 +483,7 @@ struct ClientInner {
 	acp_requests:           Receiver<AcpRequest>,
 	approval_queries:       Receiver<ApprovalQueryEvent>,
 	reflection_queries:     Receiver<ReflectionQueryEvent>,
+	eval_parent_queries:    Receiver<EvalParentQueryEvent>,
 	next_id:                AtomicU64,
 	cancel:                 Sender<u64>,
 	lease_close:            Sender<LeaseClose>,
@@ -584,6 +601,26 @@ pub enum ReflectionQueryEvent {
 		/// Connection-unique query identifier.
 		query_id:   u64,
 	},
+}
+/// One eval-parent relay event sent by the daemon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EvalParentQueryEvent {
+	/// Open one operation on the session's bound parent.
+	Requested {
+		/// Request carrying the eval invocation.
+		request_id: u64,
+		/// Parent operation and owner.
+		query:      EvalParentOpen,
+	},
+	/// Cancel an operation that is still running.
+	Cancelled {
+		/// Request carrying the eval invocation.
+		request_id: u64,
+		/// Connection-unique query identifier.
+		query_id:   u64,
+	},
+	/// Ordered progress emitted by the session pump.
+	Progress(EvalParentProgress),
 }
 
 /// The server half of an in-process `env/v1` frame transport.
@@ -966,6 +1003,7 @@ impl EnvClient {
 		let (acp_tx, acp_requests) = flume::unbounded();
 		let (approval_tx, approval_queries) = flume::unbounded();
 		let (reflection_tx, reflection_queries) = flume::unbounded();
+		let (eval_parent_tx, eval_parent_queries) = flume::unbounded();
 		let (cancel, cancellations) = flume::unbounded();
 		let (lease_close, lease_closes) = flume::unbounded();
 		let inner = Arc::new(ClientInner {
@@ -976,6 +1014,7 @@ impl EnvClient {
 			acp_request_scopes: Mutex::new(HashMap::new()),
 			open_approvals: Mutex::new(FastHashSet::default()),
 			open_reflections: Mutex::new(FastHashSet::default()),
+			open_eval_parents: Mutex::new(FastHashSet::default()),
 			hello_waiter: Mutex::new(None),
 			info: Mutex::new(None),
 			owner_last_transaction: Mutex::new(None),
@@ -984,6 +1023,7 @@ impl EnvClient {
 			acp_requests,
 			approval_queries,
 			reflection_queries,
+			eval_parent_queries,
 			next_id: AtomicU64::new(1),
 			cancel,
 			lease_close,
@@ -992,8 +1032,9 @@ impl EnvClient {
 		let router = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || {
 			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx, RelayQueues {
-				approvals:   approval_tx,
-				reflections: reflection_tx,
+				approvals:    approval_tx,
+				reflections:  reflection_tx,
+				eval_parents: eval_parent_tx,
 			});
 		});
 		let canceller = Arc::downgrade(&inner);
@@ -1303,6 +1344,67 @@ impl EnvClient {
 			.send_async(ClientFrame {
 				request_id,
 				body: Some(client_frame::Body::ReflectionAnswer(answer)),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Subscribes to parent-session operations relayed by the daemon.
+	pub fn eval_parent_queries(&self) -> Receiver<EvalParentQueryEvent> {
+		self.inner.eval_parent_queries.clone()
+	}
+
+	/// Sends ordered progress for one open parent-session operation.
+	pub async fn send_eval_parent_progress(
+		&self,
+		request_id: u64,
+		progress: EvalParentProgress,
+	) -> Result<(), ClientError> {
+		if !self
+			.inner
+			.open_eval_parents
+			.lock()
+			.contains(&(request_id, progress.query_id))
+		{
+			return Err(ClientError::EvalParentQueryClosed {
+				request_id,
+				query_id: progress.query_id,
+			});
+		}
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::EvalParentProgress(progress)),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Completes one parent-session operation.
+	pub async fn answer_eval_parent(
+		&self,
+		request_id: u64,
+		result: EvalParentResult,
+	) -> Result<(), ClientError> {
+		let query_id = result.query_id;
+		if !self
+			.inner
+			.open_eval_parents
+			.lock()
+			.remove(&(request_id, query_id))
+		{
+			return Err(ClientError::EvalParentQueryClosed { request_id, query_id });
+		}
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::EvalParentResult(result)),
 				..ClientFrame::default()
 			})
 			.await
@@ -4493,8 +4595,9 @@ const fn ensure_worker_data(request: &DataRequest) -> Result<(), ClientError> {
 
 /// The queues that take daemon-relayed queries off ordinary routing.
 struct RelayQueues {
-	approvals:   Sender<ApprovalQueryEvent>,
-	reflections: Sender<ReflectionQueryEvent>,
+	approvals:    Sender<ApprovalQueryEvent>,
+	reflections:  Sender<ReflectionQueryEvent>,
+	eval_parents: Sender<EvalParentQueryEvent>,
 }
 
 fn route_responses(
@@ -4598,6 +4701,7 @@ fn route_responses(
 		client.acp_request_scopes.lock().clear();
 		client.open_approvals.lock().clear();
 		client.open_reflections.lock().clear();
+		client.open_eval_parents.lock().clear();
 		client.hello_waiter.lock().take();
 	}
 }
@@ -4653,6 +4757,28 @@ fn divert_relay_frame(
 				let _ = relays
 					.reflections
 					.send(ReflectionQueryEvent::Withdrawn { request_id, query_id });
+			}
+			None
+		},
+		Some(server_frame::Body::EvalParentOpen(query)) => {
+			client
+				.open_eval_parents
+				.lock()
+				.insert((request_id, query.query_id));
+			let _ = relays
+				.eval_parents
+				.send(EvalParentQueryEvent::Requested { request_id, query });
+			None
+		},
+		Some(server_frame::Body::EvalParentCancel(cancel)) => {
+			if client
+				.open_eval_parents
+				.lock()
+				.remove(&(request_id, cancel.query_id))
+			{
+				let _ = relays
+					.eval_parents
+					.send(EvalParentQueryEvent::Cancelled { request_id, query_id: cancel.query_id });
 			}
 			None
 		},
