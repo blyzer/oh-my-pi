@@ -28,7 +28,9 @@ fn generate_docs_manifest(manifest: &Path) -> io::Result<()> {
 	let output_root = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
 	let mut paths = Vec::new();
 	collect_markdown(&docs_root, &docs_root, &mut paths)?;
-	paths.sort();
+	// PathBuf orders components; the runtime index binary-searches rendered URL
+	// strings.
+	paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
 
 	let mut generated = String::from(
 		"/// Sorted packaged documentation entries: `(relative path, gzip bytes)`.\npub static \
