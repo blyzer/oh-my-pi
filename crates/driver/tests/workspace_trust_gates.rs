@@ -176,9 +176,11 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 			session: Some(self.session.clone()),
 			sessions_dir: self.session.parent().map(Path::to_path_buf),
 			no_tools: !tools_enabled,
-			// The scripted gateway knows only the `eval` declaration, and it
-			// refuses a request advertising any tool it cannot resolve.
-			tools: tools_enabled.then(|| vec![sf!("eval")]),
+			// The scripted gateway knows only the `bash` declaration, and it
+			// refuses a request advertising any tool it cannot resolve. `eval`
+			// is a `dyn` device under the default tools policy, so the model
+			// reaches it through `bash`.
+			tools: tools_enabled.then(|| vec![sf!("bash")]),
 			gateway: Some(gateway.channel.clone()),
 			prompt: PromptOverrides { custom_prompt, append_prompt, ..PromptOverrides::default() },
 			workspace_trust: WorkspaceTrustSource::Fixed(decision),
@@ -226,13 +228,21 @@ struct Gateway {
 	_serving:   JoinHandle<()>,
 }
 
-/// The gateway's tool registry: the `eval` declaration the production
-/// environment advertises, so the gateway lowers the model's `eval` call.
-fn eval_declaration() -> omp_tool::Registry {
+/// The gateway's tool registry: the `bash` declaration the production
+/// environment advertises, so the gateway lowers the model's `bash` call.
+fn bash_declaration() -> omp_tool::Registry {
 	let mut registry = omp_tool::Registry::new();
 	registry
 		.register_worker(
-			omp_tools::eval::spec(sf!("eval")),
+			omp_tools::shell::spec(&omp_tools::shell::ShellPromptSnapshot {
+				sibling_tools:       Arc::from([]),
+				platform:            sf!("test"),
+				command_prefix:      false,
+				embedded_builtins:   true,
+				devices:             true,
+				interceptor_enabled: false,
+				interceptor_rules:   Arc::from([]),
+			}),
 			omp_tool::Presentation::Slot,
 			omp_tool::Claims {
 				precedence: omp_tool::Precedence::CORE,
@@ -240,7 +250,7 @@ fn eval_declaration() -> omp_tool::Registry {
 				replaces:   None,
 			},
 		)
-		.expect("eval declaration registers");
+		.expect("bash declaration registers");
 	registry
 }
 
@@ -300,7 +310,7 @@ impl Gateway {
 		let rpc = InferenceRpc::new_for_test(
 			builder.build().expect("registry"),
 			sessions,
-			Arc::new(eval_declaration()),
+			Arc::new(bash_declaration()),
 			responses,
 		);
 		let socket = scratch.join("gateway.sock");
@@ -331,12 +341,18 @@ impl Gateway {
 		]));
 	}
 
-	/// Scripts an `eval` invocation followed by the assistant's final answer.
+	/// Scripts a `bash` call running `dyn eval`, then the assistant's final
+	/// answer. The cell's result is spelled by concatenation, so the marker
+	/// appears in the journal only when the cell actually ran.
 	fn eval(&self) {
+		let arguments = serde_json::json!({
+			"command": r#"dyn eval --json '{"language":"py","code":"\"eval-owner-\" + \"ok\""}'"#,
+			"i": "Running an eval cell",
+		});
 		let call = ToolCall {
 			id:        "eval-owner-regression".into(),
-			name:      sf!("eval"),
-			arguments: OpaqueJson::new(serde_json::json!({"language":"py","code":"40 + 2"})),
+			name:      sf!("bash"),
+			arguments: OpaqueJson::new(arguments.clone()),
 		};
 		self.fake.push(FakeScript::chat(vec![
 			Ok(ChatEvent::ToolCallStarted {
@@ -344,10 +360,7 @@ impl Gateway {
 				id:    call.id.clone(),
 				name:  call.name.clone(),
 			}),
-			Ok(ChatEvent::ToolArgumentsDelta {
-				index: 0,
-				bytes: Bytes::from_static(br#"{"language":"py","code":"40 + 2"}"#),
-			}),
+			Ok(ChatEvent::ToolArgumentsDelta { index: 0, bytes: Bytes::from(arguments.to_string()) }),
 			Ok(ChatEvent::ToolCallReady { index: 0, call }),
 			Ok(ChatEvent::Completed(Completion {
 				reason:  FinishReason::ToolCalls,
@@ -383,7 +396,7 @@ async fn eval_turn(
 	kernel
 		.run_turn(
 			session,
-			TurnInput { text: Str::new_static("calculate 40 + 2"), attachments: Vec::new() },
+			TurnInput { text: Str::new_static("run an eval cell"), attachments: Vec::new() },
 			RunControl::new(CancellationToken::new(), None),
 		)
 		.await
@@ -460,7 +473,11 @@ async fn composed_kernel_binds_eval_to_the_external_dispatch_session() {
 
 	let journal = fs::read_to_string(&workspace.session).expect("read composed session journal");
 	assert!(
-		journal.contains(r#""text":"42""#),
+		!journal.contains("not bound for this owner"),
+		"production eval was refused by the bridge: {journal}"
+	);
+	assert!(
+		journal.contains("eval-owner-ok"),
 		"production eval did not return its cell result: {journal}"
 	);
 }
