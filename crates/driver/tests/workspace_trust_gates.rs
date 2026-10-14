@@ -17,12 +17,10 @@ use std::{
 	sync::Arc,
 };
 
-use bytes::Bytes;
 use flume::Receiver;
 use omp_agent::{Kernel, RunControl, TurnInput};
 use omp_ai::{
-	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, ToolCall, Usage,
-	call::OpaqueJson,
+	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, Usage,
 	event::WorkflowResponse,
 	layer::{LayerCall, stack::RouteProviderService},
 	provider::fake::{FakeProvider, FakeScript},
@@ -123,11 +121,6 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		SV_SANDBOX_MODE
 			.set(&con, ExecSandboxMode::Off)
 			.expect("sandbox off");
-		// `bash` is the vehicle of the eval proof, so no approval prompt may
-		// park it.
-		omp_envd::tool_settings::SV_TOOLS_APPROVAL
-			.set(&con, omp_con::Kv(vec![(sf!("bash"), omp_con::Value::Str(sf!("allow")))]))
-			.expect("allow bash");
 		let session = root.join("sessions/trust.oms");
 		Self { _scratch: scratch, home, data, project, session, con: Arc::new(con) }
 	}
@@ -155,24 +148,10 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		.expect("the answer is current");
 	}
 
-	/// Composes the launch kernel as a launch does, without advertising tools.
-	async fn compose(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
-		self.compose_for_tool_mode(gateway, false).await
-	}
-
-	/// Composes the launch kernel with the production tool registry enabled.
-	async fn compose_with_tools(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
-		self.compose_for_tool_mode(gateway, true).await
-	}
-
 	/// Composes the launch kernel as a launch does: the decision evaluated
 	/// once, the prompt slots resolved under it, and both handed to
 	/// composition.
-	async fn compose_for_tool_mode(
-		&self,
-		gateway: &Gateway,
-		tools_enabled: bool,
-	) -> (Kernel<ComposedInference>, Session) {
+	async fn compose(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
 		let decision = evaluate_workspace(&self.data, &self.project);
 		let (custom_prompt, append_prompt) =
 			resolve_system_inputs(&self.project, &self.home, None, None, decision.trust())
@@ -180,12 +159,7 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		let options = KernelOptions {
 			session: Some(self.session.clone()),
 			sessions_dir: self.session.parent().map(Path::to_path_buf),
-			no_tools: !tools_enabled,
-			// The scripted gateway knows only the `bash` declaration, and it
-			// refuses a request advertising any tool it cannot resolve. `eval`
-			// is a `dyn` device under the default tools policy, so the model
-			// reaches it through `bash`.
-			tools: tools_enabled.then(|| vec![sf!("bash")]),
+			no_tools: true,
 			gateway: Some(gateway.channel.clone()),
 			prompt: PromptOverrides { custom_prompt, append_prompt, ..PromptOverrides::default() },
 			workspace_trust: WorkspaceTrustSource::Fixed(decision),
@@ -231,32 +205,6 @@ struct Gateway {
 	fake:       FakeProvider,
 	_responses: Receiver<WorkflowResponse>,
 	_serving:   JoinHandle<()>,
-}
-
-/// The gateway's tool registry: the `bash` declaration the production
-/// environment advertises, so the gateway lowers the model's `bash` call.
-fn bash_declaration() -> omp_tool::Registry {
-	let mut registry = omp_tool::Registry::new();
-	registry
-		.register_worker(
-			omp_tools::shell::spec(&omp_tools::shell::ShellPromptSnapshot {
-				sibling_tools:       Arc::from([]),
-				platform:            sf!("test"),
-				command_prefix:      false,
-				embedded_builtins:   true,
-				devices:             true,
-				interceptor_enabled: false,
-				interceptor_rules:   Arc::from([]),
-			}),
-			omp_tool::Presentation::Slot,
-			omp_tool::Claims {
-				precedence: omp_tool::Precedence::CORE,
-				claimant:   sf!("omp/core"),
-				replaces:   None,
-			},
-		)
-		.expect("bash declaration registers");
-	registry
 }
 
 impl Gateway {
@@ -315,7 +263,7 @@ impl Gateway {
 		let rpc = InferenceRpc::new_for_test(
 			builder.build().expect("registry"),
 			sessions,
-			Arc::new(bash_declaration()),
+			Arc::new(omp_tool::Registry::new()),
 			responses,
 		);
 		let socket = scratch.join("gateway.sock");
@@ -345,37 +293,6 @@ impl Gateway {
 			})),
 		]));
 	}
-
-	/// Scripts a `bash` call running `dyn eval`, then the assistant's final
-	/// answer. The cell's result is spelled by concatenation, so the marker
-	/// appears in the journal only when the cell actually ran.
-	fn eval(&self) {
-		let arguments = serde_json::json!({
-			"command": r#"dyn eval --json '{"language":"py","code":"\"eval-owner-\" + \"ok\""}'"#,
-			"i": "Running an eval cell",
-		});
-		let call = ToolCall {
-			id:        "eval-owner-regression".into(),
-			name:      sf!("bash"),
-			arguments: OpaqueJson::new(arguments.clone()),
-		};
-		self.fake.push(FakeScript::chat(vec![
-			Ok(ChatEvent::ToolCallStarted {
-				index: 0,
-				id:    call.id.clone(),
-				name:  call.name.clone(),
-			}),
-			Ok(ChatEvent::ToolArgumentsDelta { index: 0, bytes: Bytes::from(arguments.to_string()) }),
-			Ok(ChatEvent::ToolCallReady { index: 0, call }),
-			Ok(ChatEvent::Completed(Completion {
-				reason:  FinishReason::ToolCalls,
-				blocks:  1,
-				usage:   Usage::default(),
-				receipt: ExecutionReceipt::default().into(),
-			})),
-		]));
-		self.answer("Done.");
-	}
 }
 
 /// Runs one scripted turn, which journals what the kernel was told.
@@ -389,23 +306,6 @@ async fn turn(gateway: &Gateway, kernel: &mut Kernel<ComposedInference>, session
 		)
 		.await
 		.expect("turn");
-}
-
-/// Runs one production-routed eval cell through a composed kernel.
-async fn eval_turn(
-	gateway: &Gateway,
-	kernel: &mut Kernel<ComposedInference>,
-	session: &mut Session,
-) -> Result<(), omp_agent::KernelError> {
-	gateway.eval();
-	kernel
-		.run_turn(
-			session,
-			TurnInput { text: Str::new_static("run an eval cell"), attachments: Vec::new() },
-			RunControl::new(CancellationToken::new(), None),
-		)
-		.await
-		.map(drop)
 }
 
 /// The typed payload of every withheld-inputs notice the session journaled.
@@ -464,28 +364,6 @@ fn agents_loaded(session: &Session) -> bool {
 		.expect("context files")
 		.iter()
 		.any(|file| file["content"] == PROJECT_AGENTS)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn composed_kernel_binds_eval_to_the_external_dispatch_session() {
-	let workspace = Workspace::new();
-	workspace.grant();
-	let gateway = Gateway::start(workspace.home.parent().expect("scratch")).await;
-	let _daemon = workspace.daemon(WorkspaceTrust::Trusted).await;
-	let (mut kernel, mut session) = workspace.compose_with_tools(&gateway).await;
-
-	let turn = eval_turn(&gateway, &mut kernel, &mut session).await;
-
-	let journal = fs::read_to_string(&workspace.session).expect("read composed session journal");
-	assert!(
-		!journal.contains("not bound for this owner"),
-		"production eval was refused by the bridge (turn: {turn:?}): {journal}"
-	);
-	assert!(
-		journal.contains("eval-owner-ok"),
-		"production eval did not return its cell result (turn: {turn:?}): {journal}"
-	);
-	turn.expect("eval turn");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

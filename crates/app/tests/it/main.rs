@@ -10,6 +10,8 @@ mod envd_policy;
 mod envd_windows;
 #[cfg(unix)]
 mod envd_workspace;
+#[cfg(unix)]
+mod eval_owner;
 mod process_smoke;
 mod stock_sdk_clients;
 #[cfg(unix)]
