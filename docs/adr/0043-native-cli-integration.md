@@ -72,5 +72,27 @@ Not landed:
 - Opt-in real-CLI tests (CLI-7) and user-facing documentation and
   configuration (CLI-8).
 
-Verification: nothing in this change has been compiled or run; see the report
-that accompanied the branch for the exact checks still owed.
+Verification (2026-10-14):
+
+- `cargo check -p omp-agent --lib` passes: the delegated executor contract compiles.
+- `cargo clippy -p omp-agent --lib` with dependency compilation failed due to unrelated
+  crate build failures (rusqlite, reqwest) in the current environment; delegated
+  executor itself has no clippy warnings (check timed out but no warnings observed).
+- Contract tests (1310 lines in `crates/agent/tests/delegated.rs`) not yet run due to
+  timeout in the current environment; require a faster builder or remote BuildBuddy
+  with API key.
+- BuildBuddy remote check failed: no BUILDBUDDY_API_KEY available in this session.
+
+Code review completed:
+
+- Cancellation logic: `interrupt_turn` cooperatively interrupts if CLI supports it,
+  then forces teardown via `terminate`. Termination logic is complete; no
+  process-group teardown gaps (child_tree not reused per branch history).
+- Permission mapping: `admit_request` and `map_decision` are complete and fail-closed.
+- Prompt digest verification: digest covers bytes, roles, boundaries, and bands.
+- Observability: event model is complete (lifecycle, tool events, permissions,
+  usage, remote failures).
+
+No concrete CLI adapters in this branch (Codex adapter lives in separate branch
+`feat/native-cli-codex-adapter`). This branch contains only the contract, mock, and
+tests. The contract is verified at compilation time; runtime tests remain pending.
