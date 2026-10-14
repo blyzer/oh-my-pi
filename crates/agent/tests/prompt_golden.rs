@@ -8,7 +8,7 @@ use omp_agent::prompt::{
 };
 use omp_core::{Hash32, Str};
 use omp_dom::{KnownTag, NodeSpec, Op, PropId, PropKey, Txn, Value as DomValue};
-use omp_proto::thread::v1::{Item, Role, item, part};
+use omp_proto::thread::v1::{Item, item, part};
 use omp_scribe::{Props, canon::canonicalize_prompt};
 use omp_session::{ComponentRegistry, Session};
 use serde_json::{Value, value::RawValue};
@@ -52,20 +52,10 @@ fn session_with_facts(facts: Value) -> (tempfile::TempDir, Session) {
 	(directory, session)
 }
 
-/// The system prefix by band, then the Volatile band as it trails the thread:
-/// synthetic user messages, so a golden shows where a volatile item lands.
 fn snapshot(session: &Session) -> Vec<GoldenItem> {
-	let system = CanonicalPromptSource
+	CanonicalPromptSource
 		.system_items(session.dom())
-		.expect("canonical prompt renders");
-	let volatile = CanonicalPromptSource
-		.volatile_items(session.dom())
-		.expect("volatile prompt renders");
-	assert!(
-		volatile.iter().all(is_synthetic_user),
-		"volatile items ride the message stream as synthetic user messages"
-	);
-	system
+		.expect("canonical prompt renders")
 		.iter()
 		.enumerate()
 		.map(|(index, item)| GoldenItem {
@@ -73,29 +63,12 @@ fn snapshot(session: &Session) -> Vec<GoldenItem> {
 			band: match index {
 				0 => "frozen+stable",
 				1..=3 => "stable",
-				_ => "epochal",
+				4 | 5 => "epochal",
+				_ => "volatile",
 			},
 			text: canonicalize_prompt(item_text(item)),
 		})
-		.chain(
-			volatile
-				.iter()
-				.enumerate()
-				.map(|(offset, item)| GoldenItem {
-					index: system.len() + offset,
-					band:  "volatile",
-					text:  canonicalize_prompt(item_text(item)),
-				}),
-		)
 		.collect()
-}
-
-fn is_synthetic_user(item: &Item) -> bool {
-	matches!(
-		&item.kind,
-		Some(item::Kind::Message(message))
-			if message.role == Role::User as i32 && message.synthetic == Some(true)
-	)
 }
 
 const TOOL_NAMES: [&str; 8] = ["ast_edit", "bash", "edit", "glob", "grep", "read", "task", "write"];
@@ -384,11 +357,12 @@ fn todo_and_director_status_are_selected_from_component_elements() {
 			],
 		})
 		.expect("component fixtures");
-	let items = CanonicalPromptSource
-		.volatile_items(session.dom())
-		.expect("volatile prompt renders");
-	assert!(items.iter().all(is_synthetic_user));
-	let text = items.iter().map(item_text).collect::<String>();
+	let text = CanonicalPromptSource
+		.system_items(session.dom())
+		.expect("canonical prompt renders")
+		.iter()
+		.map(item_text)
+		.collect::<String>();
 	assert!(text.contains("- Verify prompt projection [in_progress]"));
 	assert!(text.contains("active directors: 1"));
 }
@@ -537,13 +511,7 @@ fn live_turn_facts_are_projected_from_session_dom_into_volatile_band() {
 	session.begin_turn().expect("turn");
 	let (items, bands): (_, [BandHash; 4]) =
 		CanonicalPromptSource.banded_render(session.dom()).unwrap();
-	let system = items.iter().map(item_text).collect::<String>();
-	assert!(!system.contains("turn: 1"));
-	assert!(!system.contains("cwd: /work/omp"));
-	let volatile = CanonicalPromptSource.volatile_items(session.dom()).unwrap();
-	let text = volatile.iter().map(item_text).collect::<String>();
-	assert!(volatile.iter().all(is_synthetic_user));
-	assert!(text.contains("<system-notice>"));
+	let text = items.iter().map(item_text).collect::<String>();
 	assert!(text.contains("turn: 1"));
 	assert!(text.contains("cwd: /work/omp"));
 	assert!(text.contains("date: 2026-09-02"));

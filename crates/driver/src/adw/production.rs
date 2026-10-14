@@ -355,9 +355,7 @@ impl AdwHost for ProductionAdwHost {
 			// confines (`bash`, `hub`); every other tool follows `write` per call
 			// (`omp_envd::admission::resolve_approval`).
 			approval: match effective_approval_mode(
-				ToolSettings::from_con(&self.ctx)
-					.with_workspace_trust(self.workspace_trust.trust())
-					.configured_approval(),
+				ToolSettings::from_con(&self.ctx).configured_approval(),
 				sandbox,
 			) {
 				ApprovalMode::AlwaysAsk => ApprovalScope::AlwaysAsk,

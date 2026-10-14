@@ -5,7 +5,6 @@
 pub mod approvals;
 pub mod cancel;
 pub mod context;
-pub mod delegated;
 pub mod director;
 pub mod directors;
 pub mod dispatch;

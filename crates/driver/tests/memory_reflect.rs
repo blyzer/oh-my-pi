@@ -28,7 +28,7 @@ use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::headless::reflection::{REFLECTION_SELECTOR, bind_reflection};
 use omp_envd::{
-	AttachOptions, ProjectEnvironment,
+	AttachOptions, ProjectEnvironment, RegistryBridges,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
 	host_settings::{AI_MEMORY_BACKEND, MemoryBackendSetting},
 	tool_settings::ApprovalMode,
@@ -159,11 +159,10 @@ struct Turn {
 }
 
 /// Runs one turn calling `reflect` under `mode` (`None`: the shipped default
-/// posture) and the workspace `trust` the host decided, against a Mnemopi
-/// bank holding one fact; `approve` answers every prompt the kernel journals.
-/// No OS sandbox runs on any host, so the session's approval posture is the
-/// same everywhere.
-async fn reflect_turn(mode: Option<ApprovalMode>, trust: WorkspaceTrust, approve: bool) -> Turn {
+/// posture) against a Mnemopi bank holding one fact; `approve` answers every
+/// prompt the kernel journals. No OS sandbox runs on any host, so the
+/// session's approval posture is the same everywhere.
+async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 	let scratch = tempfile::tempdir().expect("scratch");
 	let root = scratch.path().join("workspace");
 	let state = scratch.path().join("state");
@@ -186,7 +185,7 @@ async fn reflect_turn(mode: Option<ApprovalMode>, trust: WorkspaceTrust, approve
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::clone(&con),
-		bridges:            support::trusting(trust),
+		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
 		spawn_policy:       None,
 	})
@@ -203,24 +202,13 @@ async fn reflect_turn(mode: Option<ApprovalMode>, trust: WorkspaceTrust, approve
 		.expect("retain the fact");
 	let synthesis = Synthesis::default();
 	bind_reflection(&environment, synthesis.clone()).expect("bind reflection");
-	drive(
-		&environment,
-		&con,
-		&root,
-		scratch.path(),
-		mode,
-		trust,
-		approve,
-		Script::reflect(),
-		&synthesis,
-	)
-	.await
+	drive(&environment, &con, &root, scratch.path(), mode, approve, Script::reflect(), &synthesis)
+		.await
 }
 
-/// Runs one turn of `script` on `environment` under `mode` and the workspace
-/// `trust` the host decided, the session's tool authority installed as
-/// `compose_kernel` installs it; `approve` answers every prompt the kernel
-/// journals.
+/// Runs one turn of `script` on `environment` under `mode`, the session's
+/// tool authority installed as `compose_kernel` installs it; `approve`
+/// answers every prompt the kernel journals.
 #[expect(clippy::too_many_arguments, reason = "one scripted turn's whole fixture")]
 async fn drive(
 	environment: &ProjectEnvironment,
@@ -228,7 +216,6 @@ async fn drive(
 	root: &std::path::Path,
 	scratch: &std::path::Path,
 	mode: Option<ApprovalMode>,
-	trust: WorkspaceTrust,
 	approve: bool,
 	script: Script,
 	synthesis: &Synthesis,
@@ -246,8 +233,7 @@ async fn drive(
 		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("test")),
 	);
-	let mut kernel =
-		support::install_authority(kernel, environment, &session, con, mode, trust, root);
+	let mut kernel = support::install_authority(kernel, environment, &session, con, mode, root);
 	let events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
 	let host = tokio::spawn(async move {
@@ -314,8 +300,7 @@ fn prompts(session: &Session) -> Vec<omp_agent::ApprovalTicket> {
 /// no sandbox the session is told once that `write` is in force.
 #[tokio::test]
 async fn default_posture_prompts_for_reflect_and_an_approved_call_is_one_request() {
-	let Turn { tickets, result, selectors, postures } =
-		reflect_turn(None, WorkspaceTrust::Untrusted, true).await;
+	let Turn { tickets, result, selectors, postures } = reflect_turn(None, true).await;
 
 	assert_eq!(tickets.len(), 1, "one admission prompt: {tickets:?}");
 	let reason = &tickets[0].reasons[0];
@@ -335,20 +320,17 @@ async fn default_posture_prompts_for_reflect_and_an_approved_call_is_one_request
 #[tokio::test]
 async fn a_refused_reflect_makes_no_inference_request() {
 	let Turn { tickets, result, selectors, .. } =
-		reflect_turn(Some(ApprovalMode::AlwaysAsk), WorkspaceTrust::Untrusted, false).await;
+		reflect_turn(Some(ApprovalMode::AlwaysAsk), false).await;
 
 	assert_eq!(tickets.len(), 1, "one admission prompt: {tickets:?}");
 	assert!(selectors.is_empty(), "a refused call made {} requests", selectors.len());
 	assert!(result.contains("denied by user: not today"), "denied reflect must settle: {result}");
 }
 
-/// An explicit `yolo` in a trusted workspace runs `reflect` unprompted, still
-/// with one request.
+/// An explicit `yolo` runs `reflect` unprompted, still with one request.
 #[tokio::test]
 async fn explicit_yolo_runs_reflect_unprompted_with_one_request() {
-	// Explicit `yolo` is respected only in a trusted workspace.
-	let Turn { tickets, result, selectors, .. } =
-		reflect_turn(Some(ApprovalMode::Yolo), WorkspaceTrust::Trusted, true).await;
+	let Turn { tickets, result, selectors, .. } = reflect_turn(Some(ApprovalMode::Yolo), true).await;
 
 	assert!(tickets.is_empty(), "explicit yolo prompts for nothing: {tickets:?}");
 	assert_eq!(selectors, [Some(Str::new_static(REFLECTION_SELECTOR))]);
@@ -370,17 +352,16 @@ async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
 	AI_MEMORY_BACKEND
 		.set(&con, MemoryBackendSetting::Mnemopi)
 		.expect("memory backend");
-	// Explicit `yolo` is respected only in a trusted workspace; the daemon and
-	// the session share that decision, or the session would not join it.
-	let trust = WorkspaceTrust::Trusted;
-	let _daemon = support::InProcessDaemon::serve(&root, &state, Arc::clone(&con), trust).await;
+	let _daemon =
+		support::InProcessDaemon::serve(&root, &state, Arc::clone(&con), WorkspaceTrust::Untrusted)
+			.await;
 	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
 		py_eval:            false,
 		approval_mode:      Some(ApprovalMode::Yolo),
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::clone(&con),
-		bridges:            support::trusting(trust),
+		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
 		spawn_policy:       None,
 	})
@@ -412,7 +393,6 @@ async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
 		&root,
 		scratch.path(),
 		Some(ApprovalMode::Yolo),
-		trust,
 		true,
 		script,
 		&synthesis,

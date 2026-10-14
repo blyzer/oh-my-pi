@@ -24,11 +24,7 @@ use omp_core::Str;
 use omp_dom::{
 	Dom, Handle, KnownTag, Node, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value as DomValue,
 };
-use omp_driver::{
-	headless::kernel::SessionHome,
-	workspace_trust::{WITHHELD_NOTICE, WorkspaceTrustSource},
-};
-use omp_ext::{trust::GrantDuration, workspace_trust::TrustDecision};
+use omp_driver::headless::kernel::SessionHome;
 use omp_rpc::{
 	framing::{
 		JsonLineDecoder, MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES, RpcFrameDecoder, encode_json_v1,
@@ -36,7 +32,6 @@ use omp_rpc::{
 	},
 	protocol::{
 		PROTOCOL_V1, PROTOCOL_V2, ReadyFrame, RequestId, RpcErrorCode, RpcRequest, RpcResponse,
-		SESSION_STARTUP_COMMAND, SessionStartupParams,
 	},
 };
 use omp_session::Session;
@@ -50,10 +45,7 @@ use omp_tools::{
 };
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
-use tokio::io::{
-	AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
-	stdin, stdout,
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, stdin, stdout};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -78,14 +70,7 @@ async fn run_inner(args: ChatArgs, ui_enabled: bool) -> miette::Result<()> {
 	let project = fs::canonicalize(&args.project).into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, args.gateway.is_some())?;
-	let mut input = BufReader::new(stdin());
-	let mut output = stdout();
-	let (startup, pending) = receive_startup(&mut input, &mut output).await?;
 	let mut launch = Launch::prepare(args, ctx, env).await?;
-	if startup.trust_workspace == Some(true) {
-		launch.options.workspace_trust =
-			WorkspaceTrustSource::Fixed(TrustDecision::Trusted { duration: GrantDuration::Session });
-	}
 	let (kernel, session) = launch.compose().await?;
 	let home = SessionHome::new(
 		&launch.data_dir,
@@ -123,56 +108,7 @@ async fn run_inner(args: ChatArgs, ui_enabled: bool) -> miette::Result<()> {
 		interrupt_mode:       Str::new_static("immediate"),
 		skills:               launch.options.discovered_skills.clone(),
 	};
-	let input = std::io::Cursor::new(pending).chain(input);
-	serve_rpc_with_runtime(kernel, session, home, ui, runtime, input, output, false).await
-}
-
-/// Offers startup before composition. A legacy first request selects ordinary
-/// grant evaluation and is replayed unchanged into the normal RPC decoder.
-async fn receive_startup<R, W>(
-	input: &mut R,
-	output: &mut W,
-) -> miette::Result<(SessionStartupParams, Vec<u8>)>
-where
-	R: tokio::io::AsyncBufRead + Unpin,
-	W: AsyncWrite + Unpin,
-{
-	let ready = serde_json::to_vec(&ReadyFrame::v2_capable(MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES))
-		.into_diagnostic()?;
-	output.write_all(&ready).await.into_diagnostic()?;
-	output.write_all(b"\n").await.into_diagnostic()?;
-	output.flush().await.into_diagnostic()?;
-
-	let mut line = Vec::new();
-	input
-		.take((MAX_FRAME_BYTES + 1) as u64)
-		.read_until(b'\n', &mut line)
-		.await
-		.into_diagnostic()?;
-	if line.len() > MAX_FRAME_BYTES {
-		return Err(miette!("RPC startup frame exceeds the frame limit"));
-	}
-	let Ok(request) = serde_json::from_slice::<RpcRequest>(&line) else {
-		return Ok((SessionStartupParams::default(), line));
-	};
-	if request.command != SESSION_STARTUP_COMMAND {
-		return Ok((SessionStartupParams::default(), line));
-	}
-	let params = request.parse_params::<SessionStartupParams>();
-	let response = match &params {
-		Ok(_) => RpcResponse::success_empty(request.id, SESSION_STARTUP_COMMAND),
-		Err(_) => RpcResponse::error(
-			request.id,
-			SESSION_STARTUP_COMMAND,
-			"session_startup requires `trustWorkspace` to be a boolean when present",
-			Some(RpcErrorCode::new("invalid_params")),
-		),
-	};
-	let response = serde_json::to_vec(&response).into_diagnostic()?;
-	output.write_all(&response).await.into_diagnostic()?;
-	output.write_all(b"\n").await.into_diagnostic()?;
-	output.flush().await.into_diagnostic()?;
-	Ok((params.into_diagnostic()?, Vec::new()))
+	serve_rpc_with_runtime(kernel, session, home, ui, runtime, stdin(), stdout()).await
 }
 
 /// Remote retained-dialog bridge enabled by `rpc-ui`.
@@ -562,11 +498,11 @@ struct RpcToolState {
 
 #[derive(Default)]
 struct RpcEventProjection {
-	users:      HashSet<String>,
-	assistants: HashMap<String, RpcAssistantState>,
-	tools:      HashMap<String, RpcToolState>,
-	/// Journaled operator notices already forwarded.
-	notices:    HashSet<String>,
+	users:       HashSet<String>,
+	assistants:  HashMap<String, RpcAssistantState>,
+	tools:       HashMap<String, RpcToolState>,
+	/// Journaled `account-pin` notices already forwarded.
+	pin_notices: HashSet<String>,
 }
 
 impl RpcEventProjection {
@@ -636,27 +572,21 @@ impl RpcEventProjection {
 							events.push(json!({ "type": "message_end", "message": message }));
 						}
 					},
+					// A session account pin the turn could not honor is the one
+					// notice RPC forwards: clients need to tell it from a provider
+					// failure, since the fix is `/pin`, not a retry.
 					Tag::Known(KnownTag::Notice)
-						if matches!(
-							node
-								.prop(&PropKey::Custom(Str::new_static("name")))
-								.and_then(DomValue::as_str),
-							Some(omp_agent::ACCOUNT_PIN_NOTICE | WITHHELD_NOTICE)
-						) =>
+						if node
+							.prop(&PropKey::Custom(Str::new_static("name")))
+							.and_then(DomValue::as_str)
+							== Some(omp_agent::ACCOUNT_PIN_NOTICE) =>
 					{
-						if self.notices.insert(key) {
+						if self.pin_notices.insert(key) {
 							events.push(json!({
 								"type": "notice",
 								"level": if prop(node, PropId::Kind) == Some("error") { "error" } else { "warning" },
 								"message": node.content.as_deref().unwrap_or_default(),
-								"source": node.prop(&PropKey::Custom(Str::new_static("name"))).and_then(DomValue::as_str),
-								"data": node.prop(&PropKey::from(PropId::Data)).and_then(|value| {
-									if let DomValue::Json(raw) = value {
-										serde_json::from_str::<Value>(raw.get()).ok()
-									} else {
-										None
-									}
-								}),
+								"source": omp_agent::ACCOUNT_PIN_NOTICE,
 							}));
 						}
 					},
@@ -1702,7 +1632,7 @@ where
 	W: AsyncWrite + Unpin + Send + 'static,
 {
 	let runtime = RpcRuntime::detached(&kernel, &session);
-	serve_rpc_with_runtime(kernel, session, home, ui, runtime, input, output, true).await
+	serve_rpc_with_runtime(kernel, session, home, ui, runtime, input, output).await
 }
 
 async fn serve_rpc_with_runtime<C, R, W>(
@@ -1713,7 +1643,6 @@ async fn serve_rpc_with_runtime<C, R, W>(
 	mut runtime: RpcRuntime,
 	mut input: R,
 	mut output: W,
-	send_ready: bool,
 ) -> miette::Result<()>
 where
 	C: Inference + Send + Sync + 'static,
@@ -1754,14 +1683,12 @@ where
 		}
 		Ok::<(), miette::Report>(())
 	});
-	if send_ready {
-		outgoing_tx
-			.send(Outgoing::Frame(
-				serde_json::to_value(ReadyFrame::v2_capable(MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES))
-					.into_diagnostic()?,
-			))
-			.into_diagnostic()?;
-	}
+	outgoing_tx
+		.send(Outgoing::Frame(
+			serde_json::to_value(ReadyFrame::v2_capable(MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES))
+				.into_diagnostic()?,
+		))
+		.into_diagnostic()?;
 	outgoing_tx
 		.send(Outgoing::Frame(json!({
 			"type": "available_commands_update",
@@ -1941,14 +1868,6 @@ where
 						let id = request.id.clone();
 						let command = request.command.clone();
 						match command.as_str() {
-							SESSION_STARTUP_COMMAND => {
-								outgoing_tx.send(Outgoing::Frame(error_frame(
-									id,
-									SESSION_STARTUP_COMMAND,
-									"session_already_started",
-									"workspace trust must be supplied before session composition",
-								))).into_diagnostic()?;
-							},
 							"negotiate_protocol" => {
 								let response = negotiate(id, &request.params);
 								let protocol = request.params
@@ -3633,92 +3552,6 @@ mod tests {
 	use omp_core::Str;
 
 	use super::kernel_event_value;
-
-	#[tokio::test]
-	async fn startup_trust_precedes_composition_and_preserves_pipelined_input() {
-		use tokio::io::AsyncReadExt as _;
-
-		let mut input = std::io::Cursor::new(
-			b"{\"id\":\"start\",\"type\":\"session_startup\",\"trustWorkspace\":true}\n{\"type\":\"get_state\"}\n",
-		);
-		let mut output = Vec::new();
-		let (startup, pending) = super::receive_startup(&mut input, &mut output)
-			.await
-			.unwrap();
-		assert_eq!(startup.trust_workspace, Some(true));
-		assert!(pending.is_empty());
-		let mut rest = String::new();
-		input.read_to_string(&mut rest).await.unwrap();
-		assert_eq!(rest, "{\"type\":\"get_state\"}\n");
-		let frames: Vec<serde_json::Value> = output
-			.split(|byte| *byte == b'\n')
-			.filter(|line| !line.is_empty())
-			.map(|line| serde_json::from_slice(line).unwrap())
-			.collect();
-		assert_eq!(frames.len(), 2);
-		assert_eq!(frames[0]["type"], "ready");
-		assert_eq!(frames[1]["id"], "start");
-		assert_eq!(frames[1]["success"], true);
-	}
-
-	#[tokio::test]
-	async fn omitted_startup_keeps_legacy_requests_and_default_grant_evaluation() {
-		let request = b"{\"id\":\"old\",\"type\":\"get_state\"}\n";
-		let mut input = std::io::Cursor::new(request);
-		let mut output = Vec::new();
-		let (startup, pending) = super::receive_startup(&mut input, &mut output)
-			.await
-			.unwrap();
-		assert_eq!(startup, omp_rpc::protocol::SessionStartupParams::default());
-		assert_eq!(pending, request);
-		assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
-	}
-
-	#[tokio::test]
-	async fn omitted_and_false_trust_startup_keep_default_evaluation() {
-		for request in [
-			"{\"type\":\"session_startup\"}\n",
-			"{\"type\":\"session_startup\",\"trustWorkspace\":false}\n",
-		] {
-			let mut input = std::io::Cursor::new(request.as_bytes());
-			let mut output = Vec::new();
-			let (startup, pending) = super::receive_startup(&mut input, &mut output)
-				.await
-				.unwrap();
-			assert_ne!(startup.trust_workspace, Some(true));
-			assert!(pending.is_empty());
-		}
-	}
-
-	#[tokio::test]
-	async fn malformed_startup_is_rejected_before_composition() {
-		let mut input = std::io::Cursor::new(
-			b"{\"id\":\"bad\",\"type\":\"session_startup\",\"trustWorkspace\":\"true\"}\n",
-		);
-		let mut output = Vec::new();
-		assert!(
-			super::receive_startup(&mut input, &mut output)
-				.await
-				.is_err()
-		);
-		let response: serde_json::Value =
-			serde_json::from_slice(output.split(|byte| *byte == b'\n').nth(1).unwrap()).unwrap();
-		assert_eq!(response["id"], "bad");
-		assert_eq!(response["success"], false);
-		assert_eq!(response["code"], "invalid_params");
-	}
-
-	#[tokio::test]
-	async fn oversized_startup_without_newline_is_bounded() {
-		let bytes = vec![b'x'; super::MAX_FRAME_BYTES + 2];
-		let mut input = std::io::Cursor::new(bytes);
-		assert!(
-			super::receive_startup(&mut input, &mut Vec::new())
-				.await
-				.is_err()
-		);
-		assert_eq!(input.position(), (super::MAX_FRAME_BYTES + 1) as u64);
-	}
 
 	/// One answer to `approve` decides every requirement of the prompt, so
 	/// the request carries them all beside the first one's summary.

@@ -257,41 +257,32 @@ fn project_settings_import_once_per_project() {
 	let v1_file = project.join(".omp/config.yml");
 	write(
 		&v1_file,
-		"modelRoles:\n  default: anthropic/claude-opus\ndisabledExtensions:\n  - \
-		 acme.reviewer\ncompaction:\n  thresholdPercent: 55\nsharpshooter:\n  model: x\n",
+		"disabledExtensions:\n  - acme.reviewer\ncompaction:\n  thresholdPercent: \
+		 55\nsharpshooter:\n  model: x\n",
 	);
 	let before = snapshot(root.path());
 
 	let dry = import_project_settings(&project, &v2, ImportMode::DryRun);
 	assert_eq!(snapshot(root.path()), before, "a dry run must not write");
-	assert_eq!(kind_of(&settings(&dry), "modelRoles -> ai_model_roles"), OutcomeKind::WouldImport);
+	assert_eq!(
+		kind_of(&settings(&dry), "disabledExtensions -> cl_disabled_extensions"),
+		OutcomeKind::WouldImport
+	);
 
 	let applied = import_project_settings(&project, &v2, ImportMode::Apply);
-	assert_eq!(kind_of(&settings(&applied), "modelRoles -> ai_model_roles"), OutcomeKind::Imported);
+	assert_eq!(
+		kind_of(&settings(&applied), "disabledExtensions -> cl_disabled_extensions"),
+		OutcomeKind::Imported
+	);
 	// A project cfg runs with project authority, so a convar that is not
 	// project-scoped is kept as a comment instead of a line every load rejects.
-	// `cl_disabled_extensions` is user-only (owner decision Q8): a repository
-	// must not be able to switch off a guard extension.
-	for subject in [
-		"disabledExtensions -> cl_disabled_extensions",
-		"compaction.thresholdPercent -> ai_compact_threshold",
-	] {
-		assert!(
-			applied
-				.iter()
-				.any(|entry| entry.subject.as_deref() == Some(subject)
-					&& matches!(
-						entry.outcome,
-						ImportOutcome::NotMigratable(NotMigratable::NotProjectScoped)
-					)),
-			"{subject}: {applied:#?}"
-		);
-	}
+	assert_eq!(
+		kind_of(&settings(&applied), "compaction.thresholdPercent -> ai_compact_threshold"),
+		OutcomeKind::NotMigratable
+	);
 	assert_eq!(kind_of(&settings(&applied), "sharpshooter.model"), OutcomeKind::NotMigratable);
 	let config = fs::read_to_string(project.join(".omp/config.cfg")).expect("project cfg");
-	assert!(config.contains("\nai_model_roles {default anthropic/claude-opus}\n"), "{config}");
-	assert!(!config.contains("\ncl_disabled_extensions"), "{config}");
-	assert!(config.contains("\n// disabledExtensions = [\"acme.reviewer\"]\n"), "{config}");
+	assert!(config.contains("\ncl_disabled_extensions [acme.reviewer]\n"), "{config}");
 	assert!(!config.contains("\nai_compact_threshold"), "{config}");
 	assert!(config.contains("\n// compaction.thresholdPercent = 55\n"), "{config}");
 	assert!(config.contains("\n// sharpshooter.model = \"x\"\n"), "{config}");
@@ -310,7 +301,7 @@ fn project_settings_import_once_per_project() {
 	// Another project imports on its own, and one without v1 settings gets
 	// no marker.
 	let other = root.path().join("other");
-	write(&other.join(".omp/config.yml"), "modelRoles:\n  default: other/model\n");
+	write(&other.join(".omp/config.yml"), "disabledExtensions:\n  - other.reviewer\n");
 	let imported = import_project_settings(&other, &v2, ImportMode::Apply);
 	assert_eq!(imported[0].outcome.kind(), OutcomeKind::Imported);
 	let bare = root.path().join("bare");

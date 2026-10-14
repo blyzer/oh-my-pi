@@ -343,11 +343,7 @@ fn run_mcp(user_root: &Path, project: &Path, command: &McpConfigCommand) -> miet
 			let server: McpServerConfig = serde_json::from_str(config).into_diagnostic()?;
 			mcp_store(*scope, &user, &project_store, &root)
 				.add(name, server)
-				.into_diagnostic()?;
-			if *scope == McpConfigScope::Project {
-				println!("{}", project_mcp_inactive_hint());
-			}
-			Ok(())
+				.into_diagnostic()
 		},
 		McpConfigCommand::Update { name, config, scope } => {
 			let server: McpServerConfig = serde_json::from_str(config).into_diagnostic()?;
@@ -384,15 +380,6 @@ fn mcp_store<'a>(
 
 fn mcp_scope_name(scope: McpConfigScope) -> &'static str {
 	scope.into()
-}
-/// Explains why a project MCP declaration is not mounted in an untrusted
-/// workspace.
-#[must_use]
-pub(crate) fn project_mcp_inactive_hint() -> Str {
-	Str::new_static(
-		"This project MCP server stays inactive until the workspace is trusted (`omp trust`) or \
-		 `sv_mcp_enable_project_config` is enabled.",
-	)
 }
 
 fn redacted_server(server: &McpServerConfig) -> serde_json::Value {
@@ -676,17 +663,5 @@ pub fn set_persisted(
 				.into_diagnostic()?;
 			Ok(())
 		}),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::project_mcp_inactive_hint;
-
-	#[test]
-	fn project_mcp_add_hint_names_the_trust_and_opt_in_commands() {
-		let hint = project_mcp_inactive_hint();
-		assert!(hint.contains("omp trust"));
-		assert!(hint.contains("sv_mcp_enable_project_config"));
 	}
 }

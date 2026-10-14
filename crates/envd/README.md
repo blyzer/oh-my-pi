@@ -37,11 +37,7 @@ client and framing boundary; it does not contain an alternate host.
   default as `workspace-write`). `admission::effective_approval_mode` is the
   one rule that joins it to approval: the default `yolo` holds only while a
   sandbox was actually constructed (`SandboxState::Active`); otherwise `write`
-  is in force. An explicit `yolo` (flag or user config) is respected only in a
-  trusted workspace; in an untrusted workspace it becomes `write` even with an
-  active sandbox. Per-tool allow, deny and prompt overrides retain precedence.
-  The typed approval posture includes workspace trust and the reason for the
-  clamp, so clients do not need to infer policy from notice prose.
+  is in force. An explicit `yolo` (flag or user config) is respected.
   `admission::resolve_approval` applies it per call with the tool's typed
   `omp_tool::Confinement` (`admission::call_approval_mode`, which `/security`
   also reports per confinement): the sandbox counts only for an `ExecSandbox`

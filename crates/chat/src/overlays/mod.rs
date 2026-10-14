@@ -81,8 +81,6 @@ pub mod tasks;
 pub mod tree;
 /// Full-screen `/usage` dashboard.
 pub mod usage;
-/// First-run workspace trust selector shown before kernel composition.
-pub mod workspace_trust;
 
 pub use models::{ModelPicker, PickerRole, RoleMark};
 pub use notices::NoticeLog;

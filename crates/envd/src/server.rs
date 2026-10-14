@@ -484,19 +484,17 @@ impl From<WorkspaceOperationError> for EnvdError {
 #[derive(Clone, Debug)]
 pub struct ServerIdentity {
 	/// Canonical document workspace identity.
-	pub workspace_id:    Bytes,
+	pub workspace_id:   Bytes,
 	/// Canonical workspace root URI.
-	pub root_uri:        Str,
+	pub root_uri:       Str,
 	/// Epoch of the connected document authority.
-	pub server_epoch:    Bytes,
+	pub server_epoch:   Bytes,
 	/// Human-readable server build version.
-	pub server_version:  Str,
+	pub server_version: Str,
 	/// Executable-generation identity of the serving environment.
-	pub server_build:    Str,
+	pub server_build:   Str,
 	/// Sandbox and approval policy the serving environment enforces.
-	pub policy:          DaemonPolicy,
-	/// Workspace active-content policy fixed at composition.
-	pub workspace_trust: WorkspaceTrust,
+	pub policy:         DaemonPolicy,
 }
 
 /// Per-connection transport and exact DATA grant bounds.
@@ -2608,9 +2606,8 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
+		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
-		host_settings.tools = host_settings.tools.with_workspace_trust(workspace_trust);
 		let enforced = crate::daemon_policy::of(
 			&sandbox_settings,
 			&host_settings.tools,
@@ -2680,13 +2677,12 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id: hello.workspace_id,
-			root_uri: hello.root_uri,
-			server_epoch: hello.server_epoch,
+			workspace_id:   hello.workspace_id,
+			root_uri:       hello.root_uri,
+			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build: Str::from(omp_env::build_id::current()),
-			policy: enforced,
-			workspace_trust,
+			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -2915,7 +2911,6 @@ impl EnvServer {
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
 			.tools
-			.with_workspace_trust(workspace_trust)
 			.with_approval_mode_override(approval_mode);
 		let mcp_settings = McpSettings::from_con(con, workspace_trust);
 		mcp.start_native_configs(mcp_settings.project_config)
@@ -2979,13 +2974,12 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id: hello.workspace_id,
-			root_uri: hello.root_uri,
-			server_epoch: hello.server_epoch,
+			workspace_id:   hello.workspace_id,
+			root_uri:       hello.root_uri,
+			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build: Str::from(omp_env::build_id::current()),
-			policy: enforced,
-			workspace_trust,
+			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -3148,7 +3142,6 @@ impl EnvServer {
 		);
 		host_settings.tools = host_settings
 			.tools
-			.with_workspace_trust(workspace_trust)
 			.with_approval_mode_override(approval_mode);
 		let memory_runtime =
 			start_memory_runtime(&host_settings, state_dir, &root, &session_id).await?;
@@ -3214,13 +3207,12 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id: owner_info.workspace_id,
-			root_uri: Str::from(owner_info.root_uri),
-			server_epoch: owner_info.server_epoch,
+			workspace_id:   owner_info.workspace_id,
+			root_uri:       Str::from(owner_info.root_uri),
+			server_epoch:   owner_info.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build: Str::from(owner_info.server_build),
-			policy: enforced,
-			workspace_trust,
+			server_build:   Str::from(owner_info.server_build),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -4150,25 +4142,20 @@ impl EnvServer {
 			.send_async(server_frame(
 				0,
 				server_frame::Body::Hello(pb::ServerHello {
-					schema_rev:      omp_proto::SCHEMA_REV,
-					min_schema_rev:  MIN_SCHEMA_REV,
-					capabilities:    grants.iter().map(str::to_owned).collect(),
-					server_version:  self.identity.server_version.to_string(),
-					workspace_id:    self.identity.workspace_id.clone(),
-					root_uri:        self.identity.root_uri.to_string(),
-					server_epoch:    self.identity.server_epoch.clone(),
-					server_build:    self.identity.server_build.to_string(),
-					policy_digest:   Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
+					schema_rev:     omp_proto::SCHEMA_REV,
+					min_schema_rev: MIN_SCHEMA_REV,
+					capabilities:   grants.iter().map(str::to_owned).collect(),
+					server_version: self.identity.server_version.to_string(),
+					workspace_id:   self.identity.workspace_id.clone(),
+					root_uri:       self.identity.root_uri.to_string(),
+					server_epoch:   self.identity.server_epoch.clone(),
+					server_build:   self.identity.server_build.to_string(),
+					policy_digest:  Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
 					// What this host's own probe found, which every admission on
 					// the connection resolves against; equal policies do not
 					// imply equal probes.
-					sandbox_state:   self.exec.sandbox_state().to_wire().into(),
-					workspace_trust: match self.identity.workspace_trust {
-						WorkspaceTrust::Untrusted => pb::WorkspaceTrust::Untrusted,
-						WorkspaceTrust::Trusted => pb::WorkspaceTrust::Trusted,
-					}
-					.into(),
-					props:           Default::default(),
+					sandbox_state:  self.exec.sandbox_state().to_wire().into(),
+					props:          Default::default(),
 				}),
 			))
 			.await
@@ -14097,13 +14084,12 @@ mod tests {
 		mcp.bind_manager(&mcp_manager);
 		let server = Arc::new(EnvServer::new(
 			ServerIdentity {
-				workspace_id:    hello.workspace_id,
-				root_uri:        hello.root_uri,
-				server_epoch:    hello.server_epoch,
-				server_version:  sf!("test"),
-				server_build:    sf!("envd-test"),
-				policy:          crate::daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
-				workspace_trust: WorkspaceTrust::Untrusted,
+				workspace_id:   hello.workspace_id,
+				root_uri:       hello.root_uri,
+				server_epoch:   hello.server_epoch,
+				server_version: sf!("test"),
+				server_build:   sf!("envd-test"),
+				policy:         crate::daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
 			},
 			Some(EnvironmentAuthorities {
 				documents,
@@ -15035,12 +15021,7 @@ mod tests {
 		let grants = Grants::all();
 		let authority = Arc::new(AuthorityTable::default());
 		let policy = ConnectionPolicy::in_process();
-		// Explicit `yolo` is respected only in a trusted workspace.
-		let base = ToolSettings {
-			approval_mode: ApprovalMode::AlwaysAsk,
-			workspace_trust: WorkspaceTrust::Trusted,
-			..ToolSettings::default()
-		};
+		let base = ToolSettings { approval_mode: ApprovalMode::AlwaysAsk, ..ToolSettings::default() };
 		let yolo = ConnectionState::new(
 			ExecHost::new(),
 			accepted_hello(grants.clone(), Some(ApprovalMode::Yolo)),
@@ -15950,7 +15931,7 @@ mod tests {
 	async fn relay_daemon_with(
 		sandbox: SandboxSettings,
 	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
-		relay_daemon_in(sandbox, Registry::new(), WorkspaceTrust::Untrusted).await
+		relay_daemon_in(sandbox, Registry::new()).await
 	}
 
 	/// [`relay_daemon_with`], composing the production tools over `registry`.
@@ -15958,7 +15939,6 @@ mod tests {
 	async fn relay_daemon_in(
 		sandbox: SandboxSettings,
 		registry: Registry,
-		workspace_trust: WorkspaceTrust,
 	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
 		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
 			return None;
@@ -15981,11 +15961,7 @@ mod tests {
 				),
 				&con,
 				convars,
-				{
-					let mut bridges = RegistryBridges::default();
-					bridges.content.workspace_trust = workspace_trust;
-					bridges
-				},
+				RegistryBridges::default(),
 			)
 			.await
 			.expect("daemon-shaped server"),
@@ -16690,8 +16666,6 @@ mod tests {
 		let Some((server, _root, _state)) = relay_daemon_in(
 			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
 			registry,
-			// An explicit `yolo` is respected only in a trusted workspace.
-			WorkspaceTrust::Trusted,
 		)
 		.await
 		else {
@@ -17686,15 +17660,14 @@ mod tests {
 
 	/// The production `read@3` declares the most its resolvers can fetch, a
 	/// credentialed fetch, and judges each call by the resolver that reads
-	/// each target: a local path, an internal URI that reads local state, and a
-	/// vault read that asks the Obsidian CLI are document reads; an http(s) URL
-	/// and an unknown foreign scheme the RPC host resolves (no locality
-	/// guarantee, owner decision Q12) are anonymous fetches; an `ssh://` host,
-	/// `issue://`, `pr://` and an `mcp://` resource no mounted server advertises
-	/// yet are credentialed fetches. A local read is `read` tier and runs
-	/// unasked in every mode and sandbox state; a fetch asks only under
-	/// `always-ask`. With URL reads disabled the maximum keeps the credentialed
-	/// fetch and a URL read fetches nothing.
+	/// each target: a local path, an internal URI that reads local state, a
+	/// vault read that asks the Obsidian CLI and a scheme only the RPC host
+	/// serves are document reads; an http(s) URL is an anonymous fetch; an
+	/// `ssh://` host, `issue://`, `pr://` and an `mcp://` resource no mounted
+	/// server advertises yet are credentialed fetches. A local read is `read`
+	/// tier and runs unasked in every mode and sandbox state; a fetch asks
+	/// only under `always-ask`. With URL reads disabled the maximum keeps the
+	/// credentialed fetch and a URL read fetches nothing.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
 		use crate::{
@@ -17721,7 +17694,7 @@ mod tests {
 			("vault://notes/a.md", None),
 			("vault://_/a.md?op=read", None),
 			("vault://notes?op=search&q=todo", None),
-			("custom://thing", anonymous),
+			("custom://thing", None),
 			("ssh://", None),
 			("https://docs.rs/serde", anonymous),
 			("docs.rs:443/", anonymous),

@@ -558,7 +558,6 @@ fn encode_converse_request(
 	}
 	if !explicit_cache
 		&& let Some(retention) = setting_value(&request.cache_retention)
-		&& !matches!(retention, CacheRetention::Request)
 		&& context.policy.cache.prompt_cache_mode == Some(PromptCacheMode::Explicit)
 	{
 		let mut remaining = context.policy.cache.maximum_checkpoints.unwrap_or(0).min(2);
@@ -2941,24 +2940,6 @@ mod tests {
 			serde_json::json!({"cachePoint":{"type":"default"}}),
 		);
 		assert_eq!(explicit["system"][1], serde_json::json!({"cachePoint":{"type":"default"}}),);
-
-		// `none` lowers to `Require(Request)`: explicit cache-capable routes must
-		// still leave it marker-free rather than treating every non-Unset value
-		// as permission to add checkpoints.
-		request.cache_retention = Setting::Require(CacheRetention::Request);
-		let explicit_none = encode_fixture_with_policy(
-			&request,
-			&BedrockOptions::default(),
-			ThinkingMode::Budget,
-			false,
-			|policy| {
-				policy.cache.prompt_cache_mode = Some(PromptCacheMode::Explicit);
-				policy.cache.maximum_checkpoints = Some(2);
-			},
-		);
-		let explicit_none: Value =
-			serde_json::from_slice(&explicit_none).expect("explicit none cache request is JSON");
-		assert!(!explicit_none.to_string().contains("cachePoint"));
 	}
 
 	#[test]

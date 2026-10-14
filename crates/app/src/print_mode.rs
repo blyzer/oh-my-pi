@@ -32,7 +32,6 @@ use omp_agent::{
 use omp_catalog::{ModelKey, RouteId, snapshot::Catalog};
 use omp_core::{FastHashMap, Str, encoding::base64};
 use omp_dom::{Dom, Event, Handle, KnownTag, Node, Op, PropId, PropKey, Sid, StreamOp, Tag, Value};
-use omp_driver::workspace_trust::WithheldInputs;
 use omp_journal::{
 	Journal,
 	blob::{BlobRef, BlobStore},
@@ -80,14 +79,6 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, launch.gateway.is_some())?;
 	let mut launch = Launch::prepare(launch, ctx, env).await?;
-	let withheld_notice = WithheldInputs::of(
-		&launch
-			.options
-			.workspace_trust
-			.decide(&launch.data_dir, &launch.project),
-		&launch.data_dir,
-		&launch.project,
-	);
 	ensure_stored_logins_unlockable(
 		&launch,
 		omp_driver::registry::credential_key_mode(&launch.ctx),
@@ -111,9 +102,6 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	}
 	if let Some(hint) = launch.plugin_dir_hint() {
 		let _ = writeln!(report, "hint: {hint}");
-	}
-	if let Some(withheld) = withheld_notice {
-		let _ = writeln!(report, "{}", withheld.body());
 	}
 	if !report.is_empty() {
 		let mut stderr = tokio::io::stderr();
@@ -2806,10 +2794,9 @@ mod tests {
 		args.prompt = vec![Str::new_static("hello")];
 		let prepare = |args| {
 			Launch::prepare(args, Arc::new(omp_con::Ctx::new()), crate::chat_cmd::LaunchEnv {
-				data_dir:        data_dir.clone(),
-				home:            dir.path().join("home"),
-				catalog:         Arc::new(Catalog::embedded().clone()),
-				workspace_trust: None,
+				data_dir: data_dir.clone(),
+				home:     dir.path().join("home"),
+				catalog:  Arc::new(Catalog::embedded().clone()),
 			})
 		};
 		let launch = prepare(args.clone()).await.expect("launch lowers");

@@ -6244,7 +6244,6 @@ mod tests {
 			crate::admission::ConfiguredApproval {
 				mode,
 				provenance: crate::admission::Provenance::Explicit,
-				workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
 			},
 			crate::admission::SandboxState::Active,
 			None,

@@ -12,7 +12,6 @@ use bytes::{Bytes, BytesMut};
 use flume::Receiver;
 use omp_agent::{ApprovalRoute, ApprovalSource as DecisionSource, ApprovalSpec};
 use omp_core::{Str, sf};
-use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_proto::{
 	env::v1::{Admission, AdmitInvocation, SandboxState as WireSandboxState},
 	policy::v1::{BashIr, EffectEnvelope, PolicyDenied},
@@ -205,18 +204,17 @@ impl Provenance {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConfiguredApproval {
 	/// The mode configured.
-	pub mode:            ApprovalMode,
+	pub mode:       ApprovalMode,
 	/// Whether the user chose it or it is the shipped default.
-	pub provenance:      Provenance,
-	/// Host-supplied workspace trust; project configuration cannot raise it.
-	pub workspace_trust: WorkspaceTrust,
+	pub provenance: Provenance,
 }
 
-/// Resolves configured approval against workspace trust and the sandbox.
+/// The one rule for how a configured approval mode meets the sandbox.
 ///
-/// Explicit `Yolo` is clamped to `Write` in an untrusted workspace, even
-/// inside a sandbox. Trusted explicit `Yolo` is respected. Default `Yolo`
-/// requires an active sandbox; other modes are unchanged.
+/// `Yolo` (never ask) inside a sandbox that confines the environment is
+/// honoured. Without one, a defaulted `Yolo` is downgraded to `Write`, while an
+/// explicit `Yolo` (a flag, the user's config) is respected and reported as
+/// unconfined. Every other mode is returned unchanged.
 ///
 /// This is the session's posture, and the mode in force for the tools the
 /// sandbox confines. [`call_approval_mode`] is the mode a call is admitted
@@ -227,11 +225,6 @@ pub const fn effective_approval_mode(
 	sandbox: SandboxState,
 ) -> ApprovalMode {
 	match (configured.mode, configured.provenance) {
-		(ApprovalMode::Yolo, Provenance::Explicit)
-			if matches!(configured.workspace_trust, WorkspaceTrust::Untrusted) =>
-		{
-			ApprovalMode::Write
-		},
 		(ApprovalMode::Yolo, Provenance::Default) if !sandbox.confines() => ApprovalMode::Write,
 		(mode, _) => mode,
 	}
@@ -242,8 +235,8 @@ pub const fn effective_approval_mode(
 /// [`effective_approval_mode`] sees the sandbox only for a tool that sandbox
 /// confines ([`Confinement::ExecSandbox`]). A [`Confinement::Host`] tool sees
 /// none, so a defaulted `Yolo` is `Write` for it even while the sandbox is
-/// active, and its mode is the same under every sandbox state. Explicit
-/// `Yolo` is respected for both only in a trusted workspace.
+/// active, and its mode is the same under every sandbox state. An explicit
+/// `Yolo` is respected for both.
 #[must_use]
 pub const fn call_approval_mode(
 	configured: ConfiguredApproval,
@@ -261,54 +254,30 @@ pub const fn call_approval_mode(
 /// Name of the typed notice reporting an [`ApprovalPosture`].
 pub const APPROVAL_POSTURE_NOTICE: &str = "approval-posture";
 
-/// Typed reason for reporting an approval posture.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalPostureReason {
-	/// Explicit `yolo` is clamped because the workspace is untrusted.
-	UntrustedWorkspace,
-	/// Default `yolo` has no active sandbox.
-	DefaultWithoutSandbox,
-	/// Trusted explicit `yolo` runs without a sandbox.
-	ExplicitWithoutSandbox,
-}
-
-/// A configured `yolo` posture requiring an operator-visible notice.
+/// A `yolo` approval that no sandbox confines: either downgraded to `write`
+/// (the default) or respected and running unconfined (the user asked for it).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ApprovalPosture {
 	/// Mode configured.
-	pub configured:      ApprovalMode,
+	pub configured: ApprovalMode,
 	/// Who configured it.
-	pub provenance:      Provenance,
+	pub provenance: Provenance,
 	/// Mode actually enforced.
-	pub effective:       ApprovalMode,
+	pub effective:  ApprovalMode,
 	/// Sandbox state that decided it.
-	pub sandbox:         SandboxState,
-	/// Workspace trust that decided it.
-	pub workspace_trust: WorkspaceTrust,
-	/// Why this posture needs reporting.
-	pub reason:          ApprovalPostureReason,
+	pub sandbox:    SandboxState,
 }
 
 impl ApprovalPosture {
-	/// Reports a trust clamp or a `yolo` without a confining sandbox.
+	/// Reports the posture [`effective_approval_mode`] yields for a `yolo`
+	/// with no confining sandbox; `None` when nothing needs saying.
 	#[must_use]
 	pub fn resolve(configured: ConfiguredApproval, sandbox: SandboxState) -> Option<Self> {
-		let untrusted = configured.provenance == Provenance::Explicit
-			&& configured.workspace_trust == WorkspaceTrust::Untrusted;
-		(configured.mode == ApprovalMode::Yolo && (untrusted || !sandbox.confines())).then(|| Self {
+		(configured.mode == ApprovalMode::Yolo && !sandbox.confines()).then(|| Self {
 			configured: configured.mode,
 			provenance: configured.provenance,
 			effective: effective_approval_mode(configured, sandbox),
 			sandbox,
-			workspace_trust: configured.workspace_trust,
-			reason: if untrusted {
-				ApprovalPostureReason::UntrustedWorkspace
-			} else if configured.provenance == Provenance::Default {
-				ApprovalPostureReason::DefaultWithoutSandbox
-			} else {
-				ApprovalPostureReason::ExplicitWithoutSandbox
-			},
 		})
 	}
 
@@ -321,12 +290,6 @@ impl ApprovalPosture {
 	/// Fallback prose for projections that do not read the typed fields.
 	#[must_use]
 	pub fn body(&self) -> Str {
-		if self.reason == ApprovalPostureReason::UntrustedWorkspace {
-			return sf!(
-				"Approval `yolo` was requested explicitly but the workspace is untrusted; `write` is \
-				 in force."
-			);
-		}
 		let effective: &'static str = self.effective.into();
 		let sandbox: &'static str = self.sandbox.into();
 		let cause = match self.sandbox {
@@ -486,9 +449,9 @@ pub struct ResolvedApproval {
 /// and `exec`, respectively: a defaulted `yolo` that only an active sandbox
 /// keeps alive covers sandboxed tools ([`Confinement::ExecSandbox`]), and a
 /// [`Confinement::Host`] tool is admitted exactly as it would be with no
-/// sandbox, so its exec-tier calls prompt. Explicit `yolo` is respected only
-/// in a trusted workspace. A sandboxed tool declares no effects the sandbox
-/// confines; without a sandbox it is process authority and resolves to `exec`.
+/// sandbox, so its exec-tier calls prompt. An explicit `yolo` is respected
+/// either way. A sandboxed tool declares no effects the sandbox confines; with
+/// no sandbox in force it is process authority and resolves to the `exec` tier.
 pub fn resolve_approval(
 	invocation_id: impl Into<Str>,
 	tool_name: impl Into<Str>,
@@ -1342,19 +1305,11 @@ mod tests {
 		SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
 
 	const fn explicit(mode: ApprovalMode) -> ConfiguredApproval {
-		ConfiguredApproval {
-			mode,
-			provenance: Provenance::Explicit,
-			workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
-		}
+		ConfiguredApproval { mode, provenance: Provenance::Explicit }
 	}
 
 	const fn defaulted(mode: ApprovalMode) -> ConfiguredApproval {
-		ConfiguredApproval {
-			mode,
-			provenance: Provenance::Default,
-			workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
-		}
+		ConfiguredApproval { mode, provenance: Provenance::Default }
 	}
 
 	/// The unknown ceiling an undeclared host tool registers is the `exec`
@@ -1487,82 +1442,6 @@ mod tests {
 	}
 
 	#[test]
-	fn explicit_yolo_untrusted_clamps_exec_but_preserves_tool_override() {
-		use omp_ext::workspace_trust::WorkspaceTrust;
-		let effects = Effects {
-			exec: Some(ToolExecEffects { commands: Arc::from([sf!("*")]), network: false }),
-			..Effects::empty()
-		};
-		for sandbox in [SandboxState::Active, SandboxState::Off, UNAVAILABLE] {
-			for confinement in [Confinement::Host, Confinement::ExecSandbox] {
-				for trust in [WorkspaceTrust::Untrusted, WorkspaceTrust::Trusted] {
-					let configured =
-						ConfiguredApproval { workspace_trust: trust, ..explicit(ApprovalMode::Yolo) };
-					let decision = resolve_approval(
-						"exec",
-						"probe",
-						&effects,
-						confinement,
-						configured,
-						sandbox,
-						None,
-					);
-					assert_eq!(decision.tier, ApprovalTier::Exec);
-					assert_eq!(
-						decision.policy,
-						if trust == WorkspaceTrust::Untrusted {
-							ApprovalPolicy::Prompt
-						} else {
-							ApprovalPolicy::Allow
-						}
-					);
-					assert_eq!(
-						decision.mode,
-						if trust == WorkspaceTrust::Untrusted {
-							ApprovalMode::Write
-						} else {
-							ApprovalMode::Yolo
-						}
-					);
-					for policy in [ApprovalPolicy::Allow, ApprovalPolicy::Deny, ApprovalPolicy::Prompt] {
-						let overridden = resolve_approval(
-							"exec",
-							"probe",
-							&effects,
-							confinement,
-							configured,
-							sandbox,
-							Some(policy),
-						);
-						assert_eq!(overridden.policy, policy);
-						assert_eq!(overridden.source, ApprovalSource::User);
-					}
-				}
-			}
-		}
-	}
-
-	#[test]
-	fn untrusted_yolo_posture_reports_typed_clamp_even_inside_sandbox() {
-		let configured = ConfiguredApproval {
-			workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Untrusted,
-			..explicit(ApprovalMode::Yolo)
-		};
-		for sandbox in [SandboxState::Active, SandboxState::Off, UNAVAILABLE] {
-			let posture = ApprovalPosture::resolve(configured, sandbox).expect("trust clamp notice");
-			assert_eq!(posture.configured, ApprovalMode::Yolo);
-			assert_eq!(posture.effective, ApprovalMode::Write);
-			assert_eq!(posture.reason, super::ApprovalPostureReason::UntrustedWorkspace);
-			assert_eq!(posture.workspace_trust, configured.workspace_trust);
-			assert_eq!(posture.sandbox, sandbox);
-			assert!(posture.downgraded());
-			assert!(posture.body().contains("untrusted"));
-			let payload = serde_json::to_value(posture).expect("typed posture");
-			assert_eq!(payload["reason"], "untrusted_workspace");
-		}
-	}
-
-	#[test]
 	fn only_a_constructed_sandbox_confines() {
 		assert!(SandboxState::Active.confines());
 		assert!(!SandboxState::Off.confines());
@@ -1584,8 +1463,6 @@ mod tests {
 				"provenance": "default",
 				"effective": "write",
 				"sandbox": { "state": "unavailable", "cause": "backend_unavailable" },
-				"workspace_trust": "trusted",
-				"reason": "default_without_sandbox",
 			})
 		);
 		assert!(downgraded.body().contains("backend_unavailable"));
@@ -1926,11 +1803,7 @@ mod tests {
 			],
 			prop_oneof![Just(Provenance::Default), Just(Provenance::Explicit)],
 		)
-			.prop_map(|(mode, provenance)| ConfiguredApproval {
-				mode,
-				provenance,
-				workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
-			})
+			.prop_map(|(mode, provenance)| ConfiguredApproval { mode, provenance })
 	}
 
 	fn any_override() -> impl Strategy<Value = Option<ApprovalPolicy>> {

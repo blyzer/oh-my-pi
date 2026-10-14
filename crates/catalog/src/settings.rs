@@ -1301,7 +1301,7 @@ omp_con::var! {
 			"ui.group": "Protocol",
 			"ui.label": "Prompt Cache Retention",
 			"ui.option.auto": "Auto",
-			"ui.option.auto.desc": "Provider-aware defaults — Anthropic and Bedrock place short-lived breakpoints when supported; codecs without breakpoint support stay marker-free",
+			"ui.option.auto.desc": "Provider default — Anthropic is sent no cache breakpoints; providers with automatic prefix caching still cache",
 			"ui.option.short": "Short (5m)",
 			"ui.option.short.desc": "Cheapest cache writes; Anthropic gets up to four 5m breakpoints (tools, system, last two user turns); nothing refreshes an idle entry, so it expires after 5m",
 			"ui.option.long": "Long (1h)",

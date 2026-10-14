@@ -149,12 +149,11 @@ Two adjacent observations about how the roster relates to the prompt:
 ### Relation to the scribe bands
 
 `CanonicalPromptSource::candidate` renders Frozen (conventions, role, runtime, workflow,
-delivery), then Stable (tool-policy, custom, append), then Dynamic, as separate system items,
-and Volatile (recall, status) as synthetic user messages that trail the projected thread
-(`crates/agent/src/prompt/mod.rs`, slot classes at `crates/agent/src/prompt/slots.rs:391-406`;
-trust/cache slice 13). The tool array is not a band. On every provider above it sits *in front
-of* the Frozen band, so a roster transition is strictly worse than editing the Frozen band: it
-misses the cache for tools, every band, and the entire transcript.
+delivery), then Stable (tool-policy, custom, append), then Dynamic, then Volatile, as separate
+system items (`crates/agent/src/prompt/mod.rs:52-90`, slot classes at
+`crates/agent/src/prompt/slots.rs:391-406`). The tool array is not a band. On every provider
+above it sits *in front of* the Frozen band, so a roster transition is strictly worse than
+editing the Frozen band: it misses the cache for tools, every band, and the entire transcript.
 
 ### Consequence per transition
 

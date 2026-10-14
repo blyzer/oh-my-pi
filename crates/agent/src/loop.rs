@@ -73,25 +73,14 @@ impl Drop for TurnActivity {
 	}
 }
 
-/// Pure prompt projection from the authoritative session tree.
+/// Pure system-prompt projection from the authoritative session tree.
 pub trait PromptSource: Send + Sync {
-	/// Projects the ordered system-prefix items without retaining parallel
-	/// session state. Only facts that stay fixed between compaction boundaries
-	/// belong here: the prefix bytes are what a provider's prompt cache keys
-	/// on, and a per-turn fact in it misses the cache on every request.
+	/// Projects ordered system items without retaining parallel session state.
 	///
 	/// A failure (a template that cannot render from the journal-derived
 	/// facts) ends the turn before inference and is journaled as a
 	/// `<notice kind=error>` by the kernel rather than aborting the host.
 	fn system_items(&self, dom: &omp_dom::Dom) -> Result<Vec<Item>, crate::PromptError>;
-
-	/// Projects the per-turn facts (turn, cwd, mounts, todos, recall) as
-	/// synthetic user messages the kernel appends after the projected thread,
-	/// so they reach the model without touching the prefix. Sources with no
-	/// volatile facts project nothing.
-	fn volatile_items(&self, _dom: &omp_dom::Dom) -> Result<Vec<Item>, crate::PromptError> {
-		Ok(Vec::new())
-	}
 }
 
 /// Fixed system prompt useful for tests and small embeddings.
@@ -2518,15 +2507,6 @@ impl<C: Inference> Kernel<C> {
 			});
 		}
 		items.extend(crate::prompt::project_thread_with_attachments(session.dom(), session.blobs())?);
-		// The Volatile band (turn, cwd, mounts, todos, recall) trails the
-		// thread as synthetic user messages: it changes every turn, so it
-		// must sit below every cacheable byte rather than in the prefix.
-		items.extend(
-			self
-				.prompt
-				.volatile_items(session.dom())
-				.map_err(KernelError::Prompt)?,
-		);
 		let mut messages = InferenceMessage::from_thread_items(&items)?;
 		crate::events::strip_unsigned_reasoning(&mut messages);
 		crate::vision::apply(session.dom(), &route, &mut messages);

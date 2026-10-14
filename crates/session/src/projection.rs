@@ -43,15 +43,6 @@ pub const FILE_MENTION_PROP: &str = "file_mention";
 
 /// Prop marking a `<user>` turn child that arrived as steering at a safe point.
 pub const STEERING_PROP: &str = "steering";
-/// Item property carrying the kind of a model-visible approval posture notice.
-pub const NOTICE_KIND_PROP: &str = "notice_kind";
-/// Item property carrying the name of a model-visible approval posture notice.
-pub const NOTICE_NAME_PROP: &str = "notice_name";
-/// Item property carrying the typed payload of a model-visible approval posture
-/// notice.
-pub const NOTICE_DATA_PROP: &str = "notice_data";
-/// The sole notice currently admitted into model history.
-pub const APPROVAL_POSTURE_NOTICE: &str = "approval-posture";
 
 /// Notice prepended to every steering user message at projection time. The
 /// journaled text stays raw; the wrapper is a pure function of the element so
@@ -422,9 +413,6 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 				Tag::Known(KnownTag::Developer) => {
 					project_message(node, thread::Role::System, items);
 				},
-				Tag::Known(KnownTag::Notice) => {
-					project_approval_posture_notice(node, items);
-				},
 				Tag::Known(KnownTag::Assistant) => {
 					// Receipts are consumed one-for-one in ordered turn
 					// sequence; no completion can reuse another's accounting.
@@ -586,50 +574,6 @@ fn project_file_mentions(payload: &FileMentions, items: &mut Vec<Item>) {
 			..Default::default()
 		})),
 		props:         None,
-	});
-}
-
-fn project_approval_posture_notice(node: &Node, items: &mut Vec<Item>) {
-	let Some(name) = node
-		.prop(&PropKey::Custom(Str::new_static("name")))
-		.and_then(Value::as_str)
-		.filter(|name| *name == APPROVAL_POSTURE_NOTICE)
-	else {
-		return;
-	};
-	let Some(Value::Json(raw)) = node.prop(&PropKey::from(PropId::Data)) else {
-		return;
-	};
-	let Ok(data) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
-		return;
-	};
-	let Some(body) = node.content.as_deref() else {
-		return;
-	};
-	let kind = node
-		.prop(&PropKey::from(PropId::Kind))
-		.and_then(Value::as_str)
-		.unwrap_or("info");
-	let text = format!("Approval posture (structured): name={name} kind={kind} data={data}\n{body}");
-	let mut fields = BTreeMap::new();
-	fields.insert(
-		NOTICE_KIND_PROP.to_owned(),
-		json_proto_value(serde_json::Value::String(kind.to_owned())),
-	);
-	fields.insert(
-		NOTICE_NAME_PROP.to_owned(),
-		json_proto_value(serde_json::Value::String(name.to_owned())),
-	);
-	fields.insert(NOTICE_DATA_PROP.to_owned(), json_proto_value(data));
-	items.push(Item {
-		seq:           0,
-		created_at_ms: 0,
-		kind:          Some(item::Kind::Message(thread::Message {
-			role: thread::Role::System as i32,
-			parts: vec![thread::Part { kind: Some(part::Kind::Text(text)) }],
-			..Default::default()
-		})),
-		props:         Some(inference::ValueMap { fields }),
 	});
 }
 

@@ -422,8 +422,6 @@ pub struct ToolSettings {
 	/// Whether the user chose [`Self::approval_mode`] or it is the shipped
 	/// default; an unconfined `yolo` is respected only when the user chose it.
 	pub approval_provenance: Provenance,
-	/// Host-supplied trust, never derived from project convars.
-	pub workspace_trust: omp_ext::workspace_trust::WorkspaceTrust,
 	/// Authoritative per-tool approval policy overrides.
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	pub approval: BTreeMap<Str, ApprovalPolicy>,
@@ -481,7 +479,6 @@ impl Default for ToolSettings {
 			diagnostic_dedup: true,
 			approval_mode: ApprovalMode::Yolo,
 			approval_provenance: Provenance::Default,
-			workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Untrusted,
 			approval: BTreeMap::new(),
 			edit_fuzzy: true,
 			edit_fuzzy_threshold: 0.95,
@@ -543,7 +540,6 @@ impl ToolSettings {
 			diagnostic_dedup: lsp.diagnostics_deduplicate,
 			approval_mode: SV_TOOLS_APPROVAL_MODE.get(ctx),
 			approval_provenance: Provenance::of_convar(ctx, "sv_tools_approval_mode"),
-			workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Untrusted,
 			approval: approval_map(SV_TOOLS_APPROVAL.get(ctx)),
 			edit_fuzzy: SV_TOOLS_EDIT_FUZZY.get(ctx),
 			edit_fuzzy_threshold: omp_tools::settings::SV_EDIT_FUZZY_THRESHOLD.get(ctx),
@@ -563,13 +559,6 @@ impl ToolSettings {
 		}
 	}
 
-	/// Binds the host's workspace trust to admission policy.
-	#[must_use]
-	pub fn with_workspace_trust(mut self, trust: omp_ext::workspace_trust::WorkspaceTrust) -> Self {
-		self.workspace_trust = trust;
-		self
-	}
-
 	/// Returns a session-local copy with an explicit approval-mode override.
 	///
 	/// The source settings are unchanged, so callers can apply an invocation
@@ -586,11 +575,7 @@ impl ToolSettings {
 	/// The configured approval mode with who asked for it.
 	#[must_use]
 	pub const fn configured_approval(&self) -> ConfiguredApproval {
-		ConfiguredApproval {
-			mode:            self.approval_mode,
-			provenance:      self.approval_provenance,
-			workspace_trust: self.workspace_trust,
-		}
+		ConfiguredApproval { mode: self.approval_mode, provenance: self.approval_provenance }
 	}
 
 	/// Whether a named tool is available after applying the default-enabled
@@ -763,9 +748,7 @@ mod tests {
 	fn an_unconfined_yolo_is_downgraded_only_when_it_is_the_default() {
 		let effects = Effects::empty();
 		let defaulted = ToolSettings::default();
-		let explicit = ToolSettings::default()
-			.with_workspace_trust(omp_ext::workspace_trust::WorkspaceTrust::Trusted)
-			.with_approval_mode_override(Some(ApprovalMode::Yolo));
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
 		let sandboxed = Confinement::ExecSandbox;
 		assert_eq!(
 			defaulted
@@ -808,9 +791,7 @@ mod tests {
 			(decision.confinement, decision.mode, decision.policy),
 			(Confinement::Host, ApprovalMode::Write, ApprovalPolicy::Prompt)
 		);
-		let explicit = ToolSettings::default()
-			.with_workspace_trust(omp_ext::workspace_trust::WorkspaceTrust::Trusted)
-			.with_approval_mode_override(Some(ApprovalMode::Yolo));
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
 			explicit
 				.approval_for("c", "web_search", &network, Confinement::Host, SandboxState::Active)
@@ -846,9 +827,7 @@ mod tests {
 				(ApprovalTier::Exec, mode, ApprovalPolicy::Prompt)
 			);
 		}
-		let explicit = ToolSettings::default()
-			.with_workspace_trust(omp_ext::workspace_trust::WorkspaceTrust::Trusted)
-			.with_approval_mode_override(Some(ApprovalMode::Yolo));
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
 			decide(&explicit, SandboxState::Active),
 			(ApprovalTier::Exec, ApprovalMode::Yolo, ApprovalPolicy::Allow)
@@ -905,9 +884,7 @@ mod tests {
 				(ApprovalTier::Exec, mode, ApprovalPolicy::Prompt)
 			);
 		}
-		let explicit = ToolSettings::default()
-			.with_workspace_trust(omp_ext::workspace_trust::WorkspaceTrust::Trusted)
-			.with_approval_mode_override(Some(ApprovalMode::Yolo));
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
 			decide(&explicit, SandboxState::Active),
 			(ApprovalTier::Exec, ApprovalMode::Yolo, ApprovalPolicy::Allow)
@@ -1026,7 +1003,6 @@ mod tests {
 
 		let overridden = persisted
 			.clone()
-			.with_workspace_trust(omp_ext::workspace_trust::WorkspaceTrust::Trusted)
 			.with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
 			overridden

@@ -24,7 +24,7 @@ const ADC_TAG: &str = "application-default";
 const AWS_TAG: &str = "aws-chain";
 const OAUTH_TAG: &str = "oauth";
 const SESSION_TAG: &str = "session";
-pub(crate) const INVOCATION_TAG: &str = "invocation";
+const INVOCATION_TAG: &str = "invocation";
 
 /// Secret environment boundary used by [`CredentialBroker`].
 pub trait CredentialEnvironment: Send + Sync {
@@ -264,13 +264,6 @@ impl CredentialBroker {
 		&self,
 		need: CredentialNeed,
 	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
-		if self
-			.invocation
-			.as_ref()
-			.is_some_and(|invocation| invocation.specs.contains_key(&need.spec))
-		{
-			return credential_ready(Err(CredentialError::Unavailable));
-		}
 		let Some(plan) = self.plans.get(&need.spec) else {
 			return credential_ready(Err(CredentialError::InvalidSource));
 		};
@@ -336,12 +329,15 @@ impl CredentialBroker {
 	) -> Option<Result<CredentialLease, CredentialError>> {
 		let invocation = self.invocation.as_ref()?;
 		let kind = *invocation.specs.get(&need.spec)?;
-		let meta = LeaseMeta {
-			account:    AccountId::from(INVOCATION_TAG),
-			principal:  PrincipalId::from(INVOCATION_TAG),
-			generation: 0,
-			expires_at: None,
-		};
+		let account = need
+			.account
+			.clone()
+			.unwrap_or_else(|| AccountId::from("invocation"));
+		let principal = need
+			.principal
+			.clone()
+			.unwrap_or_else(|| PrincipalId::from("invocation"));
+		let meta = LeaseMeta { account, principal, generation: 0, expires_at: None };
 		let lease = match kind {
 			CredentialKind::ApiKey => CredentialLease::api_key(meta, invocation.secret.clone()),
 			CredentialKind::Bearer => CredentialLease::bearer(meta, invocation.secret.clone()),
@@ -976,8 +972,7 @@ mod tests {
 
 	#[derive(Debug, Default)]
 	struct TrackingStore {
-		leases:  AtomicUsize,
-		rejects: AtomicUsize,
+		leases: AtomicUsize,
 	}
 
 	impl CredentialSource for TrackingStore {
@@ -994,7 +989,6 @@ mod tests {
 			_: &'a CredentialLease,
 			_: AuthRejection,
 		) -> CredentialFuture<'a, Result<(), CredentialError>> {
-			self.rejects.fetch_add(1, Ordering::Relaxed);
 			credential_ready(Ok(()))
 		}
 	}
@@ -1055,8 +1049,8 @@ mod tests {
 			.expect("invocation lease");
 		assert_eq!(lease.scalar_secret().expect("scalar key").expose_secret(), "invocation-only-key");
 		assert_eq!(lease.kind(), selected_kind);
-		assert_eq!(lease.meta().account.as_str(), "invocation");
-		assert_eq!(lease.meta().principal.as_str(), "invocation");
+		assert_eq!(lease.meta().account.as_str(), "selected-account");
+		assert_eq!(lease.meta().principal.as_str(), "selected-principal");
 		assert_eq!(
 			broker
 				.refresh_lease(&lease, need(selected.1.clone()))
@@ -1071,16 +1065,6 @@ mod tests {
 				.expect_err("account has no renewable stored credential"),
 			CredentialError::Unavailable,
 		);
-		broker
-			.reject(&lease, AuthRejection {
-				kind:        AuthRejectionKind::Unauthorized,
-				status:      Some(429),
-				code:        None,
-				refreshable: false,
-			})
-			.await
-			.expect("invocation rejection is ignored");
-		assert_eq!(store.rejects.load(Ordering::Relaxed), 0);
 		assert_eq!(environment.reads.load(Ordering::Relaxed), 0);
 		assert_eq!(store.leases.load(Ordering::Relaxed), 0);
 

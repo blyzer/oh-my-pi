@@ -14,7 +14,6 @@ use futures::{
 	Future, FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, header::WWW_AUTHENTICATE};
-use omp_agent::KernelSender;
 use omp_ai::{
 	auth::{
 		AuthControlHandle, StoreError,
@@ -68,8 +67,8 @@ use super::{
 		RequestIdFormat as ConfigRequestIdFormat, ResolvedConfig, TransportKind, validate_server,
 	},
 	config_values::{
-		ConfigValueError, LITERAL_VALUE_NOTICE, LiteralValueNotice, ResolvedConfigValue,
-		ResolvedTransportValues, ValueResolution, resolve_transport_values,
+		ConfigValueError, ResolvedConfigValue, ResolvedTransportValues, ValueResolution,
+		resolve_transport_values,
 	},
 	control::{ControlMountResolver, McpControlError},
 	device::{DeviceError, McpDeviceDefinitions, McpDeviceProjection},
@@ -869,8 +868,6 @@ pub struct McpManager {
 	subscriptions: Mutex<SubscriptionState>,
 	auth: RwLock<Option<Arc<dyn McpAuthChallengeHandler>>>,
 	notifications: RwLock<Option<Arc<dyn McpNotificationSink>>>,
-	literal_notice_sink: RwLock<Option<KernelSender>>,
-	pending_literal_notices: Mutex<Vec<LiteralValueNotice>>,
 	pending_notifications: Mutex<VecDeque<McpHookNotification>>,
 	definition_subscribers: RwLock<Vec<flume::Sender<McpDefinitionDiff>>>,
 	resource_update_subscribers: RwLock<Vec<flume::Sender<McpResourceUpdate>>>,
@@ -913,8 +910,6 @@ impl McpManager {
 			}),
 			auth: RwLock::new(None),
 			notifications: RwLock::new(None),
-			literal_notice_sink: RwLock::new(None),
-			pending_literal_notices: Mutex::new(Vec::new()),
 			pending_notifications: Mutex::new(VecDeque::with_capacity(NOTIFICATION_BUFFER_CAP)),
 			definition_subscribers: RwLock::new(Vec::new()),
 			resource_update_subscribers: RwLock::new(Vec::new()),
@@ -944,31 +939,6 @@ impl McpManager {
 			}
 		}
 		drop(slot);
-	}
-
-	/// Binds literal project-MCP value notices to the active Agent turn.
-	///
-	/// Configuration resolves before a session host has its mailbox, so notices
-	/// are retained until this binding is installed.
-	pub fn bind_literal_notice_sink(&self, sink: KernelSender) {
-		*self.literal_notice_sink.write() = Some(sink.clone());
-		let pending = self
-			.pending_literal_notices
-			.lock()
-			.drain(..)
-			.collect::<Vec<_>>();
-		for notice in pending {
-			send_literal_notice(&sink, notice);
-		}
-	}
-
-	/// Delivers a literal-value notice now, or retains it until a session binds.
-	fn report_literal_notice(&self, notice: LiteralValueNotice) {
-		let Some(sink) = self.literal_notice_sink.read().clone() else {
-			self.pending_literal_notices.lock().push(notice);
-			return;
-		};
-		send_literal_notice(&sink, notice);
 	}
 
 	/// Applies the MCP convars and keeps live subscription, debounce, and result
@@ -1195,7 +1165,6 @@ impl McpManager {
 					error = notice as &(dyn std::error::Error + 'static),
 					"project MCP value taken literally"
 				);
-				self.report_literal_notice(notice.clone());
 			}
 			let Ok(config_json) = serde_json::to_vec(config.as_ref()).map(Bytes::from) else {
 				continue;
@@ -3308,19 +3277,6 @@ fn mcp_dyn_join(mut outputs: Vec<DynOutput>) -> DynOutput {
 	} else {
 		DynOutput::Parts(outputs)
 	}
-}
-
-fn send_literal_notice(sink: &KernelSender, notice: LiteralValueNotice) {
-	let Ok(data) = serde_json::value::to_raw_value(&notice) else {
-		tracing::warn!("literal project MCP notice could not be encoded");
-		return;
-	};
-	let _ = sink.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
-		kind: Str::new_static("warn"),
-		name: Str::new_static(LITERAL_VALUE_NOTICE),
-		data,
-		body: Str::new(notice.to_string()),
-	}));
 }
 
 impl Drop for McpManager {

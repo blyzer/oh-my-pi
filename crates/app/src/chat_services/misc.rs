@@ -45,7 +45,6 @@ fn failed(error: impl std::fmt::Display) -> ServiceError {
 /// sandbox compiler applies.
 pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
-		.with_workspace_trust(state.workspace_trust)
 		.with_approval_mode_override(state.approval_override);
 	let sandbox = SandboxState::probe(&state.con, &state.project);
 	let configured = settings.configured_approval();

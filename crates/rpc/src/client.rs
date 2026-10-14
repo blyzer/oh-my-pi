@@ -40,8 +40,8 @@ use crate::{
 		NegotiateProtocolParams, NegotiateProtocolResult, NewSessionParams, OAuthProvider,
 		PROTOCOL_V1, PROTOCOL_V2, PromptParams, ProtocolVersion, ReadyFrame, RequestId,
 		RpcAuthAnswerFrame, RpcAuthMethod, RpcErrorCode, RpcEvent, RpcRequest, RpcResponse,
-		SESSION_STARTUP_COMMAND, SessionStartupParams, SubagentMessages, SubagentSnapshot,
-		SubscriptionLevel, TranscriptCursorError, TranscriptPage, TranscriptPageParams,
+		SubagentMessages, SubagentSnapshot, SubscriptionLevel, TranscriptCursorError, TranscriptPage,
+		TranscriptPageParams,
 	},
 };
 
@@ -65,9 +65,6 @@ pub struct RpcClientOptions {
 	pub model:             Option<String>,
 	/// Optional session directory CLI argument.
 	pub session_dir:       Option<PathBuf>,
-	/// Optional session startup request, sent before protocol negotiation.
-	/// `None` retains normal workspace grant evaluation.
-	pub startup:           Option<SessionStartupParams>,
 	/// Additional arguments appended after SDK-owned arguments.
 	pub extra_args:        Vec<OsString>,
 	/// Time allowed for the startup ready handshake.
@@ -87,7 +84,6 @@ impl Default for RpcClientOptions {
 			provider:          None,
 			model:             None,
 			session_dir:       None,
-			startup:           None,
 			extra_args:        Vec::new(),
 			ready_timeout:     DEFAULT_READY_TIMEOUT,
 			request_timeout:   DEFAULT_REQUEST_TIMEOUT,
@@ -707,8 +703,8 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
-	/// Spawns `omp rpc`, waits for `ready`, sends any startup choice, then
-	/// negotiates protocol v2 when advertised.
+	/// Spawns `omp rpc`, waits for `ready`, and negotiates protocol v2 when
+	/// advertised.
 	#[tracing::instrument(level = "debug", skip_all, fields(rpc.service = "stdio", rpc.method = "connect"))]
 	pub async fn spawn(options: RpcClientOptions) -> Result<Self, ClientError> {
 		let mut command = Command::new(&options.executable);
@@ -870,14 +866,6 @@ impl RpcClient {
 		};
 		if let Err(error) = Self::validate_ready(&ready) {
 			tracing::warn!(%error, "RPC ready handshake rejected");
-			let _ = client.shutdown().await;
-			return Err(error);
-		}
-		if let Some(startup) = options.startup
-			&& let Err(error) = client
-				.request::<_, Value>(SESSION_STARTUP_COMMAND, &startup)
-				.await
-		{
 			let _ = client.shutdown().await;
 			return Err(error);
 		}

@@ -16,7 +16,6 @@ use jiff::Timestamp;
 use omp_core::{Hash32, Str, base64, encoding::hex, sf};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
-use strum::{Display, IntoStaticStr};
 use thiserror::Error;
 
 use super::{
@@ -52,22 +51,8 @@ pub enum GrantScope {
 
 /// Lifetime of an interactive operator grant, ordered from shortest to
 /// longest.
-#[derive(
-	Clone,
-	Copy,
-	Debug,
-	Default,
-	Display,
-	Eq,
-	IntoStaticStr,
-	Ord,
-	PartialEq,
-	PartialOrd,
-	Serialize,
-	Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
 pub enum GrantDuration {
 	/// Admit only the current interactive attempt.
 	Once,
@@ -679,37 +664,6 @@ impl GrantsFile {
 				},
 			});
 			rows.push(grant);
-		})
-		.map(Ok)
-	}
-
-	/// Atomically records the operator's revocation of `grant`'s workspace, a
-	/// [`TrustBinding::Deny`] row replacing the workspace's decision, and
-	/// returns the written state. The deny outranks every covering subtree
-	/// ([`TrustDecision::Denied`]) until an exact grant answering it replaces
-	/// it.
-	///
-	/// # Errors
-	///
-	/// [`GrantPersistenceError::SessionOnly`] for a row that is not
-	/// persistent; otherwise as [`Self::update`]. A row that is not a
-	/// [`TrustBinding::Deny`] is refused ([`WorkspaceTrustRefusal::Scope`])
-	/// without touching the file.
-	pub fn persist_workspace_deny(
-		path: &Path,
-		grant: WorkspaceTrustGrant,
-	) -> Result<Result<Self, WorkspaceTrustRefusal>, GrantPersistenceError> {
-		if grant.duration != GrantDuration::Persistent {
-			return Err(GrantPersistenceError::SessionOnly);
-		}
-		if grant.binding != TrustBinding::Deny {
-			return Ok(Err(WorkspaceTrustRefusal::Scope { scope: grant.binding.scope() }));
-		}
-		Self::persisted(path, |grants| {
-			grants
-				.workspace_trust
-				.retain(|existing| !existing.same_slot(&grant));
-			grants.workspace_trust.push(grant);
 		})
 		.map(Ok)
 	}

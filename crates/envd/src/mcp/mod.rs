@@ -1091,47 +1091,6 @@ mod config_tests {
 	}
 
 	#[tokio::test]
-	async fn project_literal_mcp_value_reaches_the_bound_session_as_one_typed_notice() {
-		let scratch = tempfile::tempdir().expect("scratch");
-		let user_root = scratch.path().join(".o2");
-		let project = scratch.path().join("project");
-		fs::create_dir_all(project.join(".omp")).expect("project config directory");
-		fs::write(
-			project.join(".omp/mcp.json"),
-			br#"{"mcpServers":{"literal":{"type":"stdio","command":"literal","env":{"TOKEN":"!ignored"}}}}"#,
-		)
-		.expect("project config");
-		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
-		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
-		let manager =
-			McpManager::new(Arc::clone(&service), Arc::new(RejectConnector), Arc::from([]), project);
-		service.bind_manager(&manager);
-		let (session, notices) = flume::unbounded();
-		manager.bind_literal_notice_sink(session);
-
-		service
-			.start_native_configs(ProjectMcpPolicy::Trusted)
-			.await
-			.expect("project config starts");
-
-		let posted = notices.drain().collect::<Vec<_>>();
-		let [omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice { name, data, .. })] =
-			posted.as_slice()
-		else {
-			panic!("one typed literal-value notice reaches the session, got {}", posted.len());
-		};
-		assert_eq!(name.as_str(), config_values::LITERAL_VALUE_NOTICE);
-		assert_eq!(
-			serde_json::from_str::<config_values::LiteralValueNotice>(data.get())
-				.expect("typed literal-value notice payload"),
-			config_values::LiteralValueNotice::Command {
-				section: config_values::ValueSection::Env,
-				key:     Str::new_static("TOKEN"),
-			}
-		);
-	}
-
-	#[tokio::test]
 	async fn native_config_rpc_mutates_updates_manager_and_lists_one_environment_store() {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let user_root = scratch.path().join(".o2");

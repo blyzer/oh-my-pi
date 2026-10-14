@@ -56,13 +56,6 @@ use omp_catalog::{
 	snapshot::{Catalog, SnapshotProvenance},
 };
 use omp_core::{Str, sf};
-use omp_ext::{
-	trust::{GrantDuration, GrantsFile, grants_path},
-	workspace_trust::{
-		CanonicalHome, TrustChannel, TrustDecision, WorkspaceTrustGrant,
-		inventory::{InventoryBudget, inventory},
-	},
-};
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::{Claims, Constraint, Effects, Precedence, Presentation, Rev, ToolSpec};
 use parking_lot::Mutex;
@@ -663,27 +656,6 @@ fn isolated_roots(home: &Path) -> [(&'static str, PathBuf); 5] {
 		("OMP_CACHE_DIR", home.join("cache")),
 	]
 }
-/// Persists the same exact workspace grant a user confirmation produces.
-fn trust_workspace(project: &Path, home: &Path) {
-	let data_dir = home.join("data");
-	let inputs =
-		inventory(project, &data_dir, &InventoryBudget::default()).expect("workspace inputs");
-	let grant = WorkspaceTrustGrant::exact(
-		project,
-		*inputs.digest(),
-		TrustChannel::Cli,
-		GrantDuration::Persistent,
-	)
-	.expect("exact workspace grant");
-	let written = GrantsFile::persist_workspace_trust(
-		&grants_path(&data_dir),
-		grant,
-		&TrustDecision::Untrusted,
-		&CanonicalHome::resolve(Some(home)),
-	)
-	.expect("persist workspace trust");
-	assert!(written.is_ok(), "the new workspace grant is accepted");
-}
 
 struct PtyChild {
 	child:      Child,
@@ -1054,9 +1026,6 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	fs::create_dir(&metadata_dir).expect("project metadata directory");
 	fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
 		.expect("use standard project metadata permissions");
-	// The explicit-yolo clamp requires the same persisted workspace grant a user
-	// creates.
-	trust_workspace(&project, &project.parent().expect("project parent").join("home"));
 
 	let shell_release = scratch.path().join("unused-shell-release");
 	let gateway_socket = scratch.path().join("gateway.sock");

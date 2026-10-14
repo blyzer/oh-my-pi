@@ -424,8 +424,8 @@ impl Resolve for UrlResolver {
 				.then_some(FetchEffects { credentials: true }),
 			Self::Issue(_) | Self::Pr(_) => Some(FetchEffects { credentials: true }),
 			Self::Mcp(resolver) => resolver.read_fetch(resource, query),
-			Self::Host(_) => Some(FetchEffects { credentials: false }),
-			Self::Artifact(_)
+			Self::Host(_)
+			| Self::Artifact(_)
 			| Self::Attachment(_)
 			| Self::Agent(_)
 			| Self::History(_)

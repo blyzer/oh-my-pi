@@ -46,7 +46,7 @@ a long tail reachable through ordinary composition (0025).
 ## Consequences
 
 - Prompt-cache hit rate is a property of the session, not of the model's browsing behaviour; the
-  system prefix is identical from turn one to turn N when only volatile turn facts change.
+  request prefix is identical from turn one to turn N.
 - Optional capability is unlimited in count and free at rest: a thousand `dyn` devices cost the
   grammar nothing (0025).
 - Prohibited: pi-style discoverable tools, per-turn schema mutation, and "load on demand" of any
@@ -91,14 +91,11 @@ function of the session's composition and the route's lowering capabilities only
 
 ## Status in omp
 
-**Status: Implemented, with volatile turn facts outside the system prefix.** The tool array is
-stable for the life of a session (verified 2026-10-05 against the PR that latches the wire roster;
-see `docs/audits/tool-roster-stability.md` for the transition table T1-T9).
+**Status: Implemented, with the prompt prefix not yet stable.** The tool array is stable for the life of a session (verified 2026-10-05 against the PR that latches the wire roster; see `docs/audits/tool-roster-stability.md` for the transition table T1-T9).
 
 - Fixed identity set: `builtin_tool_identities()` in `crates/tools/src/lib.rs` (32 families, 6 hidden); MCP, media and security devices ride `dyn` (0025).
 - Latch: `crates/agent/src/roster.rs` (`WireRoster`), consulted by `Kernel::project_request` in `crates/agent/src/loop.rs`; restrictions in `crates/tool/src/restrictions.rs`.
-- Volatile prompt facts (`turn`, `cwd`, `date`, mounts, todos, directors, and recall) are the `SlotClass::Volatile` band: `CanonicalPromptSource::volatile_items` projects them as synthetic trailing user messages (`<system-notice>`), and `Kernel::project_request` appends them after the projected thread, never to the system prefix. `date` is journaled once in `prompt-facts` at composition, so the prefix carries no per-turn timestamp.
-- Proof: `crates/e2e/tests/p5_prefix_stability.rs` drives a real kernel over `CanonicalPromptSource` and compares the system-prefix bytes across a todo update and a new turn (`p5_volatile_facts_preserve_system_prefix_and_reach_latest_message`), and compares the `tools` bytes of every request across Plan, Vibe, `sv_tools` writes, `think`, the `task` ceiling, a hook narrowing `enabled_tools`, goal engage/complete/drop/resume, and a model switch.
+- Proof: `crates/e2e/tests/p5_prefix_stability.rs` drives a real kernel and compares the `tools` bytes of every request across Plan, Vibe, `sv_tools` writes, `think`, the `task` ceiling, a hook narrowing `enabled_tools`, goal engage/complete/drop/resume, and a model switch.
 - Not fixed by this work, so a green proof is not "Plan and Goal are cache-neutral": the Goal and prewalk Directors still prepend a system message at index 0 whose text changes, and mode prompts (`ai_prompt_mode`) are appended to the system prefix. Tool-conditional prompt sections still never render in production, and the Anthropic codec's `cache_control` breakpoint count is unreviewed.
 - Not verified: the 'wall-clock benchmark' acceptance test named in the ADR, before and after the full-roster grammar in Plan and Vibe.
 
