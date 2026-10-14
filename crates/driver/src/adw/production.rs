@@ -792,8 +792,7 @@ requires = { network = "disabled" }
 	fn explicit_run_model_overrides_configured_model_for_model_phases() {
 		let project = tempfile::tempdir().expect("project");
 		let ctx = omp_con::Ctx::new();
-		omp_agent::AI_MODEL
-			.set(&ctx, sf!("configured/model"))
+		ctx.exec("ai_model configured/model", omp_con::Source::Config(sf!("test")))
 			.expect("configured model");
 		let host = ProductionAdwHost::open(
 			project.path().to_path_buf(),
@@ -816,8 +815,7 @@ requires = { network = "disabled" }
 	fn implicit_run_model_preserves_configured_model_for_model_phases() {
 		let project = tempfile::tempdir().expect("project");
 		let ctx = omp_con::Ctx::new();
-		omp_agent::AI_MODEL
-			.set(&ctx, sf!("configured/model"))
+		ctx.exec("ai_model configured/model", omp_con::Source::Config(sf!("test")))
 			.expect("configured model");
 		let host = ProductionAdwHost::open(
 			project.path().to_path_buf(),
