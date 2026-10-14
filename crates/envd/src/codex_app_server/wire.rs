@@ -10,7 +10,7 @@
 //! [`Envelope::classify`], and only then decoded into the typed body for the
 //! method. No message is built with `json!` or traversed as an untyped value.
 
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 use omp_core::Str;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
@@ -166,6 +166,8 @@ pub(crate) const INITIALIZED: &str = "initialized";
 pub(crate) const THREAD_START: &str = "thread/start";
 /// Client request: `thread/resume`.
 pub(crate) const THREAD_RESUME: &str = "thread/resume";
+/// Client request: `thread/inject_items`.
+pub(crate) const THREAD_INJECT_ITEMS: &str = "thread/inject_items";
 /// Client request: `turn/start`.
 pub(crate) const TURN_START: &str = "turn/start";
 /// Client request: `turn/interrupt`.
@@ -328,8 +330,8 @@ impl Method {
 // Policy vocabulary
 // ---------------------------------------------------------------------------
 
-/// `AskForApproval` as sent and received.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// `AskForApproval` as received.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
 pub(crate) enum ApprovalPolicy {
 	/// One of the three plain policies OMP can map.
@@ -337,7 +339,6 @@ pub(crate) enum ApprovalPolicy {
 	/// The `{granular: …}` object form; never requested, never accepted.
 	Granular {
 		/// Contents are not interpreted.
-		#[serde(skip_serializing)]
 		granular: IgnoredAnyEq,
 	},
 	/// Any other string a newer protocol may add.
@@ -478,7 +479,7 @@ pub(crate) struct InitializeResult {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadStartParams<'a> {
 	/// Working directory.
-	pub(crate) cwd:                &'a Path,
+	pub(crate) cwd:                &'a str,
 	/// Approval policy.
 	pub(crate) approval_policy:    PlainApproval,
 	/// Approval reviewer; always the user.
@@ -497,7 +498,7 @@ pub(crate) struct ThreadResumeParams<'a> {
 	/// The thread to resume.
 	pub(crate) thread_id:          &'a str,
 	/// Working directory.
-	pub(crate) cwd:                &'a Path,
+	pub(crate) cwd:                &'a str,
 	/// Approval policy.
 	pub(crate) approval_policy:    PlainApproval,
 	/// Approval reviewer; always the user.
@@ -540,12 +541,12 @@ pub(crate) struct ThreadOpened {
 
 /// One `text` user input. Sent without `text_elements`.
 #[derive(Serialize)]
-pub(crate) struct TextInput<'a> {
+pub(crate) struct TextInput {
 	/// Always `text`.
 	#[serde(rename = "type")]
 	pub(crate) kind: TextKind,
 	/// The exact prompt section.
-	pub(crate) text: &'a str,
+	pub(crate) text: Str,
 }
 
 /// The `type` of [`TextInput`].
@@ -563,9 +564,9 @@ pub(crate) struct TurnStartParams<'a> {
 	/// The thread.
 	pub(crate) thread_id:       &'a str,
 	/// The prompt, one input per section, in order.
-	pub(crate) input:           Vec<TextInput<'a>>,
+	pub(crate) input:           Vec<TextInput>,
 	/// Working directory.
-	pub(crate) cwd:             &'a Path,
+	pub(crate) cwd:             &'a str,
 	/// Approval policy.
 	pub(crate) approval_policy: PlainApproval,
 	/// Sandbox policy.
@@ -595,10 +596,6 @@ pub(crate) struct TurnInterruptParams<'a> {
 	/// The turn.
 	pub(crate) turn_id:   &'a str,
 }
-
-/// An empty JSON object result (`turn/interrupt`).
-#[derive(Debug, Deserialize)]
-pub(crate) struct Empty {}
 
 // ---------------------------------------------------------------------------
 // Notifications
@@ -835,11 +832,32 @@ pub(crate) struct TokenBreakdown {
 	pub(crate) cache_write_input_tokens: u64,
 }
 
+impl TokenBreakdown {
+	/// Field-wise difference, saturating at zero.
+	pub(crate) const fn minus(self, other: Self) -> Self {
+		Self {
+			input_tokens:             self.input_tokens.saturating_sub(other.input_tokens),
+			cached_input_tokens:      self
+				.cached_input_tokens
+				.saturating_sub(other.cached_input_tokens),
+			output_tokens:            self.output_tokens.saturating_sub(other.output_tokens),
+			reasoning_output_tokens:  self
+				.reasoning_output_tokens
+				.saturating_sub(other.reasoning_output_tokens),
+			cache_write_input_tokens: self
+				.cache_write_input_tokens
+				.saturating_sub(other.cache_write_input_tokens),
+		}
+	}
+}
+
 /// `tokenUsage`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TokenUsage {
 	/// The usage of the most recent model request.
-	pub(crate) last: TokenBreakdown,
+	pub(crate) last:  TokenBreakdown,
+	/// The usage of the whole thread so far.
+	pub(crate) total: TokenBreakdown,
 }
 
 /// `thread/tokenUsage/updated` params.
@@ -992,17 +1010,14 @@ pub(crate) struct PermissionsApprovalParams {
 }
 
 /// A decision for command and file-change approvals. The variants that
-/// persist or widen future behavior (`acceptWithExecpolicyAmendment`,
-/// `applyNetworkPolicyAmendment`) and the one that aborts the turn (`cancel`)
-/// are not representable on purpose.
+/// persist or widen future behavior (`acceptForSession`,
+/// `acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`) and the one
+/// that aborts the turn (`cancel`) are not representable on purpose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) enum ApprovalDecision {
 	/// Approve this action.
 	#[serde(rename = "accept")]
 	Accept,
-	/// Approve this action and remember it for the session.
-	#[serde(rename = "acceptForSession")]
-	AcceptForSession,
 	/// Refuse; the agent continues the turn.
 	#[serde(rename = "decline")]
 	Decline,
@@ -1081,4 +1096,102 @@ pub(crate) struct ToolCallRefused {
 	pub(crate) content_items: [Str; 0],
 	/// Always false.
 	pub(crate) success:       bool,
+}
+
+// ---------------------------------------------------------------------------
+// thread/inject_items: system and developer text
+// ---------------------------------------------------------------------------
+
+/// `thread/inject_items` params: Responses API message items appended to the
+/// thread without starting a turn. Carries the prompt's system sections so
+/// they keep their role instead of being sent as user text.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InjectItemsParams<'a> {
+	/// The thread.
+	pub(crate) thread_id: &'a str,
+	/// The items.
+	pub(crate) items:     Vec<InjectedMessage>,
+}
+
+/// One injected message.
+#[derive(Serialize)]
+pub(crate) struct InjectedMessage {
+	/// Always `message`.
+	#[serde(rename = "type")]
+	pub(crate) kind:    MessageKind,
+	/// Always `developer`.
+	pub(crate) role:    DeveloperRole,
+	/// The text, as one part.
+	pub(crate) content: [InjectedText; 1],
+}
+
+/// The `type` of [`InjectedMessage`].
+#[derive(Clone, Copy, Serialize)]
+pub(crate) enum MessageKind {
+	/// `message`.
+	#[serde(rename = "message")]
+	Message,
+}
+
+/// The only role this client injects.
+#[derive(Clone, Copy, Serialize)]
+pub(crate) enum DeveloperRole {
+	/// `developer`.
+	#[serde(rename = "developer")]
+	Developer,
+}
+
+/// One `input_text` part.
+#[derive(Serialize)]
+pub(crate) struct InjectedText {
+	/// Always `input_text`.
+	#[serde(rename = "type")]
+	pub(crate) kind: InputTextKind,
+	/// The exact prompt section.
+	pub(crate) text: Str,
+}
+
+/// The `type` of [`InjectedText`].
+#[derive(Clone, Copy, Serialize)]
+pub(crate) enum InputTextKind {
+	/// `input_text`.
+	#[serde(rename = "input_text")]
+	InputText,
+}
+
+/// Read-back of an encoded outbound line, so the digest of what was delivered
+/// is computed from the bytes written, not from the values meant to be.
+#[derive(Deserialize)]
+pub(crate) struct Sent<P> {
+	/// The params of the request.
+	pub(crate) params: P,
+}
+
+/// Read-back of `thread/inject_items` params.
+#[derive(Deserialize)]
+pub(crate) struct SentInject {
+	/// The injected messages.
+	pub(crate) items: Vec<SentMessage>,
+}
+
+/// Read-back of one injected message.
+#[derive(Deserialize)]
+pub(crate) struct SentMessage {
+	/// The text parts.
+	pub(crate) content: Vec<SentText>,
+}
+
+/// Read-back of `turn/start` params.
+#[derive(Deserialize)]
+pub(crate) struct SentTurn {
+	/// The text inputs.
+	pub(crate) input: Vec<SentText>,
+}
+
+/// Read-back of one text part.
+#[derive(Deserialize)]
+pub(crate) struct SentText {
+	/// The text.
+	pub(crate) text: Str,
 }
