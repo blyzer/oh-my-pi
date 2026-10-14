@@ -962,8 +962,7 @@ pub fn uu_app() -> Command {
 				.long(OPT_ONE_FILE_SYSTEM)
 				.help(
 					"when removing a hierarchy recursively, skip any directory that is on a \
-					 file\nsystem different from that of the corresponding command line argument \
-					 (NOT\nIMPLEMENTED)",
+					 file system different from that of the corresponding command line argument",
 				)
 				.action(ArgAction::SetTrue),
 		)
