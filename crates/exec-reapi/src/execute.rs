@@ -1,56 +1,4 @@
-<<<<<<< HEAD
-=======
-	fn source() -> (Source, InputFile) {
-		let digest = blob_digest(b"file");
-		let file = InputFile { path: "file.txt".to_owned(), digest, executable: false };
->>>>>>> 105bee33e7 (test(exec-reapi): fix fake server trait bounds and Digest serialization)
-		(
-			Source {
-				files: Arc::new(vec![file.clone()]),
-				blobs: Arc::new(BTreeMap::from([(file.digest, Bytes::from_static(b"file"))])),
-			},
-			file,
-		)
-<<<<<<< HEAD
-			file,
-		)
-			inputs:      Some(InputSet {
-				manifest: blob_digest(b"manifest"),
-				files:    1,
-				bytes:    file.digest.size,
-				excluded: ExclusionCounts::default(),
-			}),
-impl BlobSource for Source {
-	async fn read(&self, digest: omp_exec::Digest) -> std::io::Result<Bytes> {
-		self
-			.blobs
-			.get(&digest)
-			.cloned()
-			.ok_or_else(|| std::io::Error::other("missing test blob"))
-	}
-}
-use crate::ExecuteConfig;
-=======
-	}
->>>>>>> 105bee33e7 (test(exec-reapi): fix fake server trait bounds and Digest serialization)
 //! REAPI action construction, CAS upload, execution streaming and cancellation.
-impl wire::execution_server::Execution for Fake {
-	async fn execute(
-		&self,
-		_request: Request<wire::ExecuteRequest>,
-	) -> Result<Response<BoxStream<Result<Operation, Status>>>, Status> {
-		let operation = operation(self.reconnect.then_some(false), self.nonzero);
-		Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
-	}
-
-	async fn wait_execution(
-		&self,
-		_request: Request<wire::WaitExecutionRequest>,
-	) -> Result<Response<BoxStream<Result<Operation, Status>>>, Status> {
-		let operation = operation(Some(true), self.nonzero);
-		Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
-	}
-}
 //!
 //! The backend is generic over the caller-owned blob authority. It never opens
 //! a path or keeps a second blob store: capture and reads are delegated to
@@ -62,12 +10,12 @@ use bytes::Bytes;
 use omp_adw::Posture;
 use omp_core::Str;
 use omp_exec::{
-	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, CancelSupport, EnvEntry,
+	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
-	ExecutionRun, InputSet, Logs, Outcome, Platform, Reattach, RemoteCancel, Timing, TransferCounts,
+	ExecutionRun, InputSet, Logs, Outcome, Platform, Reattach, Timing, TransferCounts,
 };
 use parking_lot::Mutex;
-use prost::{Message as _, Name as _};
+use prost::Message as _;
 use prost_types::Duration as WireDuration;
 use tonic::{Code, Request, Status, metadata::MetadataValue, transport::Channel};
 
@@ -908,14 +856,14 @@ fn wire_status(
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, sync::Arc};
+	use std::{collections::{BTreeMap, HashMap}, pin::Pin, sync::Arc};
 
 	use bytes::Bytes;
 	use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 	use omp_core::{Hash32, SecretString, Str};
 	use omp_exec::{
-		CacheSupport, ExecutionId, InputSet, NeedSet, OutputSpec, PlatformRequirement,
-		ResourceRequirements,
+		CacheSupport, ExclusionCounts, ExecutionId, InputSet, NeedSet, OutputSpec,
+		PlatformRequirement, ResourceRequirements,
 	};
 	use tokio::sync::Mutex as AsyncMutex;
 	use tokio_stream::{Stream, wrappers::TcpListenerStream};
@@ -930,7 +878,7 @@ mod tests {
 	#[derive(Clone)]
 	struct Source {
 		files: Arc<Vec<InputFile>>,
-		blobs: Arc<BTreeMap<omp_exec::Digest, Bytes>>,
+		blobs: Arc<HashMap<omp_exec::Digest, Bytes>>,
 	}
 
 	impl BlobSource for Source {
@@ -971,21 +919,25 @@ mod tests {
 		cancelled: Arc<AsyncMutex<bool>>,
 		reconnect: bool,
 		nonzero:   bool,
+		fault:     Option<Code>,
 	}
 
-	type OpStream = Pin<
-		Box<
-			dyn tonic::codegen::tokio_stream::Stream<Item = Result<longrunning::Operation, Status>>
-				+ Send,
-		>,
-	>;
+	/// The wire stream the fake `Execution` service yields.
+	type ExecStream =
+		Pin<Box<dyn Stream<Item = Result<longrunning::Operation, Status>> + Send + 'static>>;
 
 	#[tonic::async_trait]
 	impl wire::execution_server::Execution for Fake {
+		type ExecuteStream = ExecStream;
+		type WaitExecutionStream = ExecStream;
+
 		async fn execute(
 			&self,
 			_request: Request<wire::ExecuteRequest>,
 		) -> Result<Response<Self::ExecuteStream>, Status> {
+			if let Some(code) = self.fault {
+				return Err(Status::new(code, "injected REAPI fault"));
+			}
 			let operation = operation(self.reconnect.then_some(false), self.nonzero);
 			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
 		}
@@ -1080,7 +1032,7 @@ mod tests {
 			name: "operations/test".to_owned(),
 			done,
 			result: done.then(|| {
-				longrunning::operation::Result::Response(Any {
+				longrunning::operation::Result::Response(prost_types::Any {
 					type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse"
 						.to_owned(),
 					value:    response.encode_to_vec(),
@@ -1133,7 +1085,7 @@ mod tests {
 			.connect()
 			.await
 			.unwrap();
-		let config = ExecuteConfig {
+		let config = Config {
 			id:                  BackendId::new_static("reapi"),
 			instance:            Str::empty(),
 			profile:             Profile::reapi(),
@@ -1167,7 +1119,7 @@ mod tests {
 				manifest: blob_digest(b"manifest"),
 				files:    1,
 				bytes:    file.digest.size,
-				excluded: Default::default(),
+				excluded: ExclusionCounts { rules: Arc::new([]), symlinks: 0 },
 			}),
 			outputs:     OutputSpec::Logs,
 			toolchain:   omp_exec::ToolchainId::new_static("test"),
@@ -1191,7 +1143,7 @@ mod tests {
 		(
 			Source {
 				files: Arc::new(vec![file.clone()]),
-				blobs: Arc::new(BTreeMap::from([(digest, Bytes::from_static(b"file"))])),
+				blobs: Arc::new(HashMap::from([(digest, Bytes::from_static(b"file"))])),
 			},
 			file,
 		)
@@ -1215,6 +1167,7 @@ mod tests {
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
 				nonzero:   false,
+				fault:     None,
 			},
 			source.clone(),
 		)
@@ -1229,6 +1182,7 @@ mod tests {
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
 				nonzero:   true,
+				fault:     None,
 			},
 			source,
 		)
@@ -1249,6 +1203,7 @@ mod tests {
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
 				nonzero:   false,
+				fault:     None,
 			},
 			source,
 		)
@@ -1269,6 +1224,7 @@ mod tests {
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: true,
 				nonzero:   false,
+				fault:     None,
 			},
 			source,
 		)
@@ -1289,6 +1245,7 @@ mod tests {
 				cancelled: cancelled.clone(),
 				reconnect: true,
 				nonzero:   false,
+				fault:     None,
 			},
 			source,
 		)
@@ -1314,5 +1271,24 @@ mod tests {
 		);
 		assert!(!status.message().contains("secret-token"));
 		assert!(!format!("{credential:?}").contains("secret-token"));
+	}
+
+	#[tokio::test]
+	async fn an_injected_grpc_fault_is_a_typed_error() {
+		let (source, file) = source();
+		let result = backend(
+			Fake {
+				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				cancelled: Arc::new(AsyncMutex::new(false)),
+				reconnect: false,
+				nonzero:   false,
+				fault:     Some(Code::ResourceExhausted),
+			},
+			source,
+		)
+		.await
+		.start(request(file, "fault"))
+		.await;
+		assert!(matches!(result, Err(ExecutionError::Capacity { .. })));
 	}
 }
