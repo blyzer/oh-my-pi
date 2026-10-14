@@ -17,6 +17,7 @@ use std::{
 	sync::Arc,
 };
 
+use bytes::Bytes;
 use flume::Receiver;
 use omp_agent::{Kernel, RunControl, TurnInput};
 use omp_ai::{
@@ -322,6 +323,10 @@ impl Gateway {
 				index: 0,
 				id:    call.id.clone(),
 				name:  call.name.clone(),
+			}),
+			Ok(ChatEvent::ToolArgumentsDelta {
+				index: 0,
+				bytes: Bytes::from_static(br#"{"language":"py","code":"40 + 2"}"#),
 			}),
 			Ok(ChatEvent::ToolCallReady { index: 0, call }),
 			Ok(ChatEvent::Completed(Completion {
