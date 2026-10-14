@@ -481,7 +481,7 @@ mod tests {
 			.await
 			.expect("cancelled run");
 
-		assert_eq!(exit.status, RunStatus::Cancelled);
+		assert!(matches!(exit.status, RunStatus::Cancelled));
 		assert!(exit.records.is_empty());
 	}
 }
