@@ -20,7 +20,8 @@ use std::{
 use flume::Receiver;
 use omp_agent::{Kernel, RunControl, TurnInput};
 use omp_ai::{
-	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, Usage,
+	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, ToolCall, Usage,
+	call::OpaqueJson,
 	event::WorkflowResponse,
 	layer::{LayerCall, stack::RouteProviderService},
 	provider::fake::{FakeProvider, FakeScript},
@@ -148,10 +149,24 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		.expect("the answer is current");
 	}
 
+	/// Composes the launch kernel as a launch does, without advertising tools.
+	async fn compose(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
+		self.compose_for_tool_mode(gateway, false).await
+	}
+
+	/// Composes the launch kernel with the production tool registry enabled.
+	async fn compose_with_tools(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
+		self.compose_for_tool_mode(gateway, true).await
+	}
+
 	/// Composes the launch kernel as a launch does: the decision evaluated
 	/// once, the prompt slots resolved under it, and both handed to
 	/// composition.
-	async fn compose(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
+	async fn compose_for_tool_mode(
+		&self,
+		gateway: &Gateway,
+		tools_enabled: bool,
+	) -> (Kernel<ComposedInference>, Session) {
 		let decision = evaluate_workspace(&self.data, &self.project);
 		let (custom_prompt, append_prompt) =
 			resolve_system_inputs(&self.project, &self.home, None, None, decision.trust())
@@ -159,7 +174,7 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		let options = KernelOptions {
 			session: Some(self.session.clone()),
 			sessions_dir: self.session.parent().map(Path::to_path_buf),
-			no_tools: true,
+			no_tools: !tools_enabled,
 			gateway: Some(gateway.channel.clone()),
 			prompt: PromptOverrides { custom_prompt, append_prompt, ..PromptOverrides::default() },
 			workspace_trust: WorkspaceTrustSource::Fixed(decision),
@@ -293,6 +308,31 @@ impl Gateway {
 			})),
 		]));
 	}
+
+	/// Scripts an `eval` invocation followed by the assistant's final answer.
+	fn eval(&self) {
+		let call = ToolCall {
+			id:        "eval-owner-regression".into(),
+			name:      sf!("eval"),
+			arguments: OpaqueJson::new(serde_json::json!({"language":"py","code":"40 + 2"})),
+		};
+		self.fake.push(FakeScript::chat(vec![
+			Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::ToolCall }),
+			Ok(ChatEvent::ToolCallStarted {
+				index: 0,
+				id:    call.id.clone(),
+				name:  call.name.clone(),
+			}),
+			Ok(ChatEvent::ToolCallReady { index: 0, call }),
+			Ok(ChatEvent::Completed(Completion {
+				reason:  FinishReason::ToolCalls,
+				blocks:  1,
+				usage:   Usage::default(),
+				receipt: ExecutionReceipt::default().into(),
+			})),
+		]));
+		self.answer("Done.");
+	}
 }
 
 /// Runs one scripted turn, which journals what the kernel was told.
@@ -306,6 +346,23 @@ async fn turn(gateway: &Gateway, kernel: &mut Kernel<ComposedInference>, session
 		)
 		.await
 		.expect("turn");
+}
+
+/// Runs one production-routed eval cell through a composed kernel.
+async fn eval_turn(
+	gateway: &Gateway,
+	kernel: &mut Kernel<ComposedInference>,
+	session: &mut Session,
+) {
+	gateway.eval();
+	kernel
+		.run_turn(
+			session,
+			TurnInput { text: Str::new_static("calculate 40 + 2"), attachments: Vec::new() },
+			RunControl::new(CancellationToken::new(), None),
+		)
+		.await
+		.expect("eval turn");
 }
 
 /// The typed payload of every withheld-inputs notice the session journaled.
@@ -364,6 +421,22 @@ fn agents_loaded(session: &Session) -> bool {
 		.expect("context files")
 		.iter()
 		.any(|file| file["content"] == PROJECT_AGENTS)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composed_kernel_binds_eval_to_the_external_dispatch_session() {
+	let workspace = Workspace::new();
+	let gateway = Gateway::start(workspace.home.parent().expect("scratch")).await;
+	let _daemon = workspace.daemon(WorkspaceTrust::Trusted).await;
+	let (mut kernel, mut session) = workspace.compose_with_tools(&gateway).await;
+
+	eval_turn(&gateway, &mut kernel, &mut session).await;
+
+	let journal = fs::read_to_string(&workspace.session).expect("read composed session journal");
+	assert!(
+		journal.contains(r#""text":"42""#),
+		"production eval did not return its cell result: {journal}"
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
