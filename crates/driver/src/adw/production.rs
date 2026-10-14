@@ -772,6 +772,30 @@ requires = { network = "disabled" }
 	}
 
 	#[test]
+	fn explicit_run_model_overrides_configured_model_for_model_phases() {
+		let project = tempfile::tempdir().expect("project");
+		let ctx = omp_con::Ctx::new();
+		omp_agent::AI_MODEL
+			.set(&ctx, sf!("configured/model"))
+			.expect("configured model");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("flag/model"),
+			Arc::new(ctx),
+			TRUSTED,
+		)
+		.expect("workflow host");
+
+		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
+		assert_eq!(host.model.as_str(), "flag/model");
+		assert!(
+			child_kernel_options(&host.workspace_trust).model_override,
+			"the explicit run model must replace ai_model in every model-phase child"
+		);
+	}
+
+	#[test]
 	fn model_phase_kernels_exclude_workspace_extensions_and_inherit_trust() {
 		let options = child_kernel_options(&TrustDecision::Denied);
 		assert!(!options.extensions.include_workspace);
