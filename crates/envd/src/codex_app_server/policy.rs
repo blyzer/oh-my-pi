@@ -28,21 +28,21 @@ use super::wire::{
 
 /// A [`DelegatedPolicy`] expressed as Codex settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WirePolicy {
+pub struct WirePolicy {
 	/// `approvalPolicy`.
-	pub(crate) approval:     PlainApproval,
+	pub approval:     PlainApproval,
 	/// `sandbox` on `thread/start` and `thread/resume`.
-	pub(crate) sandbox:      SandboxMode,
+	pub sandbox:      SandboxMode,
 	/// Whether commands may reach the network.
-	pub(crate) network_open: bool,
+	pub network_open: bool,
 }
 
 impl WirePolicy {
 	/// The reviewer every request pins.
-	pub(crate) const REVIEWER: Reviewer = Reviewer::User;
+	pub const REVIEWER: Reviewer = Reviewer::User;
 
 	/// The `config` override that pins network access under workspace-write.
-	pub(crate) const fn config(self) -> Option<ThreadConfig> {
+	pub const fn config(self) -> Option<ThreadConfig> {
 		match self.sandbox {
 			SandboxMode::WorkspaceWrite => Some(ThreadConfig {
 				sandbox_workspace_write: WorkspaceWriteConfig { network_access: self.network_open },
@@ -52,7 +52,7 @@ impl WirePolicy {
 	}
 
 	/// The `sandboxPolicy` sent on every `turn/start`.
-	pub(crate) const fn turn_sandbox(self) -> SandboxPolicy {
+	pub const fn turn_sandbox(self) -> SandboxPolicy {
 		match self.sandbox {
 			SandboxMode::ReadOnly => SandboxPolicy::ReadOnly { network_access: false },
 			SandboxMode::WorkspaceWrite => SandboxPolicy::WorkspaceWrite {
@@ -64,7 +64,7 @@ impl WirePolicy {
 }
 
 /// Maps `policy` to Codex settings, or `None` when no exact mapping exists.
-pub(crate) const fn wire_policy(policy: DelegatedPolicy) -> Option<WirePolicy> {
+pub const fn wire_policy(policy: DelegatedPolicy) -> Option<WirePolicy> {
 	let approval = match policy.approval {
 		ApprovalPosture::AlwaysAsk => PlainApproval::Untrusted,
 		ApprovalPosture::Yolo => PlainApproval::Never,
@@ -82,7 +82,7 @@ pub(crate) const fn wire_policy(policy: DelegatedPolicy) -> Option<WirePolicy> {
 }
 
 /// Every policy [`wire_policy`] can express.
-pub(crate) fn supported_policies() -> Box<[DelegatedPolicy]> {
+pub fn supported_policies() -> Box<[DelegatedPolicy]> {
 	const SANDBOXES: [SandboxPosture; 3] =
 		[SandboxPosture::ReadOnly, SandboxPosture::WorkspaceWrite, SandboxPosture::Unrestricted];
 	const NETWORKS: [NetworkPosture; 3] =
@@ -111,7 +111,7 @@ pub(crate) fn supported_policies() -> Box<[DelegatedPolicy]> {
 /// `Codex on-request` is reported as [`ApprovalPosture::Write`] so a server
 /// that downgrades the request is caught as drift; no executor-supported
 /// policy contains it.
-pub(crate) fn applied_policy(opened: &ThreadOpened, workdir: &str) -> Option<DelegatedPolicy> {
+pub fn applied_policy(opened: &ThreadOpened, workdir: &str) -> Option<DelegatedPolicy> {
 	if opened.approvals_reviewer != Reviewer::User {
 		return None;
 	}

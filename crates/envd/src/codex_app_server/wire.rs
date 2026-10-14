@@ -10,8 +10,6 @@
 //! [`Envelope::classify`], and only then decoded into the typed body for the
 //! method. No message is built with `json!` or traversed as an untyped value.
 
-use std::collections::BTreeMap;
-
 use omp_core::Str;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::value::RawValue;
@@ -23,7 +21,7 @@ use serde_json::value::RawValue;
 /// A JSON-RPC request id: the wire allows a string or an integer.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(untagged)]
-pub(crate) enum RequestId {
+pub enum RequestId {
 	/// Integer id; every id this client issues is one.
 	Int(i64),
 	/// Text id, as a server may choose for its own requests.
@@ -32,14 +30,14 @@ pub(crate) enum RequestId {
 
 /// The `error` member of a JSON-RPC error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(crate) struct RpcError {
+pub struct RpcError {
 	/// JSON-RPC error code.
-	pub(crate) code: i64,
+	pub code: i64,
 }
 
 /// Every member a JSON-RPC line may carry, borrowed from the line.
 #[derive(Debug, Deserialize)]
-pub(crate) struct Envelope<'a> {
+pub struct Envelope<'a> {
 	#[serde(default)]
 	id:     Option<RequestId>,
 	#[serde(default)]
@@ -54,7 +52,7 @@ pub(crate) struct Envelope<'a> {
 
 /// An inbound line, classified.
 #[derive(Debug)]
-pub(crate) enum JsonRpcMessage<'a> {
+pub enum JsonRpcMessage<'a> {
 	/// The server asks the client something and waits for a response.
 	Request {
 		/// Id to echo in the response.
@@ -89,7 +87,7 @@ pub(crate) enum JsonRpcMessage<'a> {
 
 impl<'a> Envelope<'a> {
 	/// Classifies the envelope, or `None` when it fits no JSON-RPC shape.
-	pub(crate) fn classify(self) -> Option<JsonRpcMessage<'a>> {
+	pub fn classify(self) -> Option<JsonRpcMessage<'a>> {
 		match self {
 			Self { id: Some(id), method: Some(method), params, .. } => {
 				Some(JsonRpcMessage::Request { id, method, params })
@@ -108,70 +106,70 @@ impl<'a> Envelope<'a> {
 
 /// A client request line.
 #[derive(Serialize)]
-pub(crate) struct OutRequest<'a, P> {
+pub struct OutRequest<'a, P> {
 	/// Request id.
-	pub(crate) id:     i64,
+	pub id:     i64,
 	/// Method name.
-	pub(crate) method: &'static str,
+	pub method: &'static str,
 	/// Typed params.
-	pub(crate) params: &'a P,
+	pub params: &'a P,
 }
 
 /// A client notification line without params.
 #[derive(Serialize)]
-pub(crate) struct OutNotification {
+pub struct OutNotification {
 	/// Method name.
-	pub(crate) method: &'static str,
+	pub method: &'static str,
 }
 
 /// A client response to a server request.
 #[derive(Serialize)]
-pub(crate) struct OutResponse<'a, R> {
+pub struct OutResponse<'a, R> {
 	/// The id of the request being answered.
-	pub(crate) id:     &'a RequestId,
+	pub id:     &'a RequestId,
 	/// Typed result.
-	pub(crate) result: &'a R,
+	pub result: &'a R,
 }
 
 /// A client error response to a server request.
 #[derive(Serialize)]
-pub(crate) struct OutError<'a> {
+pub struct OutError<'a> {
 	/// The id of the request being refused.
-	pub(crate) id:    &'a RequestId,
+	pub id:    &'a RequestId,
 	/// The error.
-	pub(crate) error: OutErrorBody,
+	pub error: OutErrorBody,
 }
 
 /// Body of [`OutError`].
 #[derive(Serialize)]
-pub(crate) struct OutErrorBody {
+pub struct OutErrorBody {
 	/// JSON-RPC error code.
-	pub(crate) code:    i64,
+	pub code:    i64,
 	/// Static, secret-free message.
-	pub(crate) message: &'static str,
+	pub message: &'static str,
 }
 
 /// JSON-RPC "method not found".
-pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
+pub const METHOD_NOT_FOUND: i64 = -32601;
 
 // ---------------------------------------------------------------------------
 // Method names
 // ---------------------------------------------------------------------------
 
 /// Client request: `initialize`.
-pub(crate) const INITIALIZE: &str = "initialize";
+pub const INITIALIZE: &str = "initialize";
 /// Client notification: `initialized`.
-pub(crate) const INITIALIZED: &str = "initialized";
+pub const INITIALIZED: &str = "initialized";
 /// Client request: `thread/start`.
-pub(crate) const THREAD_START: &str = "thread/start";
+pub const THREAD_START: &str = "thread/start";
 /// Client request: `thread/resume`.
-pub(crate) const THREAD_RESUME: &str = "thread/resume";
+pub const THREAD_RESUME: &str = "thread/resume";
 /// Client request: `thread/inject_items`.
-pub(crate) const THREAD_INJECT_ITEMS: &str = "thread/inject_items";
+pub const THREAD_INJECT_ITEMS: &str = "thread/inject_items";
 /// Client request: `turn/start`.
-pub(crate) const TURN_START: &str = "turn/start";
+pub const TURN_START: &str = "turn/start";
 /// Client request: `turn/interrupt`.
-pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
+pub const TURN_INTERRUPT: &str = "turn/interrupt";
 
 /// Every server-initiated method this adapter knows by name.
 ///
@@ -180,7 +178,7 @@ pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 /// realtime, reasoning and similar traffic). A method that is not listed is
 /// [`Method::Unknown`] and is a protocol failure, not a silent drop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
-pub(crate) enum Method {
+pub enum Method {
 	/// `turn/started`.
 	#[strum(serialize = "turn/started")]
 	TurnStarted,
@@ -321,7 +319,7 @@ pub(crate) enum Method {
 
 impl Method {
 	/// Parses `name`, mapping every unlisted method to [`Method::Unknown`].
-	pub(crate) fn parse(name: &str) -> Self {
+	pub fn parse(name: &str) -> Self {
 		name.parse().unwrap_or(Self::Unknown)
 	}
 }
@@ -333,7 +331,7 @@ impl Method {
 /// `AskForApproval` as received.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
-pub(crate) enum ApprovalPolicy {
+pub enum ApprovalPolicy {
 	/// One of the three plain policies OMP can map.
 	Plain(PlainApproval),
 	/// The `{granular: …}` object form; never requested, never accepted.
@@ -347,7 +345,7 @@ pub(crate) enum ApprovalPolicy {
 
 /// The plain approval policies.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum PlainApproval {
+pub enum PlainApproval {
 	/// Ask unless the command is known safe.
 	#[serde(rename = "untrusted")]
 	Untrusted,
@@ -361,7 +359,7 @@ pub(crate) enum PlainApproval {
 
 /// An ignored value that still supports `Eq`/`Clone` for the enclosing enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IgnoredAnyEq;
+pub struct IgnoredAnyEq;
 
 impl<'de> Deserialize<'de> for IgnoredAnyEq {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -377,7 +375,7 @@ impl Serialize for IgnoredAnyEq {
 
 /// Who answers approval requests.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum Reviewer {
+pub enum Reviewer {
 	/// The client (OMP).
 	#[serde(rename = "user")]
 	User,
@@ -388,7 +386,7 @@ pub(crate) enum Reviewer {
 
 /// `SandboxMode` as sent on `thread/start` and `thread/resume`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) enum SandboxMode {
+pub enum SandboxMode {
 	/// No writes.
 	#[serde(rename = "read-only")]
 	ReadOnly,
@@ -400,7 +398,7 @@ pub(crate) enum SandboxMode {
 /// `SandboxPolicy` as sent on `turn/start` and received in thread responses.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub(crate) enum SandboxPolicy {
+pub enum SandboxPolicy {
 	/// No confinement; received only, never sent.
 	DangerFullAccess,
 	/// No writes.
@@ -429,16 +427,16 @@ pub(crate) enum SandboxPolicy {
 
 /// The `config` override used to pin network access under workspace-write.
 #[derive(Serialize)]
-pub(crate) struct ThreadConfig {
+pub struct ThreadConfig {
 	/// `[sandbox_workspace_write]` table.
-	pub(crate) sandbox_workspace_write: WorkspaceWriteConfig,
+	pub sandbox_workspace_write: WorkspaceWriteConfig,
 }
 
 /// `[sandbox_workspace_write]`.
 #[derive(Serialize)]
-pub(crate) struct WorkspaceWriteConfig {
+pub struct WorkspaceWriteConfig {
 	/// Whether commands may reach the network.
-	pub(crate) network_access: bool,
+	pub network_access: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,26 +446,26 @@ pub(crate) struct WorkspaceWriteConfig {
 /// `initialize` params.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InitializeParams<'a> {
+pub struct InitializeParams<'a> {
 	/// Who is connecting.
-	pub(crate) client_info: ClientInfo<'a>,
+	pub client_info: ClientInfo<'a>,
 }
 
 /// `initialize` `clientInfo`.
 #[derive(Serialize)]
-pub(crate) struct ClientInfo<'a> {
+pub struct ClientInfo<'a> {
 	/// Client name.
-	pub(crate) name:    &'a str,
+	pub name:    &'a str,
 	/// Client version.
-	pub(crate) version: &'a str,
+	pub version: &'a str,
 }
 
 /// `initialize` result. `codexHome` is deliberately not decoded.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InitializeResult {
+pub struct InitializeResult {
 	/// The server's user agent string.
-	pub(crate) user_agent: Str,
+	pub user_agent: Str,
 }
 
 // ---------------------------------------------------------------------------
@@ -477,62 +475,62 @@ pub(crate) struct InitializeResult {
 /// `thread/start` params.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ThreadStartParams<'a> {
+pub struct ThreadStartParams<'a> {
 	/// Working directory.
-	pub(crate) cwd:                &'a str,
+	pub cwd:                &'a str,
 	/// Approval policy.
-	pub(crate) approval_policy:    PlainApproval,
+	pub approval_policy:    PlainApproval,
 	/// Approval reviewer; always the user.
-	pub(crate) approvals_reviewer: Reviewer,
+	pub approvals_reviewer: Reviewer,
 	/// Sandbox mode.
-	pub(crate) sandbox:            SandboxMode,
+	pub sandbox:            SandboxMode,
 	/// Network override under workspace-write.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub(crate) config:             Option<ThreadConfig>,
+	pub config:             Option<ThreadConfig>,
 }
 
 /// `thread/resume` params.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ThreadResumeParams<'a> {
+pub struct ThreadResumeParams<'a> {
 	/// The thread to resume.
-	pub(crate) thread_id:          &'a str,
+	pub thread_id:          &'a str,
 	/// Working directory.
-	pub(crate) cwd:                &'a str,
+	pub cwd:                &'a str,
 	/// Approval policy.
-	pub(crate) approval_policy:    PlainApproval,
+	pub approval_policy:    PlainApproval,
 	/// Approval reviewer; always the user.
-	pub(crate) approvals_reviewer: Reviewer,
+	pub approvals_reviewer: Reviewer,
 	/// Sandbox mode.
-	pub(crate) sandbox:            SandboxMode,
+	pub sandbox:            SandboxMode,
 	/// Network override under workspace-write.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub(crate) config:             Option<ThreadConfig>,
+	pub config:             Option<ThreadConfig>,
 	/// History is not needed; only the live state.
-	pub(crate) exclude_turns:      bool,
+	pub exclude_turns:      bool,
 }
 
 /// The `thread` member of a thread response.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ThreadRef {
+pub struct ThreadRef {
 	/// Thread id.
-	pub(crate) id: Str,
+	pub id: Str,
 }
 
 /// `thread/start` and `thread/resume` result.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ThreadOpened {
+pub struct ThreadOpened {
 	/// The thread.
-	pub(crate) thread:             ThreadRef,
+	pub thread:             ThreadRef,
 	/// Effective approval policy.
-	pub(crate) approval_policy:    ApprovalPolicy,
+	pub approval_policy:    ApprovalPolicy,
 	/// Effective reviewer.
-	pub(crate) approvals_reviewer: Reviewer,
+	pub approvals_reviewer: Reviewer,
 	/// Effective working directory.
-	pub(crate) cwd:                Str,
+	pub cwd:                Str,
 	/// Effective sandbox policy.
-	pub(crate) sandbox:            SandboxPolicy,
+	pub sandbox:            SandboxPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -541,17 +539,17 @@ pub(crate) struct ThreadOpened {
 
 /// One `text` user input. Sent without `text_elements`.
 #[derive(Serialize)]
-pub(crate) struct TextInput {
+pub struct TextInput {
 	/// Always `text`.
 	#[serde(rename = "type")]
-	pub(crate) kind: TextKind,
+	pub kind: TextKind,
 	/// The exact prompt section.
-	pub(crate) text: Str,
+	pub text: Str,
 }
 
 /// The `type` of [`TextInput`].
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum TextKind {
+pub enum TextKind {
 	/// `text`.
 	#[serde(rename = "text")]
 	Text,
@@ -560,41 +558,41 @@ pub(crate) enum TextKind {
 /// `turn/start` params.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TurnStartParams<'a> {
+pub struct TurnStartParams<'a> {
 	/// The thread.
-	pub(crate) thread_id:       &'a str,
+	pub thread_id:       &'a str,
 	/// The prompt, one input per section, in order.
-	pub(crate) input:           Vec<TextInput>,
+	pub input:           Vec<TextInput>,
 	/// Working directory.
-	pub(crate) cwd:             &'a str,
+	pub cwd:             &'a str,
 	/// Approval policy.
-	pub(crate) approval_policy: PlainApproval,
+	pub approval_policy: PlainApproval,
 	/// Sandbox policy.
-	pub(crate) sandbox_policy:  SandboxPolicy,
+	pub sandbox_policy:  SandboxPolicy,
 }
 
 /// The `turn` member of a `turn/start` result.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TurnRef {
+pub struct TurnRef {
 	/// Turn id.
-	pub(crate) id: Str,
+	pub id: Str,
 }
 
 /// `turn/start` result.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TurnStartResult {
+pub struct TurnStartResult {
 	/// The started turn.
-	pub(crate) turn: TurnRef,
+	pub turn: TurnRef,
 }
 
 /// `turn/interrupt` params.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TurnInterruptParams<'a> {
+pub struct TurnInterruptParams<'a> {
 	/// The thread.
-	pub(crate) thread_id: &'a str,
+	pub thread_id: &'a str,
 	/// The turn.
-	pub(crate) turn_id:   &'a str,
+	pub turn_id:   &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -603,15 +601,15 @@ pub(crate) struct TurnInterruptParams<'a> {
 
 /// `turn/started` params.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TurnStartedParams {
+pub struct TurnStartedParams {
 	/// The turn.
-	pub(crate) turn: TurnRef,
+	pub turn: TurnRef,
 }
 
 /// Terminal status of a turn.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum TurnStatus {
+pub enum TurnStatus {
 	/// Finished normally.
 	Completed,
 	/// Stopped by `turn/interrupt`.
@@ -628,7 +626,7 @@ pub(crate) enum TurnStatus {
 /// Reason codes of a failed turn.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum ErrorCode {
+pub enum ErrorCode {
 	/// Context overflow.
 	ContextWindowExceeded,
 	/// Session budget exhausted.
@@ -657,7 +655,7 @@ pub(crate) enum ErrorCode {
 /// `codexErrorInfo`: a plain code or an object with details.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
-pub(crate) enum ErrorInfo {
+pub enum ErrorInfo {
 	/// A plain code.
 	Code(ErrorCode),
 	/// An object form (connection failures and similar).
@@ -666,7 +664,7 @@ pub(crate) enum ErrorInfo {
 
 /// A `Copy` ignored value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IgnoredAnyCopy;
+pub struct IgnoredAnyCopy;
 
 impl<'de> Deserialize<'de> for IgnoredAnyCopy {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -678,47 +676,47 @@ impl<'de> Deserialize<'de> for IgnoredAnyCopy {
 /// provider diagnostics, and typed failures carry the facts.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TurnError {
+pub struct TurnError {
 	/// The reason code, when given.
 	#[serde(default)]
-	pub(crate) codex_error_info: Option<ErrorInfo>,
+	pub codex_error_info: Option<ErrorInfo>,
 }
 
 /// The `turn` member of `turn/completed`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TurnDone {
+pub struct TurnDone {
 	/// Turn id.
-	pub(crate) id:     Str,
+	pub id:     Str,
 	/// How it ended.
-	pub(crate) status: TurnStatus,
+	pub status: TurnStatus,
 	/// The error of a failed turn.
 	#[serde(default)]
-	pub(crate) error:  Option<TurnError>,
+	pub error:  Option<TurnError>,
 }
 
 /// `turn/completed` params.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TurnCompletedParams {
+pub struct TurnCompletedParams {
 	/// The turn.
-	pub(crate) turn: TurnDone,
+	pub turn: TurnDone,
 }
 
 /// `item/agentMessage/delta` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AgentDeltaParams {
+pub struct AgentDeltaParams {
 	/// The turn.
-	pub(crate) turn_id: Str,
+	pub turn_id: Str,
 	/// The message item.
-	pub(crate) item_id: Str,
+	pub item_id: Str,
 	/// The new text.
-	pub(crate) delta:   Str,
+	pub delta:   Str,
 }
 
 /// Status of a command, file change or tool item.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum ItemStatus {
+pub enum ItemStatus {
 	/// Running.
 	InProgress,
 	/// Succeeded.
@@ -737,7 +735,7 @@ pub(crate) enum ItemStatus {
 /// A thread item, reduced to what the event model needs.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub(crate) enum ThreadItem {
+pub enum ThreadItem {
 	/// The agent's message.
 	AgentMessage {
 		/// Item id.
@@ -808,33 +806,37 @@ pub(crate) enum ThreadItem {
 /// `item/started` and `item/completed` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ItemParams {
+pub struct ItemParams {
 	/// The turn.
-	pub(crate) turn_id: Str,
+	pub turn_id: Str,
 	/// The item.
-	pub(crate) item:    ThreadItem,
+	pub item:    ThreadItem,
 }
 
 /// Token counts of one breakdown. Missing cache-write counts are zero.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[allow(
+	clippy::struct_field_names,
+	reason = "field names mirror the generated protocol schema one to one"
+)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TokenBreakdown {
+pub struct TokenBreakdown {
 	/// Input tokens, including cached ones.
-	pub(crate) input_tokens:             u64,
+	pub input_tokens:             u64,
 	/// Cached input tokens.
-	pub(crate) cached_input_tokens:      u64,
+	pub cached_input_tokens:      u64,
 	/// Output tokens.
-	pub(crate) output_tokens:            u64,
+	pub output_tokens:            u64,
 	/// Reasoning output tokens.
-	pub(crate) reasoning_output_tokens:  u64,
+	pub reasoning_output_tokens:  u64,
 	/// Cache-write input tokens.
 	#[serde(default)]
-	pub(crate) cache_write_input_tokens: u64,
+	pub cache_write_input_tokens: u64,
 }
 
 impl TokenBreakdown {
 	/// Field-wise difference, saturating at zero.
-	pub(crate) const fn minus(self, other: Self) -> Self {
+	pub const fn minus(self, other: Self) -> Self {
 		Self {
 			input_tokens:             self.input_tokens.saturating_sub(other.input_tokens),
 			cached_input_tokens:      self
@@ -853,49 +855,49 @@ impl TokenBreakdown {
 
 /// `tokenUsage`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TokenUsage {
+pub struct TokenUsage {
 	/// The usage of the most recent model request.
-	pub(crate) last:  TokenBreakdown,
+	pub last:  TokenBreakdown,
 	/// The usage of the whole thread so far.
-	pub(crate) total: TokenBreakdown,
+	pub total: TokenBreakdown,
 }
 
 /// `thread/tokenUsage/updated` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TokenUsageParams {
+pub struct TokenUsageParams {
 	/// The turn.
-	pub(crate) turn_id:     Str,
+	pub turn_id:     Str,
 	/// The usage.
-	pub(crate) token_usage: TokenUsage,
+	pub token_usage: TokenUsage,
 }
 
 /// `error` notification params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ErrorParams {
+pub struct ErrorParams {
 	/// The turn.
-	pub(crate) turn_id:    Str,
+	pub turn_id:    Str,
 	/// The error.
-	pub(crate) error:      TurnError,
+	pub error:      TurnError,
 	/// Whether the CLI retries by itself.
-	pub(crate) will_retry: bool,
+	pub will_retry: bool,
 }
 
 /// `thread/closed` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ThreadClosedParams {
+pub struct ThreadClosedParams {
 	/// The thread.
-	pub(crate) thread_id: Str,
+	pub thread_id: Str,
 }
 
 /// `serverRequest/resolved` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RequestResolvedParams {
+pub struct RequestResolvedParams {
 	/// The server request that no longer needs an answer.
-	pub(crate) request_id: RequestId,
+	pub request_id: RequestId,
 }
 
 // ---------------------------------------------------------------------------
@@ -904,15 +906,15 @@ pub(crate) struct RequestResolvedParams {
 
 /// Network context of a command approval.
 #[derive(Debug, Deserialize)]
-pub(crate) struct NetworkContext {
+pub struct NetworkContext {
 	/// The host the command wants to reach.
-	pub(crate) host: Str,
+	pub host: Str,
 }
 
 /// Whether a command approval is a command or input to a running terminal.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum CommandKind {
+pub enum CommandKind {
 	/// A command.
 	#[default]
 	Command,
@@ -926,87 +928,87 @@ pub(crate) enum CommandKind {
 /// `item/commandExecution/requestApproval` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommandApprovalParams {
+pub struct CommandApprovalParams {
 	/// The turn.
-	pub(crate) turn_id:                  Str,
+	pub turn_id:                  Str,
 	/// The command item.
-	pub(crate) item_id:                  Str,
+	pub item_id:                  Str,
 	/// The command line.
 	#[serde(default)]
-	pub(crate) command:                  Option<Str>,
+	pub command:                  Option<Str>,
 	/// Command or terminal input.
 	#[serde(default)]
-	pub(crate) kind:                     CommandKind,
+	pub kind:                     CommandKind,
 	/// Present when the request is about network access.
 	#[serde(default)]
-	pub(crate) network_approval_context: Option<NetworkContext>,
+	pub network_approval_context: Option<NetworkContext>,
 }
 
 /// `item/fileChange/requestApproval` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FileApprovalParams {
+pub struct FileApprovalParams {
 	/// The turn.
-	pub(crate) turn_id:    Str,
+	pub turn_id:    Str,
 	/// The file-change item.
-	pub(crate) item_id:    Str,
+	pub item_id:    Str,
 	/// Why the agent asks.
 	#[serde(default)]
-	pub(crate) reason:     Option<Str>,
+	pub reason:     Option<Str>,
 	/// A root the agent wants to write under for the rest of the session.
 	#[serde(default)]
-	pub(crate) grant_root: Option<Str>,
+	pub grant_root: Option<Str>,
 }
 
 /// Filesystem part of a permission profile, legacy read/write lists only.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FileSystemPermissions {
+pub struct FileSystemPermissions {
 	/// Readable paths.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) read:                Option<Vec<Str>>,
+	pub read:                Option<Vec<Str>>,
 	/// Writable paths.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) write:               Option<Vec<Str>>,
+	pub write:               Option<Vec<Str>>,
 	/// Structured entries; present only to be refused (they cannot be echoed
 	/// faithfully).
 	#[serde(default, skip_serializing)]
-	pub(crate) entries:             Option<IgnoredAnyEq>,
+	pub entries:             Option<IgnoredAnyEq>,
 	/// Glob depth; present only to be refused.
 	#[serde(default, skip_serializing)]
-	pub(crate) glob_scan_max_depth: Option<IgnoredAnyEq>,
+	pub glob_scan_max_depth: Option<IgnoredAnyEq>,
 }
 
 /// Network part of a permission profile.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct NetworkPermissions {
+pub struct NetworkPermissions {
 	/// Whether network access is requested or granted.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) enabled: Option<bool>,
+	pub enabled: Option<bool>,
 }
 
 /// A permission profile, requested or granted.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PermissionProfile {
+pub struct PermissionProfile {
 	/// Filesystem permissions.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) file_system: Option<FileSystemPermissions>,
+	pub file_system: Option<FileSystemPermissions>,
 	/// Network permissions.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) network:     Option<NetworkPermissions>,
+	pub network:     Option<NetworkPermissions>,
 }
 
 /// `item/permissions/requestApproval` params.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PermissionsApprovalParams {
+pub struct PermissionsApprovalParams {
 	/// The turn.
-	pub(crate) turn_id:     Str,
+	pub turn_id:     Str,
 	/// The item.
-	pub(crate) item_id:     Str,
+	pub item_id:     Str,
 	/// What the agent asks for.
-	pub(crate) permissions: PermissionProfile,
+	pub permissions: PermissionProfile,
 }
 
 /// A decision for command and file-change approvals. The variants that
@@ -1014,7 +1016,7 @@ pub(crate) struct PermissionsApprovalParams {
 /// `acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`) and the one
 /// that aborts the turn (`cancel`) are not representable on purpose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub(crate) enum ApprovalDecision {
+pub enum ApprovalDecision {
 	/// Approve this action.
 	#[serde(rename = "accept")]
 	Accept,
@@ -1025,64 +1027,54 @@ pub(crate) enum ApprovalDecision {
 
 /// Response to a command or file-change approval request.
 #[derive(Serialize)]
-pub(crate) struct DecisionResponse {
+pub struct DecisionResponse {
 	/// The decision.
-	pub(crate) decision: ApprovalDecision,
+	pub decision: ApprovalDecision,
 }
 
 /// Scope of a granted permission profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub(crate) enum GrantScope {
-	/// This turn only.
+pub enum GrantScope {
+	/// This turn only; the only scope this client grants.
 	#[serde(rename = "turn")]
 	Turn,
-	/// The rest of the session.
-	#[serde(rename = "session")]
-	Session,
 }
 
 /// Response to a permissions approval request.
 #[derive(Serialize)]
-pub(crate) struct PermissionsResponse {
+pub struct PermissionsResponse {
 	/// What is granted; empty means nothing.
-	pub(crate) permissions: PermissionProfile,
+	pub permissions: PermissionProfile,
 	/// How long it lasts.
-	pub(crate) scope:       GrantScope,
+	pub scope:       GrantScope,
 }
 
 /// Legacy `ReviewDecision` refusal for `applyPatchApproval` and
 /// `execCommandApproval`.
 #[derive(Serialize)]
-pub(crate) struct LegacyDenied {
+pub struct LegacyDenied {
 	/// Always `denied`.
-	pub(crate) decision: LegacyDecision,
+	pub decision: LegacyDecision,
 }
 
 /// The only legacy decision this client ever sends.
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum LegacyDecision {
+pub enum LegacyDecision {
 	/// `denied`.
 	#[serde(rename = "denied")]
 	Denied,
 }
 
-/// Refusal of `item/tool/requestUserInput`: no answers.
-#[derive(Serialize)]
-pub(crate) struct NoUserInput {
-	/// Always empty.
-	pub(crate) answers: BTreeMap<Str, Str>,
-}
-
 /// Refusal of `mcpServer/elicitation/request`.
 #[derive(Serialize)]
-pub(crate) struct ElicitationCancelled {
+pub struct ElicitationCancelled {
 	/// Always `cancel`.
-	pub(crate) action: ElicitationAction,
+	pub action: ElicitationAction,
 }
 
 /// The only elicitation action this client ever sends.
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum ElicitationAction {
+pub enum ElicitationAction {
 	/// `cancel`.
 	#[serde(rename = "cancel")]
 	Cancel,
@@ -1090,12 +1082,12 @@ pub(crate) enum ElicitationAction {
 
 /// Refusal of `item/tool/call`: the client offers no dynamic tools.
 #[derive(Serialize)]
-pub(crate) struct ToolCallRefused {
+pub struct ToolCallRefused {
 	/// Always empty.
 	#[serde(rename = "contentItems")]
-	pub(crate) content_items: [Str; 0],
+	pub content_items: [Str; 0],
 	/// Always false.
-	pub(crate) success:       bool,
+	pub success:       bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,28 +1099,28 @@ pub(crate) struct ToolCallRefused {
 /// they keep their role instead of being sent as user text.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InjectItemsParams<'a> {
+pub struct InjectItemsParams<'a> {
 	/// The thread.
-	pub(crate) thread_id: &'a str,
+	pub thread_id: &'a str,
 	/// The items.
-	pub(crate) items:     Vec<InjectedMessage>,
+	pub items:     Vec<InjectedMessage>,
 }
 
 /// One injected message.
 #[derive(Serialize)]
-pub(crate) struct InjectedMessage {
+pub struct InjectedMessage {
 	/// Always `message`.
 	#[serde(rename = "type")]
-	pub(crate) kind:    MessageKind,
+	pub kind:    MessageKind,
 	/// Always `developer`.
-	pub(crate) role:    DeveloperRole,
+	pub role:    DeveloperRole,
 	/// The text, as one part.
-	pub(crate) content: [InjectedText; 1],
+	pub content: [InjectedText; 1],
 }
 
 /// The `type` of [`InjectedMessage`].
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum MessageKind {
+pub enum MessageKind {
 	/// `message`.
 	#[serde(rename = "message")]
 	Message,
@@ -1136,7 +1128,7 @@ pub(crate) enum MessageKind {
 
 /// The only role this client injects.
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum DeveloperRole {
+pub enum DeveloperRole {
 	/// `developer`.
 	#[serde(rename = "developer")]
 	Developer,
@@ -1144,17 +1136,17 @@ pub(crate) enum DeveloperRole {
 
 /// One `input_text` part.
 #[derive(Serialize)]
-pub(crate) struct InjectedText {
+pub struct InjectedText {
 	/// Always `input_text`.
 	#[serde(rename = "type")]
-	pub(crate) kind: InputTextKind,
+	pub kind: InputTextKind,
 	/// The exact prompt section.
-	pub(crate) text: Str,
+	pub text: Str,
 }
 
 /// The `type` of [`InjectedText`].
 #[derive(Clone, Copy, Serialize)]
-pub(crate) enum InputTextKind {
+pub enum InputTextKind {
 	/// `input_text`.
 	#[serde(rename = "input_text")]
 	InputText,
@@ -1163,35 +1155,35 @@ pub(crate) enum InputTextKind {
 /// Read-back of an encoded outbound line, so the digest of what was delivered
 /// is computed from the bytes written, not from the values meant to be.
 #[derive(Deserialize)]
-pub(crate) struct Sent<P> {
+pub struct Sent<P> {
 	/// The params of the request.
-	pub(crate) params: P,
+	pub params: P,
 }
 
 /// Read-back of `thread/inject_items` params.
 #[derive(Deserialize)]
-pub(crate) struct SentInject {
+pub struct SentInject {
 	/// The injected messages.
-	pub(crate) items: Vec<SentMessage>,
+	pub items: Vec<SentMessage>,
 }
 
 /// Read-back of one injected message.
 #[derive(Deserialize)]
-pub(crate) struct SentMessage {
+pub struct SentMessage {
 	/// The text parts.
-	pub(crate) content: Vec<SentText>,
+	pub content: Vec<SentText>,
 }
 
 /// Read-back of `turn/start` params.
 #[derive(Deserialize)]
-pub(crate) struct SentTurn {
+pub struct SentTurn {
 	/// The text inputs.
-	pub(crate) input: Vec<SentText>,
+	pub input: Vec<SentText>,
 }
 
 /// Read-back of one text part.
 #[derive(Deserialize)]
-pub(crate) struct SentText {
+pub struct SentText {
 	/// The text.
-	pub(crate) text: Str,
+	pub text: Str,
 }

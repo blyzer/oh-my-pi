@@ -41,36 +41,36 @@ use super::{
 use crate::child_tree::ChildTree;
 
 /// The boxed input stream; boxed once, at construction.
-pub(crate) type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
+pub type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
 /// The boxed output stream; boxed once, at construction.
-pub(crate) type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
+pub type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// Everything a session needs from its transport.
-pub(crate) struct Transport {
+pub struct Transport {
 	/// Messages from the CLI.
-	pub(crate) reader: BoxRead,
+	pub reader: BoxRead,
 	/// Messages to the CLI.
-	pub(crate) writer: BoxWrite,
+	pub writer: BoxWrite,
 	/// The CLI's stderr, drained and discarded so it can never fill a pipe.
-	pub(crate) stderr: Option<ChildStderr>,
+	pub stderr: Option<ChildStderr>,
 	/// The owned process tree, absent for in-memory transports.
-	pub(crate) tree:   Option<ChildTree>,
+	pub tree:   Option<ChildTree>,
 }
 
 /// Limits and identity of one session.
 #[derive(Clone, Copy)]
-pub(crate) struct SessionConfig {
+pub struct SessionConfig {
 	/// Longest accepted inbound line.
-	pub(crate) max_frame_bytes:   usize,
+	pub max_frame_bytes:   usize,
 	/// How long [`DelegatedSession::terminate`] waits for an interrupted turn
 	/// to settle before it kills the tree.
-	pub(crate) terminate_grace:   Duration,
+	pub terminate_grace:   Duration,
 	/// How long the `initialize` and `thread/*` exchange may take before the
 	/// CLI is treated as hung.
-	pub(crate) handshake_timeout: Duration,
+	pub handshake_timeout: Duration,
 	/// CLI versions the executor supports; checked against the server's
 	/// user agent as a second line after the host's `--version` probe.
-	pub(crate) versions:          VersionRange,
+	pub versions:          VersionRange,
 }
 
 /// What the server asked and how to answer it.
@@ -125,7 +125,7 @@ pub struct CodexSession {
 
 impl CodexSession {
 	/// Builds the session around `transport`; nothing is exchanged yet.
-	pub(crate) fn new(executor: ExecutorId, transport: Transport, cfg: SessionConfig) -> Self {
+	pub fn new(executor: ExecutorId, transport: Transport, cfg: SessionConfig) -> Self {
 		let Transport { reader, writer, stderr, tree } = transport;
 		let (out, queue) = flume::unbounded::<Bytes>();
 		let mut tasks = vec![tokio::spawn(write_loop(writer, queue))];
@@ -213,7 +213,7 @@ impl CodexSession {
 		Self::encode(&wire::OutRequest { id, method, params })
 	}
 
-	async fn respond<R: Serialize>(
+	async fn respond<R: Serialize + Sync>(
 		&mut self,
 		id: &RequestId,
 		result: &R,
@@ -237,7 +237,7 @@ impl CodexSession {
 	/// Sends a request and waits for its response, routing everything else.
 	///
 	/// Not cancel-safe: the host ends the session when it abandons a call.
-	async fn call<P: Serialize, T: DeserializeOwned>(
+	async fn call<P: Serialize + Sync, T: DeserializeOwned + Send>(
 		&mut self,
 		method: &'static str,
 		params: &P,
@@ -275,7 +275,7 @@ impl CodexSession {
 
 	/// `initialize`, `initialized`, then `thread/start` or `thread/resume`,
 	/// verifying the policy the server reports.
-	pub(crate) async fn handshake(
+	pub async fn handshake(
 		&mut self,
 		request: &SessionRequest,
 	) -> Result<SessionInfo, ExecutorError> {
@@ -310,29 +310,26 @@ impl CodexSession {
 			.await?;
 
 		let reviewer = WirePolicy::REVIEWER;
-		let outcome: Result<wire::ThreadOpened, i64> = match &request.resume {
-			Some(wanted) => {
-				let params = wire::ThreadResumeParams {
-					thread_id:          wanted.as_str(),
-					cwd:                &cwd,
-					approval_policy:    wire_policy.approval,
-					approvals_reviewer: reviewer,
-					sandbox:            wire_policy.sandbox,
-					config:             wire_policy.config(),
-					exclude_turns:      true,
-				};
-				self.call(wire::THREAD_RESUME, &params).await?
-			},
-			None => {
-				let params = wire::ThreadStartParams {
-					cwd:                &cwd,
-					approval_policy:    wire_policy.approval,
-					approvals_reviewer: reviewer,
-					sandbox:            wire_policy.sandbox,
-					config:             wire_policy.config(),
-				};
-				self.call(wire::THREAD_START, &params).await?
-			},
+		let outcome: Result<wire::ThreadOpened, i64> = if let Some(wanted) = &request.resume {
+			let params = wire::ThreadResumeParams {
+				thread_id:          wanted.as_str(),
+				cwd:                &cwd,
+				approval_policy:    wire_policy.approval,
+				approvals_reviewer: reviewer,
+				sandbox:            wire_policy.sandbox,
+				config:             wire_policy.config(),
+				exclude_turns:      true,
+			};
+			self.call(wire::THREAD_RESUME, &params).await?
+		} else {
+			let params = wire::ThreadStartParams {
+				cwd:                &cwd,
+				approval_policy:    wire_policy.approval,
+				approvals_reviewer: reviewer,
+				sandbox:            wire_policy.sandbox,
+				config:             wire_policy.config(),
+			};
+			self.call(wire::THREAD_START, &params).await?
 		};
 		let opened = match (outcome, &request.resume) {
 			(Ok(opened), _) => opened,
@@ -933,7 +930,7 @@ fn exit_fact(status: std::process::ExitStatus) -> ExitFact {
 	status.code().map_or(ExitFact::Unknown, ExitFact::Code)
 }
 
-fn remote_failure(info: Option<wire::ErrorInfo>) -> RemoteFailure {
+const fn remote_failure(info: Option<wire::ErrorInfo>) -> RemoteFailure {
 	use wire::ErrorCode;
 	let Some(wire::ErrorInfo::Code(code)) = info else {
 		return RemoteFailure::Internal;
@@ -1028,7 +1025,7 @@ fn user_agent_version(user_agent: &str) -> Option<CliVersion> {
 }
 
 /// Parses `major.minor.patch`; anything else is `None`.
-pub(crate) fn parse_version(text: &str) -> Option<CliVersion> {
+pub fn parse_version(text: &str) -> Option<CliVersion> {
 	let mut parts = text.split('.');
 	let version = CliVersion::new(
 		parts.next()?.parse().ok()?,

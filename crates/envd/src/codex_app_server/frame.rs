@@ -12,7 +12,7 @@ const CHUNK: usize = 8 * 1024;
 
 /// Why a line could not be produced.
 #[derive(Debug, Error)]
-pub(crate) enum FrameError {
+pub enum FrameError {
 	/// A line grew past the cap without a terminating newline.
 	#[error("line exceeds {limit} bytes")]
 	Oversize {
@@ -28,7 +28,7 @@ pub(crate) enum FrameError {
 }
 
 /// Splits a byte stream into non-empty lines of at most `cap` bytes.
-pub(crate) struct LineReader<R> {
+pub struct LineReader<R> {
 	reader: R,
 	buf:    BytesMut,
 	cap:    usize,
@@ -36,7 +36,7 @@ pub(crate) struct LineReader<R> {
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
 	/// Wraps `reader`; no line longer than `cap` bytes is ever returned.
-	pub(crate) fn new(reader: R, cap: usize) -> Self {
+	pub fn new(reader: R, cap: usize) -> Self {
 		Self { reader, buf: BytesMut::with_capacity(CHUNK.min(cap + 1)), cap }
 	}
 
@@ -50,7 +50,7 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
 	/// [`FrameError::Oversize`] as soon as more than `cap` bytes are buffered
 	/// without a newline (or a complete line is longer than `cap`),
 	/// [`FrameError::Truncated`] when the stream ends mid-line.
-	pub(crate) async fn next_line(&mut self) -> Result<Option<Bytes>, FrameError> {
+	pub async fn next_line(&mut self) -> Result<Option<Bytes>, FrameError> {
 		loop {
 			if let Some(end) = self.buf.iter().position(|&byte| byte == b'\n') {
 				let mut line = self.buf.split_to(end);

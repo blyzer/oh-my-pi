@@ -132,12 +132,13 @@ impl Peer {
 
 	/// Answers `thread/inject_items` (when expected) and `turn/start`.
 	async fn accept_turn(&mut self, turn: &str, system: bool) -> (Option<String>, String) {
-		let mut inject = None;
-		if system {
+		let inject = if system {
 			let frame = self.expect("thread/inject_items").await;
 			self.reply(frame.id(), "{}").await;
-			inject = Some(frame.line);
-		}
+			Some(frame.line)
+		} else {
+			None
+		};
 		let start = self.expect("turn/start").await;
 		self
 			.reply(start.id(), &format!(r#"{{"turn":{{"id":"{turn}"}}}}"#))
@@ -208,6 +209,14 @@ fn mem(version: CliVersion, cfg: SessionConfig) -> (MemExecutor, flume::Receiver
 	(MemExecutor { caps: capabilities(), version, cfg, peers }, rx)
 }
 
+#[allow(
+	unknown_lints,
+	reason = "unused_async_trait_impl is not available on every supported nightly"
+)]
+#[allow(
+	clippy::unused_async_trait_impl,
+	reason = "the test executor reports a fixed probe; DelegatedExecutor requires async methods"
+)]
 impl DelegatedExecutor for MemExecutor {
 	type Session = CodexSession;
 
@@ -1135,7 +1144,7 @@ async fn structured_or_mixed_permission_profiles_are_unclassified() {
 	for profile in [
 		r#"{"fileSystem":{"entries":[{"access":"write","path":{"type":"special","value":{"kind":"root"}}}]}}"#,
 		r#"{"fileSystem":{"write":["/work/project/out"]},"network":{"enabled":true}}"#,
-		r#"{}"#,
+		"{}",
 	] {
 		let (mut session, mut peer) = open_workspace().await;
 		let mut resolver = Scripted::new(decision(true, ApprovalScope::Once));

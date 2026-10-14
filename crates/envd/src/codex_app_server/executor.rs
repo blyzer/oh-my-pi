@@ -73,11 +73,11 @@ impl CodexExecutor {
 
 	/// Identity of this executor.
 	#[must_use]
-	pub fn executor_id() -> ExecutorId {
+	pub const fn executor_id() -> ExecutorId {
 		ExecutorId::new_static("codex-app-server")
 	}
 
-	fn missing(&self) -> ExecutorError {
+	const fn missing() -> ExecutorError {
 		ExecutorError::ExecutableMissing { executor: Self::executor_id() }
 	}
 
@@ -118,14 +118,14 @@ impl DelegatedExecutor for CodexExecutor {
 			.kill_on_drop(true);
 		let output = match timeout(PROBE_TIMEOUT, command.output()).await {
 			Ok(Ok(output)) if output.status.success() => output,
-			Ok(_) | Err(_) => return Err(self.missing()),
+			Ok(_) | Err(_) => return Err(Self::missing()),
 		};
 		let text = String::from_utf8_lossy(&output.stdout);
 		// `codex-cli 0.160.0`
 		let version = text
 			.split_whitespace()
 			.find_map(parse_version)
-			.ok_or_else(|| self.missing())?;
+			.ok_or_else(|| Self::missing())?;
 		// Codex documents no side-effect-free login probe that is safe to run
 		// without reading credential state, so the login is reported as it is:
 		// unknown. The first turn surfaces `AuthRequired` if it is missing.
@@ -140,7 +140,7 @@ impl DelegatedExecutor for CodexExecutor {
 		command
 			.args(["app-server", "--listen", "stdio://"])
 			.current_dir(&request.workdir);
-		let spawned = ChildTree::spawn(command).map_err(|_| self.missing())?;
+		let spawned = ChildTree::spawn(command).map_err(|_| Self::missing())?;
 		let transport = Transport {
 			reader: Box::new(spawned.stdout),
 			writer: Box::new(spawned.stdin),
