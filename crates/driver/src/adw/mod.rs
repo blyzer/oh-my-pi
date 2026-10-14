@@ -44,30 +44,45 @@ pub struct PhaseRecord {
 	pub decision: Str,
 }
 
+/// The typed failure of one phase dispatch.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+#[error("workflow phase `{phase}` attempt {attempt} failed: {source}")]
+pub struct PhaseFailure<E: StdError + 'static> {
+	/// The phase whose host dispatch failed.
+	pub phase:   Str,
+	/// The attempt ordinal whose host dispatch failed.
+	pub attempt: u32,
+	/// The host error that stopped this run.
+	#[source]
+	pub source:  E,
+}
+
 /// How a run finished.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::IntoStaticStr)]
-#[strum(serialize_all = "kebab-case")]
-pub enum RunStatus {
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunStatus<E: StdError + 'static> {
 	/// Every phase was accepted.
 	Accepted,
 	/// The run halted without accepting every phase.
 	Halted,
 	/// A phase required a posture the host did not resolve.
 	Blocked,
+	/// A dispatched phase's host failed.
+	Failed(PhaseFailure<E>),
 	/// The operator cancelled the run.
 	Cancelled,
 }
 
 /// The settled result of one workflow run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunExit {
-	/// Process exit status: 0 accepted, 1 halted or blocked, 130 cancelled.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunExit<E: StdError + 'static> {
+	/// Process exit status: 0 accepted, 1 halted, blocked, or failed, 130
+	/// cancelled.
 	pub code:    u8,
 	/// How the run finished.
-	pub status:  RunStatus,
+	pub status:  RunStatus<E>,
 	/// Every settled attempt, in dispatch order.
 	pub records: Vec<PhaseRecord>,
-	/// Why the run stopped, when it did not accept.
+	/// Why the run stopped, when it did not accept or fail.
 	pub reason:  Option<Str>,
 }
 
@@ -111,25 +126,25 @@ pub enum Error<E: StdError + 'static> {
 	/// The domain refused a transition.
 	#[error("workflow run rejected a transition")]
 	Transition(#[from] RunError),
-	/// Posture resolution or phase dispatch failed.
-	#[error("workflow runtime host failed")]
-	Host(#[source] E),
+	/// Posture resolution failed before a phase could be recorded.
+	#[error("workflow runtime posture resolution failed")]
+	Posture(#[source] E),
 }
 
-/// Drives one workflow to acceptance, halt, block, or cancellation.
+/// Drives one workflow to acceptance, halt, block, failure, or cancellation.
 ///
 /// # Errors
 ///
-/// Returns [`Error`] when the definition cannot be loaded, the host fails, or
-/// the domain refuses a transition. A halted or blocked run is a normal
-/// outcome carried in [`RunExit`], not an error.
+/// Returns [`Error`] when posture resolution fails before any phase can be
+/// recorded or when the domain refuses a transition. A halted, blocked, failed,
+/// or cancelled run is a normal outcome carried in [`RunExit`].
 pub async fn run<H: AdwHost>(
 	definition: &WorkflowDefinition,
 	max_attempts: u32,
 	host: &H,
 	cancel: &CancellationToken,
-) -> Result<RunExit, Error<H::Error>> {
-	let posture = host.posture().map_err(Error::Host)?;
+) -> Result<RunExit<H::Error>, Error<H::Error>> {
+	let posture = host.posture().map_err(Error::Posture)?;
 	let mut run = Run::new(definition.workflow().clone())
 		.with_max_attempts(max_attempts)
 		.with_posture(posture);
@@ -157,10 +172,21 @@ pub async fn run<H: AdwHost>(
 						))),
 					));
 				};
-				let result = host
+				let result = match host
 					.dispatch(&phase, spec, attempt, correction.as_ref(), &inputs, cancel)
 					.await
-					.map_err(Error::Host)?;
+				{
+					Ok(result) => result,
+					Err(source) => {
+						records.push(PhaseRecord {
+							phase: Str::new(phase.name.as_str()),
+							attempt,
+							accepted: false,
+							decision: Str::new_static("failed"),
+						});
+						return Ok(failed(records, phase.name.as_str(), attempt, source));
+					},
+				};
 				// A phase stopped by cancellation did not fail on its merits:
 				// feeding it back as a rejection would schedule (and report) a
 				// retry the run will never dispatch.
@@ -214,14 +240,27 @@ pub async fn run<H: AdwHost>(
 	}
 }
 
-fn cancelled(records: Vec<PhaseRecord>) -> RunExit {
+fn failed<E: StdError + 'static>(
+	records: Vec<PhaseRecord>,
+	phase: &str,
+	attempt: u32,
+	source: E,
+) -> RunExit<E> {
+	RunExit {
+		code: 1,
+		status: RunStatus::Failed(PhaseFailure { phase: Str::new(phase), attempt, source }),
+		records,
+		reason: None,
+	}
+}
+
+fn cancelled<E: StdError + 'static>(records: Vec<PhaseRecord>) -> RunExit<E> {
 	RunExit { code: 130, status: RunStatus::Cancelled, records, reason: None }
 }
 
-fn halted(records: Vec<PhaseRecord>, reason: Option<Str>) -> RunExit {
+fn halted<E: StdError + 'static>(records: Vec<PhaseRecord>, reason: Option<Str>) -> RunExit<E> {
 	RunExit { code: 1, status: RunStatus::Halted, records, reason }
 }
-
 fn describe(outcome: &Outcome) -> Str {
 	match outcome {
 		Outcome::Accepted { version, invalidated, .. } if invalidated.is_empty() => {
@@ -369,8 +408,21 @@ mod tests {
 		let definition = definition::load(project.path(), "plan").expect("definition");
 		let host = ProviderFails { root: project.path().to_path_buf() };
 
-		run(&definition, 3, &host, &CancellationToken::new())
+		let exit = run(&definition, 3, &host, &CancellationToken::new())
 			.await
 			.expect("provider failure settles as a recorded outcome");
+
+		assert_eq!(exit.code, 1);
+		assert_eq!(exit.records, vec![PhaseRecord {
+			phase:    Str::new_static("plan"),
+			attempt:  1,
+			accepted: false,
+			decision: Str::new_static("failed"),
+		}]);
+		assert!(matches!(
+			exit.status,
+			RunStatus::Failed(PhaseFailure { phase, attempt: 1, source: ProviderFailure })
+				if phase == Str::new_static("plan")
+		));
 	}
 }

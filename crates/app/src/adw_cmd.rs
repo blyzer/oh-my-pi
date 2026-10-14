@@ -92,14 +92,21 @@ async fn execute(
 	}
 	match exit.status {
 		RunStatus::Accepted => println!("Workflow `{workflow}` accepted every phase."),
-		RunStatus::Halted | RunStatus::Blocked => println!(
-			"Workflow `{workflow}` {}{}.",
-			exit.status,
+		RunStatus::Halted => println!(
+			"Workflow `{workflow}` halted{}.",
 			exit
 				.reason
 				.as_deref()
 				.map_or_else(String::new, |reason| format!(": {reason}"))
 		),
+		RunStatus::Blocked => println!(
+			"Workflow `{workflow}` blocked{}.",
+			exit
+				.reason
+				.as_deref()
+				.map_or_else(String::new, |reason| format!(": {reason}"))
+		),
+		RunStatus::Failed(failure) => println!("Workflow `{workflow}` failed: {failure}."),
 		RunStatus::Cancelled => println!("Workflow `{workflow}` cancelled."),
 	}
 	if exit.code == 0 {
