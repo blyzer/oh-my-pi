@@ -294,7 +294,6 @@ fn io_fault(source: io::Error) -> Fault {
 mod tests {
 	use std::path::Path;
 
-	use omp_core::Hash32;
 	use omp_dom::{Op, PropKey, Txn, Value};
 	use omp_session::{
 		ComponentRegistry, Session,
@@ -307,11 +306,7 @@ mod tests {
 
 	/// The invocation principal the kernel's dispatcher sends for a journal.
 	fn principal(journal: &Path) -> Str {
-		Str::new(
-			Hash32::sum(journal.as_os_str().as_encoded_bytes())
-				.to_hex()
-				.as_str(),
-		)
+		omp_session::journal_principal(journal)
 	}
 
 	/// A journal imported from `format` whose `<meta>` names `artifacts` as
