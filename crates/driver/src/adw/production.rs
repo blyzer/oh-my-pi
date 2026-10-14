@@ -83,6 +83,7 @@ pub struct ProductionAdwHost {
 	root:            PathBuf,
 	data_dir:        PathBuf,
 	model:           Str,
+	model_override:  bool,
 	ctx:             Arc<omp_con::Ctx>,
 	resolver:        FilesystemResolver,
 	/// The workspace trust decision the run executes under: code phases run
@@ -104,6 +105,7 @@ impl ProductionAdwHost {
 		root: PathBuf,
 		data_dir: PathBuf,
 		model: Str,
+		model_override: bool,
 		ctx: Arc<omp_con::Ctx>,
 		workspace_trust: TrustDecision,
 	) -> Result<Self, ProductionError> {
@@ -111,10 +113,10 @@ impl ProductionAdwHost {
 			root: fs::canonicalize(root)?,
 			data_dir,
 			model,
+			model_override,
 			ctx,
 			resolver: FilesystemResolver,
 			workspace_trust,
-			environment: OnceCell::new(),
 		})
 	}
 
@@ -154,14 +156,16 @@ impl ProductionAdwHost {
 	async fn run_child(
 		&self,
 		prompt: Str,
+		phase_model: Option<&Str>,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
+		let (model, model_override) = self.model_phase_selector(phase_model);
 		let (mut kernel, mut session, _) = compose_kernel(
 			&self.data_dir,
 			&self.root,
-			self.model.as_str(),
+			model,
 			Arc::clone(&self.ctx),
-			child_kernel_options(&self.workspace_trust),
+			child_kernel_options(&self.workspace_trust, model_override),
 		)
 		.await?;
 		let outcome = kernel
@@ -172,6 +176,16 @@ impl ProductionAdwHost {
 			)
 			.await?;
 		Ok(outcome.assistant_text)
+	}
+
+	/// Chooses the selector and its explicitness for one model phase.
+	///
+	/// A workflow-declared selector is always explicit; otherwise the run's
+	/// explicitness describes whether its command-line selector may replace
+	/// inherited configuration.
+	fn model_phase_selector(&self, phase_model: Option<&Str>) -> (&str, bool) {
+		phase_model
+			.map_or_else(|| (self.model.as_str(), self.model_override), |model| (model.as_str(), true))
 	}
 
 	async fn run_command(
@@ -232,9 +246,10 @@ impl ProductionAdwHost {
 /// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
 /// workflow is project input already, and a project must not also choose
 /// the code its phases' kernels load.
-fn child_kernel_options(workspace_trust: &TrustDecision) -> KernelOptions {
+fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -> KernelOptions {
 	KernelOptions {
 		ephemeral: true,
+		model_override,
 		extensions: LaunchExtensionPolicy {
 			include_workspace: false,
 			..LaunchExtensionPolicy::default()
@@ -385,9 +400,9 @@ impl AdwHost for ProductionAdwHost {
 					.run_command(binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
-			PhaseSpec::Prompt { text } => {
+			PhaseSpec::Prompt { text, model } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
-				let answer = self.run_child(prompt, cancel).await?;
+				let answer = self.run_child(prompt, model.as_ref(), cancel).await?;
 				Ok(judge(phase.kind, answer))
 			},
 		}
@@ -477,10 +492,10 @@ mod tests {
 			project.to_path_buf(),
 			project.join("data"),
 			sf!("unused-model"),
+			false,
 			Arc::new(ctx),
 			trust,
 		)
-		.expect("workflow host")
 	}
 
 	/// A user workflow phase that declares `requires.network = "disabled"`.
@@ -782,24 +797,67 @@ requires = { network = "disabled" }
 			project.path().to_path_buf(),
 			project.path().join("data"),
 			sf!("flag/model"),
+			true,
 			Arc::new(ctx),
 			TRUSTED,
 		)
 		.expect("workflow host");
 
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
-		assert_eq!(host.model.as_str(), "flag/model");
-		assert!(
-			child_kernel_options(&host.workspace_trust).model_override,
-			"the explicit run model must replace ai_model in every model-phase child"
-		);
+		let (model, explicit) = host.model_phase_selector(None);
+		assert_eq!(model, "flag/model");
+		assert!(explicit);
+		assert!(child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
+	fn implicit_run_model_preserves_configured_model_for_model_phases() {
+		let project = tempfile::tempdir().expect("project");
+		let ctx = omp_con::Ctx::new();
+		omp_agent::AI_MODEL
+			.set(&ctx, sf!("configured/model"))
+			.expect("configured model");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("@smol"),
+			false,
+			Arc::new(ctx),
+			TRUSTED,
+		)
+		.expect("workflow host");
+
+		let (model, explicit) = host.model_phase_selector(None);
+		assert_eq!(model, "@smol");
+		assert!(!explicit);
+		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
+		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
+	fn workflow_model_precedes_explicit_run_model() {
+		let project = tempfile::tempdir().expect("project");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("flag/model"),
+			true,
+			Arc::new(omp_con::Ctx::new()),
+			TRUSTED,
+		)
+		.expect("workflow host");
+
+		let (model, explicit) = host.model_phase_selector(Some(&sf!("phase/model")));
+		assert_eq!(model, "phase/model");
+		assert!(explicit);
 	}
 
 	#[test]
 	fn model_phase_kernels_exclude_workspace_extensions_and_inherit_trust() {
-		let options = child_kernel_options(&TrustDecision::Denied);
+		let options = child_kernel_options(&TrustDecision::Denied, false);
 		assert!(!options.extensions.include_workspace);
 		assert!(options.ephemeral);
+		assert!(!options.model_override);
 		assert_eq!(options.workspace_trust, WorkspaceTrustSource::Fixed(TrustDecision::Denied));
 	}
 }
