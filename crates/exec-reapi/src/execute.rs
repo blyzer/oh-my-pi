@@ -73,7 +73,6 @@ pub struct ReapiBackend<S> {
 
 struct BackendInner<S> {
 	source:              S,
-	endpoint:            Endpoint,
 	profile:             Profile,
 	credential:          Option<Credential>,
 	instance:            Str,
@@ -187,7 +186,6 @@ where
 		Ok(Self {
 			inner: Arc::new(BackendInner {
 				source,
-				endpoint,
 				profile: config.profile,
 				credential: config.credential,
 				instance: config.instance,
@@ -230,7 +228,6 @@ where
 		Self {
 			inner: Arc::new(BackendInner {
 				source,
-				endpoint: Endpoint::parse("grpc://127.0.0.1:1").unwrap_or_else(|_| unreachable!()),
 				profile: config.profile,
 				credential: config.credential,
 				instance: config.instance,
@@ -254,7 +251,6 @@ where
 async fn clients_capabilities(
 	clients: &Clients,
 	config: &Config,
-	_endpoint: &Endpoint,
 ) -> Result<wire::ServerCapabilities, ExecutionError> {
 	let request = with_metadata(
 		Request::new(wire::GetCapabilitiesRequest { instance_name: config.instance.to_string() }),
@@ -269,6 +265,25 @@ async fn clients_capabilities(
 		.map_err(|error| {
 			status::classify(error, Phase::FindMissing, &config.id, Duration::from_secs(30), None)
 		})
+}
+
+fn add_request_metadata<T>(request: &mut Request<T>, id: &omp_exec::ExecutionId) {
+	let metadata = wire::RequestMetadata {
+		tool_details: Some(wire::ToolDetails {
+			tool_name:    "omp".to_owned(),
+			tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+		}),
+		tool_invocation_id: id.to_string(),
+		..Default::default()
+	};
+	let mut bytes = Vec::new();
+	if metadata.encode(&mut bytes).is_ok() {
+		if let Ok(value) = tonic::metadata::MetadataValue::try_from(bytes) {
+			request
+				.metadata_mut()
+				.insert_bin("build.bazel.remote.execution.v2.requestmetadata-bin", value);
+		}
+	}
 }
 
 fn with_metadata<T>(
@@ -333,12 +348,13 @@ where
 			action_digest: Some(digest::to_wire(action.digest)),
 			..Default::default()
 		};
-		let metadata = metadata_for(&request);
 		let request = with_metadata(
 			Request::new(request_wire),
 			&self.inner.profile,
 			self.inner.credential.as_ref(),
 		)?;
+		let mut request = request;
+		add_request_metadata(&mut request, &request_id);
 		let mut execution = self.inner.clients.execution.clone();
 		let stream = execution.execute(request).await.map_err(|error| {
 			status::classify(
@@ -349,7 +365,7 @@ where
 				Some(action.digest),
 			)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), action.digest, request_id, metadata))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id))
 	}
 
 	async fn reattach_request(&self, handle: Reattach) -> Result<ReapiRun<S>, ExecutionError> {
@@ -363,13 +379,7 @@ where
 		let stream = execution.wait_execution(request).await.map_err(|error| {
 			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
 		})?;
-		Ok(ReapiRun::new(
-			self.clone(),
-			stream.into_inner(),
-			omp_exec::Digest::new(omp_core::Hash32::default(), 0),
-			handle.id,
-			RequestMetadataState::default(),
-		))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id))
 	}
 
 	async fn prepare_action(
@@ -599,23 +609,14 @@ fn output_paths(outputs: &omp_exec::OutputSpec) -> Vec<String> {
 	}
 }
 
-#[derive(Default)]
-struct RequestMetadataState;
-
-fn metadata_for(_request: &ExecutionRequest) -> RequestMetadataState {
-	RequestMetadataState
-}
-
-struct ReapiRun<S> {
-	backend:       ReapiBackend<S>,
-	stream:        tonic::Streaming<longrunning::Operation>,
-	action_digest: omp_exec::Digest,
-	id:            omp_exec::ExecutionId,
-	operation:     Arc<Mutex<Option<Str>>>,
-	reconnected:   bool,
-	accepted:      bool,
-	settled:       bool,
-	metadata:      RequestMetadataState,
+/// A live REAPI execution stream.
+pub struct ReapiRun<S> {
+	backend:     ReapiBackend<S>,
+	stream:      tonic::Streaming<longrunning::Operation>,
+	id:          omp_exec::ExecutionId,
+	operation:   Arc<Mutex<Option<Str>>>,
+	reconnected: bool,
+	accepted:    bool,
 }
 
 impl<S> ReapiRun<S>
@@ -625,20 +626,15 @@ where
 	fn new(
 		backend: ReapiBackend<S>,
 		stream: tonic::Streaming<longrunning::Operation>,
-		action_digest: omp_exec::Digest,
 		id: omp_exec::ExecutionId,
-		metadata: RequestMetadataState,
 	) -> Self {
 		Self {
 			backend,
 			stream,
-			action_digest,
 			id,
 			operation: Arc::new(Mutex::new(None)),
 			reconnected: false,
 			accepted: false,
-			settled: false,
-			metadata,
 		}
 	}
 
@@ -648,13 +644,11 @@ where
 				Ok(Some(operation)) => operation,
 				Ok(None) if !self.reconnected && self.operation.lock().is_some() => {
 					if let Err(error) = self.wait_again().await {
-						self.settled = true;
 						return Some(ExecutionEvent::Settled(Err(error)));
 					}
 					continue;
 				},
 				Ok(None) => {
-					self.settled = true;
 					return Some(ExecutionEvent::Settled(Err(transport(Status::unavailable(
 						"REAPI execution stream ended",
 					)))));
@@ -665,13 +659,11 @@ where
 						&& error.code() == Code::Unavailable =>
 				{
 					if let Err(error) = self.wait_again().await {
-						self.settled = true;
 						return Some(ExecutionEvent::Settled(Err(error)));
 					}
 					continue;
 				},
 				Err(error) => {
-					self.settled = true;
 					return Some(ExecutionEvent::Settled(Err(status::classify(
 						error,
 						Phase::Execute,
@@ -682,7 +674,6 @@ where
 				},
 			};
 			if operation.name.is_empty() {
-				self.settled = true;
 				return Some(ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult))));
 			}
 			*self.operation.lock() = Some(Str::new(&operation.name));
@@ -693,7 +684,6 @@ where
 			if !operation.done {
 				return Some(stage_event(&operation));
 			}
-			self.settled = true;
 			return Some(self.settle(operation).await);
 		}
 	}
