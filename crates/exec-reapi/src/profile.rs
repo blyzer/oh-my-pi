@@ -59,6 +59,10 @@ pub struct Profile {
 	pub credential_header: Option<Str>,
 	/// How the architecture property is spelled.
 	pub arch:              ArchSpelling,
+	/// The platform property that names the container image a toolchain maps
+	/// to. The image reference itself is operator data
+	/// ([`crate::Toolchain`]); only the property's spelling is a service fact.
+	pub image_property:    Str,
 	/// Properties added to every action, in deterministic order.
 	pub fixed:             BTreeMap<Str, Str>,
 }
@@ -71,6 +75,7 @@ impl Profile {
 			name:              Str::new_static("reapi"),
 			credential_header: None,
 			arch:              ArchSpelling::Reapi,
+			image_property:    Str::new_static("container-image"),
 			fixed:             BTreeMap::new(),
 		}
 	}
@@ -84,6 +89,7 @@ impl Profile {
 			name:              Str::new_static("buildbuddy"),
 			credential_header: Some(Str::new_static("x-buildbuddy-api-key")),
 			arch:              ArchSpelling::Short,
+			image_property:    Str::new_static("container-image"),
 			fixed:             BTreeMap::from([(
 				Str::new_static("workload-isolation-type"),
 				Str::new_static("firecracker"),

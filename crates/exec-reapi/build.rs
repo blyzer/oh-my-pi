@@ -10,6 +10,12 @@
 //!
 //! Well-known types (`Any`, `Duration`, `Timestamp`, wrappers) map to
 //! `prost-types` through prost's default extern paths.
+//!
+//! `bytes` fields decode into `Bytes`, so blob payloads are never copied on
+//! their way in or out of a message. The `test-server` feature additionally
+//! generates the tonic *server* traits (with unimplemented default stubs) for
+//! the in-process fake server of this crate's tests; production builds
+//! generate client code only.
 
 use std::{
 	env, fs,
@@ -38,9 +44,12 @@ fn compile(root: &Path, with_services: bool, client_only: bool) {
 	let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"))
 		.join(root.file_name().expect("proto root has a name"));
 	fs::create_dir_all(&out).expect("create generated-code directory");
+	let serve = with_services && env::var_os("CARGO_FEATURE_TEST_SERVER").is_some();
 	tonic_prost_build::configure()
 		.build_client(with_services || client_only)
-		.build_server(false)
+		.build_server(serve)
+		.generate_default_stubs(serve)
+		.bytes(".")
 		.out_dir(&out)
 		.compile_fds(fds)
 		.expect("tonic-prost-build failed to generate Rust code");

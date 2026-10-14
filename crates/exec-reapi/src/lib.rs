@@ -10,9 +10,13 @@ pub mod capabilities;
 pub mod cas;
 pub mod digest;
 pub mod endpoint;
+mod execute;
 pub mod profile;
 pub mod status;
 pub mod tree;
+
+/// The execution backend and its profile-driven configuration.
+pub use execute::{Config as ExecuteConfig, ReapiBackend, Toolchain};
 
 /// Generated bindings for the vendored protos.
 ///

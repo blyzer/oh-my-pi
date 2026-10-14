@@ -11,7 +11,7 @@ use std::{future::Future, io};
 use bytes::Bytes;
 use omp_exec::Digest;
 
-use crate::capabilities::Capabilities;
+use crate::{capabilities::Capabilities, tree::InputFile};
 
 /// REAPI's default batch ceiling when a server states none (ADR 0040, Part
 /// D.4: "`0` is treated as 4 MiB").
@@ -38,6 +38,21 @@ pub trait BlobSource: Clone + Send + Sync + 'static {
 		offset: u64,
 		len: u64,
 	) -> impl Future<Output = io::Result<Bytes>> + Send + '_;
+}
+
+/// Where the captured input files of a request are listed.
+///
+/// Capture writes a manifest of `{path, mode, content hash}` and no sizes, but
+/// REAPI names every file by hash *and* size, so the composing crate resolves
+/// the manifest and sizes each blob through the environment's blob service.
+/// This crate never opens the manifest format or a path itself.
+pub trait InputSource: BlobSource {
+	/// Lists the files of the capture named by `manifest`, each with its
+	/// digest and executable bit.
+	fn files(
+		&self,
+		manifest: Digest,
+	) -> impl Future<Output = io::Result<Vec<InputFile>>> + Send + '_;
 }
 
 /// Which compression a transfer uses.
@@ -99,6 +114,12 @@ pub struct UploadPlan {
 	pub batches:  Vec<Vec<Digest>>,
 	/// Blobs too large for a batch, each sent through ByteStream `Write`.
 	pub streamed: Vec<Digest>,
+}
+
+/// Whether a blob is small enough to travel inside a batch call.
+pub(crate) fn fits_batch(digest: Digest, capabilities: &Capabilities) -> bool {
+	let ceiling = capabilities.max_batch_bytes.unwrap_or(DEFAULT_BATCH_BYTES);
+	digest.size.saturating_add(BATCH_ENTRY_OVERHEAD) <= ceiling
 }
 
 /// Splits `missing` into batch calls and streamed uploads.
