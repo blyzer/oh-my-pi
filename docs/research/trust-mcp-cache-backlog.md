@@ -68,7 +68,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 | F9 | Project cfg reads and writes follow symlinks; FIFO and `/dev/zero` | **fixed** (#263) | `driver/src/cfg.rs:300-320` checks both config and lock targets; user reads use bounded `read_text` at `:221-225`. | Low | driver |
 | F10 | `.omp/secrets.yml` overrides user rules | **fixed** (#272) | `driver/src/secrets/config.rs:105-121` accepts project rules only when trusted; `:205-230` tests the withheld project override. | Low | driver |
 | F11a | adw code phases run unconfined with the full environment | **fixed** (#267) | `driver/src/adw/production.rs:128-145` opens the environment authority; untrusted code phases are refused at `:380-383`. | Low | driver (+envd `ExecHost`) |
-| F11b | Resolver shadows `$PATH` | **fixed** (#267) | `driver/src/adw/production.rs:114-116` uses `FilesystemResolver`; the merge also covers cleanse containment. | Low | driver |
+| F11b | Resolver shadows `$PATH` | **partly fixed** (#267) | `driver/src/adw/production.rs:114-116` uses `FilesystemResolver` for ADW; cleanse containment routing remains UNVERIFIED. `driver/src/cleanse/production.rs` still delegates to `run_child` without envd exec authority. | Low | driver |
 | F11c | Reported posture is not applied to code phases | **fixed** (#267) | `driver/src/adw/production.rs:356-363` derives configured approval and sandbox before dispatching the environment command. | Low | driver |
 | F11d | `omp adw run` ignores operator cfg | **fixed** (#267) | `app/src/adw_cmd.rs:138-141` composes with `process_ctx_with`. | Low | app |
 | F11e | Agent phases admit workspace extensions | **fixed** (#267) | `driver/src/adw/production.rs:235-243` gives child kernels `include_workspace: false`. | Low | driver |
@@ -83,7 +83,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 |---|---|---|---|---|
 | §1.1 Trust model PR3-PR8 | **fixed** (#272-#277) | Driver trust evaluation: `driver/src/workspace_trust.rs:70-112`; envd policy includes trust: `envd/src/daemon_policy.rs:69-104`; CLI/RPC and overlay are covered by #274-#276. | High (closed) | driver, envd, app, ext |
 | §1.2 Explicit per-workspace MCP approval | **fixed** (#273, #274) | `envd/src/mcp/settings.rs:46-73` gates project MCP by trust; `app/src/trust_cmd.rs:20` records and revokes workspace trust. | Low | envd, driver |
-| §1.3 F11, F2, F3 | **fixed** (#265, #267, #272, #273) | See the current F2, F3, and F11 rows above. | — | — |
+| §1.3 F11, F2, F3 | **partly fixed** (#265, #267, #272, #273) | ADW resolver is fixed; cleanse containment remains UNVERIFIED. See F11b for evidence. | — | — |
 | §1.4a `HostStore::upsert`/`persist_hosts` "follow symlinks" | **fixed** (#263, #273) | `envd/src/ssh.rs:171-183`, `:253-266`, and `:309-311` contain project reads/writes and prevent shadowing. | Low | envd, app |
 | §1.4b `.cfg.lock` opened with `create(true)` | **fixed** (#263) | `driver/src/cfg.rs:300-320` validates the lock target before opening it. | Low | driver |
 | §1.4c User-level `SYSTEM.md` and user cfg not hardened | **fixed** (#263) | `driver/src/cfg.rs:221-225` and `prompt_input.rs:99-103` use bounded regular-file reads under `Unconfined`. | Low | driver |
@@ -179,16 +179,16 @@ Order rationale:
 | 2 | Fix F11 inside `omp adw run` now. | 2 (done #267) |
 | 3 | Untrusted workspaces still load `AGENTS.md`, rules and skills, contained to the repo. | 3 (done #272) |
 | 4 | Re-ask on a digest change: trust is bound to the inventory digest, and a change after `git pull` gives `DigestChanged`. `Subtree` trust exists (2026-10-12): the domain already models it, and slice 7 exposes it (`omp trust --subtree`) after checking that no existing command creates subtree grants. | 3, 7 (done #272, #274) |
-| 5 | Native `.omp/extensions` load automatically once the workspace is trusted. No per-extension link is required. | 3 (done #272) |
-| 6 | Project MCP values stay literal: `!cmd` and env-name substitution are forbidden even when trusted. | 4 (done #273) |
-| 7 | An untrusted workspace clamps an explicit user `yolo` to `write`. | 9 (done #277) |
-| 8 | `cl_disabled_extensions` loses the PROJECT flag; only the user config (`~/.o2/config.cfg`) may set it. | 15 (done #281) |
-| 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 (done #273-#275) |
-| 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 (done #279, #284) |
-| 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 (done #280) |
-| 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice (done #278) |
-| 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 (done #273) |
-
-## Commands that took more than one minute
-
-None. The longest command was a 5.5 s `git fetch`; the FIFO probe ran for 2.3 s by design.
+| 1 | Repo-local LSP/DAP binaries off by default; user-only `sv_lsp_project_binaries` opts in. | 1 (done #265) | `envd/src/docserver/lsp_supervisor.rs:619-685` proves local bins require both trust and user opt-in; `lsp_config.rs:375-412` withholds project config when untrusted. | — | S | **Yes** (Q1) |
+| 2 | Fix F11 inside `omp adw run` now. | 2 (done #267) | `app/src/adw_cmd.rs:138-141` composes with `process_ctx_with`. | — | S | **Yes** (Q2) |
+| 3 | Untrusted workspaces still load `AGENTS.md`, rules and skills, contained to the repo. | 3 (done #272) | Driver trust evaluation: `driver/src/workspace_trust.rs:70-112`; envd policy includes trust: `envd/src/daemon_policy.rs:69-104`; CLI/RPC and overlay are covered by #274-#276. | High (closed) | driver, envd, app, ext |
+| 4 | Re-ask on a digest change: trust is bound to the inventory digest, and a change after `git pull` gives `DigestChanged`. `Subtree` trust exists (2026-10-12): the domain already models it, and slice 7 exposes it (`omp trust --subtree`) after checking that no existing command creates subtree grants. | 3, 7 (done #272, #274) | — | — |
+| 5 | Native `.omp/extensions` load automatically once the workspace is trusted. No per-extension link is required. | 3 (done #272) | `driver/tests/workspace_trust_gates.rs:369-377` proves an untrusted workspace extension is withheld; `driver/src/workspace_trust.rs:70-112` evaluates the inventory-bound grant. | Low | driver |
+| 6 | Project MCP values stay literal: `!cmd` and env-name substitution are forbidden even when trusted. | 4 (done #273) | `envd/src/mcp/config_values.rs:23-30` and `config.rs:118-142` load literal values; `mcp/stdio.rs` never substitutes. | Low | envd |
+| 7 | An untrusted workspace clamps an explicit user `yolo` to `write`. | 9 (done #277) | `envd/src/admission.rs:230-233` clamps explicit `yolo` to `write` when `Untrusted`. | Low | envd |
+| 8 | `cl_disabled_extensions` loses the PROJECT flag; only the user config (`~/.o2/config.cfg`) may set it. | 15 (done #281) | `driver/src/discovery/mod.rs` rejects the project value as `ProjectVarDenied`; see slice 15. | Low-Medium | owner |
+| 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 (done #273-#275) | `proto/src/rpc/protocol.rs:107-115` and `proto/src/env/v1/env.proto:61-65` carry the typed request; `env/src/project_state.rs:22-34` folds into `DaemonPolicy`. | Low | env, driver |
+| 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 (done #279, #284) | `ai/src/codec/anthropic.rs:3884-3892` and `e2e/tests/p5_prefix_stability.rs` prove the behavior. | Cost | ai |
+| 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 (done #280) | `ai/src/auth/broker.rs:326-352` and `ai/src/provider/builtin.rs` propagate identity; tests cover 429 rejection. | owner | S | **Yes** (Q11) |
+| 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice (done #278) | `session/src/projection.rs` projects the typed posture; `envd/src/tool_url.rs` classifies host fallback as anonymous fetch. | — | — |
+| 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 (done #273) | `envd/src/vault.rs:164-184`, `:1150-1156`, and `:1532-1545` use contained reads, withhold untrusted project vaults, and preserve user names. | Low | envd |
