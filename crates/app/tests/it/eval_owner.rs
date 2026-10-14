@@ -24,12 +24,16 @@ use omp_catalog::{
 	ManagementCapabilities, OperationBits, OperationKind,
 	snapshot::{Catalog, SnapshotProvenance},
 };
-use omp_core::{Str, sf};
+use omp_core::{Principal, Str, sf};
 use omp_driver::headless::kernel::{KernelOptions, compose_kernel};
 use omp_envd::{
+	ActiveContentInputs, EnvServer, RegistryBridges,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
+	exthost::ConvarControlFactory,
 	tool_settings::SV_TOOLS_APPROVAL,
+	worker::ExtHostConfig,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_proto::inference::v1::inference_server::InferenceServer;
 use omp_serve::inference::InferenceRpc;
 use tokio_util::sync::CancellationToken;
@@ -183,6 +187,69 @@ impl Gateway {
 	}
 }
 
+/// A project daemon this test process serves on the production socket of the
+/// project's state directory, as `omp envd` opens it. `attach` joins it as a
+/// peer, which is the composition every real session runs.
+struct ProjectDaemon {
+	shutdown: CancellationToken,
+	serving:  tokio::task::JoinHandle<Result<(), omp_envd::EnvdError>>,
+}
+
+impl Drop for ProjectDaemon {
+	fn drop(&mut self) {
+		self.shutdown.cancel();
+		self.serving.abort();
+	}
+}
+
+async fn serve_project_daemon(root: &Path, state: &Path, con: &Arc<omp_con::Ctx>) -> ProjectDaemon {
+	let trust = WorkspaceTrust::Untrusted;
+	let socket = omp_env::project_state::environment_socket(
+		state,
+		&omp_envd::daemon_policy::from_con(con, trust),
+	)
+	.expect("environment socket");
+	let convars = Arc::new(ConvarControlFactory::new(Arc::clone(con)));
+	let server = EnvServer::open_project(
+		root,
+		state,
+		&omp_env::project_state::document_socket(state),
+		omp_tool::Registry::new(),
+		ExtHostConfig::current(
+			Principal::new(sf!("daemon-tester"), sf!("Daemon Tester")),
+			sf!("daemon-session"),
+			1,
+		)
+		.expect("daemon host configuration"),
+		None,
+		false,
+		None,
+		con,
+		convars,
+		RegistryBridges {
+			content: ActiveContentInputs { workspace_trust: trust, ..ActiveContentInputs::default() },
+			..RegistryBridges::default()
+		},
+	)
+	.await
+	.expect("project daemon");
+	let shutdown = CancellationToken::new();
+	let serving = tokio::spawn({
+		let server = Arc::new(server);
+		let socket = socket.clone();
+		let shutdown = shutdown.clone();
+		async move { server.serve_uds(&socket, shutdown, None).await }
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(30), async {
+		while tokio::net::UnixStream::connect(&socket).await.is_err() {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the project daemon never listened");
+	ProjectDaemon { shutdown, serving }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_composed_kernel_runs_an_eval_cell_for_its_own_session() {
 	let scratch = tempfile::tempdir().expect("scratch");
@@ -230,8 +297,12 @@ async fn a_composed_kernel_runs_an_eval_cell_for_its_own_session() {
 		gateway: Some(gateway.channel.clone()),
 		..KernelOptions::default()
 	};
+	let con = Arc::new(con);
+	let state = omp_env::project_state::directory(&data, &project).expect("project state");
+	fs::create_dir_all(&state).expect("state directory");
+	let _daemon = serve_project_daemon(&project, &state, &con).await;
 	let (mut kernel, mut session, _) =
-		Box::pin(compose_kernel(&data, &project, gateway.model.as_str(), Arc::new(con), options))
+		Box::pin(compose_kernel(&data, &project, gateway.model.as_str(), Arc::clone(&con), options))
 			.await
 			.expect("composition");
 
