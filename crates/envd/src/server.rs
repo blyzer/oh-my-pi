@@ -6912,6 +6912,7 @@ impl EnvServer {
 			Op::Snapshot(_) => "omp.env.workspace.snapshot",
 			Op::List(_) => "omp.env.workspace.list",
 			Op::Restore(_) => "omp.env.workspace.restore",
+			Op::CaptureInputs(_) => "omp.env.workspace.capture_inputs",
 		};
 		if !authorize_data_operation(
 			connection,
@@ -6946,6 +6947,27 @@ impl EnvServer {
 				.restore(&request, &cancel)
 				.await
 				.map(workspace_result::Result::Restored),
+			Op::CaptureInputs(request) => {
+				let operations = self
+					.environment_authorities()
+					.expect("workspace operation reached session-only host")
+					.workspace_ops
+					.clone();
+				let cancel = cancel.clone();
+				match task::spawn_blocking(move || operations.capture_inputs(&request, &cancel)).await {
+					Ok(captured) => captured.map(workspace_result::Result::InputsCaptured),
+					Err(source) => {
+						send_error(
+							responses,
+							request_id,
+							pb::ProtocolErrorCode::Internal,
+							&format!("input capture worker failed: {source}"),
+						)
+						.await;
+						return;
+					},
+				}
+			},
 		};
 		match result {
 			Ok(result) => {
@@ -11764,6 +11786,8 @@ async fn send_workspace_operation_error(
 		| WorkspaceOperationError::WireRevision
 		| WorkspaceOperationError::InvalidGeneration(_)
 		| WorkspaceOperationError::IsolationBaselineTooLarge(_)
+		| WorkspaceOperationError::NotARepository
+		| WorkspaceOperationError::DenyGlob { .. }
 		| WorkspaceOperationError::InvalidWorktreeName => {
 			send_error(
 				responses,
@@ -11777,6 +11801,9 @@ async fn send_workspace_operation_error(
 		| WorkspaceOperationError::Io(_)
 		| WorkspaceOperationError::IsolationPreflight(_)
 		| WorkspaceOperationError::InvalidSnapshotRecord(_)
+		| WorkspaceOperationError::InputPaths { .. }
+		| WorkspaceOperationError::DenyGlobSet(_)
+		| WorkspaceOperationError::CredentialRules(_)
 		| WorkspaceOperationError::InvalidWorktreeRecord(_) => {
 			send_error(responses, request_id, pb::ProtocolErrorCode::Internal, &error.to_string())
 				.await;

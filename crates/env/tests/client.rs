@@ -1282,3 +1282,58 @@ fn resource_completion_is_scoped_streamed_and_cancellable() {
 	expect_scoped_cancel(receive(&requests), request_id);
 	drop(responses);
 }
+
+#[test]
+fn capture_inputs_round_trips_through_the_workspace_op_without_a_snapshot() {
+	let (client, transport) = EnvClient::in_process(0);
+	let (requests, responses) = transport.into_parts();
+	let server = thread::spawn(move || {
+		let request = receive(&requests);
+		let Some(client_frame::Body::Data(frame::DataRequest {
+			body:
+				Some(data_request::Body::Workspace(frame::WorkspaceOp {
+					op: Some(frame::workspace_op::Op::CaptureInputs(capture)),
+					..
+				})),
+			..
+		})) = request.body
+		else {
+			panic!("expected a CaptureInputs workspace op");
+		};
+		assert_eq!(capture.deny_globs, ["*.local"]);
+		assert_eq!(capture.allow_paths, ["keep.env"]);
+		assert!(capture.include_untracked);
+		respond(
+			&responses,
+			request.request_id,
+			server_frame::Body::Data(frame::DataResponse {
+				body: Some(data_response::Body::Workspace(frame::WorkspaceResult {
+					result: Some(frame::workspace_result::Result::InputsCaptured(
+						frame::CaptureInputsReply {
+							manifest_hash: Bytes::from_static(&[7; 32]),
+							manifest_size: 99,
+							files: 3,
+							bytes: 42,
+							excluded_rules: vec![frame::InputExclusion { rule: ".env".into(), files: 2 }],
+							excluded_symlinks: 1,
+							..frame::CaptureInputsReply::default()
+						},
+					)),
+					..frame::WorkspaceResult::default()
+				})),
+				..frame::DataResponse::default()
+			}),
+		);
+	});
+	let reply = block_on(client.capture_inputs(frame::CaptureInputsRequest {
+		deny_globs: vec!["*.local".into()],
+		allow_paths: vec!["keep.env".into()],
+		include_untracked: true,
+		..frame::CaptureInputsRequest::default()
+	}))
+	.expect("capture reply");
+	assert_eq!(reply.manifest_hash, Bytes::from_static(&[7; 32]));
+	assert_eq!((reply.files, reply.bytes, reply.excluded_symlinks), (3, 42, 1));
+	assert_eq!(reply.excluded_rules[0].rule, ".env");
+	server.join().expect("server");
+}

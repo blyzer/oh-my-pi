@@ -151,13 +151,16 @@ workspace test suite is gated nowhere:
 - a REAPI client.
 
 **Known defects that bear on this ADR:**
-- **ADW code phases run unconfined.** They spawn a bare `tokio::process::Command` with
-  `kill_on_drop`, no process group and the full environment (`crates/driver/src/adw/production.rs:102-145`).
-  `cleanse` does the same (`crates/driver/src/cleanse/production.rs:133-146`). This is audit F11
-  (`docs/parked/2026-10-06-project-input-trust-audit.md:41`, `:48+`).
-- **`omp adw run` ignores user and project cfg.** It builds `Ctx::new()` (`crates/app/src/adw_cmd.rs:55`),
-  not `process_ctx_with` (`crates/app/src/lib.rs:132-147`).
-- **Its cancel token is never triggered** (`adw_cmd.rs:58`).
+- **ADW code phases were unconfined; they no longer are** (fixed in `9dd09d888f`, 2026-10-11). They
+  originally spawned a bare `tokio::process::Command` with `kill_on_drop`, no process group and the
+  full environment (audit F11, `docs/parked/2026-10-06-project-input-trust-audit.md:41`, `:48+`).
+  They now run through the project Environment's exec authority, so the sandbox that the reported
+  posture describes is the one that confines them (`crates/driver/src/adw/production.rs`, `posture`).
+  `cleanse` was changed with them (`crates/driver/src/cleanse/production.rs`).
+- **`omp adw run` used to ignore user and project cfg; it now applies them** through
+  `process_ctx_with` (`crates/app/src/adw_cmd.rs:122`), fixed in the same commit.
+- **Its cancel token used to be never triggered; Ctrl-C now cancels it** (`adw_cmd.rs:62-73`), fixed in
+  the same commit. PR 1d therefore does not need to wire either.
 
 ### Requirements
 
@@ -928,7 +931,8 @@ verification":
 Placement comes from the convars, and `omp adw run --exec-policy <p>` overrides them for one
 process. Output adds one line per phase, for example
 `remote (reapi remote.example:443) 4m12s: queue 3s, upload 1.2 MB / 41 blobs, exit 0`.
-For `omp adw run` to honor cfg at all, it must use `process_ctx_with`.
+`omp adw run` already honours cfg through `process_ctx_with` (`9dd09d888f`); `--exec-policy` is added on
+top of it in PR 1d.
 
 ### Part L — Recommended slices
 
@@ -1234,10 +1238,10 @@ telemetry. The reusable pieces are listed in Context.
     - `AdwHost` reports posture per dispatch and per placement (Part C.2).
   - `crates/driver/src/adw/definition.rs`: the optional per-phase `placement = "local"` field.
   - `crates/app/src/adw_cmd.rs`:
-    - use `process_ctx_with` (cfg finally applies);
-    - wire Ctrl-C to the cancel token;
     - add `--exec-policy`;
     - print the placement line.
+    (Applying cfg through `process_ctx_with` and wiring Ctrl-C to the cancel token were done in
+    `9dd09d888f`; see "Known defects" above.)
   - `crates/observability/src/{semconv.rs,attrs.rs}`: `omp.exec.*`.
   - `scripts/exec-image/` (new): the image recipe and a build script that derives pins from
     `rust-toolchain.toml`, `fetch-python.sh` and `ci.yml`.
@@ -1469,9 +1473,10 @@ change: 0040 is indexed under Runtime.
 The owner selected option D: `omp-exec` remains backend-neutral; BuildBuddy Run
 API is the first optimized backend; generic REAPI is the portable backend; both
 are optional and selected by capabilities/configuration. BuildBuddy-specific
-features must not enter the core contract. Slice 1 remains blocked until the
-probe evidence below is recorded; future BuildGrid, Buildfarm, Google RBE and
-GitHub-hosted backends must remain addable without changing the core.
+features must not enter the core contract. The probe evidence this paragraph
+originally waited for is recorded below, so Slice 1 is not blocked on it;
+future BuildGrid, Buildfarm, Google RBE and GitHub-hosted backends must remain
+addable without changing the core.
 
 The follow-up recycling probe ran four sequential `bb execute` actions with
 `recycle-runner=true`, `preserve-workspace=true`, default isolation and the
