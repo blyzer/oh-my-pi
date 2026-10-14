@@ -93,6 +93,7 @@ impl ConnectionEvalParent {
 		owner: Str,
 	) -> Result<OwnedEvalParent, BridgeHostError> {
 		let result = self
+			.relay
 			.request(request_id, owner.clone(), "config", Value::Null, None)
 			.await?;
 		let config: ParentConfig = serde_json::from_value(result).map_err(|_| {
@@ -132,13 +133,13 @@ impl ConnectionEvalParent {
 				),
 			Some(pb::eval_parent_result::Body::Error(error)) => {
 				RelayEvent::Result(Err(match pb::EvalParentErrorCode::try_from(error.code) {
-					Ok(pb::EvalParentErrorCode::Unavailable) => RelayFailure::Unavailable,
-					Ok(pb::EvalParentErrorCode::Cancelled) => RelayFailure::Cancelled,
-					Ok(pb::EvalParentErrorCode::Invalid) => {
+					Ok(pb::EvalParentErrorCode::EvalParentErrorUnavailable) => RelayFailure::Unavailable,
+					Ok(pb::EvalParentErrorCode::EvalParentErrorCancelled) => RelayFailure::Cancelled,
+					Ok(pb::EvalParentErrorCode::EvalParentErrorInvalid) => {
 						RelayFailure::Invalid(Str::from(error.detail))
 					},
-					Ok(pb::EvalParentErrorCode::Host)
-					| Ok(pb::EvalParentErrorCode::Unspecified)
+					Ok(pb::EvalParentErrorCode::EvalParentErrorHost)
+					| Ok(pb::EvalParentErrorCode::EvalParentErrorUnspecified)
 					| Err(_) => RelayFailure::Host(Str::from(error.detail)),
 				}))
 			},
@@ -151,7 +152,8 @@ impl ConnectionEvalParent {
 		drop(self.relay.responses.lock().take());
 		drop(mem::take(&mut *self.relay.pending.lock()));
 	}
-
+}
+impl Relay {
 	async fn request(
 		&self,
 		request_id: u64,
@@ -160,21 +162,21 @@ impl ConnectionEvalParent {
 		args: Value,
 		progress: Option<&dyn BridgeProgressSink>,
 	) -> Result<Value, BridgeHostError> {
-		let query_id = self.relay.next_query.fetch_add(1, Ordering::Relaxed);
+		let query_id = self.next_query.fetch_add(1, Ordering::Relaxed);
 		let (reply, events) = flume::unbounded();
 		let responses = {
-			let open = self.relay.responses.lock();
+			let open = self.responses.lock();
 			let Some(responses) = open.as_ref() else {
 				return Err(BridgeHostError::message("eval parent relay is unavailable"));
 			};
-			let mut pending = self.relay.pending.lock();
+			let mut pending = self.pending.lock();
 			if pending.len() >= MAX_PENDING {
 				return Err(BridgeHostError::message("eval parent relay is unavailable"));
 			}
 			pending.insert(query_id, Pending { request_id, reply });
 			responses.clone()
 		};
-		let guard = QueryGuard { relay: Arc::clone(&self.relay), request_id, query_id };
+		let guard = QueryGuard { relay: self, request_id, query_id };
 		let args_json = serde_json::to_string(&args)
 			.map_err(|_| BridgeHostError::message("eval parent relay arguments are not JSON"))?;
 		let sent = responses
@@ -209,13 +211,13 @@ impl ConnectionEvalParent {
 	}
 }
 
-struct QueryGuard {
-	relay:      Arc<Relay>,
+struct QueryGuard<'r> {
+	relay:      &'r Relay,
 	request_id: u64,
 	query_id:   u64,
 }
 
-impl Drop for QueryGuard {
+impl Drop for QueryGuard<'_> {
 	fn drop(&mut self) {
 		if self.relay.pending.lock().remove(&self.query_id).is_none() {
 			return;
@@ -411,11 +413,12 @@ async fn answer_query_inner(
 	query: &pb::EvalParentOpen,
 	cancelled: &CancellationToken,
 ) -> Result<Value, pb::EvalParentError> {
-	let args = serde_json::from_str(&query.args_json)
-		.map_err(|_| error(pb::EvalParentErrorCode::Invalid, "invalid JSON arguments"))?;
-	let parent = bridge
-		.parent_for_relay(&query.owner)
-		.map_err(|_| error(pb::EvalParentErrorCode::Unavailable, "parent is not bound"))?;
+	let args = serde_json::from_str(&query.args_json).map_err(|_| {
+		error(pb::EvalParentErrorCode::EvalParentErrorInvalid, "invalid JSON arguments")
+	})?;
+	let parent = bridge.parent_for_relay(&query.owner).map_err(|_| {
+		error(pb::EvalParentErrorCode::EvalParentErrorUnavailable, "parent is not bound")
+	})?;
 	if query.method == "release" {
 		parent.release_eval_owner();
 		return Ok(Value::Null);
@@ -423,7 +426,10 @@ async fn answer_query_inner(
 	if query.method == "config" {
 		let config = ParentConfig {
 			config:      parent.eval_session_config().map_err(|_| {
-				error(pb::EvalParentErrorCode::Unavailable, "parent configuration is unavailable")
+				error(
+					pb::EvalParentErrorCode::EvalParentErrorUnavailable,
+					"parent configuration is unavailable",
+				)
 			})?,
 			completion:  parent.completion_available(),
 			agent:       parent.agent_available(),
@@ -432,7 +438,10 @@ async fn answer_query_inner(
 			budget:      parent.budget_available(),
 		};
 		return serde_json::to_value(config).map_err(|_| {
-			error(pb::EvalParentErrorCode::Host, "parent configuration is not serializable")
+			error(
+				pb::EvalParentErrorCode::EvalParentErrorHost,
+				"parent configuration is not serializable",
+			)
 		});
 	}
 	let (progress_tx, progress_rx) = flume::unbounded();
@@ -452,11 +461,11 @@ async fn answer_query_inner(
 	loop {
 		tokio::select! {
 			biased;
-			() = cancelled.cancelled() => return Err(error(pb::EvalParentErrorCode::Cancelled, "parent operation cancelled")),
+			() = cancelled.cancelled() => return Err(error(pb::EvalParentErrorCode::EvalParentErrorCancelled, "parent operation cancelled")),
 			event = progress_rx.recv_async() => if let Ok(event) = event { let _ = client.send_eval_parent_progress(request_id, pb::EvalParentProgress { query_id: query.query_id, seq: event.0, event_json: serde_json::to_string(&event.1).unwrap_or_default() }).await; },
 			result = &mut call => {
 				while let Ok((seq, event)) = progress_rx.try_recv() { let _ = client.send_eval_parent_progress(request_id, pb::EvalParentProgress { query_id: query.query_id, seq, event_json: serde_json::to_string(&event).unwrap_or_default() }).await; }
-			return result.map_err(|_| error(pb::EvalParentErrorCode::Host, "parent operation failed"));
+			return result.map_err(|_| error(pb::EvalParentErrorCode::EvalParentErrorHost, "parent operation failed"));
 			},
 		}
 	}

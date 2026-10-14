@@ -89,6 +89,7 @@ use super::{
 		widened_effects_denial,
 	},
 	approval_relay::{ConnectionApprovals, OwnedApprovals},
+	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
 	docs::{
 		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHello,
@@ -8571,13 +8572,29 @@ struct ConnectionState {
 enum RequestState {
 	Invocation(InvocationState),
 	InvocationFinishing,
-	Exec { exec: Bytes, cancel: CancellationToken, eval_parent: Option<OwnedEvalParent> },
-	ProcessAttach { cancel: CancellationToken },
+	Exec {
+		exec:              Bytes,
+		cancel:            CancellationToken,
+		eval_parent:       Option<OwnedEvalParent>,
+		eval_parent_lease: Option<ParentBindingLease>,
+	},
+	ProcessAttach {
+		cancel: CancellationToken,
+	},
 	BlobPut(BlobUpload),
-	BlobGet { cancel: CancellationToken },
-	DataStream { cancel: CancellationToken },
-	DocumentEvents { lease_id: Bytes, cancel: CancellationToken },
-	LspEvents { cancel: CancellationToken },
+	BlobGet {
+		cancel: CancellationToken,
+	},
+	DataStream {
+		cancel: CancellationToken,
+	},
+	DocumentEvents {
+		lease_id: Bytes,
+		cancel:   CancellationToken,
+	},
+	LspEvents {
+		cancel: CancellationToken,
+	},
 }
 
 /// One open tool invocation. `effects` is the envelope it is admitted under:
