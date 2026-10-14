@@ -856,7 +856,10 @@ fn wire_status(
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+	use std::{
+		collections::{BTreeMap, HashMap},
+		sync::Arc,
+	};
 
 	use bytes::Bytes;
 	use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
