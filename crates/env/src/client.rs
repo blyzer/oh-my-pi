@@ -31,7 +31,7 @@ use omp_proto::{
 	env::{
 		v1,
 		v1::{
-			AdmitInvocation, ApprovalAnswer, ApprovalDecision, ApprovalQuery, ArgText, ArgsCommitted,
+			self as env_wire, AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, Admission,
 			AttachOutput, BlobGetComplete, CancelRequest, ClientFrame, ClientHello,
 			CloseSessionRequest, CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
 			CurrentWorktreeResult, DataEvent, DataRequest, DataResponse, DestroyWorktree, DetachExec,
