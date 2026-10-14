@@ -153,8 +153,6 @@ struct PhaseState {
 	status:     Status,
 	/// Completed attempts. An interrupted dispatch reuses its ordinal.
 	attempts:   u32,
-	/// Extra attempts granted by a rewind, above `max_attempts`.
-	granted:    u32,
 	correction: Option<Str>,
 	/// Acceptance ordinal currently standing, and the total ever accepted.
 	///
@@ -245,6 +243,11 @@ impl Run {
 				Step::Done { accepted: self.states.iter().all(|s| s.status == Status::Passed) }
 			};
 		};
+		if self.states[index].attempts >= self.max_attempts {
+			self.halted = true;
+			return Step::Done { accepted: false };
+		}
+
 		let phase = self.workflow.phases()[index].clone();
 		if !phase.requires.is_empty() {
 			let blocked = match self.posture {
@@ -339,8 +342,7 @@ impl Run {
 				Ok(Outcome::Halted { phase: name })
 			},
 			OnReject::Retry => {
-				let budget = self.max_attempts + self.states[index].granted;
-				if self.states[index].attempts >= budget {
+				if self.states[index].attempts >= self.max_attempts {
 					self.halted = true;
 					return Ok(Outcome::Halted { phase: name });
 				}
@@ -354,13 +356,14 @@ impl Run {
 					return Ok(Outcome::Halted { phase: name });
 				};
 				let target_name = self.workflow.phases()[target].name.clone();
+				if self.states[target].attempts >= self.max_attempts {
+					self.halted = true;
+					return Ok(Outcome::Halted { phase: target_name });
+				}
+
 				let state = &mut self.states[target];
 				state.status = Status::Pending;
 				state.correction = Some(correction);
-				// The rewind is the reviewer's decision, not the producer's
-				// failure: granting an attempt keeps a correction route from
-				// silently consuming the producer's own retry budget.
-				state.granted += 1;
 				state.published = None;
 
 				let mut invalidated = self.invalidate_dependents(&target_name);
