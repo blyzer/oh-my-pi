@@ -157,10 +157,9 @@ impl ProductionAdwHost {
 	async fn run_child(
 		&self,
 		prompt: Str,
-		phase_model: Option<&Str>,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
-		let (model, model_override) = self.model_phase_selector(phase_model);
+		let (model, model_override) = self.model_phase_selector();
 		let (mut kernel, mut session, _) = compose_kernel(
 			&self.data_dir,
 			&self.root,
@@ -179,14 +178,12 @@ impl ProductionAdwHost {
 		Ok(outcome.assistant_text)
 	}
 
-	/// Chooses the selector and its explicitness for one model phase.
+	/// Chooses the selector and its explicitness for every model phase.
 	///
-	/// A workflow-declared selector is always explicit; otherwise the run's
-	/// explicitness describes whether its command-line selector may replace
-	/// inherited configuration.
-	fn model_phase_selector<'a>(&'a self, phase_model: Option<&'a Str>) -> (&'a str, bool) {
-		phase_model
-			.map_or_else(|| (self.model.as_str(), self.model_override), |model| (model.as_str(), true))
+	/// Resolution order: explicit `omp adw run --model`, inherited `ai_model`,
+	/// then the `@smol` fallback selector.
+	fn model_phase_selector(&self) -> (&str, bool) {
+		(self.model.as_str(), self.model_override)
 	}
 
 	async fn run_command(
@@ -401,9 +398,9 @@ impl AdwHost for ProductionAdwHost {
 					.run_command(binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
-			PhaseSpec::Prompt { text, model } => {
+			PhaseSpec::Prompt { text } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
-				let answer = self.run_child(prompt, model.as_ref(), cancel).await?;
+				let answer = self.run_child(prompt, cancel).await?;
 				Ok(judge(phase.kind, answer))
 			},
 		}
@@ -805,7 +802,7 @@ requires = { network = "disabled" }
 		.expect("workflow host");
 
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
-		let (model, explicit) = host.model_phase_selector(None);
+		let (model, explicit) = host.model_phase_selector();
 		assert_eq!(model, "flag/model");
 		assert!(explicit);
 		assert!(child_kernel_options(&host.workspace_trust, explicit).model_override);
@@ -827,30 +824,11 @@ requires = { network = "disabled" }
 		)
 		.expect("workflow host");
 
-		let (model, explicit) = host.model_phase_selector(None);
+		let (model, explicit) = host.model_phase_selector();
 		assert_eq!(model, "@smol");
 		assert!(!explicit);
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
 		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
-	}
-
-	#[test]
-	fn workflow_model_precedes_explicit_run_model() {
-		let project = tempfile::tempdir().expect("project");
-		let host = ProductionAdwHost::open(
-			project.path().to_path_buf(),
-			project.path().join("data"),
-			sf!("flag/model"),
-			true,
-			Arc::new(omp_con::Ctx::new()),
-			TRUSTED,
-		)
-		.expect("workflow host");
-
-		let phase_model = sf!("phase/model");
-		let (model, explicit) = host.model_phase_selector(Some(&phase_model));
-		assert_eq!(model, "phase/model");
-		assert!(explicit);
 	}
 
 	#[test]

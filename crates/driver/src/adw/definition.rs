@@ -28,12 +28,7 @@ pub enum PhaseSpec {
 	/// A model turn driven by this prompt.
 	Prompt {
 		/// Instruction text installed as the child's turn input.
-		text:  Str,
-		/// Optional workflow-declared model selector for this phase.
-		///
-		/// Resolution order: phase `model`, explicit `omp adw run --model`,
-		/// inherited `ai_model`, then the `@smol` fallback selector.
-		model: Option<Str>,
+		text: Str,
 	},
 	/// A process whose exit status decides the outcome.
 	Command {
@@ -181,7 +176,7 @@ fn lower(file: FileWorkflow, fallback_name: &str) -> Result<WorkflowDefinition, 
 				if declared.prompt.trim().is_empty() {
 					return Err(DefinitionError::MissingPrompt { phase: name });
 				}
-				PhaseSpec::Prompt { text: declared.prompt, model: declared.model }
+				PhaseSpec::Prompt { text: declared.prompt }
 			},
 			PhaseKind::Code => {
 				let mut argv = declared.command.into_iter();
@@ -249,8 +244,6 @@ struct FilePhase {
 	#[serde(default)]
 	prompt:     Str,
 	#[serde(default)]
-	model:      Option<Str>,
-	#[serde(default)]
 	command:    Vec<Str>,
 	#[serde(default)]
 	cwd:        Option<Str>,
@@ -283,8 +276,8 @@ name = "ship"
 [[phase]]
 name = "build"
 kind = "agent"
-model = "phase/model"
 prompt = "Implement it."
+
 [[phase]]
 name = "test"
 kind = "code"
@@ -303,10 +296,7 @@ prompt = "Judge it."
 		assert_eq!(definition.workflow().phases().len(), 3);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("build")),
-			Some(&PhaseSpec::Prompt {
-				text:  Str::new_static("Implement it."),
-				model: Some(Str::new_static("phase/model")),
-			})
+			Some(&PhaseSpec::Prompt { text: Str::new_static("Implement it.") })
 		);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("test")),
