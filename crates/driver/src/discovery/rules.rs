@@ -1645,13 +1645,17 @@ mod tests {
 				.all(|pattern| pattern.name != "reviewer"),
 			"child-only rules never reach the main kernel"
 		);
+		let reviewer_patterns = rules.stream_patterns(AgentName::from_ref("reviewer"));
+		let mut reviewer_names = reviewer_patterns
+			.iter()
+			.map(|pattern| pattern.name.as_str())
+			.collect::<Vec<_>>();
+		reviewer_names.sort();
+		reviewer_names.dedup();
 		assert_eq!(
-			rules
-				.stream_patterns(AgentName::from_ref("reviewer"))
-				.iter()
-				.map(|pattern| pattern.name.as_str())
-				.collect::<Vec<_>>(),
-			["guard", "reviewer"]
+			reviewer_names,
+			["guard", "reviewer"],
+			"the reviewer child admits both rules; one entry per condition"
 		);
 	}
 

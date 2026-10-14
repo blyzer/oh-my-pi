@@ -15,6 +15,7 @@ use omp_agent::{
 	TurnInput, TurnStop, Up, When,
 };
 use omp_ai::{ChatEvent, ChatRequest, ContentPart, OpaqueJson, Role, ToolCall, ToolCallId};
+use omp_core::{Str, sf};
 use omp_dom::{PropKey, Value};
 use omp_journal::blob::BlobStore;
 use omp_proto::toolhost::v1::HookEventId;
