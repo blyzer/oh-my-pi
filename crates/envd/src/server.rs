@@ -3548,7 +3548,7 @@ impl EnvServer {
 		principal: &pb::InvocationScope,
 		relay: &ConnectionEvalParent,
 	) -> Result<(OwnedEvalParent, ParentBindingLease), BridgeHostError> {
-		let owner = Str::from(principal.session_id.as_str());
+		let owner = self.invocation_owner(Some(principal));
 		let parent = relay.fetch_config(request_id, owner.clone()).await?;
 		let lease = self.bind_eval_sdk_parent(owner, Arc::new(parent.clone()))?;
 		Ok((parent, lease))
@@ -4018,10 +4018,35 @@ impl EnvServer {
 		if self.environment_authorities().is_some() {
 			connection.bind_relays(&responses);
 		}
+		// Parent relay setup awaits a client reply during ordinary dispatch, so
+		// route those replies around the dispatch that opened them.
+		let eval_parent = connection.eval_parent.clone();
+		let (routed_tx, routed_requests) = flume::unbounded();
+		let response_router = tokio::spawn(async move {
+			while let Ok(frame) = requests.recv_async().await {
+				match frame.body.as_ref() {
+					Some(client_frame::Body::EvalParentProgress(progress)) => {
+						if let Some(relay) = &eval_parent {
+							relay.answer_progress(frame.request_id, progress.clone());
+						}
+					},
+					Some(client_frame::Body::EvalParentResult(result)) => {
+						if let Some(relay) = &eval_parent {
+							relay.answer_result(frame.request_id, result.clone());
+						}
+					},
+					_ => {
+						if routed_tx.send_async(frame).await.is_err() {
+							break;
+						}
+					},
+				}
+			}
+		});
 		loop {
 			let admission_deadline = connection.next_admission_deadline();
 			let next = tokio::select! {
-				result = requests.recv_async() => match result {
+				result = routed_requests.recv_async() => match result {
 					Ok(frame) => Some(LoopEvent::Frame(Box::new(frame))),
 					Err(_) => None,
 				},
@@ -4066,6 +4091,8 @@ impl EnvServer {
 			}
 		}
 		connection.cancel_all(&self.exec);
+		response_router.abort();
+		let _ = response_router.await;
 	}
 
 	async fn accept_hello(
@@ -4496,21 +4523,6 @@ impl EnvServer {
 			.await;
 			return;
 		}
-		match &body {
-			client_frame::Body::EvalParentProgress(progress) => {
-				if let Some(relay) = &connection.eval_parent {
-					relay.answer_progress(frame.request_id, progress.clone());
-				}
-				return;
-			},
-			client_frame::Body::EvalParentResult(result) => {
-				if let Some(relay) = &connection.eval_parent {
-					relay.answer_result(frame.request_id, result.clone());
-				}
-				return;
-			},
-			_ => {},
-		}
 		let worker_scope = connection.host.as_ref().is_some_and(|host| {
 			scope.as_ref().is_some_and(|scope| {
 				connection
@@ -4639,7 +4651,7 @@ impl EnvServer {
 
 		match body {
 			client_frame::Body::EvalParentProgress(_) | client_frame::Body::EvalParentResult(_) => {
-				unreachable!("eval parent relay frames are handled before ordinary dispatch");
+				unreachable!("eval parent relay frames are routed before ordinary dispatch");
 			},
 			client_frame::Body::Hello(_) => {
 				send_error(
