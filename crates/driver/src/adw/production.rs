@@ -117,6 +117,7 @@ impl ProductionAdwHost {
 			ctx,
 			resolver: FilesystemResolver,
 			workspace_trust,
+			environment: OnceCell::new(),
 		})
 	}
 
@@ -183,7 +184,7 @@ impl ProductionAdwHost {
 	/// A workflow-declared selector is always explicit; otherwise the run's
 	/// explicitness describes whether its command-line selector may replace
 	/// inherited configuration.
-	fn model_phase_selector(&self, phase_model: Option<&Str>) -> (&str, bool) {
+	fn model_phase_selector<'a>(&'a self, phase_model: Option<&'a Str>) -> (&'a str, bool) {
 		phase_model
 			.map_or_else(|| (self.model.as_str(), self.model_override), |model| (model.as_str(), true))
 	}
@@ -496,6 +497,7 @@ mod tests {
 			Arc::new(ctx),
 			trust,
 		)
+		.expect("workflow host")
 	}
 
 	/// A user workflow phase that declares `requires.network = "disabled"`.
@@ -847,7 +849,8 @@ requires = { network = "disabled" }
 		)
 		.expect("workflow host");
 
-		let (model, explicit) = host.model_phase_selector(Some(&sf!("phase/model")));
+		let phase_model = sf!("phase/model");
+		let (model, explicit) = host.model_phase_selector(Some(&phase_model));
 		assert_eq!(model, "phase/model");
 		assert!(explicit);
 	}
