@@ -7,9 +7,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
 use omp_adw::Posture;
-use omp_core::{SecretString, Str};
+use omp_core::Str;
 use omp_exec::{
 	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, CancelSupport, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
@@ -17,12 +16,12 @@ use omp_exec::{
 };
 use parking_lot::Mutex;
 use prost::{Message as _, Name as _};
-use prost_types::{Any, Duration as WireDuration};
+use prost_types::Duration as WireDuration;
 use tonic::{Code, Request, Status, metadata::MetadataValue, transport::Channel};
 
 use crate::{
 	capabilities::{self, Capabilities},
-	cas::{self, BlobSource, InputSource},
+	cas::{self, InputSource},
 	digest::{self, DigestError},
 	endpoint::Endpoint,
 	profile::{Credential, Profile},
@@ -127,7 +126,7 @@ fn foreign<E: std::error::Error + Send + Sync + 'static>(
 	Arc::new(error)
 }
 
-fn config<E: std::error::Error + Send + Sync + 'static>(error: E) -> ExecutionError {
+fn config_error<E: std::error::Error + Send + Sync + 'static>(error: E) -> ExecutionError {
 	ExecutionError::Config { source: foreign(error) }
 }
 
@@ -151,12 +150,12 @@ where
 		source: S,
 	) -> Result<Self, ExecutionError> {
 		let mut builder = tonic::transport::Endpoint::from_shared(endpoint.transport_url())
-			.map_err(config)?
+			.map_err(config_error)?
 			.connect_timeout(Duration::from_secs(30));
 		if endpoint.scheme() == crate::endpoint::Scheme::Tls {
 			builder = builder
 				.tls_config(tonic::transport::ClientTlsConfig::new().with_webpki_roots())
-				.map_err(config)?;
+				.map_err(config_error)?;
 		}
 		let channel = builder
 			.connect()
@@ -174,7 +173,7 @@ where
 			operations:   longrunning::operations_client::OperationsClient::new(channel),
 		};
 		let reply = clients_capabilities(&clients, &config, &endpoint).await?;
-		let caps = capabilities::interpret(&reply).map_err(config)?;
+		let caps = capabilities::interpret(&reply).map_err(config_error)?;
 		let backend_caps = BackendCapabilities {
 			platforms:      Arc::new([config.platform]),
 			needs:          omp_exec::NeedSet::new(),
@@ -279,10 +278,10 @@ fn with_metadata<T>(
 ) -> Result<Request<T>, ExecutionError> {
 	if let (Some(header), Some(credential)) = (&profile.credential_header, credential) {
 		let key = tonic::metadata::MetadataKey::from_bytes(header.as_bytes())
-			.map_err(|_| config(DecodeError::MissingResult))?;
+			.map_err(|_| config_error(DecodeError::MissingResult))?;
 		let mut value = MetadataValue::try_from(credential.expose())
 			.map_err(DecodeError::Metadata)
-			.map_err(config)?;
+			.map_err(config_error)?;
 		value.set_sensitive(true);
 		request.metadata_mut().insert(key, value);
 	}
@@ -367,7 +366,7 @@ where
 		Ok(ReapiRun::new(
 			self.clone(),
 			stream.into_inner(),
-			Digest::new(omp_core::Hash32::default(), 0),
+			omp_exec::Digest::new(omp_core::Hash32::default(), 0),
 			handle.id,
 			RequestMetadataState::default(),
 		))
@@ -380,14 +379,14 @@ where
 		let InputSet { manifest, .. } = request
 			.inputs
 			.as_ref()
-			.ok_or_else(|| config(DecodeError::MissingInputs))?;
+			.ok_or_else(|| config_error(DecodeError::MissingInputs))?;
 		let files = self
 			.inner
 			.source
 			.files(*manifest)
 			.await
 			.map_err(|error| ExecutionError::InputCapture { source: foreign(error) })?;
-		let tree = tree::build(&files).map_err(config)?;
+		let tree = tree::build(&files).map_err(config_error)?;
 		let toolchain = self.inner.toolchains.get(request.toolchain.as_str());
 		let mut env = request.env.iter().cloned().collect::<Vec<_>>();
 		if let Some(toolchain) = toolchain {
@@ -490,7 +489,7 @@ where
 			.iter()
 			.map(digest::from_wire)
 			.collect::<Result<Vec<_>, DigestError>>()
-			.map_err(config)?;
+			.map_err(config_error)?;
 		let plan = cas::plan_upload(&missing, &self.inner.caps);
 		for batch in plan.batches {
 			let requests = batch
@@ -552,11 +551,11 @@ where
 			digest.size,
 			cas::Compression::Identity,
 		);
-		let stream = async_stream::try_stream! {
+		let stream = async_stream::stream! {
 			let mut offset = 0_u64;
 			while offset < digest.size {
 				let len = (digest.size - offset).min(1024 * 1024);
-				let data = source.read_range(digest, offset, len).await.map_err(|_| Status::internal("blob read failed"))?;
+				let Ok(data) = source.read_range(digest, offset, len).await else { return };
 				offset = offset.saturating_add(data.len() as u64);
 				yield bytestream::WriteRequest { resource_name: resource.clone(), write_offset: offset as i64 - data.len() as i64, finish_write: offset >= digest.size, data };
 			}
@@ -644,75 +643,86 @@ where
 	}
 
 	async fn next(&mut self) -> Option<ExecutionEvent> {
-		let operation = match self.stream.message().await {
-			Ok(Some(operation)) => operation,
-			Ok(None) => {
-				if !self.reconnected && self.operation.lock().is_some() {
-					return self.wait_again().await;
-				}
-				self.settled = true;
-				return Some(ExecutionEvent::Settled(Err(transport(Status::unavailable(
-					"REAPI execution stream ended",
-				)))));
-			},
-			Err(error) => {
-				if !self.reconnected
-					&& self.operation.lock().is_some()
-					&& error.code() == Code::Unavailable
+		loop {
+			let operation = match self.stream.message().await {
+				Ok(Some(operation)) => operation,
+				Ok(None) if !self.reconnected && self.operation.lock().is_some() => {
+					if let Err(error) = self.wait_again().await {
+						self.settled = true;
+						return Some(ExecutionEvent::Settled(Err(error)));
+					}
+					continue;
+				},
+				Ok(None) => {
+					self.settled = true;
+					return Some(ExecutionEvent::Settled(Err(transport(Status::unavailable(
+						"REAPI execution stream ended",
+					)))));
+				},
+				Err(error)
+					if !self.reconnected
+						&& self.operation.lock().is_some()
+						&& error.code() == Code::Unavailable =>
 				{
-					return self.wait_again().await;
-				}
+					if let Err(error) = self.wait_again().await {
+						self.settled = true;
+						return Some(ExecutionEvent::Settled(Err(error)));
+					}
+					continue;
+				},
+				Err(error) => {
+					self.settled = true;
+					return Some(ExecutionEvent::Settled(Err(status::classify(
+						error,
+						Phase::Execute,
+						&self.backend.inner.id,
+						Duration::from_secs(30),
+						None,
+					))));
+				},
+			};
+			if operation.name.is_empty() {
 				self.settled = true;
-				return Some(ExecutionEvent::Settled(Err(status::classify(
+				return Some(ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult))));
+			}
+			*self.operation.lock() = Some(Str::new(&operation.name));
+			if !self.accepted {
+				self.accepted = true;
+				return Some(ExecutionEvent::Accepted { operation: Str::new(&operation.name) });
+			}
+			if !operation.done {
+				return Some(stage_event(&operation));
+			}
+			self.settled = true;
+			return Some(self.settle(operation).await);
+		}
+	}
+
+	async fn wait_again(&mut self) -> Result<(), ExecutionError> {
+		self.reconnected = true;
+		let Some(name) = self.operation.lock().clone() else {
+			return Err(transport(Status::unavailable("REAPI operation name was lost")));
+		};
+		let request = with_metadata(
+			Request::new(wire::WaitExecutionRequest { name: name.to_string() }),
+			&self.backend.inner.profile,
+			self.backend.inner.credential.as_ref(),
+		)?;
+		let mut client = self.backend.inner.clients.execution.clone();
+		self.stream = client
+			.wait_execution(request)
+			.await
+			.map_err(|error| {
+				status::classify(
 					error,
 					Phase::Execute,
 					&self.backend.inner.id,
 					Duration::from_secs(30),
 					None,
-				))));
-			},
-		};
-		if operation.name.is_empty() {
-			self.settled = true;
-			return Some(ExecutionEvent::Settled(Err(config(DecodeError::MissingResult))));
-		}
-		*self.operation.lock() = Some(Str::new(&operation.name));
-		if !self.accepted {
-			self.accepted = true;
-			return Some(ExecutionEvent::Accepted { operation: Str::new(&operation.name) });
-		}
-		if !operation.done {
-			return Some(stage_event(&operation));
-		}
-		self.settled = true;
-		Some(self.settle(operation).await)
-	}
-
-	async fn wait_again(&mut self) -> Option<ExecutionEvent> {
-		self.reconnected = true;
-		let name = self.operation.lock().clone()?;
-		let request = match with_metadata(
-			Request::new(wire::WaitExecutionRequest { name: name.to_string() }),
-			&self.backend.inner.profile,
-			self.backend.inner.credential.as_ref(),
-		) {
-			Ok(request) => request,
-			Err(error) => return Some(ExecutionEvent::Settled(Err(error))),
-		};
-		let mut client = self.backend.inner.clients.execution.clone();
-		match client.wait_execution(request).await {
-			Ok(response) => {
-				self.stream = response.into_inner();
-				self.next().await
-			},
-			Err(error) => Some(ExecutionEvent::Settled(Err(status::classify(
-				error,
-				Phase::Execute,
-				&self.backend.inner.id,
-				Duration::from_secs(30),
-				None,
-			)))),
-		}
+				)
+			})?
+			.into_inner();
+		Ok(())
 	}
 
 	async fn settle(&self, operation: longrunning::Operation) -> ExecutionEvent {
@@ -726,11 +736,13 @@ where
 			)));
 		}
 		let Some(response) = operation.response else {
-			return ExecutionEvent::Settled(Err(config(DecodeError::MissingResult)));
+			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
 		};
 		let result = match wire::ExecuteResponse::decode(response.value.as_ref()) {
 			Ok(result) => result,
-			Err(error) => return ExecutionEvent::Settled(Err(config(DecodeError::Proto(error)))),
+			Err(error) => {
+				return ExecutionEvent::Settled(Err(config_error(DecodeError::Proto(error))));
+			},
 		};
 		if let Some(status) = result.status.filter(|status| status.code != 0) {
 			return ExecutionEvent::Settled(Err(status::classify(
@@ -742,14 +754,14 @@ where
 			)));
 		}
 		let Some(action) = result.result else {
-			return ExecutionEvent::Settled(Err(config(DecodeError::MissingResult)));
+			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
 		};
 		let logs = match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
 			(Some(stdout), Some(stderr)) => {
 				match (digest::from_wire(stdout), digest::from_wire(stderr)) {
 					(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
 					(Err(error), _) | (_, Err(error)) => {
-						return ExecutionEvent::Settled(Err(config(error)));
+						return ExecutionEvent::Settled(Err(config_error(error)));
 					},
 				}
 			},
