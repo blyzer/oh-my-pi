@@ -92,3 +92,14 @@ shapes, not observed behavior):
 - Whether the policy in `ThreadStartResponse` is the post-merge effective one
   (U4) is unverified; the adapter trusts it only as far as comparing it with
   the request.
+
+Verification of the delegated-executor contract branch (2026-10-14):
+
+- `cargo check -p omp-agent --lib` passed on that branch.
+- Its `cargo clippy -p omp-agent --lib` and contract tests were not completed
+  in that environment; the tests still require an observed run before the
+  contract can be considered verified.
+- Review covered cancellation, fail-closed permission mapping, prompt digest,
+  and normalized events. Review is not a substitute for the contract tests.
+- The contract branch adds no CLI adapter; the Codex adapter listed above was
+  merged separately from `feat/native-cli-codex-adapter`.
