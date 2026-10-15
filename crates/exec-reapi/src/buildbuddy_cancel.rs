@@ -78,8 +78,8 @@ impl BuildBuddyCanceller {
 mod tests {
 	use super::*;
 
-	#[test]
-	fn canceller_is_cloneable_without_connecting() {
+	#[tokio::test]
+	async fn canceller_is_cloneable_without_connecting() {
 		let channel = Channel::from_static("http://127.0.0.1:50051").connect_lazy();
 		let canceller = BuildBuddyCanceller::from_channel(channel, Credential::new("test-key"));
 		let cloned = canceller.clone();
