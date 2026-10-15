@@ -406,7 +406,16 @@ mod platform {
 			},
 		};
 
-		let error = safe_remove_dir_recursive_impl(host, path, &dir_fd, options);
+		let root_device = if options.one_fs {
+			match dir_fd.stat() {
+				Ok(stat) => Some(stat.st_dev as u64),
+				Err(error) => return show_removal_error(host, error, path),
+			}
+		} else {
+			None
+		};
+
+		let error = safe_remove_dir_recursive_impl(host, path, &dir_fd, options, root_device);
 
 		// After processing all children, remove the directory itself
 		if error {
@@ -450,6 +459,7 @@ mod platform {
 		path: &Path,
 		dir_fd: &DirFd,
 		options: &Options,
+		root_device: Option<u64>,
 	) -> bool {
 		// Read directory entries using safe traversal
 		let entries = match dir_fd.read_dir() {
@@ -488,15 +498,8 @@ mod platform {
 			let is_dir = ((entry_stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFDIR;
 
 			if is_dir {
-				// Ask user if they want to descend into this directory
-				if options.interactive == InteractiveMode::Always
-					&& !is_dir_empty(host, &entry_path)
-					&& !prompt_descend(host, &entry_path)
-				{
-					continue;
-				}
-
-				// Recursively remove subdirectory using safe traversal
+				// Open and stat the descriptor before deciding whether this
+				// directory is on the command-line argument's filesystem.
 				let child_dir_fd = match dir_fd.open_subdir(&entry_name, SymlinkBehavior::Follow) {
 					Ok(fd) => fd,
 					Err(e) => {
@@ -516,9 +519,36 @@ mod platform {
 						continue;
 					},
 				};
+				let child_device = match child_dir_fd.stat() {
+					Ok(stat) => Some(stat.st_dev as u64),
+					Err(stat_error) => {
+						error |= handle_error_with_force(host, stat_error, &entry_path, options);
+						continue;
+					},
+				};
+				if !super::should_descend_into_directory(options, root_device, child_device) {
+					// --one-file-system takes precedence over -i: if the directory
+					// is on a different filesystem, we skip it without prompting.
+					// This matches GNU rm behavior where filesystem boundaries are
+					// enforced regardless of interactive confirmation.
+					continue;
+				}
 
-				let child_error =
-					safe_remove_dir_recursive_impl(host, &entry_path, &child_dir_fd, options);
+				// Ask user if they want to descend into this directory.
+				if options.interactive == InteractiveMode::Always
+					&& !is_dir_empty(host, &entry_path)
+					&& !prompt_descend(host, &entry_path)
+				{
+					continue;
+				}
+
+				let child_error = safe_remove_dir_recursive_impl(
+					host,
+					&entry_path,
+					&child_dir_fd,
+					options,
+					root_device,
+				);
 				error |= child_error;
 
 				// Ask user permission if needed for this subdirectory
@@ -552,10 +582,11 @@ mod platform {
 
 	#[cfg(target_os = "redox")]
 	pub fn safe_remove_dir_recursive_impl(
-		host: &mut Host,
+		_host: &mut Host,
 		_path: &Path,
 		_dir_fd: &DirFd,
 		_options: &Options,
+		_root_device: Option<u64>,
 	) -> bool {
 		// safe_traversal stat_at is not supported on Redox
 		// This shouldn't be called on Redox, but provide a stub for compilation
@@ -683,11 +714,10 @@ pub struct Options {
 	/// If no other option sets this mode, [`InteractiveMode::PromptProtected`]
 	/// is used
 	pub interactive:         InteractiveMode,
-	#[allow(
-		dead_code,
-		reason = "--one-file-system is parsed but intentionally unimplemented upstream"
-	)]
 	/// `--one-file-system`
+	///
+	/// During recursive removal, directories on a different filesystem than
+	/// the command-line argument are left untouched.
 	pub one_fs:              bool,
 	/// `--preserve-root`/`--no-preserve-root`
 	pub preserve_root:       bool,
@@ -719,6 +749,36 @@ impl Default for Options {
 			__presume_input_tty: None,
 		}
 	}
+}
+#[cfg(unix)]
+fn filesystem_device(metadata: &Metadata) -> Option<u64> {
+	use std::os::unix::fs::MetadataExt as _;
+
+	Some(metadata.dev())
+}
+
+#[cfg(windows)]
+fn filesystem_device(metadata: &Metadata) -> Option<u64> {
+	use std::os::windows::fs::MetadataExt as _;
+
+	metadata.volume_serial_number().map(u64::from)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_device(_metadata: &Metadata) -> Option<u64> {
+	None
+}
+
+fn should_descend_into_directory(
+	options: &Options,
+	root_device: Option<u64>,
+	child_device: Option<u64>,
+) -> bool {
+	!options.one_fs
+		|| matches!(
+			(root_device, child_device),
+			(Some(root_device), Some(child_device)) if root_device == child_device
+		)
 }
 
 static OPT_DIR: &str = "dir";
@@ -905,9 +965,8 @@ pub fn uu_app() -> Command {
 			Arg::new(OPT_ONE_FILE_SYSTEM)
 				.long(OPT_ONE_FILE_SYSTEM)
 				.help(
-					"when removing a hierarchy recursively, skip any directory that is on a \
-					 file\nsystem different from that of the corresponding command line argument \
-					 (NOT\nIMPLEMENTED)",
+					"when removing a hierarchy recursively, skip any directory that is on a file \
+					 system different from that of the corresponding command line argument",
 				)
 				.action(ArgAction::SetTrue),
 		)
@@ -1027,12 +1086,16 @@ impl TermLike for HostTerm {
 	}
 }
 
-/// Returns Some(ProgressBar) if `total_files` > 0, None otherwise.
-fn create_progress_bar(host: &mut Host, files: &[&OsStr], recursive: bool) -> Option<ProgressBar> {
+/// Returns Some(ProgressBar) if the planned removal has entries.
+fn create_progress_bar(
+	host: &mut Host,
+	files: &[&OsStr],
+	options: &Options,
+) -> Option<ProgressBar> {
 	if !host.stderr.is_terminal() {
 		return None;
 	}
-	let total_files = count_files(host, files, recursive);
+	let total_files = count_files(host, files, options);
 	if total_files == 0 {
 		return None;
 	}
@@ -1050,10 +1113,10 @@ fn create_progress_bar(host: &mut Host, files: &[&OsStr], recursive: bool) -> Op
 }
 
 /// Count the total number of files and directories to be deleted.
-/// This function recursively counts all files and directories that will be
-/// processed. Files are not deduplicated when appearing in multiple sources. If
-/// `recursive` is set to `false`, the directories in `paths` will be ignored.
-fn count_files(host: &mut Host, paths: &[&OsStr], recursive: bool) -> u64 {
+///
+/// Files are not deduplicated when appearing in multiple sources. Directories
+/// are counted only when recursive removal is enabled.
+fn count_files(host: &mut Host, paths: &[&OsStr], options: &Options) -> u64 {
 	let mut total = 0;
 	for p in paths {
 		if host.is_cancelled() {
@@ -1067,10 +1130,20 @@ fn count_files(host: &mut Host, paths: &[&OsStr], recursive: bool) -> u64 {
 			continue;
 		}
 		let path = Path::new(p);
-		if let Ok(md) = fs::symlink_metadata(host.resolve(path)) {
-			if md.is_dir() && !is_symlink_dir(&md) {
-				if recursive {
-					total += count_files_in_directory(host, path);
+		if let Ok(metadata) = fs::symlink_metadata(host.resolve(path)) {
+			if metadata.is_dir() && !is_symlink_dir(&metadata) {
+				if options.recursive {
+					// Progress counting uses fs::read_dir which has a symlink race
+					// between entry.file_type() and entry.metadata(). The actual
+					// removal uses DirFd which is race-free. When --one-file-system
+					// is set, skip progress counting to avoid counting files on
+					// a different filesystem that the actual removal would skip.
+					if options.one_fs || !options.progress {
+						total += 1; // Conservative estimate: count the directory itself
+					} else {
+						let root_device = filesystem_device(&metadata);
+						total += count_files_in_directory(host, path, options, root_device);
+					}
 				}
 			} else {
 				total += 1;
@@ -1082,13 +1155,18 @@ fn count_files(host: &mut Host, paths: &[&OsStr], recursive: bool) -> u64 {
 	total
 }
 
-/// A helper for `count_files` specialized for directories.
-fn count_files_in_directory(host: &mut Host, p: &Path) -> u64 {
+/// Count a directory tree using the same filesystem boundary as removal.
+fn count_files_in_directory(
+	host: &mut Host,
+	path: &Path,
+	options: &Options,
+	root_device: Option<u64>,
+) -> u64 {
 	if host.is_cancelled() {
 		return 0;
 	}
 	let mut entries_count = 0;
-	let Ok(entries) = fs::read_dir(host.resolve(p)) else {
+	let Ok(entries) = fs::read_dir(host.resolve(path)) else {
 		return 1;
 	};
 	for entry in entries.flatten() {
@@ -1096,7 +1174,17 @@ fn count_files_in_directory(host: &mut Host, p: &Path) -> u64 {
 			break;
 		}
 		entries_count += match entry.file_type() {
-			Ok(ft) if ft.is_dir() => count_files_in_directory(host, &entry.path()),
+			Ok(file_type) if file_type.is_dir() => {
+				let child_device = entry
+					.metadata()
+					.ok()
+					.and_then(|metadata| filesystem_device(&metadata));
+				if should_descend_into_directory(options, root_device, child_device) {
+					count_files_in_directory(host, &entry.path(), options, root_device)
+				} else {
+					0
+				}
+			},
 			Ok(_) => 1,
 			Err(_) => 0,
 		};
@@ -1104,8 +1192,6 @@ fn count_files_in_directory(host: &mut Host, p: &Path) -> u64 {
 	1 + entries_count
 }
 
-// TODO: implement one-file-system (this may get partially implemented in
-// walkdir)
 /// Remove (or unlink) the given files
 ///
 /// Returns true if it has encountered an error.
@@ -1156,7 +1242,7 @@ pub fn remove(host: &mut Host, files: &[&OsStr], options: &Options) -> bool {
 			Ok(metadata) => {
 				// Create progress bar on first successful file metadata read
 				if options.progress && progress_bar.is_none() {
-					progress_bar = create_progress_bar(host, files, options.recursive);
+					progress_bar = create_progress_bar(host, files, options);
 				}
 
 				any_files_processed = true;
@@ -1238,6 +1324,32 @@ fn remove_dir_recursive(
 	options: &Options,
 	progress_bar: Option<&ProgressBar>,
 ) -> bool {
+	let root_device = {
+		#[cfg(all(unix, not(target_os = "redox")))]
+		{
+			None
+		}
+		#[cfg(any(not(unix), target_os = "redox"))]
+		{
+			if options.one_fs {
+				fs::symlink_metadata(host.resolve(path))
+					.ok()
+					.and_then(|metadata| filesystem_device(&metadata))
+			} else {
+				None
+			}
+		}
+	};
+	remove_dir_recursive_with_root_device(host, path, options, progress_bar, root_device)
+}
+
+fn remove_dir_recursive_with_root_device(
+	host: &mut Host,
+	path: &Path,
+	options: &Options,
+	progress_bar: Option<&ProgressBar>,
+	root_device: Option<u64>,
+) -> bool {
 	if host.is_cancelled() {
 		return true;
 	}
@@ -1263,17 +1375,20 @@ fn remove_dir_recursive(
 	}
 
 	// Use secure traversal on Unix (except Redox) for all recursive directory
-	// removals
+	// removals.
 	#[cfg(all(unix, not(target_os = "redox")))]
 	{
+		let _ = root_device;
 		safe_remove_dir_recursive(host, path, options, progress_bar)
 	}
 
-	// Fallback for non-Unix, Redox, or use fs::remove_dir_all for very long paths
+	// Fallback for non-Unix, Redox, or use fs::remove_dir_all for very long paths.
 	#[cfg(any(not(unix), target_os = "redox"))]
 	{
-		if let Some(s) = path.to_str() {
-			if s.len() > 1000 {
+		if !options.one_fs {
+			if let Some(s) = path.to_str()
+				&& s.len() > 1000
+			{
 				let fs_path = match host.ensure_writable(path) {
 					Ok(path) => path,
 					Err(error) => return show_removal_error(host, error, path),
@@ -1304,8 +1419,23 @@ fn remove_dir_recursive(
 					match entry {
 						Err(_) => error = true,
 						Ok(entry) => {
-							let child_error =
-								remove_dir_recursive(host, &entry.path(), options, progress_bar);
+							let entry_path = entry.path();
+							if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+								let child_device = entry
+									.metadata()
+									.ok()
+									.and_then(|metadata| filesystem_device(&metadata));
+								if !should_descend_into_directory(options, root_device, child_device) {
+									continue;
+								}
+							}
+							let child_error = remove_dir_recursive_with_root_device(
+								host,
+								&entry_path,
+								options,
+								progress_bar,
+								root_device,
+							);
 							error = error || child_error;
 						},
 					}
@@ -1749,15 +1879,28 @@ mod tests {
 	}
 
 	#[test]
-	fn recursively_removes_directory_tree() {
+	fn one_file_system_removes_same_device_tree() {
 		let cwd = tempdir().unwrap();
 		fs::create_dir_all(cwd.path().join("tree/child")).unwrap();
 		fs::write(cwd.path().join("tree/child/file"), b"data").unwrap();
 
-		let (code, capture) = run_util::<Rm>(&["-r", "tree"], "", cwd.path());
+		let (code, capture) = run_util::<Rm>(&["-r", "--one-file-system", "tree"], "", cwd.path());
 
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(!cwd.path().join("tree").exists());
+	}
+
+	#[test]
+	fn one_file_system_preserves_a_different_device_boundary() {
+		let mut options = super::Options { one_fs: true, ..Default::default() };
+
+		assert!(super::should_descend_into_directory(&options, Some(1), Some(1)));
+		assert!(!super::should_descend_into_directory(&options, Some(1), Some(2)));
+		assert!(!super::should_descend_into_directory(&options, Some(1), None));
+		assert!(!super::should_descend_into_directory(&options, None, None));
+
+		options.one_fs = false;
+		assert!(super::should_descend_into_directory(&options, Some(1), Some(2)));
 	}
 
 	#[test]
