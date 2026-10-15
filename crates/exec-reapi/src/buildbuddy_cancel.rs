@@ -73,3 +73,16 @@ impl BuildBuddyCanceller {
 		Ok(())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn canceller_is_cloneable_without_connecting() {
+		let channel = Channel::from_static("http://127.0.0.1:50051").connect_lazy();
+		let canceller = BuildBuddyCanceller::from_channel(channel, Credential::new("test-key"));
+		let cloned = canceller.clone();
+		assert!(!format!("{cloned:?}").contains("test-key"));
+	}
+}

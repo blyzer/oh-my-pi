@@ -1079,9 +1079,13 @@ top of it in PR 1d.
 
 ## Status in omp
 
-**Status: Not started.** Proposed 2026-10-08 against `omp2` at `929f902235`. None of the components
-exist: no `omp-exec`, no REAPI client, no router, no `sv_exec_*` convars and no `omp.exec.*`
-telemetry. The reusable pieces are listed in Context.
+**Slice 1 status: implemented on `feat/adr0040-slice1-complete` (2026-10-15).** The
+`omp-exec-reapi` backend, feature-gated BuildBuddy invocation cancellation, Git-semantic envd
+capture, `omp-exec-buildbuddy` Run API backend, `CargoJust` planning, operator-only
+`sv_exec_*` configuration, and `--exec-policy remote-only` ADW dispatch are present. Remote
+proofs cover REAPI and Run API compilation, the Run API HTTP lifecycle, envd capture (including
+patch reconstruction and refusal cases), and the driver integration. Slice 1 still deliberately
+has no Local backend, fallback router, or action-cache reuse; those remain Slice 2 work.
 
 ### BuildBuddy coverage of REAPI
 
