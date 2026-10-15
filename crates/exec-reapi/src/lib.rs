@@ -97,24 +97,31 @@ pub mod proto {
 		}
 	}
 
-	/// Packages under `buildbuddy` (vendor-specific, buildbuddy-cancel only).
+	/// The vendor service package. Its imported `invocation` package lives at
+	/// this generated tree's sibling root, matching prost's package paths.
 	#[cfg(feature = "buildbuddy-cancel")]
 	pub mod buildbuddy {
 		package! {
 			/// `buildbuddy.service`.
 			service, "proto-buildbuddy", "buildbuddy.service.rs"
 		}
-		package! {
-			/// `invocation`.
-			invocation, "proto-buildbuddy", "invocation.rs"
-		}
-		package! {
-			/// `context`.
-			context, "proto-buildbuddy", "context.rs"
-		}
-		package! {
-			/// `user_id`.
-			user_id, "proto-buildbuddy", "user_id.rs"
-		}
+	}
+	/// BuildBuddy's invocation package.
+	#[cfg(feature = "buildbuddy-cancel")]
+	package! {
+		/// `invocation`.
+		invocation, "proto-buildbuddy", "invocation.rs"
+	}
+	/// BuildBuddy's request-context package.
+	#[cfg(feature = "buildbuddy-cancel")]
+	package! {
+		/// `context`.
+		context, "proto-buildbuddy", "context.rs"
+	}
+	/// BuildBuddy's user-id package.
+	#[cfg(feature = "buildbuddy-cancel")]
+	package! {
+		/// `user_id`.
+		user_id, "proto-buildbuddy", "user_id.rs"
 	}
 }

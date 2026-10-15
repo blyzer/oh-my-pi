@@ -5,9 +5,9 @@ use tonic::{Request, metadata::MetadataValue, transport::Channel};
 use crate::{
 	endpoint::{Endpoint, EndpointError, Scheme},
 	profile::Credential,
-	proto::buildbuddy::{
+	proto::{
+		buildbuddy::service::buildbuddy_service_client::BuildBuddyServiceClient,
 		invocation::CancelExecutionsRequest,
-		service::buildbuddy_service_client::BuildBuddyServiceClient,
 	},
 };
 
@@ -23,7 +23,7 @@ pub enum CancelConnectError {
 }
 
 /// Cloneable invocation canceller. The key is only written into gRPC metadata.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BuildBuddyCanceller {
 	client:     BuildBuddyServiceClient<Channel>,
 	credential: Credential,
