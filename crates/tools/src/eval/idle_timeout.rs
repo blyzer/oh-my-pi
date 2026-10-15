@@ -122,9 +122,11 @@ impl TimeoutHandle {
 	/// watchdog remains pending so it can be used directly in `select!`.
 	pub async fn expired(&self) {
 		loop {
-			// Register before inspecting state so a pause/resume between the
-			// inspection and select cannot be lost.
+			// `notified()` alone is lazy: enable registration before inspecting
+			// state, or `notify_waiters()` can be lost before the select polls.
 			let changed = self.inner.changed.notified();
+			tokio::pin!(changed);
+			changed.as_mut().enable();
 			let deadline = {
 				let state = self.inner.state.lock();
 				if state.expired_generation == Some(state.generation) {
@@ -137,11 +139,10 @@ impl TimeoutHandle {
 				}
 			};
 			let Some(deadline) = deadline else {
-				changed.await;
+				changed.as_mut().await;
 				continue;
 			};
 
-			tokio::pin!(changed);
 			let sleep = time::sleep_until(deadline);
 			tokio::pin!(sleep);
 			tokio::select! {
