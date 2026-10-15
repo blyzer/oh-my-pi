@@ -31,6 +31,7 @@ cargo nextest --version 2>/dev/null | grep -q '0\.9\.146' ||
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh # fetch-python.sh needs uv
 export NEXTEST_HIDE_PROGRESS_BAR=1 # Keep failures and the summary on separate CI log lines.
+export CARGO_BUILD_JOBS=4 # The 16 GB runner OOM-killed omp-envd's test compiler with unrestricted jobs.
 
 export CARGO_TARGET_DIR="$HOME/.cache/omp-target"
 mkdir -p "$HOME/.cache/omp-vendor"
