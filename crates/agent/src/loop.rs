@@ -3274,7 +3274,7 @@ impl<C: Inference> Kernel<C> {
 							crate::ToolScopedAbortReason::one(
 								Str::new(call_id.as_str()),
 								interrupt.label.clone(),
-								Str::new_static("another call was skipped after stream redirect"),
+								interrupt.sibling_label.clone(),
 							)
 						});
 						(scoped, Some((owner, interrupt)))
@@ -3712,6 +3712,15 @@ impl<C: Inference> Kernel<C> {
 			match message {
 				Up::Pause { active } => {
 					crate::set_paused(session, active)?;
+				},
+				// An interrupt accepted while the loop was not watching the
+				// mailbox (for example with a stream-redirect commit in flight)
+				// stops the turn at this admission boundary, before a resample
+				// can start; the journaled redirect stays durable.
+				Up::Interrupt => {
+					turn.cancel_turn();
+					cancelled = true;
+					break;
 				},
 				Up::Cancel => {
 					self.cancel.cancel_session();

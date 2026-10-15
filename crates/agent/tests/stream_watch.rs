@@ -6,27 +6,29 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use flume::Sender;
 use omp_agent::{
 	Director, DirectorCx, DirectorRegistry, DirectorStack, DispatchPolicy, HookGate, HookPhase,
 	Kernel, KernelEvent, OnFailure, PartialOutput, RunControl, SourceRef, StaticPrompt,
 	StreamEffect, StreamFragment, StreamInterrupt, StreamObservation, StreamVerdict, StreamWatch,
-	TurnInput, TurnStop, When,
+	TurnInput, TurnStop, Up, When,
 };
-use omp_ai::{ChatRequest, ContentPart, Role};
+use omp_ai::{ChatEvent, ChatRequest, ContentPart, OpaqueJson, Role, ToolCall, ToolCallId};
 use omp_core::{Str, sf};
-use omp_dom::{PropKey, Value};
+use omp_dom::{KnownTag, PropId, PropKey, Tag, Value};
 use omp_journal::blob::BlobStore;
 use omp_proto::toolhost::v1::HookEventId;
+use omp_tool::Part;
 
 mod support;
 
-use support::{ScriptedInference, fresh_session, journal_entries, registry, text_script};
-
+use support::{ScriptedInference, fresh_session, journal_entries, registry, spec, text_script};
 const FAMILY: &str = "test-watch";
 const INJECTION: &str = "Rewrite without the forbidden word.";
 
 /// Interrupts every response whose visible text contains `forbidden`.
-struct ForbiddenWord;
+struct ForbiddenWord(PartialOutput);
 
 impl Director for ForbiddenWord {
 	fn id(&self) -> &str {
@@ -34,11 +36,11 @@ impl Director for ForbiddenWord {
 	}
 
 	fn watch_stream(&self, _: &DirectorCx<'_>, _: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
-		Some(Box::new(Watch))
+		Some(Box::new(Watch(self.0)))
 	}
 }
 
-struct Watch;
+struct Watch(PartialOutput);
 
 impl StreamWatch for Watch {
 	fn fragment(&mut self, fragment: StreamFragment<'_>) -> StreamVerdict {
@@ -52,10 +54,11 @@ impl StreamWatch for Watch {
 		let mut payload = serde_json::Map::new();
 		payload.insert("rule".to_owned(), serde_json::Value::from("forbidden-word"));
 		StreamVerdict::Interrupt(StreamInterrupt {
-			culprit: None,
-			partial: PartialOutput::Discard,
-			label:   Str::new_static("stream rule forbidden-word"),
-			effect:  StreamEffect {
+			culprit:       None,
+			partial:       self.0,
+			label:         Str::new_static("stream rule forbidden-word"),
+			sibling_label: Str::new_static("interrupted by a stream rule on another tool call"),
+			effect:        StreamEffect {
 				developer: Some(Str::new_static(INJECTION)),
 				notice: Some(Str::new_static("forbidden word redirected")),
 				notice_name: Some(Str::new_static("stream-rule")),
@@ -63,6 +66,86 @@ impl StreamWatch for Watch {
 					event: HookEventId::HookEventStreamRuleTriggered,
 					payload,
 				}),
+				..StreamEffect::default()
+			},
+		})
+	}
+}
+
+/// Redirects only the named tool call before execution can begin.
+struct ToolCulprit;
+
+impl Director for ToolCulprit {
+	fn id(&self) -> &str {
+		FAMILY
+	}
+
+	fn watch_stream(&self, _: &DirectorCx<'_>, _: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
+		Some(Box::new(ToolWatch))
+	}
+}
+
+struct ToolWatch;
+
+impl StreamWatch for ToolWatch {
+	fn fragment(&mut self, _: StreamFragment<'_>) -> StreamVerdict {
+		StreamVerdict::Pass
+	}
+
+	fn call_ready(&mut self, _: u32, call: &ToolCall) -> StreamVerdict {
+		if call.id.as_str() != "culprit-edit" {
+			return StreamVerdict::Pass;
+		}
+		StreamVerdict::Interrupt(StreamInterrupt {
+			culprit:       Some(call.id.clone()),
+			partial:       PartialOutput::Discard,
+			label:         Str::new_static("stream rule no-unwrap"),
+			sibling_label: Str::new_static("interrupted by a stream rule on another tool call"),
+			effect:        StreamEffect {
+				developer: Some(Str::new_static(INJECTION)),
+				notice: Some(Str::new_static("tool call redirected")),
+				notice_name: Some(Str::new_static("stream-rule")),
+				..StreamEffect::default()
+			},
+		})
+	}
+}
+
+/// Queues a user interrupt with the redirect, exercising the next admission
+/// boundary before a resample can start.
+struct RedirectThenInterrupt(Sender<Up>);
+
+impl Director for RedirectThenInterrupt {
+	fn id(&self) -> &str {
+		FAMILY
+	}
+
+	fn watch_stream(&self, _: &DirectorCx<'_>, _: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
+		Some(Box::new(InterruptWatch(self.0.clone())))
+	}
+}
+
+struct InterruptWatch(Sender<Up>);
+
+impl StreamWatch for InterruptWatch {
+	fn fragment(&mut self, fragment: StreamFragment<'_>) -> StreamVerdict {
+		if !fragment
+			.bytes
+			.windows(9)
+			.any(|window| window == b"forbidden")
+		{
+			return StreamVerdict::Pass;
+		}
+		let _ = self.0.send(Up::Interrupt);
+		StreamVerdict::Interrupt(StreamInterrupt {
+			culprit:       None,
+			partial:       PartialOutput::Discard,
+			label:         Str::new_static("stream rule forbidden-word"),
+			sibling_label: Str::new_static("interrupted by a stream rule on another tool call"),
+			effect:        StreamEffect {
+				developer: Some(Str::new_static(INJECTION)),
+				notice: Some(Str::new_static("forbidden word redirected")),
+				notice_name: Some(Str::new_static("stream-rule")),
 				..StreamEffect::default()
 			},
 		})
@@ -118,6 +201,68 @@ fn prop<'a>(node: &'a omp_dom::Node, name: &'static str) -> Option<&'a str> {
 		.and_then(Value::as_str)
 }
 
+fn two_tool_calls() -> Vec<ChatEvent> {
+	let read = ToolCall {
+		id:        ToolCallId::from("innocent-read"),
+		name:      Str::new_static("read"),
+		arguments: OpaqueJson::new(serde_json::json!({})),
+	};
+	let edit = ToolCall {
+		id:        ToolCallId::from("culprit-edit"),
+		name:      Str::new_static("edit"),
+		arguments: OpaqueJson::new(serde_json::json!({})),
+	};
+	vec![
+		ChatEvent::ToolCallStarted { index: 0, id: read.id.clone(), name: read.name.clone() },
+		ChatEvent::ToolArgumentsDelta { index: 0, bytes: Bytes::from_static(b"{}") },
+		ChatEvent::ToolCallReady { index: 0, call: read },
+		ChatEvent::ToolCallStarted { index: 1, id: edit.id.clone(), name: edit.name.clone() },
+		ChatEvent::ToolArgumentsDelta { index: 1, bytes: Bytes::from_static(b"{}") },
+		ChatEvent::ToolCallReady { index: 1, call: edit },
+	]
+}
+
+/// An aborted call's model-visible label lives on its terminal error `<diag>`.
+/// A `Discard` redirect excludes the call from the resample projection.
+fn settled_result_text(dom: &omp_dom::Dom, call_id: &str) -> String {
+	let call = dom
+		.select(&format!("body turn [id={call_id}]"))
+		.expect("selector")
+		.into_iter()
+		.next()
+		.expect("the settled call element journals");
+	let diag = dom
+		.children(call)
+		.iter()
+		.filter_map(|&handle| dom.get(handle))
+		.find(|node| {
+			node.tag == Tag::Known(KnownTag::Diag)
+				&& node
+					.prop(&PropKey::from(PropId::Severity))
+					.and_then(Value::as_str)
+					== Some("error")
+		})
+		.expect("the aborted call's error diagnostic journals");
+	if let Some(Value::Json(data)) = diag.prop(&PropKey::from(PropId::Data)) {
+		if let Ok(parts) = serde_json::from_str::<Vec<Part>>(data.get()) {
+			return parts
+				.iter()
+				.map(|part| match part {
+					Part::Text { text } => text.as_str().to_owned(),
+					Part::Json { json } => String::from_utf8_lossy(&json[..]).into_owned(),
+					Part::Blob { .. } => String::new(),
+				})
+				.collect::<Vec<_>>()
+				.join("\n");
+		}
+	}
+	diag
+		.prop(&PropKey::from(PropId::Text))
+		.and_then(Value::as_str)
+		.unwrap_or_default()
+		.to_owned()
+}
+
 #[tokio::test]
 async fn a_watcher_interrupt_redirects_resamples_and_replays() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -125,7 +270,7 @@ async fn a_watcher_interrupt_redirects_resamples_and_replays() {
 	let (inference, requests) =
 		ScriptedInference::new([text_script("a forbidden answer"), text_script("a clean answer")]);
 	let mut directors = DirectorRegistry::standard();
-	directors.register_extension(Box::new(ForbiddenWord));
+	directors.register_extension(Box::new(ForbiddenWord(PartialOutput::Discard)));
 	let (gate, dispatches) = HookGate::channel();
 	let gate = Arc::new(gate);
 	gate
@@ -248,7 +393,7 @@ async fn the_per_turn_cap_downgrades_further_interrupts_to_notes() {
 		text_script("forbidden four"),
 	]);
 	let mut directors = DirectorRegistry::standard();
-	directors.register_extension(Box::new(ForbiddenWord));
+	directors.register_extension(Box::new(ForbiddenWord(PartialOutput::Discard)));
 	let (gate, dispatches) = HookGate::channel();
 	let gate = Arc::new(gate);
 	gate
@@ -311,4 +456,188 @@ async fn the_per_turn_cap_downgrades_further_interrupts_to_notes() {
 		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::standard())
 			.expect("journal replays");
 	assert_eq!(replayed.dom().snapshot(), live, "the cap count survives replay");
+}
+
+#[tokio::test]
+async fn keep_projects_the_partial_assistant_and_the_redirect_placeholders() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("keep.oms");
+	let (inference, requests) =
+		ScriptedInference::new([text_script("a forbidden answer"), text_script("a clean answer")]);
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(ForbiddenWord(PartialOutput::Keep)));
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		DispatchPolicy::new(BlobStore::open(directory.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_director_registry(directors.clone());
+	let mut session = fresh_session(&journal_path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("watcher engages");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("redirected turn completes");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2);
+	assert!(
+		assistant_texts(&requests[1])
+			.iter()
+			.any(|text| text.contains("forbidden")),
+		"keep projects the interrupted assistant into the resample"
+	);
+	let interrupted = session
+		.dom()
+		.select(&format!("body turn assistant[interrupt={FAMILY}]"))
+		.expect("selector")
+		.next()
+		.expect("interrupted assistant");
+	assert_eq!(
+		prop(session.dom().get(interrupted).expect("assistant"), "context"),
+		None,
+		"keep never excludes the partial assistant"
+	);
+}
+
+#[tokio::test]
+async fn tool_culprit_and_siblings_are_settled_then_discarded_before_resampling() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("tool-redirect.oms");
+	let (inference, requests) = ScriptedInference::new([two_tool_calls(), text_script("clean")]);
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(ToolCulprit));
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("read", 1, "unused"), spec("edit", 1, "unused")]),
+		DispatchPolicy::new(BlobStore::open(directory.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_director_registry(directors.clone());
+	let mut session = fresh_session(&journal_path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("watcher engages");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("tool redirect completes");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 2, "a redirect resamples before tool execution");
+	assert!(
+		settled_result_text(session.dom(), "culprit-edit").contains("stream rule no-unwrap"),
+		"the culprit receives its matching label"
+	);
+	assert!(
+		settled_result_text(session.dom(), "innocent-read")
+			.contains("interrupted by a stream rule on another tool call"),
+		"siblings receive the neutral label"
+	);
+	let request = &requests.lock()[1];
+	assert!(
+		!request
+			.messages
+			.iter()
+			.any(|message| message.role == Role::Tool),
+		"discard drops every placeholder result with the interrupted assistant"
+	);
+}
+
+#[tokio::test]
+async fn interrupt_accepted_with_a_redirect_prevents_the_resample() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("redirect-interrupt.oms");
+	let (inference, requests) = ScriptedInference::new([text_script("a forbidden answer")]);
+	let kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		DispatchPolicy::new(BlobStore::open(directory.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mailbox = kernel.mailbox();
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(RedirectThenInterrupt(mailbox)));
+	let mut kernel = kernel.with_director_registry(directors.clone());
+	let mut session = fresh_session(&journal_path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("watcher engages");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("interrupt settles the turn");
+
+	assert_eq!(outcome.stop, TurnStop::Cancelled);
+	assert_eq!(requests.lock().len(), 1, "no resample starts after the accepted interrupt");
+	assert_eq!(
+		session
+			.dom()
+			.select(&format!("body turn assistant[interrupt={FAMILY}]"))
+			.expect("selector")
+			.count(),
+		1,
+		"the committed redirect remains durable"
+	);
+}
+
+#[tokio::test]
+async fn redirect_consumes_the_request_budget_before_its_resample() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("redirect-budget.oms");
+	let (inference, requests) = ScriptedInference::new([text_script("a forbidden answer")]);
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(ForbiddenWord(PartialOutput::Discard)));
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		DispatchPolicy::new(BlobStore::open(directory.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_director_registry(directors.clone());
+	let mut session = fresh_session(&journal_path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("watcher engages");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+			RunControl::default()
+				.with_request_budget(1)
+				.with_request_budget_notice(false),
+		)
+		.await
+		.expect("budget blocks the resample");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 1, "the interrupted provider request consumes the budget");
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn notice[custom:name=request-budget]")
+			.expect("selector")
+			.count(),
+		1
+	);
 }

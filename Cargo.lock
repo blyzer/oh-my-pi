@@ -7603,6 +7603,8 @@ dependencies = [
  "omp-tool",
  "omp-vocab",
  "parking_lot",
+ "proptest",
+ "regex",
  "regex-automata",
  "serde",
  "serde_json",

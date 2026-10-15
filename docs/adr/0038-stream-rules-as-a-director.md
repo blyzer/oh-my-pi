@@ -400,12 +400,11 @@ conjunction, the per-turn redirect cap is 3 and downgrades to `Note`, `astCondit
 rules are later records, omp2 ships no built-in stream rules, and interrupted-response usage is
 not receipted. The decision text above already states each of these; the record is accepted.
 
-## Status in omp
-
-**Status: Partially implemented (plan steps 1-5 done; the test plan and two decision details are open, listed below).** Verified 2026-10-04
-against `omp2` at `083b38fe7d`, plus the step 5 changes recorded here. The generic `StreamWatch`
-hook and loop redirect are in `crates/agent`; the built-in Director, incremental DFA matcher,
-policy convars, discovery filtering, and driver installation are also present.
+**Status: Partially implemented (plan steps 1-5 done; targeted agent and driver test-plan
+coverage is recorded below; two implementation decisions remain open).** Verified 2026-10-14
+against current `omp2`, plus the step 5 changes recorded here. The generic `StreamWatch` hook and
+loop redirect are in `crates/agent`; the built-in Director, incremental DFA matcher, policy
+convars, discovery filtering, and driver installation are also present.
 
 Tool-specific authored-text projections use the `omp-tool` contract. Hashline `edit` projects
 inserted rows, replace projects replacement text, patch and apply-patch project added lines or
@@ -417,21 +416,28 @@ CLI and the hook rename, emitter, and host surfaces (see the two "Surfaces as bu
 below).
 
 Verification notes. The matcher, Director and policy types live in one file,
+
 `crates/agent/src/directors/stream_rules.rs` (not the `stream_rules/matcher.rs` split named in plan
 step 2); the six convars (`ai_stream_rules_*`) are in `crates/agent/src/vars.rs` and
 `AI_STREAM_REDIRECT_CAP` in `crates/ai`; driver installation is in
-`crates/driver/src/headless/kernel.rs`. Coverage: unit tests in `stream_rules.rs` (matching, scope,
-path gates, typed compile warnings, the probe agreeing with the live watch);
-`crates/agent/tests/stream_watch.rs` drives a scripted watcher through the loop (redirect, the
-trailing developer item, the excluded assistant, the notice, the `stream_rule_triggered`
-observation after commit, the cap downgrading to `Note`, replay equality); `crates/driver`
-covers `omp rules` composition; P7 (`chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit`)
-renders a project rule's redirect on a real PTY. Still unproven: proptests over byte splits, the
-JSON-string decoder, the allocation-free Pass path, rewind across a redirect, `Up::Interrupt`
-during a redirect, the request-budget interaction, `Keep` projection, tool-culprit labels through
-the loop, and the P2/P5/P6 rows of the test plan. The Director also still compiles its rules into
-one `StreamRuleSet` without the pooled per-key caches §5 describes, and the notice and the hook
-event carry no matched excerpt (§4).
+`crates/driver/src/headless/kernel.rs`. Coverage: unit tests in `stream_rules.rs` (matching,
+scope, path gates, typed compile warnings, probe/live-watch agreement, and arbitrary byte-split
+property coverage against `regex::bytes::RegexSet`); `crates/agent/tests/stream_watch.rs` drives
+a scripted watcher through the loop (redirect, trailing developer item, excluded assistant,
+notice, `stream_rule_triggered` after commit, cap downgrade to `Note`, replay equality, `Keep`
+projection, tool culprit/sibling labels, interrupt during redirect, and request-budget admission);
+`crates/driver` verifies that stream rules leave prompt facts but remain `rule://` readable, invalid
+condition siblings warn without hiding valid conditions, and agent-class filtering reaches only
+the child that admits a rule; P7
+(`chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit`) renders a project
+rule's redirect on a real PTY. Still unproven: byte-identical no-watcher journals, the
+JSON-string decoder, the allocation-free Pass path, rewind across a redirect, a failed response
+before the redirect transaction, non-interrupting reminder continuation, hidden/compaction turn
+gating, and the P2/P5/P6 rows of the test plan.
+
+**Open implementation decisions (owner):** the matcher currently keeps one `StreamRuleSet` rather
+than the pooled per-key caches §5 describes; and redirect notices plus hook events omit the
+matched excerpt §4 describes. Neither is resolved by this test coverage.
 
 ### Surfaces as built: `omp rules`
 

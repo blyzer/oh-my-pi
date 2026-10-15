@@ -793,6 +793,7 @@ impl Watch {
 				PartialOutput::Discard
 			},
 			label: sf!("stream rule {}", rule.name),
+			sibling_label: Str::new_static("interrupted by a stream rule on another tool call"),
 			effect,
 		})
 	}
@@ -897,6 +898,8 @@ impl StreamWatch for Watch {
 
 #[cfg(test)]
 mod tests {
+	use proptest::prelude::*;
+
 	use super::*;
 
 	fn make_watch(
@@ -1202,5 +1205,65 @@ mod tests {
 			panic!("the live watch interrupts where the probe hits")
 		};
 		assert_eq!(live.label.as_str(), "stream rule danger");
+	}
+
+	proptest! {
+		#[test]
+		fn incremental_text_matching_agrees_with_regex_set_across_arbitrary_byte_splits(
+			patterns in proptest::collection::vec("[a-z]{1,4}", 1..5),
+			text in proptest::collection::vec(any::<u8>(), 0..96),
+			splits in proptest::collection::vec(any::<bool>(), 0..96),
+		) {
+			let expected = regex::bytes::RegexSet::new(&patterns)
+				.expect("generated patterns compile")
+				.is_match(&text);
+			let rules = patterns
+				.iter()
+				.enumerate()
+				.map(|(index, pattern)| RulePattern {
+					name:           sf!("rule-{index}"),
+					body:           Str::new_static("Follow the repository rule."),
+					pattern:        Str::new(pattern),
+					scope:          vec![Str::new_static("text")],
+					globs:          Vec::new(),
+					interrupt_mode: None,
+				})
+				.collect();
+			let set = std::sync::Arc::new(
+				StreamRuleSet::compile(rules)
+					.set
+					.expect("generated conditions compile"),
+			);
+			let mut watch = Watch::new(
+				set,
+				omp_core::FastHashSet::default(),
+				StreamRuleInterrupt::Always,
+				StreamRuleContext::Discard,
+				1,
+			);
+			let mut start = 0;
+			let mut matched = false;
+			for (offset, split) in splits.iter().copied().enumerate().take(text.len()) {
+				if !split {
+					continue;
+				}
+				let verdict = watch.fragment(fragment(0, StreamSource::Text, &text[start..=offset]));
+				matched = !matches!(verdict, StreamVerdict::Pass);
+				start = offset + 1;
+				if matched {
+					break;
+				}
+			}
+			if !matched && start < text.len() {
+				matched = !matches!(
+					watch.fragment(fragment(0, StreamSource::Text, &text[start..])),
+					StreamVerdict::Pass
+				);
+			}
+			if !matched {
+				matched = !matches!(watch.block_end(0), StreamVerdict::Pass);
+			}
+			prop_assert_eq!(matched, expected);
+		}
 	}
 }
