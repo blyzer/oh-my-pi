@@ -470,6 +470,6 @@ mod tests {
 		let value = uuid_v4();
 		assert_eq!(value.len(), 36);
 		assert_eq!(value.as_bytes()[14], b'4');
-		assert_eq!(value.as_bytes()[19] & 0xc0, 0x80);
+		assert!(matches!(value.as_bytes()[19], b'8'..=b'9' | b'a'..=b'b'));
 	}
 }
