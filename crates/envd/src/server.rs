@@ -11787,6 +11787,9 @@ async fn send_workspace_operation_error(
 		| WorkspaceOperationError::InvalidGeneration(_)
 		| WorkspaceOperationError::IsolationBaselineTooLarge(_)
 		| WorkspaceOperationError::NotARepository
+		| WorkspaceOperationError::PatchBaseUnavailable
+		| WorkspaceOperationError::PatchTooLarge { .. }
+		| WorkspaceOperationError::PatchCredentials
 		| WorkspaceOperationError::DenyGlob { .. }
 		| WorkspaceOperationError::InvalidWorktreeName => {
 			send_error(
@@ -11802,6 +11805,8 @@ async fn send_workspace_operation_error(
 		| WorkspaceOperationError::IsolationPreflight(_)
 		| WorkspaceOperationError::InvalidSnapshotRecord(_)
 		| WorkspaceOperationError::InputPaths { .. }
+		| WorkspaceOperationError::PatchVcs { .. }
+		| WorkspaceOperationError::PatchChanged { .. }
 		| WorkspaceOperationError::DenyGlobSet(_)
 		| WorkspaceOperationError::CredentialRules(_)
 		| WorkspaceOperationError::InvalidWorktreeRecord(_) => {

@@ -34,7 +34,10 @@ jobs:
   package:
     name: Package and install-smoke omp (macOS arm64)
     runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
-    timeout-minutes: 180
+    # The release LTO build can exceed three hours on a cold/self-hosted
+    # Apple-silicon runner; cancellation at the old limit produced no compiler
+    # diagnostic and left the package job inconclusive.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -73,7 +76,11 @@ jobs:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
 
       # `just build-release`, spelled out so the runner needs no `just`.
+      # Limit concurrent Cargo units: the LTO CPython link is memory-heavy and
+      # unrestricted parallelism can swap until the package timeout.
       - name: Build release omp
+        env:
+          CARGO_BUILD_JOBS: "4"
         run: |
           PYO3_CONFIG_FILE="$PWD/vendor/python-release/pyo3-config.txt" \
             cargo build -p omp-app --bin omp --release --locked
