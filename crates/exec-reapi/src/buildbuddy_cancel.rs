@@ -6,7 +6,7 @@ use crate::{
 	endpoint::{Endpoint, EndpointError, Scheme},
 	profile::Credential,
 	proto::{
-		buildbuddy::service::buildbuddy_service_client::BuildBuddyServiceClient,
+		buildbuddy::service::build_buddy_service_client::BuildBuddyServiceClient,
 		invocation::CancelExecutionsRequest,
 	},
 };

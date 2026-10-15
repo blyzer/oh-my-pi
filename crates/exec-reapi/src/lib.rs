@@ -106,19 +106,16 @@ pub mod proto {
 			service, "proto-buildbuddy", "buildbuddy.service.rs"
 		}
 	}
-	/// BuildBuddy's invocation package.
 	#[cfg(feature = "buildbuddy-cancel")]
 	package! {
 		/// `invocation`.
 		invocation, "proto-buildbuddy", "invocation.rs"
 	}
-	/// BuildBuddy's request-context package.
 	#[cfg(feature = "buildbuddy-cancel")]
 	package! {
 		/// `context`.
 		context, "proto-buildbuddy", "context.rs"
 	}
-	/// BuildBuddy's user-id package.
 	#[cfg(feature = "buildbuddy-cancel")]
 	package! {
 		/// `user_id`.
