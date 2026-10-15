@@ -15,10 +15,10 @@ use hyper_util::{
 	rt::TokioExecutor,
 };
 use omp_adw::Posture;
-use omp_core::{CowBytes, ExposeSecret, SecretString, Str, base64};
+use omp_core::{ExposeSecret, SecretString, Str, base64};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelSupport, ExecutionBackend, ExecutionError,
-	ExecutionEvent, ExecutionRequest, ExecutionRun, NeedSet, Platform, Reattach,
+	ExecutionRequest, NeedSet, Platform, Reattach,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -306,7 +306,7 @@ fn shell_command(argv: &[Str], cwd: &Str) -> Result<String, ApiError> {
 		|| argv[0].contains('/')
 		|| argv[0].is_empty()
 		|| cwd.starts_with('/')
-		|| cwd.split('/').any(|part| part == "..")
+		|| cwd.split("/").any(|part| part == "..")
 	{
 		return Err(ApiError::InvalidCommand);
 	}
