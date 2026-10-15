@@ -8368,6 +8368,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-exec-reapi"
+version = "2.0.0"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "flume",
+ "futures",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "parking_lot",
+ "prost",
+ "prost-types",
+ "protox",
+ "rand 0.10.2",
+ "strum",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "zstd",
+]
+
+[[package]]
 name = "omp-ext"
 version = "2.0.0"
 dependencies = [
@@ -12860,6 +12886,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

@@ -1,0 +1,25 @@
+// Excerpt of proto/invocation.proto from buildbuddy-io/buildbuddy at commit
+// 7f12d987923b291095dcee0f2674b2dc06d1bd4d (MIT Expat, Copyright (c)
+// 2020-present Iteration, Inc.; see ../../NOTICE).
+//
+// Only the two messages that BuildBuddyService.CancelExecutions exchanges are
+// retained. Package, message names, field names and field numbers are
+// unchanged, so the wire encoding is identical to the upstream definition;
+// every other message of the upstream file is omitted on purpose.
+
+syntax = "proto3";
+
+import "proto/context.proto";
+
+package invocation;
+
+message CancelExecutionsRequest {
+  context.RequestContext request_context = 1;
+
+  // The ID of the invocation to be canceled.
+  string invocation_id = 2;
+}
+
+message CancelExecutionsResponse {
+  context.ResponseContext response_context = 1;
+}
