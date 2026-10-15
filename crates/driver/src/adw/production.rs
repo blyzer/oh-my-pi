@@ -31,7 +31,10 @@ use omp_proto::env::v1::{
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use super::{AdwHost, PhaseResult, PhaseSpec};
+use super::{
+	AdwHost, PhaseResult, PhaseSpec,
+	remote::{AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_POLICY, eligible},
+};
 use crate::{
 	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
@@ -76,22 +79,29 @@ pub enum ProductionError {
 	/// A code phase was dispatched in a workspace that is not trusted.
 	#[error("workspace is not trusted; adw code phases are withheld")]
 	UntrustedWorkspace,
+	/// The remote-only backend or input capture failed.
+	#[error("remote workflow code phase failed")]
+	Remote(#[from] RemoteError),
+	/// A remote phase was interrupted and its best-effort cancel was requested.
+	#[error("remote workflow code phase was cancelled")]
+	Cancelled,
 }
 
 /// Production owner for one workflow run.
 pub struct ProductionAdwHost {
-	root:            PathBuf,
-	data_dir:        PathBuf,
-	model:           Str,
-	model_override:  bool,
-	ctx:             Arc<omp_con::Ctx>,
-	resolver:        FilesystemResolver,
+	pub(super) root:      PathBuf,
+	data_dir:             PathBuf,
+	model:                Str,
+	model_override:       bool,
+	pub(super) ctx:       Arc<omp_con::Ctx>,
+	resolver:             FilesystemResolver,
 	/// The workspace trust decision the run executes under: code phases run
 	/// only when it trusts, and model phases' child kernels inherit it.
-	workspace_trust: TrustDecision,
+	workspace_trust:      TrustDecision,
 	/// The project Environment, started by the first code phase: a workflow
 	/// of model phases alone never needs one of its own.
-	environment:     OnceCell<omp_envd::ProjectEnvironment>,
+	environment:          OnceCell<omp_envd::ProjectEnvironment>,
+	exec_policy_override: Option<AdwExecPolicy>,
 }
 
 impl ProductionAdwHost {
@@ -118,12 +128,25 @@ impl ProductionAdwHost {
 			resolver: FilesystemResolver,
 			workspace_trust,
 			environment: OnceCell::new(),
+			exec_policy_override: None,
 		})
+	}
+
+	/// Overrides the operator's execution policy for this process only.
+	pub fn with_exec_policy(mut self, policy: AdwExecPolicy) -> Self {
+		self.exec_policy_override = Some(policy);
+		self
+	}
+
+	fn exec_policy(&self) -> AdwExecPolicy {
+		self
+			.exec_policy_override
+			.unwrap_or_else(|| SV_EXEC_POLICY.get(&self.ctx))
 	}
 
 	/// The Environment client code phases run through, attaching the project
 	/// Environment under this run's control context on first use.
-	async fn environment(&self) -> Result<&EnvClient, ProductionError> {
+	pub(super) async fn environment(&self) -> Result<&EnvClient, ProductionError> {
 		let environment = self
 			.environment
 			.get_or_try_init(|| async {
@@ -188,11 +211,15 @@ impl ProductionAdwHost {
 
 	async fn run_command(
 		&self,
+		phase: &Phase,
 		binary: &str,
 		args: &[Str],
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<PhaseResult, ProductionError> {
+		if self.exec_policy() == AdwExecPolicy::RemoteOnly && eligible(binary, args) {
+			return self.run_remote(phase, args, cwd, cancel).await;
+		}
 		let directory = match cwd {
 			Some(cwd) => {
 				let directory = fs::canonicalize(self.root.join(cwd))?;
@@ -341,6 +368,16 @@ impl AdwHost for ProductionAdwHost {
 		&self.root
 	}
 
+	fn phase_posture(&self, _phase: &Phase, spec: &PhaseSpec) -> Result<Posture, Self::Error> {
+		if let PhaseSpec::Command { binary, args, .. } = spec
+			&& self.exec_policy() == AdwExecPolicy::RemoteOnly
+			&& eligible(binary, args)
+		{
+			return Ok(REMOTE_POSTURE);
+		}
+		self.posture()
+	}
+
 	fn posture(&self) -> Result<Posture, Self::Error> {
 		let sandbox = SandboxState::probe(&self.ctx, &self.root);
 		let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(&self.ctx);
@@ -395,7 +432,7 @@ impl AdwHost for ProductionAdwHost {
 					return Err(ProductionError::UntrustedWorkspace);
 				}
 				self
-					.run_command(binary.as_str(), args, cwd.as_deref(), cancel)
+					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
 			PhaseSpec::Prompt { text } => {

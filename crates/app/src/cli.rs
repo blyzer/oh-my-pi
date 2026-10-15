@@ -1078,6 +1078,9 @@ pub enum AdwCommand {
 		/// Attempts one phase may consume before the run halts.
 		#[arg(long, default_value_t = omp_adw::DEFAULT_MAX_ATTEMPTS)]
 		max_attempts: u32,
+		/// Override operator execution placement for this run.
+		#[arg(long, value_parser = ["local-only", "remote-only"])]
+		exec_policy:  Option<Str>,
 	},
 }
 

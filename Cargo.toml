@@ -136,7 +136,8 @@ omp-driver = { path = "crates/driver", version = "2.0.0", default-features = fal
 omp-env = { path = "crates/env", version = "2.0.0" }
 omp-envd = { path = "crates/envd", version = "2.0.0" }
 omp-exec = { path = "crates/exec", version = "2.0.0" }
-omp-exec-reapi = { path = "crates/exec-reapi", version = "2.0.0" }
+omp-exec-buildbuddy = { path = "crates/exec-buildbuddy", version = "2.0.0" }
+omp-exec-reapi = { path = "crates/exec-reapi", version = "2.0.0", default-features = false }
 omp-ext = { path = "crates/ext", version = "2.0.0" }
 omp-gui = { path = "crates/gui", version = "2.0.0" }
 omp-edit = { path = "crates/edit", version = "2.0.0" }

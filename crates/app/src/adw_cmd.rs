@@ -9,7 +9,7 @@ use std::{
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
 use omp_driver::{
-	adw::{RunStatus, definition, production::ProductionAdwHost},
+	adw::{RunStatus, definition, production::ProductionAdwHost, remote::AdwExecPolicy},
 	workspace_trust::evaluate_workspace,
 };
 use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
@@ -21,8 +21,8 @@ use crate::{cli::AdwCommand, process_ctx_with};
 pub async fn run(command: AdwCommand) -> miette::Result<()> {
 	match command {
 		AdwCommand::List { project } => list(&project),
-		AdwCommand::Run { workflow, project, model, max_attempts } => {
-			execute(&workflow, &project, model, max_attempts).await
+		AdwCommand::Run { workflow, project, model, max_attempts, exec_policy } => {
+			execute(&workflow, &project, model, max_attempts, exec_policy).await
 		},
 	}
 }
@@ -56,12 +56,17 @@ async fn execute(
 	project: &Path,
 	model: Option<Str>,
 	max_attempts: u32,
+	exec_policy: Option<Str>,
 ) -> miette::Result<()> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let model_override = model.is_some();
 	let model = model.unwrap_or_else(|| Str::new_static("@smol"));
-	let host = open_host(project, data_dir, model, model_override)?;
+	let mut host = open_host(project, data_dir, model, model_override)?;
+	if let Some(policy) = exec_policy {
+		let policy: AdwExecPolicy = policy.parse().into_diagnostic()?;
+		host = host.with_exec_policy(policy);
+	}
 	let cancel = CancellationToken::new();
 	let exit = {
 		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);

@@ -46,6 +46,8 @@ omp-core.workspace = true
 omp-scribe.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
+omp-exec.workspace = true
+omp-exec-reapi = { workspace = true, default-features = false, features = ["buildbuddy-cancel"] }
 omp-ext.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true

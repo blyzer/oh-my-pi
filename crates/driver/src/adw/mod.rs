@@ -13,6 +13,7 @@
 
 pub mod definition;
 pub mod production;
+pub mod remote;
 
 use std::{error::Error as StdError, future::Future, path::Path};
 
@@ -116,6 +117,11 @@ pub trait AdwHost: Sync {
 	/// treats an unreported posture as unverified and refuses phases that
 	/// declare requirements, which is the safe direction.
 	fn posture(&self) -> Result<Posture, Self::Error>;
+	/// Reports the actual placement's posture for one phase. Hosts with one
+	/// execution environment inherit the run-wide value.
+	fn phase_posture(&self, _phase: &Phase, _spec: &PhaseSpec) -> Result<Posture, Self::Error> {
+		self.posture()
+	}
 
 	/// Runs one phase and reports what it produced.
 	fn dispatch<'a>(
@@ -170,7 +176,21 @@ pub async fn run<H: AdwHost>(
 		if cancel.is_cancelled() {
 			return Ok(cancelled(records));
 		}
-		match run.next_step() {
+		let mut posture_error = None;
+		let step = run.next_step_with_posture(|phase| {
+			let spec = definition.spec(&phase.name)?;
+			match host.phase_posture(phase, spec) {
+				Ok(posture) => Some(posture),
+				Err(error) => {
+					posture_error = Some(error);
+					None
+				},
+			}
+		});
+		if let Some(error) = posture_error {
+			return Err(Error::Posture(error));
+		}
+		match step {
 			Step::Run { phase, attempt, correction, inputs } => {
 				let Some(spec) = definition.spec(&phase.name) else {
 					// Unreachable by construction: the loader rejects a phase

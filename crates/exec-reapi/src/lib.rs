@@ -18,6 +18,12 @@ pub mod tree;
 /// The execution backend and its profile-driven configuration.
 pub use execute::{Config as ExecuteConfig, ReapiBackend, Toolchain};
 
+#[cfg(feature = "buildbuddy-cancel")]
+pub mod buildbuddy_cancel;
+
+#[cfg(feature = "buildbuddy-cancel")]
+pub use buildbuddy_cancel::BuildBuddyCanceller;
+
 /// Generated bindings for the vendored protos.
 ///
 /// The module tree mirrors the protobuf package tree on purpose: prost emits
@@ -28,7 +34,7 @@ pub mod proto {
 	/// Declares the module holding the generated file for one protobuf
 	/// package, with the lint relaxations machine-generated code needs.
 	macro_rules! package {
-		($(#[$meta:meta])* $name:ident, $file:literal) => {
+		($(#[$meta:meta])* $name:ident, $root:literal, $file:literal) => {
 			$(#[$meta])*
 			#[allow(
 				missing_docs,
@@ -41,8 +47,11 @@ pub mod proto {
 				          generated API"
 			)]
 			pub mod $name {
-				include!(concat!(env!("OUT_DIR"), "/proto/", $file));
+				include!(concat!(env!("OUT_DIR"), "/", $root, "/", $file));
 			}
+		};
+		($(#[$meta:meta])* $name:ident, $file:literal) => {
+			package! { $(#[$meta])* $name, "proto", $file }
 		};
 	}
 
@@ -85,6 +94,27 @@ pub mod proto {
 		package! {
 			/// `google.rpc`.
 			rpc, "google.rpc.rs"
+		}
+	}
+
+	/// Packages under `buildbuddy` (vendor-specific, buildbuddy-cancel only).
+	#[cfg(feature = "buildbuddy-cancel")]
+	pub mod buildbuddy {
+		package! {
+			/// `buildbuddy.service`.
+			service, "proto-buildbuddy", "buildbuddy.service.rs"
+		}
+		package! {
+			/// `invocation`.
+			invocation, "proto-buildbuddy", "invocation.rs"
+		}
+		package! {
+			/// `context`.
+			context, "proto-buildbuddy", "context.rs"
+		}
+		package! {
+			/// `user_id`.
+			user_id, "proto-buildbuddy", "user_id.rs"
 		}
 	}
 }

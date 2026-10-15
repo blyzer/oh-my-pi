@@ -163,6 +163,36 @@ async fn path_set_follows_git_not_the_walker() {
 }
 
 #[tokio::test]
+async fn git_patch_reconstructs_the_captured_worktree_without_denied_inputs() {
+	let fixture = Fixture::new().await;
+	fixture.commit_baseline();
+	fixture.write("tracked.txt", b"staged\n");
+	git(fixture.path(), &["add", "tracked.txt"]);
+	fixture.write("tracked.txt", b"unstaged\n");
+	fixture.write("new.txt", b"untracked\n");
+	fixture.write(".env", b"PRIVATE=1\n");
+	fs::remove_file(fixture.path().join("gone.txt")).expect("delete tracked file");
+	let reply = fixture.capture(CaptureInputsRequest { include_git_patch: true, ..request(true) });
+	assert_eq!(reply.git_base_commit, git(fixture.path(), &["rev-parse", "HEAD"]).trim());
+	assert_eq!(excluded(&reply, ".env"), 1);
+	let hash: [u8; 32] = reply.git_patch_hash[..].try_into().expect("patch digest");
+	let patch = fixture
+		.blobs
+		.get(BlobId { hash, size: reply.git_patch_size })
+		.expect("patch blob");
+	let clone = TempDir::new().expect("clone destination");
+	git(clone.path(), &["clone", fixture.path().to_str().expect("utf8"), "checkout"]);
+	let checkout = clone.path().join("checkout");
+	let patch_path = clone.path().join("change.patch");
+	fs::write(&patch_path, patch).expect("write patch");
+	git(&checkout, &["apply", patch_path.to_str().expect("utf8")]);
+	assert_eq!(fs::read(checkout.join("tracked.txt")).expect("tracked"), b"unstaged\n");
+	assert_eq!(fs::read(checkout.join("new.txt")).expect("untracked"), b"untracked\n");
+	assert!(!checkout.join("gone.txt").exists());
+	assert!(!checkout.join(".env").exists());
+}
+
+#[tokio::test]
 async fn deny_globs_exclude_untracked_files_before_hashing() {
 	let fixture = Fixture::new().await;
 	fixture.commit_baseline();

@@ -53,6 +53,7 @@ const MANIFEST_MAGIC: &[u8; 7] = b"OMPWS2\0";
 const DIFF_MAGIC: &[u8; 8] = b"OMPWSD1\0";
 const IO_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GIT_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum untracked content admitted before an isolation baseline snapshot.
 pub const ISOLATION_BASELINE_MAX_UNTRACKED_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -142,6 +143,33 @@ pub enum WorkspaceOperationError {
 		#[source]
 		source: omp_vcs::Error,
 	},
+	/// A git-format patch requires a Git checkout with a committed HEAD.
+	#[error("working-tree patch requires a Git checkout with a committed HEAD")]
+	PatchBaseUnavailable,
+	/// Git could not render the captured working-tree patch.
+	#[error("could not render working-tree patch")]
+	PatchVcs {
+		/// Underlying version-control failure.
+		#[source]
+		source: omp_vcs::Error,
+	},
+	/// A file changed after capture and before patch generation completed.
+	#[error("captured input changed during working-tree patch generation: {path}")]
+	PatchChanged {
+		/// Workspace-relative path.
+		path: Str,
+	},
+	/// A patch is too large for the bounded remote submission path.
+	#[error("working-tree patch exceeds {limit} bytes (actual {actual} bytes)")]
+	PatchTooLarge {
+		/// Patch limit.
+		limit:  u64,
+		/// Observed patch size.
+		actual: u64,
+	},
+	/// The generated patch contains a credential and cannot be sent remotely.
+	#[error("working-tree patch contains credentials")]
+	PatchCredentials,
 	/// An upload deny glob did not compile.
 	#[error("invalid upload deny glob {glob:?}")]
 	DenyGlob {
@@ -899,6 +927,19 @@ impl WorkspaceOperations {
 			return Err(WorkspaceOperationError::NotARepository);
 		};
 		let root = repo.root().to_path_buf();
+		let patch_base = if request.include_git_patch {
+			if repo.kind() != VcsKind::Git {
+				return Err(WorkspaceOperationError::PatchBaseUnavailable);
+			}
+			Some(
+				repo
+					.head_id()
+					.map_err(input_paths)?
+					.ok_or(WorkspaceOperationError::PatchBaseUnavailable)?,
+			)
+		} else {
+			None
+		};
 		let mut candidates = BTreeMap::<String, bool>::new();
 		for path in repo.ls_files(false, true).map_err(input_paths)? {
 			candidates.insert(path, true);
@@ -928,6 +969,14 @@ impl WorkspaceOperations {
 				return Err(WorkspaceError::Cancelled.into());
 			}
 			let path = checked_join(&root, relative)?;
+			// Deleted tracked files also occur in the patch; check their names
+			// before the missing-file shortcut below.
+			if request.include_git_patch && *tracked && !filter.allows(relative) {
+				if let Some(rule) = filter.deny_rule(relative) {
+					refused.push(pb::InputRefusal { path: relative.clone(), rule: rule.to_string() });
+					continue;
+				}
+			}
 			let metadata = match fs::symlink_metadata(&path) {
 				Ok(metadata) => metadata,
 				Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -983,6 +1032,7 @@ impl WorkspaceOperations {
 		manifest.write_all(MANIFEST_MAGIC)?;
 		write_u32(&mut manifest, 0)?;
 		let mut manifest_bytes = MANIFEST_MAGIC.len() as u64 + 4;
+		let mut captured = Vec::new();
 		for relative in kept {
 			let (blob, mode) = self.hash_file(&checked_join(&root, relative)?, cancel)?;
 			manifest_bytes = manifest_bytes.saturating_add(4 + relative.len() as u64 + 4 + 32);
@@ -992,6 +1042,9 @@ impl WorkspaceOperations {
 			manifest.write_all(&blob.hash)?;
 			reply.files += 1;
 			reply.bytes = reply.bytes.saturating_add(blob.size);
+			if request.include_git_patch {
+				captured.push((relative.to_owned(), blob.hash));
+			}
 		}
 		if cancel.is_cancelled() {
 			return Err(WorkspaceError::Cancelled.into());
@@ -999,6 +1052,67 @@ impl WorkspaceOperations {
 		let reference = manifest.finish().map_err(BlobError::from)?;
 		reply.manifest_hash = Bytes::copy_from_slice(reference.hash.as_bytes());
 		reply.manifest_size = reference.size;
+		if let Some(base) = patch_base {
+			let tracked = candidates
+				.iter()
+				.filter(|(_, tracked)| **tracked)
+				.map(|(path, _)| path.clone())
+				.collect();
+			let options = DiffOptions {
+				base: Some(base.clone()),
+				files: tracked,
+				binary: true,
+				..DiffOptions::default()
+			};
+			let mut patch = repo
+				.diff_text(&options)
+				.map_err(|source| WorkspaceOperationError::PatchVcs { source })?;
+			if let omp_vcs::Repo::Git(git) = &repo {
+				for (relative, _) in &captured {
+					if candidates.get(relative).copied() != Some(false) {
+						continue;
+					}
+					let addition = git
+						.diff_no_index(Path::new("/dev/null"), &checked_join(&root, relative)?, true)
+						.map_err(|source| WorkspaceOperationError::PatchVcs { source })?;
+					patch.push_str(&addition);
+					if patch.len() as u64 > MAX_GIT_PATCH_BYTES {
+						return Err(WorkspaceOperationError::PatchTooLarge {
+							limit:  MAX_GIT_PATCH_BYTES,
+							actual: patch.len() as u64,
+						});
+					}
+				}
+			}
+			if patch.len() as u64 > MAX_GIT_PATCH_BYTES {
+				return Err(WorkspaceOperationError::PatchTooLarge {
+					limit:  MAX_GIT_PATCH_BYTES,
+					actual: patch.len() as u64,
+				});
+			}
+			if credential_hit(&credentials, patch.as_bytes()).is_some() {
+				return Err(WorkspaceOperationError::PatchCredentials);
+			}
+			for (relative, expected) in &captured {
+				if cancel.is_cancelled() {
+					return Err(WorkspaceError::Cancelled.into());
+				}
+				let mut bytes = Vec::new();
+				open_snapshot_file(&checked_join(&root, relative)?)?.read_to_end(&mut bytes)?;
+				if Hash32::sum(&bytes).into_bytes() != *expected {
+					return Err(WorkspaceOperationError::PatchChanged { path: Str::new(relative) });
+				}
+			}
+			if repo.head_id().map_err(input_paths)?.as_deref() != Some(base.as_str()) {
+				return Err(WorkspaceOperationError::PatchBaseUnavailable);
+			}
+			let mut blob = self.inner.blobs.begin_spill()?;
+			blob.write_all(patch.as_bytes())?;
+			let reference = blob.finish().map_err(BlobError::from)?;
+			reply.git_patch_hash = Bytes::copy_from_slice(reference.hash.as_bytes());
+			reply.git_patch_size = reference.size;
+			reply.git_base_commit = base;
+		}
 		Ok(reply)
 	}
 

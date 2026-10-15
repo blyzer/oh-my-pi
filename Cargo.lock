@@ -8124,6 +8124,8 @@ dependencies = [
  "omp-dom",
  "omp-env",
  "omp-envd",
+ "omp-exec",
+ "omp-exec-reapi",
  "omp-ext",
  "omp-http",
  "omp-journal",
@@ -8365,6 +8367,27 @@ dependencies = [
  "serde",
  "strum",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "omp-exec-buildbuddy"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "omp-exec-reapi",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]

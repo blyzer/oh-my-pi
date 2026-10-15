@@ -1,0 +1,451 @@
+//! Operator-selected remote-only placement for ADW Cargo/just code phases.
+//!
+//! The Environment owns capture and blobs; the driver owns the REAPI network
+//! service. No project cfg can choose a remote endpoint or credential.
+
+use std::{collections::BTreeMap, fs, future::Future, io, path::Path, sync::Arc, time::Duration};
+
+use bytes::Bytes;
+use omp_adw::{ApprovalScope, NetworkScope, Phase, Posture, WriteScope};
+use omp_ai::auth::command::CommandCredentialResolver;
+use omp_con::Ctx;
+use omp_core::{EnvPath, Hash32, Str};
+use omp_env::{BlobDownloadEvent, EnvClient};
+use omp_envd::CommandCredentialExecutorFactory as _;
+use omp_exec::{
+	BackendId, BuildCommand, BuildSystemAdapter, Digest, Eligibility, EnvEntry, ExecutionBackend,
+	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent, Outcome, Platform,
+	RepoPins,
+};
+use omp_exec_reapi::{
+	ExecuteConfig, ReapiBackend, Toolchain,
+	cas::{BlobSource, InputSource},
+	endpoint::Endpoint,
+	profile::{Credential, Profile},
+	tree::InputFile,
+};
+use omp_proto::{
+	blob::v1::{GetRequest, StatRequest},
+	env::v1::CaptureInputsRequest,
+};
+use tokio_util::sync::CancellationToken;
+
+use super::production::{ProductionAdwHost, ProductionError};
+use crate::bridges::CommandCredentials;
+
+/// Placement supported by Slice 1. No fallback or local backend is installed.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
+#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
+pub enum AdwExecPolicy {
+	/// Run existing local Environment commands.
+	#[default]
+	LocalOnly,
+	/// Offload only eligible code phases, with no fallback on remote errors.
+	RemoteOnly,
+}
+omp_con::con_enum!(AdwExecPolicy);
+
+omp_con::var! {
+	/// ADW execution placement; always operator-controlled, never project cfg.
+	pub static SV_EXEC_POLICY = sv_exec_policy: AdwExecPolicy {
+		default: AdwExecPolicy::LocalOnly,
+		flags: archive,
+	};
+	/// Remote REAPI address. Empty disables remote execution.
+	pub static SV_EXEC_REMOTE_ENDPOINT = sv_exec_remote_endpoint: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// REAPI profile name: `reapi` or `buildbuddy`.
+	pub static SV_EXEC_REMOTE_PROFILE = sv_exec_remote_profile: Str {
+		default: Str::new_static("reapi"), flags: archive,
+	};
+	/// Command credential source, prefixed with `!`; never the key itself.
+	pub static SV_EXEC_REMOTE_CREDENTIAL = sv_exec_remote_credential: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// Digest-pinned remote image for the repository's Cargo/just toolchain.
+	pub static SV_EXEC_REMOTE_IMAGE = sv_exec_remote_image: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// Extra operator-approved upload deny patterns, comma separated.
+	pub static SV_EXEC_UPLOAD_EXCLUDE = sv_exec_upload_exclude: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// Paths exempted by the operator from upload denial, comma separated.
+	pub static SV_EXEC_UPLOAD_ALLOW = sv_exec_upload_allow: Str {
+		default: Str::default(), flags: archive,
+	};
+}
+
+/// Enforced by the Linux runner profile: the remote action cannot write the
+/// local workspace and BuildBuddy's Firecracker worker has networking off.
+pub const REMOTE_POSTURE: Posture = Posture {
+	write:    WriteScope::ReadOnly,
+	network:  NetworkScope::Disabled,
+	approval: ApprovalScope::Yolo,
+};
+
+/// The only phase class Slice 1 may offload. Unknown recipes remain local.
+pub fn eligible(binary: &str, args: &[Str]) -> bool {
+	binary == "just"
+		&& args
+			.first()
+			.and_then(|arg| omp_exec::cargo_just::recipe_class(arg))
+			.is_some_and(|class| {
+				matches!(class.eligibility, Eligibility::RemotePreferred | Eligibility::RemoteRequired)
+			})
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RemoteError {
+	#[error("remote execution is not configured with an endpoint and digest-pinned image")]
+	MissingConfiguration,
+	#[error("remote credential must be a !command source; plaintext is not accepted")]
+	CredentialSource,
+	#[error("operator remote credential command failed")]
+	Credential(#[source] omp_ai::auth::command::CommandCredentialError),
+	#[error("repository toolchain pins could not be read")]
+	Pins(#[source] io::Error),
+	#[error("CargoJust could not plan this command")]
+	Plan(#[source] omp_exec::PlanError),
+	#[error("remote endpoint is not secure")]
+	Endpoint(#[source] omp_exec_reapi::endpoint::EndpointError),
+	#[error("project Environment input capture failed")]
+	Capture(#[source] omp_env::ClientError),
+	#[error("tracked input was refused: {path} matched {rule}")]
+	InputRefused { path: Str, rule: Str },
+	#[error("invalid environment capture manifest")]
+	Manifest,
+	#[error("remote action failed before a command verdict")]
+	Execute(#[source] ExecutionError),
+}
+
+fn config_list(value: Str) -> Vec<String> {
+	value
+		.split(',')
+		.map(str::trim)
+		.filter(|s| !s.is_empty())
+		.map(str::to_owned)
+		.collect()
+}
+
+fn repo_pins(root: &Path) -> Result<RepoPins, io::Error> {
+	let rust = fs::read_to_string(root.join("rust-toolchain.toml"))?;
+	let ci = fs::read_to_string(root.join(".github/workflows/ci.yml"))?;
+	let python = fs::read_to_string(root.join("crates/py/scripts/fetch-python.sh"))?;
+	let channel = rust
+		.lines()
+		.find_map(|line| line.trim().strip_prefix("channel = "))
+		.map(|value| value.trim_matches('"'));
+	let nextest = ci
+		.lines()
+		.find_map(|line| line.trim().strip_prefix("tool: nextest@"));
+	let tag = python.lines().find_map(|line| line.strip_prefix("TAG="));
+	let version = python.lines().find_map(|line| line.strip_prefix("VER="));
+	let (Some(channel), Some(nextest), Some(tag), Some(version)) = (channel, nextest, tag, version)
+	else {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "toolchain pins missing"));
+	};
+	Ok(RepoPins {
+		rust_toolchain: Str::new(channel),
+		nextest:        Str::new(nextest.trim()),
+		cpython_tag:    Str::new(tag.trim()),
+		cpython:        Str::new(version.trim()),
+	})
+}
+
+#[derive(Clone)]
+struct EnvironmentInputs(EnvClient);
+
+impl EnvironmentInputs {
+	async fn bytes(&self, digest: Digest) -> io::Result<Bytes> {
+		let download = self
+			.0
+			.blob_get(GetRequest {
+				hash:   Bytes::copy_from_slice(digest.hash.as_bytes()),
+				offset: 0,
+				length: 0,
+			})
+			.await
+			.map_err(io::Error::other)?;
+		let mut output = Vec::new();
+		download
+			.write_verified(digest.hash, digest.size, digest.size, &mut output)
+			.await
+			.map_err(io::Error::other)?;
+		Ok(Bytes::from(output))
+	}
+}
+
+impl BlobSource for EnvironmentInputs {
+	fn read(&self, digest: Digest) -> impl Future<Output = io::Result<Bytes>> + Send + '_ {
+		self.bytes(digest)
+	}
+
+	fn read_range(
+		&self,
+		digest: Digest,
+		offset: u64,
+		len: u64,
+	) -> impl Future<Output = io::Result<Bytes>> + Send + '_ {
+		async move {
+			if offset > digest.size || len > digest.size - offset {
+				return Err(io::Error::new(io::ErrorKind::InvalidInput, "blob range exceeds size"));
+			}
+			let mut download = self
+				.0
+				.blob_get(GetRequest {
+					hash: Bytes::copy_from_slice(digest.hash.as_bytes()),
+					offset,
+					length: len,
+				})
+				.await
+				.map_err(io::Error::other)?;
+			let mut output = Vec::with_capacity(len.min(64 * 1024) as usize);
+			let mut completed = false;
+			while let Some(event) = download.next_event().await.map_err(io::Error::other)? {
+				match event {
+					BlobDownloadEvent::Chunk(chunk) => {
+						if !chunk.hash.is_empty() && chunk.hash.as_ref() != digest.hash.as_bytes()
+							|| chunk.size.is_some_and(|size| size != digest.size)
+							|| output.len().saturating_add(chunk.data.len()) as u64 > len
+						{
+							return Err(io::Error::new(
+								io::ErrorKind::InvalidData,
+								"blob range metadata mismatch",
+							));
+						}
+						output.extend_from_slice(&chunk.data);
+					},
+					BlobDownloadEvent::Complete(_) => {
+						completed = true;
+						break;
+					},
+				}
+			}
+			if !completed || output.len() as u64 != len {
+				return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "blob range incomplete"));
+			}
+			Ok(Bytes::from(output))
+		}
+	}
+}
+
+impl InputSource for EnvironmentInputs {
+	fn files(
+		&self,
+		manifest: Digest,
+	) -> impl Future<Output = io::Result<Vec<InputFile>>> + Send + '_ {
+		async move {
+			let bytes = self.bytes(manifest).await?;
+			if !bytes.starts_with(b"OMPWS2\0\0\0\0\0") {
+				return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid capture manifest"));
+			}
+			let mut offset = 11usize;
+			let mut files = Vec::new();
+			while offset < bytes.len() {
+				let count = bytes.get(offset..offset + 4).ok_or_else(|| {
+					io::Error::new(io::ErrorKind::InvalidData, "truncated path length")
+				})?;
+				let length =
+					u32::from_be_bytes(count.try_into().map_err(|_| io::ErrorKind::InvalidData)?)
+						as usize;
+				offset += 4;
+				let path = bytes
+					.get(offset..offset + length)
+					.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated path"))?;
+				let path = std::str::from_utf8(path)
+					.map_err(|_| io::ErrorKind::InvalidData)?
+					.to_owned();
+				offset += length;
+				let mode = bytes
+					.get(offset..offset + 4)
+					.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated file mode"))?;
+				let executable =
+					u32::from_be_bytes(mode.try_into().map_err(|_| io::ErrorKind::InvalidData)?) & 0o111
+						!= 0;
+				offset += 4;
+				let hash = bytes.get(offset..offset + 32).ok_or_else(|| {
+					io::Error::new(io::ErrorKind::InvalidData, "truncated file digest")
+				})?;
+				let hash: [u8; 32] = hash.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
+				offset += 32;
+				let stat = self
+					.0
+					.blob_stat(StatRequest { hash: Bytes::copy_from_slice(&hash) })
+					.await
+					.map_err(io::Error::other)?;
+				if !stat.present {
+					return Err(io::Error::new(io::ErrorKind::NotFound, "capture blob missing"));
+				}
+				files.push(InputFile {
+					path,
+					digest: Digest::new(Hash32::new(hash), stat.size),
+					executable,
+				});
+			}
+			Ok(files)
+		}
+	}
+}
+
+impl ProductionAdwHost {
+	pub(super) async fn run_remote(
+		&self,
+		phase: &Phase,
+		args: &[Str],
+		cwd: Option<&str>,
+		cancel: &CancellationToken,
+	) -> Result<super::PhaseResult, ProductionError> {
+		let ctx: &Ctx = &self.ctx;
+		let endpoint = SV_EXEC_REMOTE_ENDPOINT.get(ctx);
+		let image = SV_EXEC_REMOTE_IMAGE.get(ctx);
+		if endpoint.is_empty() || image.is_empty() || !image.contains("@sha256:") {
+			return Err(RemoteError::MissingConfiguration.into());
+		}
+		let endpoint = Endpoint::parse(&endpoint).map_err(RemoteError::Endpoint)?;
+		let credential_source = SV_EXEC_REMOTE_CREDENTIAL.get(ctx);
+		let Some(command) = credential_source.strip_prefix('!') else {
+			return Err(RemoteError::CredentialSource.into());
+		};
+		let environment = self.environment().await?.clone();
+		let executor = CommandCredentials.make(environment.clone(), &self.root);
+		let credential = CommandCredentialResolver::new(executor, Duration::from_secs(1))
+			.resolve(command, cancel.clone())
+			.await
+			.map_err(RemoteError::Credential)?;
+		let pins = repo_pins(&self.root).map_err(RemoteError::Pins)?;
+		let command = BuildCommand {
+			id:          ExecutionId::new(Str::from(uuid_v4())),
+			argv:        Arc::from([vec![Str::new_static("just")], args.to_vec()].concat()),
+			cwd:         cwd.map(Str::new),
+			intent:      Intent::Test,
+			requirement: phase.requires,
+			target:      Platform::LINUX_X86_64,
+			host:        host_platform(),
+		};
+		let mut plan = omp_exec::cargo_just::CargoJust::default()
+			.plan(&command, &pins)
+			.map_err(RemoteError::Plan)?;
+		let mut request = plan.requests.first().ok_or(RemoteError::Manifest)?.clone();
+		let capture = environment
+			.capture_inputs(CaptureInputsRequest {
+				include_untracked: true,
+				deny_globs: config_list(SV_EXEC_UPLOAD_EXCLUDE.get(ctx)),
+				allow_paths: config_list(SV_EXEC_UPLOAD_ALLOW.get(ctx)),
+				wire_revision: omp_proto::SCHEMA_REV,
+				..Default::default()
+			})
+			.await
+			.map_err(RemoteError::Capture)?;
+		if let Some(refused) = capture.refused.first() {
+			return Err(
+				RemoteError::InputRefused {
+					path: Str::new(&refused.path),
+					rule: Str::new(&refused.rule),
+				}
+				.into(),
+			);
+		}
+		let hash: [u8; 32] = capture
+			.manifest_hash
+			.as_ref()
+			.try_into()
+			.map_err(|_| RemoteError::Manifest)?;
+		request.inputs = Some(InputSet {
+			manifest: Digest::new(Hash32::new(hash), capture.manifest_size),
+			files:    capture.files,
+			bytes:    capture.bytes,
+			excluded: omp_exec::ExclusionCounts {
+				rules:    Arc::from([]),
+				symlinks: capture.excluded_symlinks,
+			},
+		});
+		let profile = match SV_EXEC_REMOTE_PROFILE.get(ctx).as_str() {
+			"reapi" => Profile::reapi(),
+			"buildbuddy" => Profile::buildbuddy(),
+			_ => return Err(RemoteError::MissingConfiguration.into()),
+		};
+		let config = ExecuteConfig {
+			id: BackendId::new_static("remote"),
+			instance: Str::empty(),
+			profile,
+			credential: Some(Credential::new(credential)),
+			platform: Platform::LINUX_X86_64,
+			enforced: REMOTE_POSTURE,
+			cache: omp_exec::CachePolicy::Off,
+			platform_properties: BTreeMap::new(),
+			toolchains: BTreeMap::from([(
+				omp_exec::cargo_just::CargoJust::toolchain(&pins)
+					.to_string()
+					.into(),
+				Toolchain { image: Some(image), env: Arc::<[EnvEntry]>::from([]) },
+			)]),
+			#[cfg(feature = "buildbuddy-cancel")]
+			buildbuddy_canceller: None,
+		};
+		let backend = ReapiBackend::connect(endpoint, config, EnvironmentInputs(environment))
+			.await
+			.map_err(RemoteError::Execute)?;
+		let mut run = backend.start(request).await.map_err(RemoteError::Execute)?;
+		loop {
+			let event = tokio::select! {
+				event = run.next_event() => event,
+				() = cancel.cancelled() => {
+					let _ = run.cancel().await;
+					return Err(ProductionError::Cancelled);
+				},
+			};
+			match event {
+				Some(ExecutionEvent::Settled(Ok(result))) => {
+					return Ok(super::PhaseResult {
+						accepted: result.outcome.is_success(),
+						feedback: Str::new(format!("remote command exited {:?}", result.outcome)),
+					});
+				},
+				Some(ExecutionEvent::Settled(Err(source))) => {
+					return Err(RemoteError::Execute(source).into());
+				},
+				Some(_) => {},
+				None => return Err(RemoteError::Manifest.into()),
+			}
+		}
+	}
+}
+
+fn host_platform() -> Platform {
+	#[cfg(target_arch = "aarch64")]
+	let arch = omp_exec::Arch::Aarch64;
+	#[cfg(not(target_arch = "aarch64"))]
+	let arch = omp_exec::Arch::X86_64;
+	#[cfg(target_os = "macos")]
+	let os = omp_exec::Os::Macos;
+	#[cfg(not(target_os = "macos"))]
+	let os = omp_exec::Os::Linux;
+	Platform { os, arch }
+}
+
+fn uuid_v4() -> String {
+	use rand::Rng as _;
+	let mut rng = rand::rng();
+	let bytes: [u8; 16] = rng.random();
+	format!(
+		"{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+		u32::from_be_bytes(bytes[..4].try_into().unwrap()),
+		u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+		u16::from_be_bytes(bytes[6..8].try_into().unwrap()) & 0x0fff,
+		u16::from_be_bytes(bytes[8..10].try_into().unwrap()) & 0x3fff | 0x8000,
+		u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]])
+	)
+}
