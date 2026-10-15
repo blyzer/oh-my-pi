@@ -335,7 +335,7 @@ impl ProductionAdwHost {
 			target:      Platform::LINUX_X86_64,
 			host:        host_platform(),
 		};
-		let mut plan = CargoJust::default()
+		let plan = CargoJust::default()
 			.plan(&command, &pins)
 			.map_err(RemoteError::Plan)?;
 		let mut request = plan.requests.first().ok_or(RemoteError::Manifest)?.clone();
@@ -437,12 +437,39 @@ fn uuid_v4() -> String {
 	use rand::RngExt as _;
 	let mut rng = rand::rng();
 	let bytes: [u8; 16] = rng.random();
-	format!(
-		"{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-		u32::from_be_bytes(bytes[..4].try_into().unwrap()),
-		u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
-		u16::from_be_bytes(bytes[6..8].try_into().unwrap()) & 0x0fff,
-		u16::from_be_bytes(bytes[8..10].try_into().unwrap()) & 0x3fff | 0x8000,
-		u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]])
-	)
+	let first = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+	let second = u16::from_be_bytes([bytes[4], bytes[5]]);
+	let third = u16::from_be_bytes([bytes[6], bytes[7]]) & 0x0fff;
+	let fourth = u16::from_be_bytes([bytes[8], bytes[9]]) & 0x3fff | 0x8000;
+	let tail =
+		u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]]);
+	format!("{first:08x}-{second:04x}-4{third:03x}-{fourth:04x}-{tail:012x}")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn only_remote_preferred_just_recipes_are_eligible() {
+		assert!(eligible("just", &[Str::new_static("test-pkg")]));
+		assert!(eligible("just", &[Str::new_static("clippy")]));
+		assert!(!eligible("just", &[Str::new_static("e2e-p7")]));
+		assert!(!eligible("cargo", &[Str::new_static("test")]));
+		assert!(!eligible("just", &[Str::new_static("unknown")]));
+	}
+
+	#[test]
+	fn operator_policy_and_upload_lists_are_typed_at_the_boundary() {
+		assert_eq!("remote-only".parse::<AdwExecPolicy>(), Ok(AdwExecPolicy::RemoteOnly));
+		assert_eq!(config_list(Str::new_static(" .env , *.key, ")), [".env", "*.key"]);
+	}
+
+	#[test]
+	fn uuid_has_v4_shape() {
+		let value = uuid_v4();
+		assert_eq!(value.len(), 36);
+		assert_eq!(value.as_bytes()[14], b'4');
+		assert_eq!(value.as_bytes()[19] & 0xc0, 0x80);
+	}
 }
