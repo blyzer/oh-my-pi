@@ -12,7 +12,7 @@
 #
 # --seed runs the recipe on the default branch's head instead of this checkout and saves the
 # runner snapshot later runs resume from. Run it after toolchain or dependency changes; it costs
-# one snapshot upload (about the runner's memory plus disk, ~56 GB at the sizes below).
+# one snapshot upload. The test workspace exceeded the former 40 GB disk reservation.
 #
 # The runner properties are fixed on purpose: every property is part of BuildBuddy's snapshot key,
 # so changing one makes every later run cold until a new snapshot is seeded.
@@ -77,7 +77,7 @@ args=(
     --container_image=docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:f7db0d4791247f032fdb4451b7c3ba90e567923a341cc6dc43abfc283436791a
     --runner_exec_properties=EstimatedCPU=8
     --runner_exec_properties=EstimatedMemory=16GB
-    --runner_exec_properties=EstimatedFreeDiskBytes=40GB
+    --runner_exec_properties=EstimatedFreeDiskBytes=80GB
     --runner_exec_properties=remote-snapshot-save-policy=none-available
     --runner_exec_properties=snapshot-read-policy=local-first
     --timeout=60m
