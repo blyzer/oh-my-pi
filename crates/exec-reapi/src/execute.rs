@@ -1105,19 +1105,21 @@ mod tests {
 			.await
 			.unwrap();
 		let config = Config {
-			id:                  BackendId::new_static("reapi"),
-			instance:            Str::empty(),
-			profile:             Profile::reapi(),
-			credential:          None,
-			platform:            Platform::LINUX_X86_64,
-			enforced:            Posture {
+			id: BackendId::new_static("reapi"),
+			instance: Str::empty(),
+			profile: Profile::reapi(),
+			credential: None,
+			platform: Platform::LINUX_X86_64,
+			enforced: Posture {
 				write:    WriteScope::ReadOnly,
 				network:  NetworkScope::Unrestricted,
 				approval: ApprovalScope::Yolo,
 			},
-			cache:               CachePolicy::Off,
+			cache: CachePolicy::Off,
 			platform_properties: BTreeMap::new(),
-			toolchains:          BTreeMap::new(),
+			toolchains: BTreeMap::new(),
+			#[cfg(feature = "buildbuddy-cancel")]
+			buildbuddy_canceller: None,
 		};
 		ReapiBackend::from_channel(
 			channel,
