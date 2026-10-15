@@ -9,13 +9,13 @@ use bytes::Bytes;
 use omp_adw::{ApprovalScope, NetworkScope, Phase, Posture, WriteScope};
 use omp_ai::auth::command::CommandCredentialResolver;
 use omp_con::Ctx;
-use omp_core::{EnvPath, Hash32, Str};
+use omp_core::{Hash32, Str};
 use omp_env::{BlobDownloadEvent, EnvClient};
 use omp_envd::CommandCredentialExecutorFactory as _;
 use omp_exec::{
-	BackendId, BuildCommand, BuildSystemAdapter, Digest, Eligibility, EnvEntry, ExecutionBackend,
-	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent, Outcome, Platform,
-	RepoPins,
+	BackendId, BuildCommand, BuildSystemAdapter, CargoJust, Digest, Eligibility, EnvEntry,
+	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent,
+	Platform, RepoPins,
 };
 use omp_exec_reapi::{
 	ExecuteConfig, ReapiBackend, Toolchain,
@@ -101,7 +101,7 @@ pub fn eligible(binary: &str, args: &[Str]) -> bool {
 	binary == "just"
 		&& args
 			.first()
-			.and_then(|arg| omp_exec::cargo_just::recipe_class(arg))
+			.and_then(|arg| omp_exec::recipe_class(arg))
 			.is_some_and(|class| {
 				matches!(class.eligibility, Eligibility::RemotePreferred | Eligibility::RemoteRequired)
 			})
@@ -133,10 +133,10 @@ pub enum RemoteError {
 
 fn config_list(value: Str) -> Vec<String> {
 	value
-		.split(',')
-		.map(str::trim)
-		.filter(|s| !s.is_empty())
-		.map(str::to_owned)
+		.split(",")
+		.map(|part| part.trim())
+		.filter(|part| !part.is_empty())
+		.map(|part| part.to_string())
 		.collect()
 }
 
@@ -316,13 +316,13 @@ impl ProductionAdwHost {
 		}
 		let endpoint = Endpoint::parse(&endpoint).map_err(RemoteError::Endpoint)?;
 		let credential_source = SV_EXEC_REMOTE_CREDENTIAL.get(ctx);
-		let Some(command) = credential_source.strip_prefix('!') else {
+		let Some(command) = credential_source.strip_prefix("!") else {
 			return Err(RemoteError::CredentialSource.into());
 		};
 		let environment = self.environment().await?.clone();
 		let executor = CommandCredentials.make(environment.clone(), &self.root);
 		let credential = CommandCredentialResolver::new(executor, Duration::from_secs(1))
-			.resolve(command, cancel.clone())
+			.resolve(&command, cancel.clone())
 			.await
 			.map_err(RemoteError::Credential)?;
 		let pins = repo_pins(&self.root).map_err(RemoteError::Pins)?;
@@ -335,7 +335,7 @@ impl ProductionAdwHost {
 			target:      Platform::LINUX_X86_64,
 			host:        host_platform(),
 		};
-		let mut plan = omp_exec::cargo_just::CargoJust::default()
+		let mut plan = CargoJust::default()
 			.plan(&command, &pins)
 			.map_err(RemoteError::Plan)?;
 		let mut request = plan.requests.first().ok_or(RemoteError::Manifest)?.clone();
@@ -387,12 +387,9 @@ impl ProductionAdwHost {
 			cache: omp_exec::CachePolicy::Off,
 			platform_properties: BTreeMap::new(),
 			toolchains: BTreeMap::from([(
-				omp_exec::cargo_just::CargoJust::toolchain(&pins)
-					.to_string()
-					.into(),
+				CargoJust::toolchain(&pins).to_string().into(),
 				Toolchain { image: Some(image), env: Arc::<[EnvEntry]>::from([]) },
 			)]),
-			#[cfg(feature = "buildbuddy-cancel")]
 			buildbuddy_canceller: None,
 		};
 		let backend = ReapiBackend::connect(endpoint, config, EnvironmentInputs(environment))
@@ -437,7 +434,7 @@ fn host_platform() -> Platform {
 }
 
 fn uuid_v4() -> String {
-	use rand::Rng as _;
+	use rand::RngExt as _;
 	let mut rng = rand::rng();
 	let bytes: [u8; 16] = rng.random();
 	format!(
