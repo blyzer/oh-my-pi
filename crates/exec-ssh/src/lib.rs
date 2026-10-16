@@ -3,7 +3,7 @@
 use std::{future::Future, sync::Arc};
 
 use omp_adw::Posture;
-use omp_core::{CowBytes, Str};
+use omp_core::Str;
 use omp_envd::ssh::SshService;
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,

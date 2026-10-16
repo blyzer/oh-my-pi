@@ -15,6 +15,7 @@ flume.workspace = true
 omp-adw.workspace = true
 omp-core.workspace = true
 omp-envd.workspace = true
+tokio-util.workspace = true
 omp-exec.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
