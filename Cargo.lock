@@ -8391,6 +8391,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-exec-local"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "omp-adw",
+ "omp-core",
+ "omp-envd",
+ "omp-exec",
+ "omp-proto",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
 name = "omp-exec-reapi"
 version = "2.0.0"
 dependencies = [

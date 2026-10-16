@@ -68,6 +68,7 @@ area/env:
           - 'crates/exec/**'
           - 'crates/exec-buildbuddy/**'
           - 'crates/exec-reapi/**'
+          - 'crates/exec-local/**'
           - 'crates/sandbox/**'
 
 area/shell:
