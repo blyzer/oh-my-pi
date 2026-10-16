@@ -34,6 +34,8 @@ impl<L, R> ExecutionBackend for BackendPair<L, R>
 where
 	L: ExecutionBackend,
 	R: ExecutionBackend,
+	L::Run: Sync,
+	R::Run: Sync,
 {
 	type Run = BackendRun<L::Run, R::Run>;
 
