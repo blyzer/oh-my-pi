@@ -4,11 +4,11 @@
 //! a path or keeps a second blob store: capture and reads are delegated to
 //! [`crate::cas::InputSource`].
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use omp_adw::Posture;
-use omp_core::Str;
+use omp_core::{Hash32, Str};
 use omp_exec::{
 	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
@@ -348,6 +348,73 @@ impl<S> ReapiBackend<S>
 where
 	S: InputSource,
 {
+	/// Downloads one verified REAPI blob from the backend CAS.
+	///
+	/// The returned bytes are verified against both the declared length and
+	/// SHA-256 digest before they escape the backend.
+	pub async fn download_blob(&self, digest: omp_exec::Digest) -> Result<Bytes, ExecutionError> {
+		let resource = cas::read_resource(
+			self.inner.instance.as_str(),
+			&digest.hash.to_hex().to_string(),
+			digest.size,
+			cas::Compression::Identity,
+		);
+		let request = with_metadata(
+			Request::new(bytestream::ReadRequest {
+				resource_name: resource,
+				read_offset:   0,
+				read_limit:    0,
+			}),
+			&self.inner.profile,
+			self.inner.credential.as_ref(),
+		)?;
+		let mut client = self.inner.clients.byte_stream.clone();
+		let mut stream = client
+			.read(request)
+			.await
+			.map_err(|error| {
+				status::classify(
+					error,
+					Phase::Download,
+					&self.inner.id,
+					Duration::from_secs(30),
+					Some(digest),
+				)
+			})?
+			.into_inner();
+		let capacity = usize::try_from(digest.size.min(8 * 1024 * 1024)).unwrap_or(8 * 1024 * 1024);
+		let mut bytes = BytesMut::with_capacity(capacity);
+		while let Some(response) = stream.message().await.map_err(|error| {
+			status::classify(
+				error,
+				Phase::Download,
+				&self.inner.id,
+				Duration::from_secs(30),
+				Some(digest),
+			)
+		})? {
+			bytes.extend_from_slice(&response.data);
+			if bytes.len() as u64 > digest.size {
+				return Err(ExecutionError::OutputRetrieval {
+					source: Arc::new(io::Error::new(
+						io::ErrorKind::InvalidData,
+						"REAPI blob exceeded digest size",
+					)),
+				});
+			}
+		}
+		let bytes = bytes.freeze();
+		if bytes.len() as u64 != digest.size || Hash32::sum(&bytes) != digest.hash {
+			return Err(ExecutionError::OutputRetrieval {
+				source: Arc::new(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"REAPI blob digest mismatch",
+				)),
+			});
+		}
+		Ok(bytes)
+	}
+
 	async fn start_request(&self, request: ExecutionRequest) -> Result<ReapiRun<S>, ExecutionError> {
 		let action = self.prepare_action(&request).await?;
 		let action_timeout = request.timeout;
