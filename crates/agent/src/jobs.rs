@@ -33,6 +33,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream};
 
+#[derive(Clone, Copy, Debug, Deserialize, Display, EnumString, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum JobKind {
 	/// A detached ordinary tool call.
 	Tool,
@@ -44,6 +47,8 @@ pub enum JobKind {
 	Execution,
 }
 
+#[derive(Clone, Copy, Debug, IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
 enum DeliveryJobType {
 	Bash,
 	Task,
@@ -894,6 +899,7 @@ fn restart_orphan(record: &JobRecord, recovered: Option<&RecoveredSettlement>) -
 			// The environment host owns durable process generations and may
 			// reconnect them independently of this disposable board.
 			JobKind::Process => false,
+			JobKind::Execution => recovered.is_none(),
 		}
 }
 
