@@ -4,14 +4,20 @@ use std::{
 	future::Future,
 	path::{Path, PathBuf},
 	pin::Pin,
-	process::Stdio,
 	sync::Arc,
 };
 
+use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 use omp_core::{Str, sf};
 use omp_dom::{NodeSpec, Op, Tag, Txn};
+use omp_envd::exec::ExecHost;
+use omp_exec::{
+	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
+	ExecutionRequest, ExecutionRun, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement,
+	ResourceRequirements, ToolchainId,
+};
+use omp_exec_local::{Config as LocalConfig, LocalBackend};
 use omp_session::{ComponentRegistry, Session};
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -59,6 +65,9 @@ pub enum ProductionError {
 	/// JSON projection failed.
 	#[error("cleanse JSON failed")]
 	Json(#[from] serde_json::Error),
+	/// The local execution backend failed.
+	#[error("cleanse execution backend failed")]
+	Execution(#[source] ExecutionError),
 }
 
 /// Production owner for one standalone cleanse run.
@@ -67,6 +76,7 @@ pub struct ProductionCleanseHost {
 	files:        Vec<PathBuf>,
 	data_dir:     PathBuf,
 	resolver:     FilesystemResolver,
+	exec:         ExecHost,
 	journal:      parking_lot::Mutex<Session>,
 	presentation: Arc<dyn CleansePresentation>,
 }
@@ -90,6 +100,7 @@ impl ProductionCleanseHost {
 			files,
 			data_dir,
 			resolver: FilesystemResolver,
+			exec: ExecHost::new(),
 			journal: parking_lot::Mutex::new(journal),
 			presentation,
 		})
@@ -139,28 +150,113 @@ impl CheckerRunner for ProductionCleanseHost {
 		let checker = checker.clone();
 		let cancel = cancel.clone();
 		async move {
-			let mut child = Command::new(&checker.binary);
-			child
-				.args(checker.args.iter().map(Str::as_str))
-				.current_dir(&checker.cwd)
-				.kill_on_drop(true)
-				.stdout(Stdio::piped())
-				.stderr(Stdio::piped());
-			let output = tokio::select! {
-				result = child.output() => result?,
-				() = cancel.cancelled() => return Ok(ProcessOutput { exit_code: None, stdout: sf!(""), stderr: sf!("cancelled") }),
+			let cwd = checker
+				.cwd
+				.strip_prefix(&self.root)
+				.map_err(|_| ProductionError::Io(std::io::Error::other("checker cwd escapes root")))?
+				.to_string_lossy()
+				.into_owned();
+			let platform = cleanse_platform();
+			let backend = LocalBackend::new(LocalConfig {
+				id: BackendId::new_static("local"),
+				root: self.root.clone(),
+				host: self.exec.clone(),
+				platform,
+				enforced: Posture {
+					write:    WriteScope::Unconfined,
+					network:  NetworkScope::Unrestricted,
+					approval: ApprovalScope::Yolo,
+				},
+			});
+			let mut argv = Vec::with_capacity(checker.args.len() + 1);
+			argv.push(Str::new(checker.binary.to_string_lossy()));
+			argv.extend(checker.args.iter().cloned());
+			let request = ExecutionRequest {
+				id:          ExecutionId::new(Str::from(omp_core::Ulid::generate().to_string())),
+				intent:      Intent::Test,
+				argv:        Arc::from(argv),
+				cwd:         Str::new(cwd),
+				env:         Arc::<[EnvEntry]>::from([]),
+				inputs:      None,
+				outputs:     OutputSpec::Logs,
+				toolchain:   ToolchainId::new_static("local"),
+				caches:      Arc::from([]),
+				platform:    PlatformRequirement {
+					os:            platform.os,
+					arch:          platform.arch,
+					needs_network: false,
+					needs:         NeedSet::new(),
+				},
+				requirement: Default::default(),
+				resources:   ResourceRequirements::default(),
+				eligibility: Eligibility::LocalPreferred,
+				timeout:     std::time::Duration::from_secs(30 * 60),
 			};
-			let result = ProcessOutput {
-				exit_code: output.status.code(),
-				stdout:    Str::new(String::from_utf8_lossy(&output.stdout)),
-				stderr:    Str::new(String::from_utf8_lossy(&output.stderr)),
-			};
-			if let Some(partials) = partials {
-				let _ = partials.send(result.clone());
+			let mut run = backend
+				.start(request)
+				.await
+				.map_err(ProductionError::Execution)?;
+			let mut stdout = Vec::new();
+			let mut stderr = Vec::new();
+			loop {
+				let event = tokio::select! {
+					event = run.next_event() => event,
+					() = cancel.cancelled() => {
+						let _ = run.cancel().await;
+						return Ok(ProcessOutput {
+							exit_code: None,
+							stdout: Str::empty(),
+							stderr: sf!("cancelled"),
+						});
+					},
+				};
+				match event {
+					Some(ExecutionEvent::Output(frame)) => match frame.stream {
+						omp_exec::Stream::Stdout => stdout.extend_from_slice(&frame.bytes),
+						omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
+					},
+					Some(ExecutionEvent::Settled(Ok(result))) => {
+						let exit_code = match result.outcome {
+							omp_exec::Outcome::Exited { code } => Some(code),
+							omp_exec::Outcome::Signalled { .. } => None,
+						};
+						let output = ProcessOutput {
+							exit_code,
+							stdout: Str::new(String::from_utf8_lossy(&stdout)),
+							stderr: Str::new(String::from_utf8_lossy(&stderr)),
+						};
+						if let Some(partials) = &partials {
+							let _ = partials.send(output.clone());
+						}
+						return Ok(output);
+					},
+					Some(ExecutionEvent::Settled(Err(error))) => {
+						return Err(ProductionError::Execution(error));
+					},
+					Some(_) => {},
+					None => {
+						return Err(ProductionError::Execution(ExecutionError::Infrastructure {
+							source: Arc::new(std::io::Error::other(
+								"cleanse execution ended without a result",
+							)),
+						}));
+					},
+				}
 			}
-			Ok(result)
 		}
 	}
+}
+
+fn cleanse_platform() -> Platform {
+	#[cfg(target_arch = "aarch64")]
+	let arch = omp_exec::Arch::Aarch64;
+	#[cfg(not(target_arch = "aarch64"))]
+	let arch = omp_exec::Arch::X86_64;
+	#[cfg(target_os = "macos")]
+	let os = omp_exec::Os::Macos;
+	#[cfg(not(target_os = "macos"))]
+	let os = omp_exec::Os::Linux;
+	Platform { os, arch }
 }
 
 impl CleanseHost for ProductionCleanseHost {
