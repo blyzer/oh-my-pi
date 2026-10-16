@@ -350,6 +350,7 @@ where
 {
 	async fn start_request(&self, request: ExecutionRequest) -> Result<ReapiRun<S>, ExecutionError> {
 		let action = self.prepare_action(&request).await?;
+		let action_timeout = request.timeout;
 		let outputs = request.outputs.clone();
 		let request_id = request.id.clone();
 		let request_wire = wire::ExecuteRequest {
