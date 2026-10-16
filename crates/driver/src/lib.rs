@@ -13,6 +13,7 @@ pub mod commit;
 pub mod compress;
 pub mod discovery;
 pub mod ext_updates;
+pub mod execution;
 pub mod headless;
 pub mod keybindings;
 pub mod legacy_settings;
