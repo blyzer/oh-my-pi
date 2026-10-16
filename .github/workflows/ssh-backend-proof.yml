@@ -1,0 +1,83 @@
+name: SSH backend proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [omp2]
+    paths:
+      - ".github/workflows/ssh-backend-proof.yml"
+      - "crates/exec-ssh/**"
+      - "crates/envd/src/ssh.rs"
+      - "crates/exec/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    name: SSH backend loopback (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+      - name: Start pinned loopback sshd
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v sshd
+          state="$RUNNER_TEMP/omp-ssh-loopback"
+          mkdir -p "$state"
+          chmod 700 "$state"
+          ssh-keygen -q -t ed25519 -N '' -f "$state/client_key"
+          ssh-keygen -q -t ed25519 -N '' -f "$state/host_key"
+          cp "$state/client_key.pub" "$state/authorized_keys"
+          chmod 600 "$state/authorized_keys" "$state/client_key"
+          port=2222
+          cat >"$state/sshd_config" <<EOF
+          Port $port
+          ListenAddress 127.0.0.1
+          HostKey $state/host_key
+          AuthorizedKeysFile $state/authorized_keys
+          PidFile $state/sshd.pid
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          UsePAM no
+          StrictModes no
+          AllowUsers $USER
+          LogLevel ERROR
+          EOF
+          sshd -t -f "$state/sshd_config"
+          sshd -D -e -f "$state/sshd_config" >"$state/sshd.log" 2>&1 &
+          echo $! >"$state/sshd.pid"
+          for _ in {1..20}; do
+            if nc -z 127.0.0.1 "$port"; then break; fi
+            sleep 1
+          done
+          nc -z 127.0.0.1 "$port"
+          fingerprint=$(ssh-keygen -lf "$state/host_key.pub" -E sha256 | awk '{print $2}')
+          cat >"$state/hosts.toml" <<EOF
+          [hosts.loopback]
+          address = "127.0.0.1"
+          port = $port
+          user = "$USER"
+          host_key = "$fingerprint"
+          timeout_secs = 30
+          [hosts.loopback.auth]
+          type = "key"
+          path = "$state/client_key"
+          EOF
+          echo "OMP_SSH_TEST_HOSTS=$state/hosts.toml" >> "$GITHUB_ENV"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+      - name: Run SSH backend proof
+        run: cargo nextest run -p omp-exec-ssh --test loopback --locked --no-fail-fast

@@ -20,5 +20,8 @@ omp-exec.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true
