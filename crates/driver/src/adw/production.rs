@@ -17,17 +17,20 @@ use std::{
 };
 
 use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
-use omp_core::{EnvPath, Str, StrMut, sf};
-use omp_env::{EnvClient, ExecEvent};
+use omp_core::{Str, StrMut, sf};
+use omp_env::EnvClient;
 use omp_envd::{
 	admission::{SandboxState, effective_approval_mode},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
 	tool_settings::{ApprovalMode, ToolSettings},
 };
-use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
-use omp_proto::env::v1::{
-	CloseSessionRequest, ExecOutcome, ExecRequest, OpenSessionRequest, OutputChannel, Script,
+use omp_exec::{
+	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
+	ExecutionRequest, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement,
+	ResourceRequirements, ToolchainId,
 };
+use omp_exec_local::{Config as LocalConfig, LocalBackend};
+use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +54,9 @@ pub enum ProductionError {
 	/// The project Environment that runs code phases could not start.
 	#[error("workflow project environment could not start")]
 	Environment(#[from] omp_envd::EnvdError),
+	/// The unified local or remote execution backend failed.
+	#[error("workflow execution backend failed")]
+	Execution(#[source] ExecutionError),
 	/// The Environment refused or lost a code phase's command.
 	#[error("workflow project environment rejected a command")]
 	Exec(#[from] omp_env::ClientError),
@@ -144,10 +150,11 @@ impl ProductionAdwHost {
 			.unwrap_or_else(|| SV_EXEC_POLICY.get(&self.ctx))
 	}
 
-	/// The Environment client code phases run through, attaching the project
-	/// Environment under this run's control context on first use.
-	pub(super) async fn environment(&self) -> Result<&EnvClient, ProductionError> {
-		let environment = self
+	/// Opens the project Environment composition once and returns its owner.
+	pub(super) async fn environment_owner(
+		&self,
+	) -> Result<&omp_envd::ProjectEnvironment, ProductionError> {
+		self
 			.environment
 			.get_or_try_init(|| async {
 				let state_dir = omp_env::project_state::directory(&self.data_dir, &self.root)?;
@@ -173,8 +180,12 @@ impl ProductionAdwHost {
 				.await
 				.map_err(ProductionError::from)
 			})
-			.await?;
-		Ok(environment.client())
+			.await
+	}
+
+	/// The Environment client used by remote capture and other protocol calls.
+	pub(super) async fn environment(&self) -> Result<&EnvClient, ProductionError> {
+		Ok(self.environment_owner().await?.client())
 	}
 
 	async fn run_child(
@@ -234,34 +245,79 @@ impl ProductionAdwHost {
 			.resolver
 			.resolve(&[binary])
 			.ok_or_else(|| ProductionError::UnresolvedBinary { binary: Str::new(binary) })?;
-		let client = self.environment().await?;
-		let cwd =
-			EnvPath::new(Str::new(directory.to_string_lossy())).map_err(ProductionError::Location)?;
-		let opened = client
-			.open_session(&cwd, OpenSessionRequest::default())
-			.await?;
-		let session = opened.session.clone();
-		let finished =
-			run_script(client, opened.session, command_script(&resolved, args), cancel).await;
-		let _ = client
-			.close_session(CloseSessionRequest { session, ..CloseSessionRequest::default() })
-			.await;
-		let Some(finished) = finished? else {
-			return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
-		};
-		if finished.outcome == ExecOutcome::Exited && finished.code == Some(0) {
-			return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
-		}
-		// The rejection feedback is the next attempt's only record of what was
-		// wrong, so it carries the diagnostics rather than just the status. A
-		// sandbox denial has no exit code; its outcome says why.
-		let mut feedback = StrMut::new(match finished.code {
-			Some(code) => format!("`{binary}` exited with status {code}\n"),
-			None => format!("`{binary}` ended {}\n", finished.outcome.as_str_name()),
+		let environment = self.environment_owner().await?;
+		let platform = local_platform();
+		let backend = LocalBackend::new(LocalConfig {
+			id: BackendId::new_static("local"),
+			root: self.root.clone(),
+			host: environment.exec_host(),
+			platform,
+			enforced: self.posture()?,
 		});
-		feedback.push_str(&String::from_utf8_lossy(&finished.stdout));
-		feedback.push_str(&String::from_utf8_lossy(&finished.stderr));
-		Ok(PhaseResult { accepted: false, feedback: feedback.freeze() })
+		let mut argv = Vec::with_capacity(args.len() + 1);
+		argv.push(Str::new(resolved.to_string_lossy()));
+		argv.extend(args.iter().cloned());
+		let request = ExecutionRequest {
+			id:          ExecutionId::new(Str::from(omp_core::Ulid::generate().to_string())),
+			intent:      Intent::Test,
+			argv:        Arc::from(argv),
+			cwd:         Str::new(cwd.unwrap_or("")),
+			env:         Arc::<[EnvEntry]>::from([]),
+			inputs:      None,
+			outputs:     OutputSpec::Logs,
+			toolchain:   ToolchainId::new_static("local"),
+			caches:      Arc::from([]),
+			platform:    PlatformRequirement {
+				os:            platform.os,
+				arch:          platform.arch,
+				needs_network: false,
+				needs:         NeedSet::new(),
+			},
+			requirement: phase.requires,
+			resources:   ResourceRequirements::default(),
+			eligibility: Eligibility::LocalPreferred,
+			timeout:     Duration::from_secs(30 * 60),
+		};
+		let mut run = backend
+			.start(request)
+			.await
+			.map_err(ProductionError::Execution)?;
+		let mut stdout = Vec::new();
+		let mut stderr = Vec::new();
+		loop {
+			let event = tokio::select! {
+				event = run.next_event() => event,
+				() = cancel.cancelled() => {
+					let _ = run.cancel().await;
+					return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
+				},
+			};
+			match event {
+				Some(ExecutionEvent::Output(frame)) => match frame.stream {
+					omp_exec::Stream::Stdout => stdout.extend_from_slice(&frame.bytes),
+					omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
+				},
+				Some(ExecutionEvent::Settled(Ok(result))) if result.outcome.is_success() => {
+					return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
+				},
+				Some(ExecutionEvent::Settled(Ok(result))) => {
+					let mut feedback =
+						StrMut::new(format!("`{binary}` ended with {:?}\n", result.outcome));
+					feedback.push_str(&String::from_utf8_lossy(&stdout));
+					feedback.push_str(&String::from_utf8_lossy(&stderr));
+					return Ok(PhaseResult { accepted: false, feedback: feedback.freeze() });
+				},
+				Some(ExecutionEvent::Settled(Err(error))) => {
+					return Err(ProductionError::Execution(error));
+				},
+				Some(_) => {},
+				None => {
+					return Err(ProductionError::Execution(ExecutionError::Infrastructure {
+						source: Arc::new(io::Error::other("local execution ended without a result")),
+					}));
+				},
+			}
+		}
 	}
 }
 
@@ -284,83 +340,17 @@ fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -
 	}
 }
 
-/// The in-process shell script that runs `binary` with `args`, each word
-/// single-quoted so no argument is reinterpreted.
-fn command_script(binary: &Path, args: &[Str]) -> String {
-	let mut script = String::new();
-	push_quoted(&mut script, &binary.to_string_lossy());
-	for argument in args {
-		script.push(' ');
-		push_quoted(&mut script, argument.as_str());
-	}
-	script
+fn local_platform() -> Platform {
+	#[cfg(target_arch = "aarch64")]
+	let arch = omp_exec::Arch::Aarch64;
+	#[cfg(not(target_arch = "aarch64"))]
+	let arch = omp_exec::Arch::X86_64;
+	#[cfg(target_os = "macos")]
+	let os = omp_exec::Os::Macos;
+	#[cfg(not(target_os = "macos"))]
+	let os = omp_exec::Os::Linux;
+	Platform { os, arch }
 }
-
-fn push_quoted(script: &mut String, word: &str) {
-	script.push('\'');
-	for (index, part) in word.split('\'').enumerate() {
-		if index > 0 {
-			script.push_str("'\\''");
-		}
-		script.push_str(part);
-	}
-	script.push('\'');
-}
-
-/// What one code phase's command produced.
-struct Finished {
-	outcome: ExecOutcome,
-	code:    Option<i32>,
-	stdout:  Vec<u8>,
-	stderr:  Vec<u8>,
-}
-
-/// Runs `script` in `session` to its exit; `None` when `cancel` fired first.
-///
-/// Dropping the run on cancellation tears its process groups down
-/// TERM-then-KILL in the Environment.
-async fn run_script(
-	client: &EnvClient,
-	session: bytes::Bytes,
-	script: String,
-	cancel: &CancellationToken,
-) -> Result<Option<Finished>, ProductionError> {
-	let mut run = client
-		.exec(ExecRequest {
-			session,
-			source: Some(Script { text: script, ..Script::default() }),
-			..ExecRequest::default()
-		})
-		.await?;
-	let mut stdout = Vec::new();
-	let mut stderr = Vec::new();
-	loop {
-		let event = tokio::select! {
-			event = run.next_event() => event?,
-			() = cancel.cancelled() => return Ok(None),
-		};
-		match event {
-			Some(ExecEvent::Output(frame)) => {
-				if frame.channel == OutputChannel::Stderr as i32 {
-					stderr.extend_from_slice(&frame.data);
-				} else {
-					stdout.extend_from_slice(&frame.data);
-				}
-			},
-			Some(ExecEvent::Started(_)) => {},
-			Some(ExecEvent::Exit(exit)) => {
-				let status = exit.status.unwrap_or_default();
-				let outcome = ExecOutcome::try_from(status.outcome).unwrap_or(ExecOutcome::Unspecified);
-				let code = matches!(outcome, ExecOutcome::Exited | ExecOutcome::Failed)
-					.then_some(status.exit_code)
-					.flatten();
-				return Ok(Some(Finished { outcome, code, stdout, stderr }));
-			},
-			None => return Ok(None),
-		}
-	}
-}
-
 impl AdwHost for ProductionAdwHost {
 	type Error = ProductionError;
 
