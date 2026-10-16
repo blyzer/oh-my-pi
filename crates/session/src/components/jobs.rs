@@ -141,15 +141,6 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 	if let Some(agent) = spec.agent {
 		node = node.with_prop(PropKey::Custom(Str::new_static("agent")), Value::Str(agent));
 	}
-	if let Some(backend) = spec.backend {
-		node = node.with_prop(PropKey::Custom(Str::new_static("backend")), Value::Str(backend));
-	}
-	if let Some(operation) = spec.operation {
-		node = node.with_prop(PropKey::Custom(Str::new_static("operation")), Value::Str(operation));
-	}
-	if let Some(request) = spec.request {
-		node = node.with_prop(PropKey::Custom(Str::new_static("request")), Value::Str(request));
-	}
 	Some(Txn {
 		cause,
 		label: Some(Str::new_static("jobs.insert")),
