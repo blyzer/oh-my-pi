@@ -10,7 +10,7 @@ use omp_core::Str;
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_session::{
 	ComponentRegistry, Session,
-	components::jobs::{self, JobSpec},
+	components::jobs::{self, ExecutionJobSpec, JobSpec},
 };
 use tempfile::tempdir;
 
@@ -599,4 +599,38 @@ async fn every_rewind_and_switch_tells_the_session_observers() {
 	let told = [Some(genesis), Some(genesis), next.head()];
 	assert_eq!(first.heads(), told, "each transition hands over the session now served");
 	assert_eq!(second.heads(), told);
+}
+
+#[tokio::test]
+async fn execution_job_metadata_is_durable_and_orphans_explicitly() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("execution.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let cause = session.head().expect("genesis head");
+	let txn = jobs::insert_execution(session.dom(), cause, ExecutionJobSpec {
+		id:          Str::new_static("execution-1"),
+		owner:       Str::new_static("kernel"),
+		started:     Str::new_static("1"),
+		backend:     Str::new_static("remote"),
+		operation:   Some(Str::new_static("op-1")),
+		request:     Str::new_static("{\"output\":\"logs\"}"),
+		output_mode: Str::new_static("logs"),
+	})
+	.expect("jobs root");
+	session.patch(txn).expect("insert execution job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.list().into_iter().next().expect("execution record");
+	assert_eq!(record.kind, omp_agent::jobs::JobKind::Execution);
+	assert_eq!(record.backend.as_deref(), Some("remote"));
+	assert_eq!(record.operation.as_deref(), Some("op-1"));
+	assert_eq!(record.request.as_deref(), Some("{\"output\":\"logs\"}"));
+	assert!(board.has_finished_units());
+	let settled = board
+		.wait(&mut session, Some(&[Str::new_static("execution-1")]))
+		.await
+		.expect("poll")
+		.expect("orphan settlement");
+	assert_eq!(settled.status.as_str(), "failed");
+	assert_eq!(settled.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
 }
