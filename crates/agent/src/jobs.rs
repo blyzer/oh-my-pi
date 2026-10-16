@@ -382,6 +382,22 @@ impl JobBoard {
 		true
 	}
 
+	/// Attaches a backend-owned execution task to a journalled
+	/// `JobKind::Execution` node.
+	///
+	/// The caller must append the node through
+	/// `omp_session::components::jobs::insert_execution` first. This method
+	/// only installs the disposable cancellation and settlement boundary.
+	pub fn attach_execution_task(
+		&self,
+		dom: &Dom,
+		handle: Handle,
+		cancel: CancellationToken,
+		task: JoinHandle<JobSettlement>,
+	) -> bool {
+		self.attach_task(dom, handle, cancel, task)
+	}
+
 	/// Attaches a restartable execution factory for rewind/resume lifecycle.
 	pub fn attach_restartable<F>(&self, dom: &Dom, handle: Handle, factory: F) -> bool
 	where
