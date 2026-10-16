@@ -80,10 +80,8 @@ where
 
 impl<L, R> ExecutionRun for BackendRun<L, R>
 where
-	L: ExecutionRun,
-	R: ExecutionRun,
-	L::Run: Sync,
-	R::Run: Sync,
+	L: ExecutionRun + Sync,
+	R: ExecutionRun + Sync,
 {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
 		async move {
