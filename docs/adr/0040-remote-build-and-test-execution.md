@@ -1085,9 +1085,11 @@ capture, `omp-exec-buildbuddy` Run API backend, `CargoJust` planning, operator-o
 `sv_exec_*` configuration, and `--exec-policy remote-only` ADW dispatch are present. Remote
 proofs cover REAPI and Run API compilation, the Run API HTTP lifecycle, envd capture (including
 patch reconstruction and refusal cases), and the driver integration. Slice 2 now has a Local
-`ExecHost` backend, local ADW and `cleanse` routing, and output-mode enforcement for Local,
-REAPI, and the documented Run API limitations. Runtime backend-enum/fallback orchestration,
-artifact materialization, and action-cache reuse remain future work.
+`ExecHost` backend, local ADW and `cleanse` routing, output-mode enforcement for Local, REAPI,
+and the documented Run API limitations, plus a generic Local/Reapi runtime router with
+pre-acceptance fallback classification. Remote action-cache policy is wired through the REAPI
+profile. An `omp-exec-ssh` backend now exists over envd's native SSH authority, but driver
+composition, artifact materialization, and journaled agent-initiated execution jobs remain.
 
 ### BuildBuddy coverage of REAPI
 
