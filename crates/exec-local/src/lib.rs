@@ -179,7 +179,9 @@ impl ExecutionRun for LocalRun {
 					Some(ExecutionEvent::Accepted { operation })
 				},
 				ExecEvent::Output(frame) => Some(ExecutionEvent::Output(OutputFrame {
-					stream: match frame.channel {
+					stream: match omp_proto::env::v1::OutputChannel::try_from(frame.channel)
+						.unwrap_or(omp_proto::env::v1::OutputChannel::Unspecified)
+					{
 						omp_proto::env::v1::OutputChannel::Stdout
 						| omp_proto::env::v1::OutputChannel::Pty => Stream::Stdout,
 						omp_proto::env::v1::OutputChannel::Stderr => Stream::Stderr,
@@ -205,9 +207,9 @@ impl ExecutionRun for LocalRun {
 
 	fn detach(self) -> Reattach {
 		Reattach {
-			backend:   self.backend,
-			operation: self.operation.unwrap_or_default(),
-			id:        self.id,
+			backend:   self.backend.clone(),
+			operation: self.operation.clone().unwrap_or_default(),
+			id:        self.id.clone(),
 		}
 	}
 }
@@ -289,11 +291,11 @@ fn quote_argv(argv: &[Str]) -> Result<String, LocalError> {
 			command.push(' ');
 		}
 		command.push('\'');
-		for (part_index, part) in arg.split('\'').enumerate() {
+		for (part_index, part) in arg.split("'").enumerate() {
 			if part_index != 0 {
 				command.push_str("'\\''");
 			}
-			command.push_str(part);
+			command.push_str(part.as_str());
 		}
 		command.push('\'');
 	}
