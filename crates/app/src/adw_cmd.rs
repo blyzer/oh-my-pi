@@ -82,7 +82,7 @@ async fn execute(
 			"{} attempt {}: {} — {}",
 			record.phase,
 			record.attempt,
-			if record.accepted {
+			if record.status == omp_driver::adw::PhaseStatus::Accepted {
 				"accepted"
 			} else {
 				"rejected"
@@ -94,12 +94,13 @@ async fn execute(
 		RunStatus::Accepted => println!("Workflow `{workflow}` accepted every phase."),
 		RunStatus::Halted | RunStatus::Blocked => println!(
 			"Workflow `{workflow}` {}{}.",
-			exit.status,
+			format!("{:?}", exit.status),
 			exit
 				.reason
 				.as_deref()
 				.map_or_else(String::new, |reason| format!(": {reason}"))
 		),
+		RunStatus::Failed(failure) => println!("Workflow `{workflow}` failed: {failure:?}."),
 		RunStatus::Cancelled => println!("Workflow `{workflow}` cancelled."),
 	}
 	if exit.code == 0 {
@@ -121,6 +122,6 @@ pub fn open_host(
 ) -> miette::Result<ProductionAdwHost> {
 	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
 	let workspace_trust = evaluate_workspace(&data_dir, project);
-	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, ctx, workspace_trust)
+	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, false, ctx, workspace_trust)
 		.into_diagnostic()
 }
