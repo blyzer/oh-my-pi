@@ -622,11 +622,13 @@ fn output_paths(outputs: &omp_exec::OutputSpec) -> Vec<String> {
 
 /// A live REAPI execution stream.
 pub struct ReapiRun<S> {
-	backend:  ReapiBackend<S>,
-	stream:   tonic::Streaming<longrunning::Operation>,
-	id:       omp_exec::ExecutionId,
-	outputs:  OutputSpec,
-	accepted: bool,
+	backend:     ReapiBackend<S>,
+	stream:      tonic::Streaming<longrunning::Operation>,
+	id:          omp_exec::ExecutionId,
+	outputs:     OutputSpec,
+	operation:   Arc<Mutex<Option<Str>>>,
+	reconnected: bool,
+	accepted:    bool,
 }
 
 impl<S> ReapiRun<S>
@@ -639,7 +641,15 @@ where
 		id: omp_exec::ExecutionId,
 		outputs: OutputSpec,
 	) -> Self {
-		Self { backend, stream, id, outputs, operation: Arc::new(Mutex::new(None)) }
+		Self {
+			backend,
+			stream,
+			id,
+			outputs,
+			operation: Arc::new(Mutex::new(None)),
+			reconnected: false,
+			accepted: false,
+		}
 	}
 
 	async fn next(&mut self) -> Option<ExecutionEvent> {
