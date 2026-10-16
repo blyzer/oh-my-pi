@@ -30,6 +30,11 @@ invocation was unsuccessful; it is not an infrastructure failure.
 - REST cancellation is unavailable. Enabling `buildbuddy-cancel` lets the run use the separate
   invocation-scoped gRPC cancellation client from `omp-exec-reapi`.
 
+The public Run API has no content-addressed output-file digests. `Metadata` suppresses log
+retrieval; `Logs` and `All` retrieve bounded logs as output events; `Paths` and `All` cannot
+materialize artifacts and therefore settle with an empty artifact list. REAPI remains the backend
+for digest-addressed artifacts.
+
 ## Features
 
 - `buildbuddy-cancel`: enables the optional `BuildBuddyService.CancelExecutions` integration.

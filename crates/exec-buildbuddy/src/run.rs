@@ -16,6 +16,7 @@ use omp_exec::{
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Config, HttpClient, MAX_LOG_BYTES, post};
+/// One accepted BuildBuddy Run API invocation.
 pub struct BuildBuddyRun {
 	config:     Arc<Config>,
 	client:     HttpClient,
