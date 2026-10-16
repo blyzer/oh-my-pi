@@ -11,6 +11,7 @@ enum ComponentJobKind {
 	Tool,
 	Subagent,
 	Process,
+	Execution,
 }
 
 #[derive(Clone, Copy, Debug, EnumString)]
@@ -28,6 +29,7 @@ enum DeliveryJobType {
 	Task,
 	Eval,
 	Tool,
+	Execution,
 }
 
 impl From<ComponentJobKind> for DeliveryJobType {
@@ -36,6 +38,7 @@ impl From<ComponentJobKind> for DeliveryJobType {
 			ComponentJobKind::Tool => Self::Tool,
 			ComponentJobKind::Subagent => Self::Task,
 			ComponentJobKind::Process => Self::Bash,
+			ComponentJobKind::Execution => Self::Execution,
 		}
 	}
 }
@@ -65,6 +68,49 @@ pub struct JobSpec {
 	pub agent:   Option<Str>,
 }
 
+/// Durable metadata for an execution backend job.
+#[derive(Clone, Debug)]
+pub struct ExecutionJobSpec {
+	/// Stable execution identity.
+	pub id:          Str,
+	/// Runtime owner identity.
+	pub owner:       Str,
+	/// Start timestamp represented by the caller.
+	pub started:     Str,
+	/// Backend identity.
+	pub backend:     Str,
+	/// Reattach operation, when the backend accepted work.
+	pub operation:   Option<Str>,
+	/// Serialized request identity.
+	pub request:     Str,
+	/// Requested output mode.
+	pub output_mode: Str,
+}
+
+/// Builds a journal-first `<job kind="execution">` insertion.
+pub fn insert_execution(dom: &Dom, cause: EntryId, spec: ExecutionJobSpec) -> Option<Txn> {
+	let jobs = jobs_handle(dom)?;
+	let mut node = NodeSpec::new(KnownTag::Job)
+		.with_prop(PropId::Id, Value::Str(spec.id.clone()))
+		.with_prop(PropId::Kind, Value::Str(Str::new_static("execution")))
+		.with_prop(PropId::Status, Value::Str(Str::new_static("running")))
+		.with_prop(PropKey::Custom(Str::new_static("owner")), Value::Str(spec.owner))
+		.with_prop(PropKey::Custom(Str::new_static("started")), Value::Str(spec.started))
+		.with_prop(PropId::Name, Value::Str(Str::new_static("execution")))
+		.with_prop(PropId::Label, Value::Str(spec.id))
+		.with_prop(PropKey::Custom(Str::new_static("backend")), Value::Str(spec.backend))
+		.with_prop(PropKey::Custom(Str::new_static("request")), Value::Str(spec.request))
+		.with_prop(PropKey::Custom(Str::new_static("output_mode")), Value::Str(spec.output_mode));
+	if let Some(operation) = spec.operation {
+		node = node.with_prop(PropKey::Custom(Str::new_static("operation")), Value::Str(operation));
+	}
+	Some(Txn {
+		cause,
+		label: Some(Str::new_static("jobs.insert.execution")),
+		ops: vec![Op::Ins { parent: jobs, after: dom.children(jobs).last().copied(), node }],
+	})
+}
+
 /// Builds the journalled patch that inserts a job under `<meta><jobs>`.
 ///
 /// Subagents use the semantic `<subagent>` tag; every other kind uses `<job>`.
@@ -78,7 +124,9 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 		.unwrap_or(ComponentJobKind::Tool);
 	let tag = match kind {
 		ComponentJobKind::Subagent => KnownTag::Subagent,
-		ComponentJobKind::Tool | ComponentJobKind::Process => KnownTag::Job,
+		ComponentJobKind::Tool | ComponentJobKind::Process | ComponentJobKind::Execution => {
+			KnownTag::Job
+		},
 	};
 	let job_type = DeliveryJobType::from(kind);
 	let job_type: &'static str = job_type.into();
@@ -92,6 +140,15 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 		.with_prop(PropId::Label, Value::Str(spec.id));
 	if let Some(agent) = spec.agent {
 		node = node.with_prop(PropKey::Custom(Str::new_static("agent")), Value::Str(agent));
+	}
+	if let Some(backend) = spec.backend {
+		node = node.with_prop(PropKey::Custom(Str::new_static("backend")), Value::Str(backend));
+	}
+	if let Some(operation) = spec.operation {
+		node = node.with_prop(PropKey::Custom(Str::new_static("operation")), Value::Str(operation));
+	}
+	if let Some(request) = spec.request {
+		node = node.with_prop(PropKey::Custom(Str::new_static("request")), Value::Str(request));
 	}
 	Some(Txn {
 		cause,

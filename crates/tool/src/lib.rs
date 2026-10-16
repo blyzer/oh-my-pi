@@ -2116,6 +2116,8 @@ pub enum JobKind {
 	Task,
 	/// A detached evaluation.
 	Eval,
+	/// An execution backend job.
+	Execution,
 }
 
 /// Lifecycle state observed for detached work.

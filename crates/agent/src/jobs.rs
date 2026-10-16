@@ -33,10 +33,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream};
 
-/// The three execution shapes represented by the one job primitive.
-#[derive(Clone, Copy, Debug, Deserialize, Display, EnumString, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
 pub enum JobKind {
 	/// A detached ordinary tool call.
 	Tool,
@@ -44,14 +40,15 @@ pub enum JobKind {
 	Subagent,
 	/// A supervised process or daemon.
 	Process,
+	/// An execution backend job with a durable reattach identity.
+	Execution,
 }
 
-#[derive(Clone, Copy, Debug, IntoStaticStr)]
-#[strum(serialize_all = "lowercase")]
 enum DeliveryJobType {
 	Bash,
 	Task,
 	Tool,
+	Execution,
 }
 
 impl From<JobKind> for DeliveryJobType {
@@ -60,6 +57,7 @@ impl From<JobKind> for DeliveryJobType {
 			JobKind::Tool => Self::Tool,
 			JobKind::Subagent => Self::Task,
 			JobKind::Process => Self::Bash,
+			JobKind::Execution => Self::Execution,
 		}
 	}
 }
@@ -102,6 +100,14 @@ pub struct JobRecord {
 	pub output:      Option<Box<RawValue>>,
 	/// Terminal diagnostic projected from the DOM.
 	pub error:       Option<Str>,
+	/// Backend identity for an execution job.
+	pub backend:     Option<Str>,
+	/// Reattach operation for an execution job.
+	pub operation:   Option<Str>,
+	/// Serialized request identity and output mode.
+	pub request:     Option<Str>,
+	/// Fallback/error class recorded for an execution job.
+	pub fallback:    Option<Str>,
 	/// Tool-call entry owned by this detached job.
 	pub call:        Option<EntryId>,
 	/// Initial detached `tool.result@1` entry which created this job.
@@ -165,6 +171,9 @@ pub const ORPHANED_TOOL_JOB: &str =
 /// `wait` and revive hang forever.
 pub const ORPHANED_SUBAGENT_JOB: &str =
 	"subagent execution was lost across a rewind or restart and can be revived";
+/// Stable diagnostic journaled when an execution job cannot be reattached.
+pub const ORPHANED_EXECUTION_JOB: &str =
+	"execution job was lost across a rewind or restart and cannot be reattached";
 
 /// Host state outside the job board derived from the live session's journal,
 /// which outlives that session because the kernel and its environment do.
@@ -465,6 +474,7 @@ impl JobBoard {
 			let error = match kind {
 				JobKind::Subagent => ORPHANED_SUBAGENT_JOB,
 				JobKind::Tool | JobKind::Process => ORPHANED_TOOL_JOB,
+				JobKind::Execution => ORPHANED_EXECUTION_JOB,
 			};
 			self.commit(session, handle, JobSettlement {
 				status:     Str::new_static("failed"),
@@ -1187,6 +1197,10 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 				_ => None,
 			}),
 		error: custom(node, "error").map(Str::new),
+		backend: custom(node, "backend").map(Str::new),
+		operation: custom(node, "operation").map(Str::new),
+		request: custom(node, "request").map(Str::new),
+		fallback: custom(node, "fallback").map(Str::new),
 		call: custom(node, "call").and_then(|value| value.parse().ok()),
 		detached_at: prop(node, PropId::Cause).and_then(|value| value.parse().ok()),
 	})
