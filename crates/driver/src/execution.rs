@@ -30,6 +30,122 @@ pub enum BackendRun<L, R> {
 	Remote(R),
 }
 
+/// Runtime composition of Local, REAPI, and SSH backends.
+///
+/// This enum is the concrete dispatch boundary for the full ADR. It keeps
+/// backend selection static and lets the pure placement layer remain unaware
+/// of vendor or transport details.
+#[derive(Clone)]
+pub enum BackendSet<L, R, S> {
+	/// The local backend.
+	Local(L),
+	/// The REAPI/BuildBuddy backend.
+	Remote(R),
+	/// The SSH backend.
+	Ssh(S),
+}
+
+/// A run from the three-backend runtime composition.
+pub enum BackendSetRun<L, R, S> {
+	/// A local run.
+	Local(L),
+	/// A remote run.
+	Remote(R),
+	/// An SSH run.
+	Ssh(S),
+}
+
+impl<L, R, S> ExecutionBackend for BackendSet<L, R, S>
+where
+	L: ExecutionBackend,
+	R: ExecutionBackend,
+	S: ExecutionBackend,
+	L::Run: Sync,
+	R::Run: Sync,
+	S::Run: Sync,
+{
+	type Run = BackendSetRun<L::Run, R::Run, S::Run>;
+
+	fn id(&self) -> &BackendId<str> {
+		match self {
+			Self::Local(backend) => backend.id(),
+			Self::Remote(backend) => backend.id(),
+			Self::Ssh(backend) => backend.id(),
+		}
+	}
+
+	fn capabilities(&self) -> &BackendCapabilities {
+		match self {
+			Self::Local(backend) => backend.capabilities(),
+			Self::Remote(backend) => backend.capabilities(),
+			Self::Ssh(backend) => backend.capabilities(),
+		}
+	}
+
+	fn start(
+		&self,
+		request: ExecutionRequest,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
+		let backend = self.clone();
+		async move {
+			match backend {
+				Self::Local(backend) => backend.start(request).await.map(BackendSetRun::Local),
+				Self::Remote(backend) => backend.start(request).await.map(BackendSetRun::Remote),
+				Self::Ssh(backend) => backend.start(request).await.map(BackendSetRun::Ssh),
+			}
+		}
+	}
+
+	fn reattach(
+		&self,
+		handle: omp_exec::Reattach,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
+		let backend = self.clone();
+		async move {
+			match backend {
+				Self::Local(backend) => backend.reattach(handle).await.map(BackendSetRun::Local),
+				Self::Remote(backend) => backend.reattach(handle).await.map(BackendSetRun::Remote),
+				Self::Ssh(backend) => backend.reattach(handle).await.map(BackendSetRun::Ssh),
+			}
+		}
+	}
+}
+
+impl<L, R, S> ExecutionRun for BackendSetRun<L, R, S>
+where
+	L: ExecutionRun + Sync,
+	R: ExecutionRun + Sync,
+	S: ExecutionRun + Sync,
+{
+	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
+		async move {
+			match self {
+				Self::Local(run) => run.next_event().await,
+				Self::Remote(run) => run.next_event().await,
+				Self::Ssh(run) => run.next_event().await,
+			}
+		}
+	}
+
+	fn cancel(&self) -> impl Future<Output = omp_exec::CancelOutcome> + Send + '_ {
+		async move {
+			match self {
+				Self::Local(run) => run.cancel().await,
+				Self::Remote(run) => run.cancel().await,
+				Self::Ssh(run) => run.cancel().await,
+			}
+		}
+	}
+
+	fn detach(self) -> omp_exec::Reattach {
+		match self {
+			Self::Local(run) => run.detach(),
+			Self::Remote(run) => run.detach(),
+			Self::Ssh(run) => run.detach(),
+		}
+	}
+}
+
 impl<L, R> ExecutionBackend for BackendPair<L, R>
 where
 	L: ExecutionBackend,
