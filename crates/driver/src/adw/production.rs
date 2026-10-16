@@ -26,7 +26,7 @@ use omp_envd::{
 };
 use omp_exec::{
 	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
-	ExecutionRequest, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement,
+	ExecutionRequest, ExecutionRun, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement,
 	ResourceRequirements, ToolchainId,
 };
 use omp_exec_local::{Config as LocalConfig, LocalBackend};

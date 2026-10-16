@@ -8127,6 +8127,7 @@ dependencies = [
  "omp-exec",
  "omp-exec-local",
  "omp-exec-reapi",
+ "omp-ext",
  "omp-http",
  "omp-journal",
  "omp-memory",
