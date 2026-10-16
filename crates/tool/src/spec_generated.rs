@@ -843,6 +843,14 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	),
 	symbol!(
 		"docs/py/12-agents.md",
+		"omp.env.workspace.capture_inputs",
+		"(request: CaptureInputsRequest) -> CaptureInputsReply",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await env.capture_inputs(request)"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
 		"omp.env.workspace.restore",
 		"(snapshot, *, dry_run=False) -> RestoreOutcome",
 		CallbackAbi::None,
