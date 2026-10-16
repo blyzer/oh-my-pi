@@ -1088,8 +1088,11 @@ patch reconstruction and refusal cases), and the driver integration. Slice 2 now
 `ExecHost` backend, local ADW and `cleanse` routing, output-mode enforcement for Local, REAPI,
 and the documented Run API limitations, plus a generic Local/Reapi runtime router with
 pre-acceptance fallback classification. Remote action-cache policy is wired through the REAPI
-profile. An `omp-exec-ssh` backend now exists over envd's native SSH authority, but driver
-composition, artifact materialization, and journaled agent-initiated execution jobs remain.
+profile. An `omp-exec-ssh` backend now exists over envd's native SSH authority; driver
+composition and live-host proof remain. The durable `JobKind::Execution` schema, journal-first
+insertion, live-run supervision, cancellation, orphan settlement, and 327-agent-test proof now
+exist; CLI projection and restartable backend-factory wiring remain. Artifact materialization and
+the live production endpoint proof remain.
 
 ### BuildBuddy coverage of REAPI
 
