@@ -16,6 +16,9 @@ use std::{
 use flume::Receiver;
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
+use omp_exec::{
+	ExecutionError, ExecutionErrorKind, ExecutionEvent, ExecutionResult, ExecutionRun, Outcome,
+};
 use omp_journal::{
 	EntryId,
 	blob::{BlobRef, BlobStore},
@@ -396,6 +399,22 @@ impl JobBoard {
 		task: JoinHandle<JobSettlement>,
 	) -> bool {
 		self.attach_task(dom, handle, cancel, task)
+	}
+
+	/// Attaches a live backend run and maps its terminal event to one durable
+	/// `jobs.settle` patch through [`Self::poll`].
+	pub fn attach_execution_run<R>(
+		&self,
+		dom: &Dom,
+		handle: Handle,
+		cancel: CancellationToken,
+		run: R,
+	) -> bool
+	where
+		R: ExecutionRun + 'static,
+	{
+		let task = tokio::spawn(supervise_execution(run, cancel.clone()));
+		self.attach_execution_task(dom, handle, cancel, task)
 	}
 
 	/// Attaches a restartable execution factory for rewind/resume lifecycle.
@@ -1183,6 +1202,90 @@ fn collect(dom: &Dom, parent: Handle, out: &mut Vec<JobRecord>) {
 			out.push(record);
 		}
 		collect(dom, *handle, out);
+	}
+}
+
+async fn supervise_execution<R: ExecutionRun>(
+	mut run: R,
+	cancel: CancellationToken,
+) -> JobSettlement {
+	let mut operation = None;
+	loop {
+		let event = tokio::select! {
+			event = run.next_event() => event,
+			() = cancel.cancelled() => {
+				let outcome = run.cancel().await;
+				return JobSettlement {
+					status: Str::new_static("cancelled"),
+					output: serde_json::value::to_raw_value(&serde_json::json!({
+						"kind": "execution",
+						"status": "cancelled",
+						"cancel": outcome.to_string(),
+						"operation": operation,
+					})).ok(),
+					error: None,
+					completion: None,
+				};
+			},
+		};
+		match event {
+			Some(ExecutionEvent::Accepted { operation: value }) => operation = Some(value),
+			Some(ExecutionEvent::Settled(Ok(result))) => {
+				return settled_execution(result, operation);
+			},
+			Some(ExecutionEvent::Settled(Err(error))) => {
+				return failed_execution(error, operation);
+			},
+			Some(_) => {},
+			None => {
+				return JobSettlement {
+					status:     Str::new_static("failed"),
+					output:     None,
+					error:      Some(Str::new_static("execution stream ended before settlement")),
+					completion: None,
+				};
+			},
+		}
+	}
+}
+
+fn settled_execution(result: ExecutionResult, operation: Option<Str>) -> JobSettlement {
+	let (status, outcome) = match result.outcome {
+		Outcome::Exited { code } => {
+			(if code == 0 { "completed" } else { "failed" }, serde_json::json!({ "exit_code": code }))
+		},
+		Outcome::Signalled { signal } => ("failed", serde_json::json!({ "signal": signal })),
+	};
+	JobSettlement {
+		status:     Str::new_static(status),
+		output:     serde_json::value::to_raw_value(&serde_json::json!({
+			"kind": "execution",
+			"status": status,
+			"operation": operation,
+			"backend": result.backend,
+			"outcome": outcome,
+			"cache_hit": result.cache_hit,
+			"fallback": result.fallback.map(|fallback| fallback.kind.to_string()),
+		}))
+		.ok(),
+		error:      None,
+		completion: None,
+	}
+}
+
+fn failed_execution(error: ExecutionError, operation: Option<Str>) -> JobSettlement {
+	let kind = ExecutionErrorKind::from(&error);
+	JobSettlement {
+		status:     Str::new_static("failed"),
+		output:     serde_json::value::to_raw_value(&serde_json::json!({
+			"kind": "execution",
+			"status": "failed",
+			"operation": operation,
+			"error_kind": kind.to_string(),
+		}))
+		.ok(),
+		error:      Some(Str::new(error.to_string())),
+		completion: None,
 	}
 }
 

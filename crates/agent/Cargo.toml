@@ -21,6 +21,7 @@ omp-vocab.workspace = true
 omp-session.workspace = true
 omp-ai.workspace = true
 omp-tool.workspace = true
+omp-exec.workspace = true
 omp-proto.workspace = true
 omp-scribe.workspace = true
 omp-snapcompact.workspace = true
