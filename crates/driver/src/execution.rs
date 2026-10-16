@@ -82,6 +82,8 @@ impl<L, R> ExecutionRun for BackendRun<L, R>
 where
 	L: ExecutionRun,
 	R: ExecutionRun,
+	L::Run: Sync,
+	R::Run: Sync,
 {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
 		async move {
@@ -125,9 +127,10 @@ where
 	let placement = place(&request, &[remote.capabilities()], policy)
 		.map_err(|need| ExecutionError::Unplaceable { need })?;
 	match placement {
-		Placement::Local => settle(local.start(request).await?, cancel)
-			.await
-			.map(|(result, _)| result),
+		Placement::Local => {
+			let (result, _) = settle(local.start(request).await?, cancel).await;
+			result
+		},
 		Placement::Remote { .. } => {
 			let remote_result = match remote.start(request.clone()).await {
 				Ok(run) => settle(run, cancel).await,

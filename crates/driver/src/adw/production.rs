@@ -232,7 +232,7 @@ impl ProductionAdwHost {
 		if self.exec_policy() == AdwExecPolicy::RemoteOnly && eligible(binary, args) {
 			return self.run_remote(phase, args, cwd, cancel).await;
 		}
-		let directory = match cwd {
+		let _directory = match cwd {
 			Some(cwd) => {
 				let directory = fs::canonicalize(self.root.join(cwd))?;
 				if !directory.starts_with(&self.root) {
