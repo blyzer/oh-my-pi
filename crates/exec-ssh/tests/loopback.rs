@@ -1,12 +1,13 @@
 #![cfg(target_os = "macos")]
 
 use std::{env, sync::Arc, time::Duration};
+use omp_exec_ssh::{Config, SshBackend};
 
-use omp_adw::Posture;
+use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 use omp_core::{Str, project_file::Containment};
 use omp_envd::ssh::{HostStore, SshService};
 use omp_exec::{
-	BackendId, Eligibility, ExecutionBackend, ExecutionEvent, ExecutionId, ExecutionRequest, Intent,
+	BackendId, Eligibility, ExecutionBackend, ExecutionEvent, ExecutionId, ExecutionRun, ExecutionRequest, Intent,
 	NeedSet, OutputSpec, Platform, PlatformRequirement, ResourceRequirements, ToolchainId,
 };
 
@@ -19,7 +20,7 @@ async fn loopback_sshd_executes_a_pinned_host_key_command() {
 		alias:            Str::new_static("loopback"),
 		service:          SshService::new(hosts),
 		platform:         Platform::MACOS_AARCH64,
-		enforced:         Posture::default(),
+		enforced:         Posture { write: WriteScope::Unconfined, network: NetworkScope::Unrestricted, approval: ApprovalScope::Yolo },
 		max_output_bytes: 1024 * 1024,
 	});
 	let request = ExecutionRequest {
@@ -59,4 +60,3 @@ async fn loopback_sshd_executes_a_pinned_host_key_command() {
 	assert_eq!(output, b"ssh-ok");
 }
 
-use omp_exec::BackendId;

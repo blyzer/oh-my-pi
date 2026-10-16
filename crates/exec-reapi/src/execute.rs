@@ -511,7 +511,7 @@ where
 			command_digest: Some(digest::to_wire(command_digest)),
 			input_root_digest: Some(digest::to_wire(tree.root)),
 			timeout: Some(timeout(request.timeout)),
-			do_not_cache: self.inner.cache == CachePolicy::Off,
+			do_not_cache: matches!(self.inner.cache, CachePolicy::Off | CachePolicy::Read),
 			platform: Some(platform),
 			..Default::default()
 		};
@@ -632,9 +632,11 @@ where
 
 	async fn stream_blob(&self, digest: omp_exec::Digest) -> Result<(), ExecutionError> {
 		let source = self.inner.source.clone();
+		use rand::RngExt as _;
+		let upload_id = format!("{:032x}", rand::rng().random::<u128>());
 		let resource = cas::write_resource(
 			self.inner.instance.as_str(),
-			"omp-upload",
+			&upload_id,
 			&digest.hash.to_hex().to_string(),
 			digest.size,
 			cas::Compression::Identity,
