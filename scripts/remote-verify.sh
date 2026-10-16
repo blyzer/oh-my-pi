@@ -45,11 +45,29 @@ if [ -z "${BUILDBUDDY_API_KEY-}" ]; then
 fi
 export BUILDBUDDY_API_KEY
 
-# `bb remote` refuses to start outside a Bazel workspace. An empty marker satisfies it; it is
-# removed again if this script created it.
-if [ ! -e MODULE.bazel ]; then
-    : >MODULE.bazel
-    trap 'rm -f "$REPO_ROOT/MODULE.bazel"' EXIT
+# `bb remote` refuses to start outside a Bazel workspace. The marker and the
+# workspace symlinks it creates are disposable and must not enter the mirrored
+# working tree.
+module_created=false
+had_bazel_bin=false
+had_bazel_out=false
+had_bazel_testlogs=false
+had_bazel_workspace=false
+[ -e MODULE.bazel ] || module_created=true
+[ -h bazel-bin ] && had_bazel_bin=true
+[ -h bazel-out ] && had_bazel_out=true
+[ -h bazel-testlogs ] && had_bazel_testlogs=true
+[ -h bazel-oh-my-pi ] && had_bazel_workspace=true
+cleanup_remote_markers() {
+	$module_created && rm -f "$REPO_ROOT/MODULE.bazel"
+	! $had_bazel_bin && rm -f "$REPO_ROOT/bazel-bin"
+	! $had_bazel_out && rm -f "$REPO_ROOT/bazel-out"
+	! $had_bazel_testlogs && rm -f "$REPO_ROOT/bazel-testlogs"
+	! $had_bazel_workspace && rm -f "$REPO_ROOT/bazel-oh-my-pi"
+}
+trap cleanup_remote_markers EXIT
+if $module_created; then
+	: >MODULE.bazel
 fi
 
 # With several git remotes bb asks which one the runner fetches from; answer once.
@@ -82,10 +100,9 @@ args=(
     "--env=OMP_REMOTE_JUST_ARGS=$*"
 )
 if [ -n "${BUILDBUDDY_API_KEY-}" ]; then
-    # Match BuildBuddy's documented GitHub Actions pattern. The credential is
-    # consumed by the local bb client request; the remote runner script unsets
-    # BUILDBUDDY_API_KEY before running repository commands.
-	args+=("--remote_run_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY")
+	# `bb` reads BUILDBUDDY_API_KEY from its environment. Do not copy the
+	# secret into argv, where local process listings can expose it.
+	export BUILDBUDDY_API_KEY
 fi
 if [ "$seed" = true ]; then
     args+=(

@@ -12,6 +12,11 @@
 node_modules/
 .omp/tools/node_modules/
 
+# Bun transient build files and generated bundled binaries.
+**/*.bun-build
+/packages/coding-agent/binaries/
+/packages/natives/native/*.node
+/.bazelrc.user
 # Python
 __pycache__/
 *.py[cod]

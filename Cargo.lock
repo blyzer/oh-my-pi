@@ -7595,6 +7595,7 @@ dependencies = [
  "omp-con",
  "omp-core",
  "omp-dom",
+ "omp-exec",
  "omp-journal",
  "omp-proto",
  "omp-scribe",
@@ -7603,6 +7604,8 @@ dependencies = [
  "omp-tool",
  "omp-vocab",
  "parking_lot",
+ "proptest",
+ "regex",
  "regex-automata",
  "serde",
  "serde_json",
@@ -8122,6 +8125,10 @@ dependencies = [
  "omp-dom",
  "omp-env",
  "omp-envd",
+ "omp-exec",
+ "omp-exec-local",
+ "omp-exec-reapi",
+ "omp-exec-ssh",
  "omp-ext",
  "omp-http",
  "omp-journal",
@@ -8302,6 +8309,7 @@ dependencies = [
  "omp-dom",
  "omp-edit",
  "omp-env",
+ "omp-exec",
  "omp-ext",
  "omp-http",
  "omp-journal",
@@ -8362,6 +8370,84 @@ dependencies = [
  "serde",
  "strum",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "omp-exec-buildbuddy"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "omp-exec-reapi",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "omp-exec-local"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "omp-adw",
+ "omp-core",
+ "omp-envd",
+ "omp-exec",
+ "omp-proto",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "omp-exec-reapi"
+version = "2.0.0"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "flume",
+ "futures",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "parking_lot",
+ "prost",
+ "prost-types",
+ "protox",
+ "rand 0.10.2",
+ "strum",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "zstd",
+]
+
+[[package]]
+name = "omp-exec-ssh"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "flume",
+ "omp-adw",
+ "omp-core",
+ "omp-envd",
+ "omp-exec",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -12857,6 +12943,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
