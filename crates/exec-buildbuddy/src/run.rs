@@ -11,18 +11,17 @@ use bytes::Bytes;
 use omp_core::{CowBytes, Str};
 use omp_exec::{
 	CancelOutcome, ExecutionError, ExecutionEvent, ExecutionId, ExecutionResult, ExecutionRun,
-	Outcome, OutputFrame, Reattach, Stream, Timing, TransferCounts,
+	Outcome, OutputFrame, OutputSpec, Reattach, Stream, Timing, TransferCounts,
 };
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Config, HttpClient, MAX_LOG_BYTES, post};
-
-/// An accepted Run API invocation. Its token never travels in the action body.
 pub struct BuildBuddyRun {
 	config:     Arc<Config>,
 	client:     HttpClient,
 	invocation: Str,
 	id:         ExecutionId,
+	outputs:    OutputSpec,
 	timeout:    Duration,
 	started:    Instant,
 	state:      RunState,
@@ -47,12 +46,14 @@ impl BuildBuddyRun {
 		invocation: Str,
 		id: ExecutionId,
 		timeout: Duration,
+		outputs: OutputSpec,
 	) -> Self {
 		Self {
 			config,
 			client,
 			invocation,
 			id,
+			outputs,
 			timeout,
 			started: Instant::now(),
 			state: RunState::Accepted,
@@ -151,7 +152,9 @@ impl ExecutionRun for BuildBuddyRun {
 								// Code 1 is a normalized failed-command verdict, never an infrastructure
 								// failure.
 								let result = self.verdict(i32::from(!success));
-								if let Err(source) = self.fetch_logs().await {
+								if matches!(&self.outputs, OutputSpec::Logs | OutputSpec::All)
+									&& let Err(source) = self.fetch_logs().await
+								{
 									self.state = RunState::Done;
 									return Some(ExecutionEvent::Settled(Err(
 										ExecutionError::OutputRetrieval { source: Arc::new(source) },

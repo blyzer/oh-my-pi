@@ -18,7 +18,7 @@ use omp_adw::Posture;
 use omp_core::{ExposeSecret, SecretString, Str, base64};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelSupport, ExecutionBackend, ExecutionError,
-	ExecutionRequest, NeedSet, Platform, Reattach,
+	ExecutionRequest, NeedSet, OutputSpec, Platform, Reattach,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -262,6 +262,7 @@ impl<S: RunInputSource> ExecutionBackend for BuildBuddyBackend<S> {
 				invocation,
 				request.id,
 				request.timeout,
+				request.outputs,
 			))
 		}
 	}
@@ -280,6 +281,7 @@ impl<S: RunInputSource> ExecutionBackend for BuildBuddyBackend<S> {
 				handle.operation,
 				handle.id,
 				Duration::from_secs(1800),
+				OutputSpec::Logs,
 			))
 		}
 	}
