@@ -66,6 +66,10 @@ omp_con::var! {
 	pub static SV_EXEC_REMOTE_ENDPOINT = sv_exec_remote_endpoint: Str {
 		default: Str::default(), flags: archive,
 	};
+	/// Remote action-cache policy: `off`, `read`, or `read-write`.
+	pub static SV_EXEC_REMOTE_CACHE = sv_exec_remote_cache: Str {
+		default: Str::new_static("off"), flags: archive,
+	};
 	/// REAPI profile name: `reapi` or `buildbuddy`.
 	pub static SV_EXEC_REMOTE_PROFILE = sv_exec_remote_profile: Str {
 		default: Str::new_static("reapi"), flags: archive,
@@ -138,6 +142,14 @@ fn config_list(value: Str) -> Vec<String> {
 		.filter(|part| !part.is_empty())
 		.map(|part| part.to_string())
 		.collect()
+}
+
+fn cache_policy(ctx: &Ctx) -> omp_exec::CachePolicy {
+	match SV_EXEC_REMOTE_CACHE.get(ctx).as_str() {
+		"read" => omp_exec::CachePolicy::Read,
+		"read-write" => omp_exec::CachePolicy::ReadWrite,
+		_ => omp_exec::CachePolicy::Off,
+	}
 }
 
 fn repo_pins(root: &Path) -> Result<RepoPins, io::Error> {
@@ -384,7 +396,7 @@ impl ProductionAdwHost {
 			credential: Some(Credential::new(credential)),
 			platform: Platform::LINUX_X86_64,
 			enforced: REMOTE_POSTURE,
-			cache: omp_exec::CachePolicy::Off,
+			cache: cache_policy(ctx),
 			platform_properties: BTreeMap::new(),
 			toolchains: BTreeMap::from([(
 				CargoJust::toolchain(&pins).to_string().into(),
