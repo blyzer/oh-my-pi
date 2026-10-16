@@ -8400,7 +8400,9 @@ dependencies = [
  "omp-envd",
  "omp-exec",
  "omp-proto",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "url",
 ]
 

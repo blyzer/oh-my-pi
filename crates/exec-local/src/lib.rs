@@ -324,3 +324,79 @@ enum LocalError {
 	#[error("local execution failed")]
 	Failed,
 }
+
+#[cfg(test)]
+mod tests {
+	use omp_adw::{ApprovalScope, NetworkScope, WriteScope};
+	use omp_exec::{
+		Eligibility, Intent, NeedSet, Platform, PlatformRequirement, ResourceRequirements,
+		ToolchainId,
+	};
+
+	use super::*;
+
+	#[tokio::test]
+	async fn exec_host_run_maps_output_and_exit() {
+		let root = tempfile::tempdir().expect("temporary root");
+		let backend = LocalBackend::new(Config {
+			id:       BackendId::new_static("local"),
+			root:     root.path().to_path_buf(),
+			host:     ExecHost::new(),
+			platform: Platform::LINUX_X86_64,
+			enforced: Posture {
+				write:    WriteScope::WorkspaceWrite,
+				network:  NetworkScope::Unrestricted,
+				approval: ApprovalScope::Yolo,
+			},
+		});
+		let request = ExecutionRequest {
+			id:          ExecutionId::new_static("local-test"),
+			intent:      Intent::Test,
+			argv:        Arc::new([Str::new_static("printf"), Str::new_static("local-ok")]),
+			cwd:         Str::empty(),
+			env:         Arc::new([]),
+			inputs:      None,
+			outputs:     OutputSpec::Logs,
+			toolchain:   ToolchainId::new_static("local"),
+			caches:      Arc::new([]),
+			platform:    PlatformRequirement {
+				os:            Platform::LINUX_X86_64.os,
+				arch:          Platform::LINUX_X86_64.arch,
+				needs_network: false,
+				needs:         NeedSet::new(),
+			},
+			requirement: Default::default(),
+			resources:   ResourceRequirements::default(),
+			eligibility: Eligibility::LocalPreferred,
+			timeout:     Duration::from_secs(10),
+		};
+		let mut run = backend.start(request).await.expect("local start");
+		let mut output = Vec::new();
+		loop {
+			match run.next_event().await.expect("local event") {
+				ExecutionEvent::Output(frame) => output.extend_from_slice(&frame.bytes),
+				ExecutionEvent::Settled(Ok(result)) => {
+					assert_eq!(result.outcome, Outcome::Exited { code: 0 });
+					break;
+				},
+				ExecutionEvent::Settled(Err(error)) => panic!("local execution failed: {error}"),
+				_ => {},
+			}
+		}
+		assert_eq!(output, b"local-ok");
+	}
+
+	#[test]
+	fn argv_quoting_preserves_single_quotes() {
+		let argv = [Str::new_static("printf"), Str::new_static("a'b")];
+		assert_eq!(quote_argv(&argv).expect("quote"), "'printf' 'a'\\''b'");
+	}
+
+	#[test]
+	fn cwd_rejects_escape() {
+		assert!(matches!(
+			resolve_cwd(Path::new("/tmp/root"), "../escape"),
+			Err(LocalError::InvalidCwd { .. })
+		));
+	}
+}
