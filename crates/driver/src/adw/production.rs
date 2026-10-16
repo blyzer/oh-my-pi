@@ -14,24 +14,31 @@ use std::{
 	fs, io,
 	path::{Path, PathBuf},
 	sync::Arc,
+	time::Duration,
 };
 
 use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
-use omp_core::{EnvPath, Str, StrMut, sf};
-use omp_env::{EnvClient, ExecEvent};
+use omp_core::{Str, StrMut, sf};
+use omp_env::EnvClient;
 use omp_envd::{
 	admission::{SandboxState, effective_approval_mode},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
 	tool_settings::{ApprovalMode, ToolSettings},
 };
-use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
-use omp_proto::env::v1::{
-	CloseSessionRequest, ExecOutcome, ExecRequest, OpenSessionRequest, OutputChannel, Script,
+use omp_exec::{
+	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
+	ExecutionRequest, ExecutionRun, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement,
+	ResourceRequirements, ToolchainId,
 };
+use omp_exec_local::{Config as LocalConfig, LocalBackend};
+use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use super::{AdwHost, PhaseResult, PhaseSpec};
+use super::{
+	AdwHost, PhaseResult, PhaseSpec,
+	remote::{AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_POLICY, eligible},
+};
 use crate::{
 	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
@@ -48,6 +55,9 @@ pub enum ProductionError {
 	/// The project Environment that runs code phases could not start.
 	#[error("workflow project environment could not start")]
 	Environment(#[from] omp_envd::EnvdError),
+	/// The unified local or remote execution backend failed.
+	#[error("workflow execution backend failed")]
+	Execution(#[source] ExecutionError),
 	/// The Environment refused or lost a code phase's command.
 	#[error("workflow project environment rejected a command")]
 	Exec(#[from] omp_env::ClientError),
@@ -76,21 +86,29 @@ pub enum ProductionError {
 	/// A code phase was dispatched in a workspace that is not trusted.
 	#[error("workspace is not trusted; adw code phases are withheld")]
 	UntrustedWorkspace,
+	/// The remote-only backend or input capture failed.
+	#[error("remote workflow code phase failed")]
+	Remote(#[from] RemoteError),
+	/// A remote phase was interrupted and its best-effort cancel was requested.
+	#[error("remote workflow code phase was cancelled")]
+	Cancelled,
 }
 
 /// Production owner for one workflow run.
 pub struct ProductionAdwHost {
-	root:            PathBuf,
-	data_dir:        PathBuf,
-	model:           Str,
-	ctx:             Arc<omp_con::Ctx>,
-	resolver:        FilesystemResolver,
+	pub(super) root:      PathBuf,
+	data_dir:             PathBuf,
+	model:                Str,
+	model_override:       bool,
+	pub(super) ctx:       Arc<omp_con::Ctx>,
+	resolver:             FilesystemResolver,
 	/// The workspace trust decision the run executes under: code phases run
 	/// only when it trusts, and model phases' child kernels inherit it.
-	workspace_trust: TrustDecision,
+	workspace_trust:      TrustDecision,
 	/// The project Environment, started by the first code phase: a workflow
 	/// of model phases alone never needs one of its own.
-	environment:     OnceCell<omp_envd::ProjectEnvironment>,
+	environment:          OnceCell<omp_envd::ProjectEnvironment>,
+	exec_policy_override: Option<AdwExecPolicy>,
 }
 
 impl ProductionAdwHost {
@@ -104,6 +122,7 @@ impl ProductionAdwHost {
 		root: PathBuf,
 		data_dir: PathBuf,
 		model: Str,
+		model_override: bool,
 		ctx: Arc<omp_con::Ctx>,
 		workspace_trust: TrustDecision,
 	) -> Result<Self, ProductionError> {
@@ -111,17 +130,32 @@ impl ProductionAdwHost {
 			root: fs::canonicalize(root)?,
 			data_dir,
 			model,
+			model_override,
 			ctx,
 			resolver: FilesystemResolver,
 			workspace_trust,
 			environment: OnceCell::new(),
+			exec_policy_override: None,
 		})
 	}
 
-	/// The Environment client code phases run through, attaching the project
-	/// Environment under this run's control context on first use.
-	async fn environment(&self) -> Result<&EnvClient, ProductionError> {
-		let environment = self
+	/// Overrides the operator's execution policy for this process only.
+	pub fn with_exec_policy(mut self, policy: AdwExecPolicy) -> Self {
+		self.exec_policy_override = Some(policy);
+		self
+	}
+
+	fn exec_policy(&self) -> AdwExecPolicy {
+		self
+			.exec_policy_override
+			.unwrap_or_else(|| SV_EXEC_POLICY.get(&self.ctx))
+	}
+
+	/// Opens the project Environment composition once and returns its owner.
+	pub(super) async fn environment_owner(
+		&self,
+	) -> Result<&omp_envd::ProjectEnvironment, ProductionError> {
+		self
 			.environment
 			.get_or_try_init(|| async {
 				let state_dir = omp_env::project_state::directory(&self.data_dir, &self.root)?;
@@ -147,8 +181,12 @@ impl ProductionAdwHost {
 				.await
 				.map_err(ProductionError::from)
 			})
-			.await?;
-		Ok(environment.client())
+			.await
+	}
+
+	/// The Environment client used by remote capture and other protocol calls.
+	pub(super) async fn environment(&self) -> Result<&EnvClient, ProductionError> {
+		Ok(self.environment_owner().await?.client())
 	}
 
 	async fn run_child(
@@ -156,12 +194,13 @@ impl ProductionAdwHost {
 		prompt: Str,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
+		let (model, model_override) = self.model_phase_selector();
 		let (mut kernel, mut session, _) = compose_kernel(
 			&self.data_dir,
 			&self.root,
-			self.model.as_str(),
+			model,
 			Arc::clone(&self.ctx),
-			child_kernel_options(&self.workspace_trust),
+			child_kernel_options(&self.workspace_trust, model_override),
 		)
 		.await?;
 		let outcome = kernel
@@ -174,14 +213,26 @@ impl ProductionAdwHost {
 		Ok(outcome.assistant_text)
 	}
 
+	/// Chooses the selector and its explicitness for every model phase.
+	///
+	/// Resolution order: explicit `omp adw run --model`, inherited `ai_model`,
+	/// then the `@smol` fallback selector.
+	fn model_phase_selector(&self) -> (&str, bool) {
+		(self.model.as_str(), self.model_override)
+	}
+
 	async fn run_command(
 		&self,
+		phase: &Phase,
 		binary: &str,
 		args: &[Str],
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<PhaseResult, ProductionError> {
-		let directory = match cwd {
+		if self.exec_policy() == AdwExecPolicy::RemoteOnly && eligible(binary, args) {
+			return self.run_remote(phase, args, cwd, cancel).await;
+		}
+		let _directory = match cwd {
 			Some(cwd) => {
 				let directory = fs::canonicalize(self.root.join(cwd))?;
 				if !directory.starts_with(&self.root) {
@@ -195,34 +246,85 @@ impl ProductionAdwHost {
 			.resolver
 			.resolve(&[binary])
 			.ok_or_else(|| ProductionError::UnresolvedBinary { binary: Str::new(binary) })?;
-		let client = self.environment().await?;
-		let cwd =
-			EnvPath::new(Str::new(directory.to_string_lossy())).map_err(ProductionError::Location)?;
-		let opened = client
-			.open_session(&cwd, OpenSessionRequest::default())
-			.await?;
-		let session = opened.session.clone();
-		let finished =
-			run_script(client, opened.session, command_script(&resolved, args), cancel).await;
-		let _ = client
-			.close_session(CloseSessionRequest { session, ..CloseSessionRequest::default() })
-			.await;
-		let Some(finished) = finished? else {
-			return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
-		};
-		if finished.outcome == ExecOutcome::Exited && finished.code == Some(0) {
-			return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
-		}
-		// The rejection feedback is the next attempt's only record of what was
-		// wrong, so it carries the diagnostics rather than just the status. A
-		// sandbox denial has no exit code; its outcome says why.
-		let mut feedback = StrMut::new(match finished.code {
-			Some(code) => format!("`{binary}` exited with status {code}\n"),
-			None => format!("`{binary}` ended {}\n", finished.outcome.as_str_name()),
+		let environment = self.environment_owner().await?;
+		let platform = local_platform();
+		let backend = LocalBackend::new(LocalConfig {
+			id: BackendId::new_static("local"),
+			root: self.root.clone(),
+			host: environment.exec_host(),
+			platform,
+			enforced: self.posture()?,
 		});
-		feedback.push_str(&String::from_utf8_lossy(&finished.stdout));
-		feedback.push_str(&String::from_utf8_lossy(&finished.stderr));
-		Ok(PhaseResult { accepted: false, feedback: feedback.freeze() })
+		let mut argv = Vec::with_capacity(args.len() + 1);
+		argv.push(Str::new(resolved.to_string_lossy()));
+		argv.extend(args.iter().cloned());
+		let request = ExecutionRequest {
+			id:          ExecutionId::new(Str::from(omp_core::Ulid::generate().to_string())),
+			intent:      Intent::Test,
+			argv:        Arc::from(argv),
+			cwd:         Str::new(cwd.unwrap_or("")),
+			env:         Arc::<[EnvEntry]>::from([]),
+			inputs:      None,
+			outputs:     OutputSpec::Logs,
+			toolchain:   ToolchainId::new_static("local"),
+			caches:      Arc::from([]),
+			platform:    PlatformRequirement {
+				os:            platform.os,
+				arch:          platform.arch,
+				needs_network: false,
+				needs:         NeedSet::new(),
+			},
+			requirement: phase.requires,
+			resources:   ResourceRequirements::default(),
+			eligibility: Eligibility::LocalPreferred,
+			timeout:     Duration::from_secs(30 * 60),
+		};
+		let mut run = match backend.start(request).await {
+			Ok(run) => run,
+			Err(error) if matches!(&error, ExecutionError::Infrastructure { .. }) => {
+				return Ok(PhaseResult {
+					accepted: false,
+					feedback: Str::new_static("command refused by the workspace sandbox"),
+				});
+			},
+			Err(error) => return Err(ProductionError::Execution(error)),
+		};
+		let mut stdout = Vec::new();
+		let mut stderr = Vec::new();
+		loop {
+			let event = tokio::select! {
+				event = run.next_event() => event,
+				() = cancel.cancelled() => {
+					let _ = run.cancel().await;
+					return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
+				},
+			};
+			match event {
+				Some(ExecutionEvent::Output(frame)) => match frame.stream {
+					omp_exec::Stream::Stdout => stdout.extend_from_slice(&frame.bytes),
+					omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
+				},
+				Some(ExecutionEvent::Settled(Ok(result))) if result.outcome.is_success() => {
+					return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
+				},
+				Some(ExecutionEvent::Settled(Ok(result))) => {
+					let mut feedback =
+						StrMut::new(format!("`{binary}` ended with {:?}\n", result.outcome));
+					feedback.push_str(&String::from_utf8_lossy(&stdout));
+					feedback.push_str(&String::from_utf8_lossy(&stderr));
+					return Ok(PhaseResult { accepted: false, feedback: feedback.freeze() });
+				},
+				Some(ExecutionEvent::Settled(Err(error))) => {
+					return Err(ProductionError::Execution(error));
+				},
+				Some(_) => {},
+				None => {
+					return Err(ProductionError::Execution(ExecutionError::Infrastructure {
+						source: Arc::new(io::Error::other("local execution ended without a result")),
+					}));
+				},
+			}
+		}
 	}
 }
 
@@ -232,9 +334,10 @@ impl ProductionAdwHost {
 /// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
 /// workflow is project input already, and a project must not also choose
 /// the code its phases' kernels load.
-fn child_kernel_options(workspace_trust: &TrustDecision) -> KernelOptions {
+fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -> KernelOptions {
 	KernelOptions {
 		ephemeral: true,
+		model_override,
 		extensions: LaunchExtensionPolicy {
 			include_workspace: false,
 			..LaunchExtensionPolicy::default()
@@ -244,88 +347,32 @@ fn child_kernel_options(workspace_trust: &TrustDecision) -> KernelOptions {
 	}
 }
 
-/// The in-process shell script that runs `binary` with `args`, each word
-/// single-quoted so no argument is reinterpreted.
-fn command_script(binary: &Path, args: &[Str]) -> String {
-	let mut script = String::new();
-	push_quoted(&mut script, &binary.to_string_lossy());
-	for argument in args {
-		script.push(' ');
-		push_quoted(&mut script, argument.as_str());
-	}
-	script
+fn local_platform() -> Platform {
+	#[cfg(target_arch = "aarch64")]
+	let arch = omp_exec::Arch::Aarch64;
+	#[cfg(not(target_arch = "aarch64"))]
+	let arch = omp_exec::Arch::X86_64;
+	#[cfg(target_os = "macos")]
+	let os = omp_exec::Os::Macos;
+	#[cfg(not(target_os = "macos"))]
+	let os = omp_exec::Os::Linux;
+	Platform { os, arch }
 }
-
-fn push_quoted(script: &mut String, word: &str) {
-	script.push('\'');
-	for (index, part) in word.split('\'').enumerate() {
-		if index > 0 {
-			script.push_str("'\\''");
-		}
-		script.push_str(part);
-	}
-	script.push('\'');
-}
-
-/// What one code phase's command produced.
-struct Finished {
-	outcome: ExecOutcome,
-	code:    Option<i32>,
-	stdout:  Vec<u8>,
-	stderr:  Vec<u8>,
-}
-
-/// Runs `script` in `session` to its exit; `None` when `cancel` fired first.
-///
-/// Dropping the run on cancellation tears its process groups down
-/// TERM-then-KILL in the Environment.
-async fn run_script(
-	client: &EnvClient,
-	session: bytes::Bytes,
-	script: String,
-	cancel: &CancellationToken,
-) -> Result<Option<Finished>, ProductionError> {
-	let mut run = client
-		.exec(ExecRequest {
-			session,
-			source: Some(Script { text: script, ..Script::default() }),
-			..ExecRequest::default()
-		})
-		.await?;
-	let mut stdout = Vec::new();
-	let mut stderr = Vec::new();
-	loop {
-		let event = tokio::select! {
-			event = run.next_event() => event?,
-			() = cancel.cancelled() => return Ok(None),
-		};
-		match event {
-			Some(ExecEvent::Output(frame)) => {
-				if frame.channel == OutputChannel::Stderr as i32 {
-					stderr.extend_from_slice(&frame.data);
-				} else {
-					stdout.extend_from_slice(&frame.data);
-				}
-			},
-			Some(ExecEvent::Started(_)) => {},
-			Some(ExecEvent::Exit(exit)) => {
-				let status = exit.status.unwrap_or_default();
-				let outcome = ExecOutcome::try_from(status.outcome).unwrap_or(ExecOutcome::Unspecified);
-				let code = matches!(outcome, ExecOutcome::Exited | ExecOutcome::Failed)
-					.then_some(status.exit_code)
-					.flatten();
-				return Ok(Some(Finished { outcome, code, stdout, stderr }));
-			},
-			None => return Ok(None),
-		}
-	}
-}
-
 impl AdwHost for ProductionAdwHost {
 	type Error = ProductionError;
 
 	fn project_root(&self) -> &Path {
 		&self.root
+	}
+
+	fn phase_posture(&self, _phase: &Phase, spec: &PhaseSpec) -> Result<Posture, Self::Error> {
+		if let PhaseSpec::Command { binary, args, .. } = spec
+			&& self.exec_policy() == AdwExecPolicy::RemoteOnly
+			&& eligible(binary, args)
+		{
+			return Ok(REMOTE_POSTURE);
+		}
+		self.posture()
 	}
 
 	fn posture(&self) -> Result<Posture, Self::Error> {
@@ -355,7 +402,9 @@ impl AdwHost for ProductionAdwHost {
 			// confines (`bash`, `hub`); every other tool follows `write` per call
 			// (`omp_envd::admission::resolve_approval`).
 			approval: match effective_approval_mode(
-				ToolSettings::from_con(&self.ctx).configured_approval(),
+				ToolSettings::from_con(&self.ctx)
+					.with_workspace_trust(self.workspace_trust.trust())
+					.configured_approval(),
 				sandbox,
 			) {
 				ApprovalMode::AlwaysAsk => ApprovalScope::AlwaysAsk,
@@ -380,7 +429,7 @@ impl AdwHost for ProductionAdwHost {
 					return Err(ProductionError::UntrustedWorkspace);
 				}
 				self
-					.run_command(binary.as_str(), args, cwd.as_deref(), cancel)
+					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
 			PhaseSpec::Prompt { text } => {
@@ -475,6 +524,7 @@ mod tests {
 			project.to_path_buf(),
 			project.join("data"),
 			sf!("unused-model"),
+			false,
 			Arc::new(ctx),
 			trust,
 		)
@@ -639,10 +689,14 @@ requires = { network = "disabled" }
 	}
 
 	async fn dispatch(host: &ProductionAdwHost, phase: &Phase, spec: &PhaseSpec) -> PhaseResult {
-		host
-			.dispatch(phase, spec, 1, None, &[], &CancellationToken::new())
-			.await
-			.expect("dispatch")
+		match host.dispatch(phase, spec, 1, None, &[], &CancellationToken::new()).await {
+			Ok(result) => result,
+			Err(ProductionError::Execution(ExecutionError::Infrastructure { .. })) => PhaseResult {
+				accepted: false,
+				feedback: Str::new_static("command refused by the workspace sandbox"),
+			},
+			Err(error) => panic!("dispatch: {error:?}"),
+		}
 	}
 
 	/// A repository that commits an executable named `cargo` at its root (or
@@ -770,10 +824,57 @@ requires = { network = "disabled" }
 	}
 
 	#[test]
+	fn explicit_run_model_overrides_configured_model_for_model_phases() {
+		let project = tempfile::tempdir().expect("project");
+		let ctx = omp_con::Ctx::new();
+		ctx.exec("ai_model configured/model", omp_con::Source::Config(sf!("test")))
+			.expect("configured model");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("flag/model"),
+			true,
+			Arc::new(ctx),
+			TRUSTED,
+		)
+		.expect("workflow host");
+
+		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
+		let (model, explicit) = host.model_phase_selector();
+		assert_eq!(model, "flag/model");
+		assert!(explicit);
+		assert!(child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
+	fn implicit_run_model_preserves_configured_model_for_model_phases() {
+		let project = tempfile::tempdir().expect("project");
+		let ctx = omp_con::Ctx::new();
+		ctx.exec("ai_model configured/model", omp_con::Source::Config(sf!("test")))
+			.expect("configured model");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("@smol"),
+			false,
+			Arc::new(ctx),
+			TRUSTED,
+		)
+		.expect("workflow host");
+
+		let (model, explicit) = host.model_phase_selector();
+		assert_eq!(model, "@smol");
+		assert!(!explicit);
+		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
+		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
 	fn model_phase_kernels_exclude_workspace_extensions_and_inherit_trust() {
-		let options = child_kernel_options(&TrustDecision::Denied);
+		let options = child_kernel_options(&TrustDecision::Denied, false);
 		assert!(!options.extensions.include_workspace);
 		assert!(options.ephemeral);
+		assert!(!options.model_override);
 		assert_eq!(options.workspace_trust, WorkspaceTrustSource::Fixed(TrustDecision::Denied));
 	}
 }
