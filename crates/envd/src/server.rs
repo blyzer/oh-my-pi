@@ -6912,6 +6912,7 @@ impl EnvServer {
 		let result = match operation {
 			Op::Snapshot(request) => self
 				.environment_authorities()
+			Op::CaptureInputs(_) => "omp.env.workspace.capture_inputs",
 				.expect("workspace operation reached session-only host")
 				.workspace_ops
 				.snapshot(&request, &cancel)
@@ -6946,6 +6947,27 @@ impl EnvServer {
 		}
 	}
 
+			Op::CaptureInputs(request) => {
+				let operations = self
+					.environment_authorities()
+					.expect("workspace operation reached session-only host")
+					.workspace_ops
+					.clone();
+				let cancel = cancel.clone();
+				match task::spawn_blocking(move || operations.capture_inputs(&request, &cancel)).await {
+					Ok(captured) => captured.map(workspace_result::Result::InputsCaptured),
+					Err(source) => {
+						send_error(
+							responses,
+							request_id,
+							pb::ProtocolErrorCode::Internal,
+							&format!("input capture worker failed: {source}"),
+						)
+						.await;
+						return;
+					},
+				}
+			},
 	async fn dispatch_worktree(
 		&self,
 		request_id: u64,
@@ -11764,6 +11786,11 @@ fn workspace_walk_request(
 	let root = if request.root_uri.is_empty() {
 		workspace.root().to_path_buf()
 	} else {
+		| WorkspaceOperationError::NotARepository
+		| WorkspaceOperationError::PatchBaseUnavailable
+		| WorkspaceOperationError::PatchTooLarge { .. }
+		| WorkspaceOperationError::PatchCredentials
+		| WorkspaceOperationError::DenyGlob { .. }
 		Url::parse(&request.root_uri)
 			.map_err(|error| {
 				(
@@ -11777,6 +11804,11 @@ fn workspace_walk_request(
 			})?
 	};
 	if !request.exclude.is_empty() {
+		| WorkspaceOperationError::InputPaths { .. }
+		| WorkspaceOperationError::PatchVcs { .. }
+		| WorkspaceOperationError::PatchChanged { .. }
+		| WorkspaceOperationError::DenyGlobSet(_)
+		| WorkspaceOperationError::CredentialRules(_)
 		return Err((
 			pb::ProtocolErrorCode::Unsupported,
 			"walk exclude globs are not implemented".to_owned(),
