@@ -12,7 +12,7 @@ use omp_core::Str;
 use omp_exec::{
 	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
-	ExecutionRun, InputSet, Logs, Outcome, Platform, Reattach, Timing, TransferCounts,
+	ExecutionRun, InputSet, Logs, Outcome, OutputSpec, Platform, Reattach, Timing, TransferCounts,
 };
 use parking_lot::Mutex;
 use prost::Message as _;
@@ -350,7 +350,7 @@ where
 {
 	async fn start_request(&self, request: ExecutionRequest) -> Result<ReapiRun<S>, ExecutionError> {
 		let action = self.prepare_action(&request).await?;
-		let action_timeout = request.timeout;
+		let outputs = request.outputs.clone();
 		let request_id = request.id.clone();
 		let request_wire = wire::ExecuteRequest {
 			instance_name: self.inner.instance.to_string(),
@@ -375,7 +375,7 @@ where
 				Some(action.digest),
 			)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs))
 	}
 
 	async fn reattach_request(&self, handle: Reattach) -> Result<ReapiRun<S>, ExecutionError> {
@@ -389,7 +389,7 @@ where
 		let stream = execution.wait_execution(request).await.map_err(|error| {
 			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id, OutputSpec::Logs))
 	}
 
 	async fn prepare_action(
@@ -621,12 +621,11 @@ fn output_paths(outputs: &omp_exec::OutputSpec) -> Vec<String> {
 
 /// A live REAPI execution stream.
 pub struct ReapiRun<S> {
-	backend:     ReapiBackend<S>,
-	stream:      tonic::Streaming<longrunning::Operation>,
-	id:          omp_exec::ExecutionId,
-	operation:   Arc<Mutex<Option<Str>>>,
-	reconnected: bool,
-	accepted:    bool,
+	backend:  ReapiBackend<S>,
+	stream:   tonic::Streaming<longrunning::Operation>,
+	id:       omp_exec::ExecutionId,
+	outputs:  OutputSpec,
+	accepted: bool,
 }
 
 impl<S> ReapiRun<S>
@@ -637,15 +636,9 @@ where
 		backend: ReapiBackend<S>,
 		stream: tonic::Streaming<longrunning::Operation>,
 		id: omp_exec::ExecutionId,
+		outputs: OutputSpec,
 	) -> Self {
-		Self {
-			backend,
-			stream,
-			id,
-			operation: Arc::new(Mutex::new(None)),
-			reconnected: false,
-			accepted: false,
-		}
+		Self { backend, stream, id, outputs, operation: Arc::new(Mutex::new(None)) }
 	}
 
 	async fn next(&mut self) -> Option<ExecutionEvent> {
@@ -759,20 +752,29 @@ where
 		let Some(action) = result.result else {
 			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
 		};
-		let logs = match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
-			(Some(stdout), Some(stderr)) => {
-				match (digest::from_wire(stdout), digest::from_wire(stderr)) {
-					(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
-					(Err(error), _) | (_, Err(error)) => {
-						return ExecutionEvent::Settled(Err(config_error(error)));
-					},
-				}
-			},
-			_ => None,
+		let logs = if matches!(&self.outputs, OutputSpec::Logs | OutputSpec::All) {
+			match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
+				(Some(stdout), Some(stderr)) => {
+					match (digest::from_wire(stdout), digest::from_wire(stderr)) {
+						(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
+						(Err(error), _) | (_, Err(error)) => {
+							return ExecutionEvent::Settled(Err(config_error(error)));
+						},
+					}
+				},
+				_ => None,
+			}
+		} else {
+			None
 		};
 		let artifacts = action
 			.output_files
 			.into_iter()
+			.filter(|file| match &self.outputs {
+				OutputSpec::Paths(paths) => paths.iter().any(|path| path.as_str() == file.path),
+				OutputSpec::All => true,
+				OutputSpec::Metadata | OutputSpec::Logs => false,
+			})
 			.filter_map(|file| {
 				Some(Artifact {
 					path:       Str::new(file.path),
