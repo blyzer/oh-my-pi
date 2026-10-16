@@ -13,7 +13,7 @@ use omp_core::{Hash32, Str};
 use omp_env::{BlobDownloadEvent, EnvClient};
 use omp_envd::CommandCredentialExecutorFactory as _;
 use omp_exec::{
-	BackendId, BuildCommand, BuildSystemAdapter, CargoJust, Digest, Eligibility, EnvEntry,
+	Artifact, BackendId, BuildCommand, BuildSystemAdapter, CargoJust, Digest, Eligibility, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent,
 	Platform, RepoPins,
 };
@@ -25,7 +25,7 @@ use omp_exec_reapi::{
 	tree::InputFile,
 };
 use omp_proto::{
-	blob::v1::{GetRequest, StatRequest},
+	blob::v1::{Chunk, GetRequest, StatRequest},
 	env::v1::CaptureInputsRequest,
 };
 use tokio_util::sync::CancellationToken;
@@ -133,6 +133,8 @@ pub enum RemoteError {
 	Manifest,
 	#[error("remote action failed before a command verdict")]
 	Execute(#[source] ExecutionError),
+	#[error("remote artifact could not be materialized into the Environment blob store")]
+	Materialize(#[source] omp_env::ClientError),
 }
 
 fn config_list(value: Str) -> Vec<String> {
@@ -312,6 +314,28 @@ impl InputSource for EnvironmentInputs {
 	}
 }
 
+async fn materialize_artifact(
+	backend: &ReapiBackend<EnvironmentInputs>,
+	environment: &EnvClient,
+	artifact: &Artifact,
+) -> Result<Str, RemoteError> {
+	let bytes = backend
+		.download_blob(artifact.blob)
+		.await
+		.map_err(RemoteError::Execute)?;
+	let upload = environment.blob_put().map_err(RemoteError::Materialize)?;
+	upload
+		.send_chunk(Chunk {
+			data: bytes,
+			hash: Bytes::copy_from_slice(artifact.blob.hash.as_bytes()),
+			size: Some(artifact.blob.size),
+		})
+		.await
+		.map_err(RemoteError::Materialize)?;
+	upload.commit().await.map_err(RemoteError::Materialize)?;
+	Ok(Str::new(format!("artifact://sha256/{}", artifact.blob.hash.to_hex())))
+}
+
 impl ProductionAdwHost {
 	pub(super) async fn run_remote(
 		&self,
@@ -404,6 +428,7 @@ impl ProductionAdwHost {
 			)]),
 			buildbuddy_canceller: None,
 		};
+		let materialize_client = environment.clone();
 		let backend = ReapiBackend::connect(endpoint, config, EnvironmentInputs(environment))
 			.await
 			.map_err(RemoteError::Execute)?;
@@ -418,6 +443,9 @@ impl ProductionAdwHost {
 			};
 			match event {
 				Some(ExecutionEvent::Settled(Ok(result))) => {
+					for artifact in result.artifacts.iter() {
+						let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
+					}
 					return Ok(super::PhaseResult {
 						accepted: result.outcome.is_success(),
 						feedback: Str::new(format!("remote command exited {:?}", result.outcome)),
