@@ -1,7 +1,7 @@
 //! One BuildBuddy invocation and its paginated logs.
 
 use std::{
-	collections::VecDeque,
+	collections::{HashSet, VecDeque},
 	future::Future,
 	sync::Arc,
 	time::{Duration, Instant},
@@ -28,6 +28,7 @@ pub struct BuildBuddyRun {
 	state:      RunState,
 	logs:       VecDeque<Bytes>,
 	log_bytes:  usize,
+	seen_pages: HashSet<String>,
 	terminal:   Option<ExecutionEvent>,
 }
 
@@ -60,6 +61,7 @@ impl BuildBuddyRun {
 			state: RunState::Accepted,
 			logs: VecDeque::new(),
 			log_bytes: 0,
+			seen_pages: HashSet::new(),
 			terminal: None,
 		}
 	}
@@ -83,7 +85,12 @@ impl BuildBuddyRun {
 
 	async fn fetch_logs(&mut self) -> Result<(), ApiError> {
 		let mut page = String::new();
+		let mut pages = 0_u32;
 		loop {
+			if pages >= 4096 || !self.seen_pages.insert(page.clone()) {
+				return Err(ApiError::IncompleteInvocation);
+			}
+			pages = pages.saturating_add(1);
 			let reply: LogResponse = post(&self.client, &self.config, "GetLog", &LogRequest {
 				selector:   Selector { invocation_id: &self.invocation },
 				page_token: &page,

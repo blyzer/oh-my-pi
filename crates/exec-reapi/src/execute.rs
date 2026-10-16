@@ -443,7 +443,7 @@ where
 				Some(action.digest),
 			)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs, action_timeout))
 	}
 
 	async fn reattach_request(&self, handle: Reattach) -> Result<ReapiRun<S>, ExecutionError> {
@@ -457,7 +457,7 @@ where
 		let stream = execution.wait_execution(request).await.map_err(|error| {
 			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id, OutputSpec::Logs))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id, OutputSpec::Logs, Duration::from_secs(30 * 60)))
 	}
 
 	async fn prepare_action(
@@ -641,11 +641,13 @@ where
 			digest.size,
 			cas::Compression::Identity,
 		);
+		let read_error = Arc::new(Mutex::new(None));
+		let stream_error = read_error.clone();
 		let stream = async_stream::stream! {
 			let mut offset = 0_u64;
 			while offset < digest.size {
 				let len = (digest.size - offset).min(1024 * 1024);
-				let Ok(data) = source.read_range(digest, offset, len).await else { return };
+				let data = match source.read_range(digest, offset, len).await { Ok(data) => data, Err(error) => { *stream_error.lock() = Some(error); return } };
 				offset = offset.saturating_add(data.len() as u64);
 				yield bytestream::WriteRequest { resource_name: resource.clone(), write_offset: offset as i64 - data.len() as i64, finish_write: offset >= digest.size, data };
 			}
@@ -653,7 +655,7 @@ where
 		let request =
 			with_metadata(Request::new(stream), &self.inner.profile, self.inner.credential.as_ref())?;
 		let mut client = self.inner.clients.byte_stream.clone();
-		client.write(request).await.map_err(|error| {
+		let response = client.write(request).await.map_err(|error| {
 			status::classify(
 				error,
 				Phase::Upload,
@@ -662,6 +664,10 @@ where
 				Some(digest),
 			)
 		})?;
+		if let Some(error) = read_error.lock().take() { return Err(ExecutionError::Infrastructure { source: Arc::new(error) }); }
+		if response.into_inner().committed_size != digest.size as i64 {
+			return Err(ExecutionError::Infrastructure { source: Arc::new(io::Error::new(io::ErrorKind::InvalidData, "REAPI CAS committed size mismatch")) });
+		}
 		Ok(())
 	}
 }
@@ -698,6 +704,7 @@ pub struct ReapiRun<S> {
 	operation:   Arc<Mutex<Option<Str>>>,
 	reconnected: bool,
 	accepted:    bool,
+	timeout:     Duration,
 }
 
 impl<S> ReapiRun<S>
@@ -709,6 +716,7 @@ where
 		stream: tonic::Streaming<longrunning::Operation>,
 		id: omp_exec::ExecutionId,
 		outputs: OutputSpec,
+		timeout: Duration,
 	) -> Self {
 		Self {
 			backend,
@@ -718,6 +726,7 @@ where
 			operation: Arc::new(Mutex::new(None)),
 			reconnected: false,
 			accepted: false,
+			timeout,
 		}
 	}
 
@@ -883,7 +892,13 @@ where
 	S: InputSource,
 {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
-		self.next()
+		let timeout = self.timeout;
+		async move {
+			match tokio::time::timeout(timeout, self.next()).await {
+				Ok(event) => event,
+				Err(_) => Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit: timeout }))),
+			}
+		}
 	}
 
 	fn cancel(&self) -> impl Future<Output = CancelOutcome> + Send + '_ {
