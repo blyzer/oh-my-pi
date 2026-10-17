@@ -214,6 +214,11 @@ test-pkg pkg:
     cargo nextest run -p {{ pkg }} --locked
     cargo test --doc -p {{ pkg }} --locked
 
+# Run the macOS SSH backend loopback fixture with an ephemeral sshd and agent.
+[group('test')]
+test-ssh:
+    scripts/ssh-loopback-fixture.sh cargo nextest run -p omp-exec-ssh --locked
+
 # ---------------------------------------------------------------------------
 # E2E acceptance suite (crates/e2e, joined-system proofs P1-P12)
 # ---------------------------------------------------------------------------

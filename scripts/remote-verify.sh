@@ -45,11 +45,29 @@ if [ -z "${BUILDBUDDY_API_KEY-}" ]; then
 fi
 export BUILDBUDDY_API_KEY
 
-# `bb remote` refuses to start outside a Bazel workspace. An empty marker satisfies it; it is
-# removed again if this script created it.
-if [ ! -e MODULE.bazel ]; then
-    : >MODULE.bazel
-    trap 'rm -f "$REPO_ROOT/MODULE.bazel"' EXIT
+# `bb remote` refuses to start outside a Bazel workspace. The marker and the
+# workspace symlinks it creates are disposable and must not enter the mirrored
+# working tree.
+module_created=false
+had_bazel_bin=false
+had_bazel_out=false
+had_bazel_testlogs=false
+had_bazel_workspace=false
+[ -e MODULE.bazel ] || module_created=true
+[ -h bazel-bin ] && had_bazel_bin=true
+[ -h bazel-out ] && had_bazel_out=true
+[ -h bazel-testlogs ] && had_bazel_testlogs=true
+[ -h bazel-oh-my-pi ] && had_bazel_workspace=true
+cleanup_remote_markers() {
+	$module_created && rm -f "$REPO_ROOT/MODULE.bazel"
+	! $had_bazel_bin && rm -f "$REPO_ROOT/bazel-bin"
+	! $had_bazel_out && rm -f "$REPO_ROOT/bazel-out"
+	! $had_bazel_testlogs && rm -f "$REPO_ROOT/bazel-testlogs"
+	! $had_bazel_workspace && rm -f "$REPO_ROOT/bazel-oh-my-pi"
+}
+trap cleanup_remote_markers EXIT
+if $module_created; then
+	: >MODULE.bazel
 fi
 
 # With several git remotes bb asks which one the runner fetches from; answer once.
@@ -76,7 +94,7 @@ args=(
     --container_image=docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:f7db0d4791247f032fdb4451b7c3ba90e567923a341cc6dc43abfc283436791a
     --runner_exec_properties=EstimatedCPU=8
     --runner_exec_properties=EstimatedMemory=16GB
-    --runner_exec_properties=EstimatedFreeDiskBytes=80GB
+    --runner_exec_properties=EstimatedFreeDiskBytes=40GB
     --runner_exec_properties=remote-snapshot-save-policy=none-available
     --runner_exec_properties=snapshot-read-policy=local-first
     --timeout=60m
