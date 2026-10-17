@@ -1189,7 +1189,14 @@ impl ProjectEnvironment {
 		&self.client
 	}
 
-	/// Binds the application's shared credential authority and MCP OAuth flow
+	/// Returns the process execution authority for a local `omp-exec` backend.
+	///
+	/// The returned host shares this composition's shell/process lifecycle;
+	/// callers must not construct a second process authority for the project.
+	pub fn exec_host(&self) -> exec::ExecHost {
+		self.lifecycle.server.process_host()
+	}
+
 	/// after production inference has opened the canonical credential store.
 	pub async fn bind_mcp_oauth(
 		&self,

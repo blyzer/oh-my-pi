@@ -1,0 +1,53 @@
+[package]
+name = "omp-exec-reapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Remote Execution API v2 client backend for omp-exec: CAS, action cache, execute and cancel over gRPC, with vendor behaviour as profile data"
+readme = "README.md"
+
+[features]
+default = ["test-server"]
+# BuildBuddy's proprietary invocation-cancel RPC (`BuildBuddyService.CancelExecutions`):
+# the one vendor-specific wire behaviour, gated so the generic client carries none.
+buildbuddy-cancel = []
+# Generates the tonic *server* traits for the vendored REAPI services. Only the
+# in-process fake server of this crate's own tests uses them; the self
+# dev-dependency below turns it on for `cargo test`, so no production build
+# compiles server code.
+test-server = []
+
+[dependencies]
+async-stream.workspace = true
+bytes.workspace = true
+flume.workspace = true
+omp-adw.workspace = true
+omp-core.workspace = true
+omp-exec.workspace = true
+parking_lot.workspace = true
+strum.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+# `tls-webpki-roots`: a `grpcs://` endpoint verifies the server against the
+# bundled public roots unless the operator supplies a CA.
+tonic = { workspace = true, features = ["tls-webpki-roots"] }
+tonic-prost.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tokio-stream.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+prost-types.workspace = true
+tonic-prost-build.workspace = true
+
+[lints]
+workspace = true

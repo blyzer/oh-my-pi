@@ -138,6 +138,8 @@ pub enum Stream {
 	Stdout,
 	/// Standard error.
 	Stderr,
+	/// Combined vendor log with no stdout/stderr channel metadata.
+	Combined,
 }
 
 /// A chunk of live output (local backends only; remote output arrives as

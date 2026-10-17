@@ -1,0 +1,22 @@
+// Excerpt of proto/buildbuddy_service.proto from buildbuddy-io/buildbuddy at
+// commit 7f12d987923b291095dcee0f2674b2dc06d1bd4d (MIT Expat, Copyright (c)
+// 2020-present Iteration, Inc.; see ../../NOTICE).
+//
+// Only the CancelExecutions method is retained. Package, service and method
+// names are unchanged, so the gRPC path
+// /buildbuddy.service.BuildBuddyService/CancelExecutions and the wire encoding
+// are identical to the upstream definition; every other method of the
+// upstream service is omitted on purpose.
+
+syntax = "proto3";
+
+import "proto/invocation.proto";
+
+package buildbuddy.service;
+
+option go_package = "buildbuddy_service";
+
+service BuildBuddyService {
+  rpc CancelExecutions(invocation.CancelExecutionsRequest)
+      returns (invocation.CancelExecutionsResponse);
+}

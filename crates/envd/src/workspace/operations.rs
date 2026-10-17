@@ -19,13 +19,20 @@ use std::{
 use std::{fs::OpenOptions, os::fd::AsRawFd as _};
 
 use bytes::Bytes;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use omp_core::{Hash32, Str, Ulid, encoding::hex, sf};
+use omp_exec::DEFAULT_UPLOAD_DENY;
 use omp_proto::{
 	document::v1::{
 		self as document_pb, commit_transaction_response, document_mutation, text_mutation,
 	},
 	env::v1 as pb,
 };
+use omp_secrets::{
+	builtins::credential_rules,
+	rule::{SecretRule, SecretRuleError},
+};
+use omp_vcs::{DiffOptions, VcsKind};
 use omp_walker::{FileType, WalkOrder};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,6 +53,7 @@ const MANIFEST_MAGIC: &[u8; 7] = b"OMPWS2\0";
 const DIFF_MAGIC: &[u8; 8] = b"OMPWSD1\0";
 const IO_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_GIT_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum untracked content admitted before an isolation baseline snapshot.
 pub const ISOLATION_BASELINE_MAX_UNTRACKED_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -125,6 +133,58 @@ pub enum WorkspaceOperationError {
 	/// Untracked content exceeded the isolation snapshot budget.
 	#[error(transparent)]
 	IsolationBaselineTooLarge(#[from] IsolationBaselineTooLargeError),
+	/// Input capture needs a git repository and the workspace is not in one.
+	#[error("input capture needs a git repository")]
+	NotARepository,
+	/// Listing the git path sets for input capture failed.
+	#[error("could not list working-tree inputs")]
+	InputPaths {
+		/// Version-control failure.
+		#[source]
+		source: omp_vcs::Error,
+	},
+	/// A git-format patch requires a Git checkout with a committed HEAD.
+	#[error("working-tree patch requires a Git checkout with a committed HEAD")]
+	PatchBaseUnavailable,
+	/// Git could not render the captured working-tree patch.
+	#[error("could not render working-tree patch")]
+	PatchVcs {
+		/// Underlying version-control failure.
+		#[source]
+		source: omp_vcs::Error,
+	},
+	/// A file changed after capture and before patch generation completed.
+	#[error("captured input changed during working-tree patch generation: {path}")]
+	PatchChanged {
+		/// Workspace-relative path.
+		path: Str,
+	},
+	/// A patch is too large for the bounded remote submission path.
+	#[error("working-tree patch exceeds {limit} bytes (actual {actual} bytes)")]
+	PatchTooLarge {
+		/// Patch limit.
+		limit:  u64,
+		/// Observed patch size.
+		actual: u64,
+	},
+	/// The generated patch contains a credential and cannot be sent remotely.
+	#[error("working-tree patch contains credentials")]
+	PatchCredentials,
+	/// An upload deny glob did not compile.
+	#[error("invalid upload deny glob {glob:?}")]
+	DenyGlob {
+		/// The offending glob.
+		glob:   String,
+		/// Glob compilation failure.
+		#[source]
+		source: globset::Error,
+	},
+	/// The compiled upload deny globs could not be combined.
+	#[error("upload deny globs could not be combined")]
+	DenyGlobSet(#[source] globset::Error),
+	/// The built-in credential content rules failed to build.
+	#[error("credential content rules are invalid")]
+	CredentialRules(#[source] SecretRuleError),
 }
 
 /// Result of merging an isolated worktree without invoking a VCS subprocess.
@@ -270,6 +330,91 @@ struct ManifestEntry {
 struct Manifest {
 	prefixes: Vec<Str>,
 	entries:  BTreeMap<Str, ManifestEntry>,
+}
+
+/// Rule name reported when a tracked symlink refuses an input capture.
+const TRACKED_SYMLINK_RULE: &str = "tracked-symlink";
+
+/// Upload deny globs and operator exemptions compiled for one input capture.
+struct InputFilter {
+	set:   GlobSet,
+	rules: Vec<Str>,
+	allow: BTreeSet<String>,
+}
+
+impl InputFilter {
+	/// Compiles the built-in deny list plus operator globs. A glob matches a
+	/// path below any directory (gitignore name semantics), and `*` never
+	/// crosses a `/`.
+	fn new(extra: &[String], allow: &[String]) -> Result<Self, WorkspaceOperationError> {
+		let mut builder = GlobSetBuilder::new();
+		let mut rules = Vec::with_capacity(DEFAULT_UPLOAD_DENY.len() + extra.len());
+		for glob in DEFAULT_UPLOAD_DENY
+			.iter()
+			.copied()
+			.chain(extra.iter().map(String::as_str))
+		{
+			let compiled = GlobBuilder::new(&format!("**/{glob}"))
+				.literal_separator(true)
+				.build()
+				.map_err(|source| WorkspaceOperationError::DenyGlob {
+					glob: glob.to_owned(),
+					source,
+				})?;
+			builder.add(compiled);
+			rules.push(Str::new(glob));
+		}
+		let set = builder
+			.build()
+			.map_err(WorkspaceOperationError::DenyGlobSet)?;
+		Ok(Self { set, rules, allow: allow.iter().cloned().collect() })
+	}
+
+	fn allows(&self, relative: &str) -> bool {
+		self.allow.contains(relative)
+	}
+
+	/// The first deny rule matching `relative`, built-ins before operator globs.
+	fn deny_rule(&self, relative: &str) -> Option<&Str> {
+		self
+			.set
+			.matches(relative)
+			.into_iter()
+			.min()
+			.map(|index| &self.rules[index])
+	}
+}
+
+/// Returns the name of the first credential rule whose match sits on a
+/// credential-alphabet boundary.
+fn credential_hit<'r>(rules: &'r [SecretRule], bytes: &[u8]) -> Option<&'r str> {
+	let text = String::from_utf8_lossy(bytes);
+	rules
+		.iter()
+		.find(|rule| {
+			rule.regex().is_some_and(|regex| {
+				regex.find_iter(&text).any(|found| {
+					!rule.boundary_guard() || on_credential_boundary(&text, found.start(), found.end())
+				})
+			})
+		})
+		.map(|rule| rule.friendly_name().unwrap_or("credential"))
+}
+
+/// Mirrors the secrets crate's boundary guard: a match flanked by a
+/// credential-alphabet byte is part of a longer token, not a credential.
+fn on_credential_boundary(source: &str, start: usize, end: usize) -> bool {
+	let alphabet = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'*' | b'-');
+	let bytes = source.as_bytes();
+	start
+		.checked_sub(1)
+		.is_none_or(|index| !alphabet(bytes[index]))
+		&& bytes.get(end).is_none_or(|byte| !alphabet(*byte))
+}
+
+/// REAPI keeps only the executable bit of a file mode.
+const fn normalized_input_mode(mode: u32) -> u32 {
+	if mode & 0o111 != 0 { 0o755 } else { 0o644 }
 }
 
 fn untracked_paths(root: &Path) -> Result<Vec<PathBuf>, IsolationBaselinePreflightError> {
@@ -757,6 +902,218 @@ impl WorkspaceOperations {
 		}
 		drop(workspace_lease);
 		Ok(conflicts)
+	}
+
+	/// Captures the git-defined working tree as a content-addressed manifest
+	/// without taking the transition lock or publishing a generation.
+	///
+	/// The input set is every index path at its working-tree content plus,
+	/// when requested, untracked paths git does not ignore, minus paths missing
+	/// from the working tree (ADR 0040, Part D). The upload deny globs run
+	/// before any file is read or hashed; the credential content scan runs
+	/// before hashing. An untracked match is excluded and counted; a tracked
+	/// match (or tracked symlink) refuses the capture, which then carries no
+	/// manifest.
+	pub fn capture_inputs(
+		&self,
+		request: &pb::CaptureInputsRequest,
+		cancel: &CancellationToken,
+	) -> Result<pb::CaptureInputsReply, WorkspaceOperationError> {
+		self.ensure_wire_revision(request.wire_revision)?;
+		let filter = InputFilter::new(&request.deny_globs, &request.allow_paths)?;
+		let credentials = credential_rules().map_err(WorkspaceOperationError::CredentialRules)?;
+		let input_paths = |source| WorkspaceOperationError::InputPaths { source };
+		let Some(repo) = omp_vcs::detect(self.inner.workspace.root()).map_err(input_paths)? else {
+			return Err(WorkspaceOperationError::NotARepository);
+		};
+		let root = repo.root().to_path_buf();
+		let patch_base = if request.include_git_patch {
+			if repo.kind() != VcsKind::Git {
+				return Err(WorkspaceOperationError::PatchBaseUnavailable);
+			}
+			Some(
+				repo
+					.head_id()
+					.map_err(input_paths)?
+					.ok_or(WorkspaceOperationError::PatchBaseUnavailable)?,
+			)
+		} else {
+			None
+		};
+		let mut candidates = BTreeMap::<String, bool>::new();
+		for path in repo.ls_files(false, true).map_err(input_paths)? {
+			candidates.insert(path, true);
+		}
+		if request.include_untracked {
+			for path in repo.ls_files(true, true).map_err(input_paths)? {
+				candidates.entry(path).or_insert(false);
+			}
+		}
+		// Tracked files that equal HEAD were reviewed when committed; only the
+		// ones that differ from it are scanned. Without a HEAD, or on a backend
+		// with no HEAD diff, every tracked file counts as changed.
+		let mut changed = BTreeSet::new();
+		let mut scan_all_tracked = true;
+		if repo.kind() == VcsKind::Git && repo.head_id().map_err(input_paths)?.is_some() {
+			let options = DiffOptions { base: Some("HEAD".to_owned()), ..DiffOptions::default() };
+			changed.extend(repo.changed_files(&options).map_err(input_paths)?);
+			scan_all_tracked = false;
+		}
+
+		let mut excluded = BTreeMap::<Str, u64>::new();
+		let mut symlinks = 0_u64;
+		let mut refused = Vec::new();
+		let mut kept = Vec::new();
+		for (relative, tracked) in &candidates {
+			if cancel.is_cancelled() {
+				return Err(WorkspaceError::Cancelled.into());
+			}
+			let path = checked_join(&root, relative)?;
+			// Deleted tracked files also occur in the patch; check their names
+			// before the missing-file shortcut below.
+			if request.include_git_patch && *tracked && !filter.allows(relative) {
+				if let Some(rule) = filter.deny_rule(relative) {
+					refused.push(pb::InputRefusal { path: relative.clone(), rule: rule.to_string() });
+					continue;
+				}
+			}
+			let metadata = match fs::symlink_metadata(&path) {
+				Ok(metadata) => metadata,
+				Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+				Err(error) => return Err(error.into()),
+			};
+			let file_type = metadata.file_type();
+			if file_type.is_symlink() {
+				if *tracked {
+					refused.push(pb::InputRefusal {
+						path: relative.clone(),
+						rule: TRACKED_SYMLINK_RULE.to_owned(),
+					});
+				} else {
+					symlinks += 1;
+				}
+				continue;
+			}
+			if !file_type.is_file() {
+				continue;
+			}
+			if filter.allows(relative) {
+				kept.push(relative.as_str());
+				continue;
+			}
+			let mut rule = filter.deny_rule(relative).cloned();
+			if rule.is_none() && (!*tracked || scan_all_tracked || changed.contains(relative)) {
+				let bytes = fs::read(&path)?;
+				rule = credential_hit(&credentials, &bytes).map(Str::new);
+			}
+			match rule {
+				Some(rule) if *tracked => {
+					refused.push(pb::InputRefusal { path: relative.clone(), rule: rule.to_string() });
+				},
+				Some(rule) => *excluded.entry(rule).or_default() += 1,
+				None => kept.push(relative.as_str()),
+			}
+		}
+
+		let mut reply = pb::CaptureInputsReply {
+			excluded_rules: excluded
+				.into_iter()
+				.map(|(rule, files)| pb::InputExclusion { rule: rule.to_string(), files })
+				.collect(),
+			excluded_symlinks: symlinks,
+			wire_revision: omp_proto::SCHEMA_REV,
+			..Default::default()
+		};
+		if !refused.is_empty() {
+			reply.refused = refused;
+			return Ok(reply);
+		}
+		let mut manifest = self.inner.blobs.begin_spill()?;
+		manifest.write_all(MANIFEST_MAGIC)?;
+		write_u32(&mut manifest, 0)?;
+		let mut manifest_bytes = MANIFEST_MAGIC.len() as u64 + 4;
+		let mut captured = Vec::new();
+		for relative in kept {
+			let (blob, mode) = self.hash_file(&checked_join(&root, relative)?, cancel)?;
+			manifest_bytes = manifest_bytes.saturating_add(4 + relative.len() as u64 + 4 + 32);
+			check_manifest_bound(manifest_bytes)?;
+			write_bytes(&mut manifest, relative.as_bytes())?;
+			manifest.write_all(&normalized_input_mode(mode).to_be_bytes())?;
+			manifest.write_all(&blob.hash)?;
+			reply.files += 1;
+			reply.bytes = reply.bytes.saturating_add(blob.size);
+			if request.include_git_patch {
+				captured.push((relative.to_owned(), blob.hash));
+			}
+		}
+		if cancel.is_cancelled() {
+			return Err(WorkspaceError::Cancelled.into());
+		}
+		let reference = manifest.finish().map_err(BlobError::from)?;
+		reply.manifest_hash = Bytes::copy_from_slice(reference.hash.as_bytes());
+		reply.manifest_size = reference.size;
+		if let Some(base) = patch_base {
+			let tracked = candidates
+				.iter()
+				.filter(|(_, tracked)| **tracked)
+				.map(|(path, _)| path.clone())
+				.collect();
+			let options = DiffOptions {
+				base: Some(base.clone()),
+				files: tracked,
+				binary: true,
+				..DiffOptions::default()
+			};
+			let mut patch = repo
+				.diff_text(&options)
+				.map_err(|source| WorkspaceOperationError::PatchVcs { source })?;
+			if let omp_vcs::Repo::Git(git) = &repo {
+				for (relative, _) in &captured {
+					if candidates.get(relative).copied() != Some(false) {
+						continue;
+					}
+					let addition = git
+						.diff_no_index(Path::new("/dev/null"), &checked_join(&root, relative)?, true)
+						.map_err(|source| WorkspaceOperationError::PatchVcs { source })?;
+					patch.push_str(&addition);
+					if patch.len() as u64 > MAX_GIT_PATCH_BYTES {
+						return Err(WorkspaceOperationError::PatchTooLarge {
+							limit:  MAX_GIT_PATCH_BYTES,
+							actual: patch.len() as u64,
+						});
+					}
+				}
+			}
+			if patch.len() as u64 > MAX_GIT_PATCH_BYTES {
+				return Err(WorkspaceOperationError::PatchTooLarge {
+					limit:  MAX_GIT_PATCH_BYTES,
+					actual: patch.len() as u64,
+				});
+			}
+			if credential_hit(&credentials, patch.as_bytes()).is_some() {
+				return Err(WorkspaceOperationError::PatchCredentials);
+			}
+			for (relative, expected) in &captured {
+				if cancel.is_cancelled() {
+					return Err(WorkspaceError::Cancelled.into());
+				}
+				let mut bytes = Vec::new();
+				open_snapshot_file(&checked_join(&root, relative)?)?.read_to_end(&mut bytes)?;
+				if Hash32::sum(&bytes).into_bytes() != *expected {
+					return Err(WorkspaceOperationError::PatchChanged { path: Str::new(relative) });
+				}
+			}
+			if repo.head_id().map_err(input_paths)?.as_deref() != Some(base.as_str()) {
+				return Err(WorkspaceOperationError::PatchBaseUnavailable);
+			}
+			let mut blob = self.inner.blobs.begin_spill()?;
+			blob.write_all(patch.as_bytes())?;
+			let reference = blob.finish().map_err(BlobError::from)?;
+			reply.git_patch_hash = Bytes::copy_from_slice(reference.hash.as_bytes());
+			reply.git_patch_size = reference.size;
+			reply.git_base_commit = base;
+		}
+		Ok(reply)
 	}
 
 	fn snapshot_at(
