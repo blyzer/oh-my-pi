@@ -197,7 +197,7 @@ impl<S: RunInputSource> BuildBuddyBackend<S> {
 	}
 }
 
-async fn post<T: Serialize, R: DeserializeOwned>(
+async fn post<T: Serialize + Sync, R: DeserializeOwned>(
 	client: &HttpClient,
 	config: &Config,
 	operation: &str,
