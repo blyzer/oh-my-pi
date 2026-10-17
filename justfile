@@ -134,10 +134,10 @@ remote-test-pkg pkg:
 [group('remote')]
 remote-plain-test pkg:
     NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p {{ pkg }} --locked --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
-# Save the BuildBuddy runner snapshot every branch resumes from, built from the default branch's head (one snapshot upload, ~56 GB; see scripts/remote-verify.sh).
+# Save the BuildBuddy runner snapshot from the `omp2` base branch. The seed must not follow `origin/HEAD`.
 [group('remote')]
 remote-seed:
-    scripts/remote-verify.sh --seed test-pkg omp-envd
+    OMP_REMOTE_DEFAULT_BRANCH=omp2 scripts/remote-verify.sh --seed test-pkg omp-envd
 
 ## Fast connectivity/auth probe; no Cargo work.
 [group('remote')]
