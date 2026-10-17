@@ -457,7 +457,13 @@ where
 		let stream = execution.wait_execution(request).await.map_err(|error| {
 			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id, OutputSpec::Logs, Duration::from_secs(30 * 60)))
+		Ok(ReapiRun::new(
+			self.clone(),
+			stream.into_inner(),
+			handle.id,
+			OutputSpec::Logs,
+			Duration::from_secs(30 * 60),
+		))
 	}
 
 	async fn prepare_action(
@@ -506,7 +512,10 @@ where
 		let platform = wire::Platform {
 			properties: platform_properties
 				.into_iter()
-				.map(|(name, value)| wire::platform::Property { name: name.to_string(), value: value.to_string() })
+				.map(|(name, value)| wire::platform::Property {
+					name:  name.to_string(),
+					value: value.to_string(),
+				})
 				.collect(),
 		};
 		let action = wire::Action {
@@ -666,9 +675,16 @@ where
 				Some(digest),
 			)
 		})?;
-		if let Some(error) = read_error.lock().take() { return Err(ExecutionError::Infrastructure { source: Arc::new(error) }); }
+		if let Some(error) = read_error.lock().take() {
+			return Err(ExecutionError::Infrastructure { source: Arc::new(error) });
+		}
 		if response.into_inner().committed_size != digest.size as i64 {
-			return Err(ExecutionError::Infrastructure { source: Arc::new(io::Error::new(io::ErrorKind::InvalidData, "REAPI CAS committed size mismatch")) });
+			return Err(ExecutionError::Infrastructure {
+				source: Arc::new(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"REAPI CAS committed size mismatch",
+				)),
+			});
 		}
 		Ok(())
 	}
@@ -898,7 +914,9 @@ where
 		async move {
 			match tokio::time::timeout(timeout, self.next()).await {
 				Ok(event) => event,
-				Err(_) => Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit: timeout }))),
+				Err(_) => {
+					Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit: timeout })))
+				},
 			}
 		}
 	}
