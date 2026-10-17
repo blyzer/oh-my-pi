@@ -3,7 +3,9 @@
 //! The Environment owns capture and blobs; the driver owns the REAPI network
 //! service. No project cfg can choose a remote endpoint or credential.
 
-use std::{collections::BTreeMap, env, fs, future::Future, io, path::Path, sync::Arc, time::Duration};
+use std::{
+	collections::BTreeMap, env, fs, future::Future, io, path::Path, sync::Arc, time::Duration,
+};
 
 use bytes::Bytes;
 use omp_adw::{ApprovalScope, NetworkScope, Phase, Posture, WriteScope};
@@ -486,10 +488,14 @@ impl ProductionAdwHost {
 					let mut feedback =
 						StrMut::new(format!("remote command exited {:?}\n", result.outcome));
 					if let Some(logs) = result.logs {
-						let stdout =
-							backend.download_blob(logs.stdout).await.map_err(RemoteError::Execute)?;
-						let stderr =
-							backend.download_blob(logs.stderr).await.map_err(RemoteError::Execute)?;
+						let stdout = backend
+							.download_blob(logs.stdout)
+							.await
+							.map_err(RemoteError::Execute)?;
+						let stderr = backend
+							.download_blob(logs.stderr)
+							.await
+							.map_err(RemoteError::Execute)?;
 						feedback.push_str("stdout:\n");
 						feedback.push_str(&String::from_utf8_lossy(&stdout));
 						feedback.push_str("\nstderr:\n");

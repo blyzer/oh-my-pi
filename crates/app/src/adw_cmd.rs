@@ -21,7 +21,13 @@ pub async fn run(command: AdwCommand) -> miette::Result<()> {
 	match command {
 		AdwCommand::List { project } => list(&project),
 		AdwCommand::Run { workflow, project, model, max_attempts } => {
-			execute(&workflow, &project, model, max_attempts).await
+			execute(
+				&workflow,
+				&project,
+				model.unwrap_or_else(|| Str::new_static("default")),
+				max_attempts,
+			)
+			.await
 		},
 	}
 }
