@@ -129,6 +129,11 @@ remote +recipe:
 remote-test-pkg pkg:
     scripts/remote-verify.sh test-pkg {{ pkg }}
 
+
+# Print every nextest result so remote test evidence includes its Summary line.
+[group('remote')]
+remote-plain-test pkg:
+    NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p {{ pkg }} --locked --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
 # Save the BuildBuddy runner snapshot every branch resumes from, built from the default branch's head (one snapshot upload, ~56 GB; see scripts/remote-verify.sh).
 [group('remote')]
 remote-seed:
@@ -142,12 +147,14 @@ remote-probe:
 # Run the Linux-valid Cargo verification set in one remote runner so the
 # runner-home Cargo target and Python cache are reused between phases. Protobuf
 # checks remain in the GitHub gate because they need the repository's `buf`.
+# Clippy keeps its own target under $HOME: a checkout-relative target/ is wiped by every
+# `bb remote` run, which made clippy cold each time. No separate `cargo check`: clippy
+# type-checks the whole workspace.
 [group('remote')]
 remote-heavy:
-    cargo check --workspace --locked
     cargo nextest run --workspace --exclude omp-e2e --locked
     cargo test --doc --workspace --exclude omp-e2e --locked
-    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --all-targets --locked
+    CARGO_TARGET_DIR="$HOME/.cache/omp-target-clippy" cargo clippy --workspace --all-targets --locked
 
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
