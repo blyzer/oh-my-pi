@@ -388,6 +388,11 @@ impl ProductionAdwHost {
 			.plan(&command, &pins)
 			.map_err(RemoteError::Plan)?;
 		let mut request = plan.requests.first().ok_or(RemoteError::Manifest)?.clone();
+		if !request.argv.is_empty() {
+			let mut argv = request.argv.to_vec();
+			argv[0] = Str::new_static("/usr/local/bin/just");
+			request.argv = Arc::from(argv);
+		}
 		let capture = environment
 			.capture_inputs(CaptureInputsRequest {
 				include_untracked: true,
@@ -453,7 +458,13 @@ impl ProductionAdwHost {
 			platform_properties: BTreeMap::new(),
 			toolchains: BTreeMap::from([(
 				CargoJust::toolchain(&pins).to_string().into(),
-				Toolchain { image: Some(image), env: Arc::<[EnvEntry]>::from([]) },
+				Toolchain {
+					image: Some(image),
+					env:   Arc::from([EnvEntry {
+						name:  Str::new_static("PATH"),
+						value: Str::new_static("/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"),
+					}]),
+				},
 			)]),
 			buildbuddy_canceller,
 		};

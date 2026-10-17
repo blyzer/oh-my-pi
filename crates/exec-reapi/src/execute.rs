@@ -495,16 +495,18 @@ where
 		};
 		let command_bytes = command.encode_to_vec();
 		let command_digest = blob_digest(&command_bytes);
+		let mut platform_properties = self
+			.inner
+			.profile
+			.platform_properties(request.platform.platform(), &self.inner.platform_properties);
+		if let Some(toolchain) = toolchain.and_then(|toolchain| toolchain.image.as_ref()) {
+			platform_properties.push((self.inner.profile.image_property.clone(), toolchain.clone()));
+			platform_properties.sort_by(|left, right| left.0.cmp(&right.0));
+		}
 		let platform = wire::Platform {
-			properties: self
-				.inner
-				.profile
-				.platform_properties(request.platform.platform(), &self.inner.platform_properties)
+			properties: platform_properties
 				.into_iter()
-				.map(|(name, value)| wire::platform::Property {
-					name:  name.to_string(),
-					value: value.to_string(),
-				})
+				.map(|(name, value)| wire::platform::Property { name: name.to_string(), value: value.to_string() })
 				.collect(),
 		};
 		let action = wire::Action {

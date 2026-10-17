@@ -226,6 +226,7 @@ pub async fn run<H: AdwHost>(
 				if cancel.is_cancelled() {
 					return Ok(cancelled(records));
 				}
+				let feedback = result.feedback.clone();
 				let outcome = if result.accepted {
 					run.accept(&phase.name)?
 				} else {
