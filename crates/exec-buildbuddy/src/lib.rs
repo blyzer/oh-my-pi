@@ -1,4 +1,4 @@
-//! BuildBuddy's REST Run API backend for git-backed remote verification.
+//! `BuildBuddy`'s REST Run API backend for git-backed remote verification.
 //!
 //! This is distinct from `omp-exec-reapi`: Run clones a repository and applies
 //! captured git patches, while REAPI uploads the complete content-addressed
@@ -280,7 +280,7 @@ impl<S: RunInputSource> ExecutionBackend for BuildBuddyBackend<S> {
 				self.client.clone(),
 				handle.operation,
 				handle.id,
-				Duration::from_secs(1800),
+				Duration::from_mins(30),
 				OutputSpec::Logs,
 			))
 		}
