@@ -1,0 +1,40 @@
+[package]
+name = "omp-exec-buildbuddy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "BuildBuddy Run API execution backend for omp-exec"
+readme = "README.md"
+
+[dependencies]
+omp-core.workspace = true
+omp-exec.workspace = true
+omp-exec-reapi = { workspace = true, optional = true, features = ["buildbuddy-cancel"] }
+omp-adw.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+hyper-rustls.workspace = true
+rustls.workspace = true
+http-body-util.workspace = true
+tokio.workspace = true
+tonic = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+
+[features]
+default = []
+buildbuddy-cancel = ["dep:omp-exec-reapi", "dep:tonic"]
+
+[lints]
+workspace = true
