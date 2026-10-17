@@ -57,10 +57,9 @@ if [ "$(git remote | wc -l)" -gt 1 ] && [ -z "$(git config --get buildbuddy.remo
     git config --local buildbuddy.remote-bazel-remote-name "${OMP_REMOTE_GIT_REMOTE:-origin}"
 fi
 
-# CI checkouts (actions/checkout) never create refs/remotes/origin/HEAD; under pipefail a failed
-# lookup would end the script silently before bb runs, so a miss falls back to the default.
-default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
-default_branch=${default_branch:-omp2}
+# The repository's remote execution base is omp2. Allow CI or a local experiment to override it,
+# but never infer it from origin/HEAD, which points at main in ordinary clones.
+default_branch=${OMP_REMOTE_DEFAULT_BRANCH:-omp2}
 
 # bb resolves the default branch as a local branch (`git rev-parse <branch>`). A pull-request
 # checkout is a detached merge commit with no local branches, so fetch it shallowly when missing.
