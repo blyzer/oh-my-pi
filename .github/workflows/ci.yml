@@ -394,6 +394,9 @@ jobs:
       # `cargo clippy --workspace --all-targets` on its own runner in parallel
       # and is a required check, which took ~12 min off this job.
 
+      - name: Run SSH backend loopback fixture
+        run: scripts/ssh-loopback-fixture.sh cargo nextest run --profile ci -p omp-exec-ssh --locked
+
       # One cargo invocation builds every test binary, the acceptance proofs
       # included, so their codegen and links overlap the workspace tail instead
       # of following it as a second invocation (265.5 s median, n=10, for one
