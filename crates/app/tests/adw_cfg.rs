@@ -8,7 +8,7 @@ use omp_core::Str;
 use omp_driver::adw::AdwHost as _;
 
 fn reported_posture(project: &Path, data: &Path) -> Posture {
-	open_host(project, data.to_path_buf(), Str::new_static("unused-model"), false)
+	open_host(project, data.to_path_buf(), Str::new_static("unused-model"))
 		.expect("workflow host")
 		.posture()
 		.expect("posture")
