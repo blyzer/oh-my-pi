@@ -12,6 +12,11 @@
 node_modules/
 .omp/tools/node_modules/
 
+# Bun transient build files and generated bundled binaries.
+**/*.bun-build
+/packages/coding-agent/binaries/
+/packages/natives/native/*.node
+/.bazelrc.user
 # Python
 __pycache__/
 *.py[cod]
@@ -33,6 +38,3 @@ __pycache__/
 .omp/config.toml.lock
 .omp/omp-*.md
 dist/
-
-# Local Bazel/BuildBuddy overrides may carry an API key header; never commit them.
-.bazelrc.user

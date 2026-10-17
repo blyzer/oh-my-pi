@@ -1,7 +1,6 @@
 //! Terminal presentation adapter for the driver-owned workflow host.
 
 use std::{
-	error::Error as StdError,
 	path::{Path, PathBuf},
 	sync::Arc,
 };
@@ -54,14 +53,12 @@ fn list(project: &Path) -> miette::Result<()> {
 async fn execute(
 	workflow: &str,
 	project: &Path,
-	model: Option<Str>,
+	model: Str,
 	max_attempts: u32,
 ) -> miette::Result<()> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let model_override = model.is_some();
-	let model = model.unwrap_or_else(|| Str::new_static("@smol"));
-	let host = open_host(project, data_dir, model, model_override)?;
+	let host = open_host(project, data_dir, model)?;
 	let cancel = CancellationToken::new();
 	let exit = {
 		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);
@@ -83,48 +80,33 @@ async fn execute(
 	for record in &exit.records {
 		println!(
 			"{} attempt {}: {} — {}",
-			record.phase, record.attempt, record.status, record.decision
+			record.phase,
+			record.attempt,
+			if record.status == omp_driver::adw::PhaseStatus::Accepted {
+				"accepted"
+			} else {
+				"rejected"
+			},
+			record.decision
 		);
 	}
 	match exit.status {
 		RunStatus::Accepted => println!("Workflow `{workflow}` accepted every phase."),
-		RunStatus::Halted => println!(
-			"Workflow `{workflow}` halted{}.",
+		RunStatus::Halted | RunStatus::Blocked => println!(
+			"Workflow `{workflow}` {}{}.",
+			format!("{:?}", exit.status),
 			exit
 				.reason
 				.as_deref()
 				.map_or_else(String::new, |reason| format!(": {reason}"))
 		),
-		RunStatus::Blocked => println!(
-			"Workflow `{workflow}` blocked{}.",
-			exit
-				.reason
-				.as_deref()
-				.map_or_else(String::new, |reason| format!(": {reason}"))
-		),
-		RunStatus::Failed(failure) => {
-			println!(
-				"Workflow `{workflow}` failed in phase `{}` attempt {}.",
-				failure.phase, failure.attempt
-			);
-			print_error_chain(&failure.source);
-		},
+		RunStatus::Failed(failure) => println!("Workflow `{workflow}` failed: {failure:?}."),
 		RunStatus::Cancelled => println!("Workflow `{workflow}` cancelled."),
 	}
 	if exit.code == 0 {
 		Ok(())
 	} else {
 		Err(miette::miette!("workflow exited with status {}", exit.code))
-	}
-}
-
-/// Renders a typed host failure's cause chain at the terminal boundary.
-fn print_error_chain(error: &(dyn StdError + 'static)) {
-	println!("  caused by: {error}");
-	let mut source = error.source();
-	while let Some(error) = source {
-		println!("  caused by: {error}");
-		source = error.source();
 	}
 }
 
@@ -137,17 +119,9 @@ pub fn open_host(
 	project: &Path,
 	data_dir: PathBuf,
 	model: Str,
-	model_override: bool,
 ) -> miette::Result<ProductionAdwHost> {
 	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
 	let workspace_trust = evaluate_workspace(&data_dir, project);
-	ProductionAdwHost::open(
-		project.to_path_buf(),
-		data_dir,
-		model,
-		model_override,
-		ctx,
-		workspace_trust,
-	)
-	.into_diagnostic()
+	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, false, ctx, workspace_trust)
+		.into_diagnostic()
 }
