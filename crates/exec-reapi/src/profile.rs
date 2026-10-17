@@ -92,7 +92,7 @@ impl Profile {
 			image_property:    Str::new_static("container-image"),
 			fixed:             BTreeMap::from([(
 				Str::new_static("workload-isolation-type"),
-				Str::new_static("firecracker"),
+				Str::new_static("oci"),
 			)]),
 		}
 	}
