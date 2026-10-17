@@ -301,7 +301,9 @@ impl ProductionAdwHost {
 			};
 			match event {
 				Some(ExecutionEvent::Output(frame)) => match frame.stream {
-					omp_exec::Stream::Stdout | omp_exec::Stream::Combined => stdout.extend_from_slice(&frame.bytes),
+					omp_exec::Stream::Stdout | omp_exec::Stream::Combined => {
+						stdout.extend_from_slice(&frame.bytes)
+					},
 					omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
 				},
 				Some(ExecutionEvent::Settled(Ok(result))) if result.outcome.is_success() => {
@@ -689,7 +691,10 @@ requires = { network = "disabled" }
 	}
 
 	async fn dispatch(host: &ProductionAdwHost, phase: &Phase, spec: &PhaseSpec) -> PhaseResult {
-		match host.dispatch(phase, spec, 1, None, &[], &CancellationToken::new()).await {
+		match host
+			.dispatch(phase, spec, 1, None, &[], &CancellationToken::new())
+			.await
+		{
 			Ok(result) => result,
 			Err(ProductionError::Execution(ExecutionError::Infrastructure { .. })) => PhaseResult {
 				accepted: false,
