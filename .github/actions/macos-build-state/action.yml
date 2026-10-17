@@ -74,6 +74,23 @@ runs:
           vendor/python-release
         key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
 
+    - name: Cache Cargo registry
+      # Self-hosted runners keep registry state between runs via the persistent
+      # home directory; only github-hosted runners need explicit caching.
+      # target/ is intentionally not cached: LTO bitcode makes partial caches
+      # dangerous — a toolchain or dependency change invalidates everything and
+      # a stale cache would link mismatched bitcode.
+      if: runner.environment == 'github-hosted'
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: |
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/index
+          ~/.cargo/git/db
+        key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-${{ runner.os }}-${{ runner.arch }}-
+
     # Only when the inputs change: the script regenerates stdlib.bin even
     # when its archive is current, and a new stdlib.bin rebuilds omp-py.
     - name: Prepare embedded Python
