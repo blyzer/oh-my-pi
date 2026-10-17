@@ -848,3 +848,33 @@ jobs:
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
         run: scripts/remote-verify.sh remote-heavy
+# Warm the shared BuildBuddy runner snapshot only on explicit dispatch. This avoids
+# handing the repository credential to ordinary pull-request code.
+  remote_seed:
+    name: Seed BuildBuddy omp2 runner cache
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: omp2
+      - name: Install pinned BuildBuddy client
+        env:
+          BB_VERSION: 5.0.492
+          BB_SHA256: e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --silent --show-error \
+            "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-linux-x86_64" \
+            --output "$RUNNER_TEMP/bin/bb"
+          printf '%s  %s\n' "$BB_SHA256" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/bin/bb"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Seed omp2 runner snapshot
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: just remote-seed
