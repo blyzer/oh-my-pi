@@ -184,7 +184,7 @@ impl ExecutionRun for BuildBuddyRun {
 					RunState::Settled => {
 						if let Some(bytes) = self.logs.pop_front() {
 							return Some(ExecutionEvent::Output(OutputFrame {
-								stream: Stream::Stdout,
+								stream: Stream::Combined,
 								bytes:  CowBytes::owned(bytes),
 							}));
 						}

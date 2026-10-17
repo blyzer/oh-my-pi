@@ -301,7 +301,7 @@ impl ProductionAdwHost {
 			};
 			match event {
 				Some(ExecutionEvent::Output(frame)) => match frame.stream {
-					omp_exec::Stream::Stdout => stdout.extend_from_slice(&frame.bytes),
+					omp_exec::Stream::Stdout | omp_exec::Stream::Combined => stdout.extend_from_slice(&frame.bytes),
 					omp_exec::Stream::Stderr => stderr.extend_from_slice(&frame.bytes),
 				},
 				Some(ExecutionEvent::Settled(Ok(result))) if result.outcome.is_success() => {
