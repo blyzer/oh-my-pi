@@ -217,7 +217,7 @@ test-pkg pkg:
 # Run the macOS SSH backend loopback fixture with an ephemeral sshd and agent.
 [group('test')]
 test-ssh:
-    scripts/ssh-loopback-fixture.sh cargo nextest run -p omp-exec-ssh --locked
+    scripts/ssh-loopback-fixture.sh cargo nextest run -p omp-exec-ssh --locked --include-ignored
 
 # ---------------------------------------------------------------------------
 # E2E acceptance suite (crates/e2e, joined-system proofs P1-P12)
