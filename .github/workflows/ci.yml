@@ -395,7 +395,7 @@ jobs:
       # and is a required check, which took ~12 min off this job.
 
       - name: Run SSH backend loopback fixture
-        run: scripts/ssh-loopback-fixture.sh cargo nextest run --profile ci -p omp-exec-ssh --locked --include-ignored
+        run: scripts/ssh-loopback-fixture.sh cargo nextest run --profile ci -p omp-exec-ssh --locked --run-ignored all
 
       # One cargo invocation builds every test binary, the acceptance proofs
       # included, so their codegen and links overlap the workspace tail instead
