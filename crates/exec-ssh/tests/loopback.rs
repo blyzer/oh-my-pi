@@ -13,6 +13,7 @@ use omp_exec::{
 use omp_exec_ssh::{Config, SshBackend};
 
 #[tokio::test]
+#[ignore = "requires OMP_SSH_TEST_HOSTS from scripts/ssh-loopback-fixture.sh"]
 async fn loopback_sshd_executes_a_pinned_host_key_command() {
 	let hosts_path = env::var_os("OMP_SSH_TEST_HOSTS").expect("workflow hosts file");
 	let hosts = HostStore::load(hosts_path.as_ref(), Containment::Unconfined).expect("hosts");
