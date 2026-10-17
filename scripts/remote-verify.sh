@@ -45,11 +45,29 @@ if [ -z "${BUILDBUDDY_API_KEY-}" ]; then
 fi
 export BUILDBUDDY_API_KEY
 
-# `bb remote` refuses to start outside a Bazel workspace. An empty marker satisfies it; it is
-# removed again if this script created it.
-if [ ! -e MODULE.bazel ]; then
-    : >MODULE.bazel
-    trap 'rm -f "$REPO_ROOT/MODULE.bazel"' EXIT
+# `bb remote` refuses to start outside a Bazel workspace. The marker and the
+# workspace symlinks it creates are disposable and must not enter the mirrored
+# working tree.
+module_created=false
+had_bazel_bin=false
+had_bazel_out=false
+had_bazel_testlogs=false
+had_bazel_workspace=false
+[ -e MODULE.bazel ] || module_created=true
+[ -h bazel-bin ] && had_bazel_bin=true
+[ -h bazel-out ] && had_bazel_out=true
+[ -h bazel-testlogs ] && had_bazel_testlogs=true
+[ -h bazel-oh-my-pi ] && had_bazel_workspace=true
+cleanup_remote_markers() {
+	$module_created && rm -f "$REPO_ROOT/MODULE.bazel"
+	! $had_bazel_bin && rm -f "$REPO_ROOT/bazel-bin"
+	! $had_bazel_out && rm -f "$REPO_ROOT/bazel-out"
+	! $had_bazel_testlogs && rm -f "$REPO_ROOT/bazel-testlogs"
+	! $had_bazel_workspace && rm -f "$REPO_ROOT/bazel-oh-my-pi"
+}
+trap cleanup_remote_markers EXIT
+if $module_created; then
+	: >MODULE.bazel
 fi
 
 # With several git remotes bb asks which one the runner fetches from; answer once.
@@ -57,10 +75,9 @@ if [ "$(git remote | wc -l)" -gt 1 ] && [ -z "$(git config --get buildbuddy.remo
     git config --local buildbuddy.remote-bazel-remote-name "${OMP_REMOTE_GIT_REMOTE:-origin}"
 fi
 
-# CI checkouts (actions/checkout) never create refs/remotes/origin/HEAD; under pipefail a failed
-# lookup would end the script silently before bb runs, so a miss falls back to the default.
-default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
-default_branch=${default_branch:-omp2}
+# The repository's remote execution base is omp2. Allow CI or a local experiment to override it,
+# but never infer it from origin/HEAD, which points at main in ordinary clones.
+default_branch=${OMP_REMOTE_DEFAULT_BRANCH:-omp2}
 
 # bb resolves the default branch as a local branch (`git rev-parse <branch>`). A pull-request
 # checkout is a detached merge commit with no local branches, so fetch it shallowly when missing.
@@ -77,7 +94,7 @@ args=(
     --container_image=docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:f7db0d4791247f032fdb4451b7c3ba90e567923a341cc6dc43abfc283436791a
     --runner_exec_properties=EstimatedCPU=8
     --runner_exec_properties=EstimatedMemory=16GB
-    --runner_exec_properties=EstimatedFreeDiskBytes=80GB
+    --runner_exec_properties=EstimatedFreeDiskBytes=40GB
     --runner_exec_properties=remote-snapshot-save-policy=none-available
     --runner_exec_properties=snapshot-read-policy=local-first
     --timeout=60m

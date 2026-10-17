@@ -17,27 +17,45 @@ git status --short | head -20 # the local changes bb mirrored, if any
 
 stamp "toolchain"
 if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y build-essential cmake ninja-build zstd curl git python3 rsync
+	sudo apt-get update
+	sudo apt-get install -y build-essential cmake ninja-build zstd curl git python3 rsync
 fi
 if [ ! -x "$HOME/.cargo/bin/rustup" ]; then # the runner user is the non-root `buildbuddy`
-    curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+	curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
 fi
 . "$HOME/.cargo/env" # rust-toolchain.toml installs the pinned nightly on first use
-command -v just >/dev/null || cargo install --locked just
+if command -v just >/dev/null; then
+	stamp "cache just hit"
+else
+	stamp "cache just miss"
+	cargo install --locked just
+fi
 # Prebuilt: building nextest pulls aws-lc-sys, which refuses older images' gcc (GCC bug 95189).
-cargo nextest --version 2>/dev/null | grep -q '0\.9\.146' ||
-    curl -LsSf https://get.nexte.st/0.9.146/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+if cargo nextest --version 2>/dev/null | grep -q '0\.9\.146'; then
+	stamp "cache nextest hit"
+else
+	stamp "cache nextest miss"
+	curl -LsSf https://get.nexte.st/0.9.146/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+fi
 export PATH="$HOME/.local/bin:$PATH"
-command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh # fetch-python.sh needs uv
+if command -v uv >/dev/null; then
+	stamp "cache uv hit"
+else
+	stamp "cache uv miss"
+	curl -LsSf https://astral.sh/uv/install.sh | sh # fetch-python.sh needs uv
+fi
 export NEXTEST_HIDE_PROGRESS_BAR=1 # Keep failures and the summary on separate CI log lines.
 export CARGO_BUILD_JOBS=4 # The 16 GB runner OOM-killed omp-envd's test compiler with unrestricted jobs.
 
 export CARGO_TARGET_DIR="$HOME/.cache/omp-target"
 mkdir -p "$HOME/.cache/omp-vendor"
 [ -L vendor ] || ln -sfn "$HOME/.cache/omp-vendor" vendor
-[ -f vendor/python/pyo3-config.txt ] || crates/py/scripts/fetch-python.sh
-
+if [ -f vendor/python/pyo3-config.txt ]; then
+	stamp "cache python hit"
+else
+	stamp "cache python miss"
+	crates/py/scripts/fetch-python.sh
+fi
 stamp "just ${OMP_REMOTE_JUST_ARGS}"
 start=$(date +%s)
 status=0
