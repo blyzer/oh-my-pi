@@ -59,4 +59,3 @@ async fn loopback_sshd_executes_a_pinned_host_key_command() {
 	}
 	assert_eq!(output, b"ssh-ok");
 }
-
