@@ -7595,6 +7595,7 @@ dependencies = [
  "omp-con",
  "omp-core",
  "omp-dom",
+ "omp-exec",
  "omp-journal",
  "omp-proto",
  "omp-scribe",
@@ -8124,6 +8125,10 @@ dependencies = [
  "omp-dom",
  "omp-env",
  "omp-envd",
+ "omp-exec",
+ "omp-exec-local",
+ "omp-exec-reapi",
+ "omp-exec-ssh",
  "omp-ext",
  "omp-http",
  "omp-journal",
@@ -8368,6 +8373,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-exec-buildbuddy"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "omp-exec-reapi",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "omp-exec-local"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "omp-adw",
+ "omp-core",
+ "omp-envd",
+ "omp-exec",
+ "omp-proto",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "omp-exec-reapi"
 version = "2.0.0"
 dependencies = [
@@ -8391,6 +8433,21 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "zstd",
+]
+
+[[package]]
+name = "omp-exec-ssh"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "flume",
+ "omp-adw",
+ "omp-core",
+ "omp-envd",
+ "omp-exec",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
