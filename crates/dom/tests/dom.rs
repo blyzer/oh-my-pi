@@ -372,11 +372,13 @@ fn lagging_subscriber_is_dropped_when_buffer_is_full() {
 	let (_, rx) = dom.subscribe();
 	// Fill the 512-slot buffer without draining.
 	for _ in 0..512 {
-		dom.apply(&txn(vec![ins(dom.body(), KnownTag::Turn)])).unwrap();
+		dom.apply(&txn(vec![ins(dom.body(), KnownTag::Turn)]))
+			.unwrap();
 	}
 	assert!(!rx.is_disconnected(), "receiver must still be connected mid-fill");
 	// One more event overflows the buffer; publish() retains only senders
 	// that succeed, so the lagging subscriber is removed.
-	dom.apply(&txn(vec![ins(dom.body(), KnownTag::Turn)])).unwrap();
+	dom.apply(&txn(vec![ins(dom.body(), KnownTag::Turn)]))
+		.unwrap();
 	assert!(rx.is_disconnected(), "lagging subscriber must be dropped after overflow");
 }
