@@ -519,8 +519,7 @@ impl ProductionAdwHost {
 						feedback.push_str(&String::from_utf8_lossy(&stderr));
 					}
 					for artifact in result.artifacts.iter() {
-						let _ =
-							materialize_artifact(&backend, &materialize_client, artifact).await?;
+						let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
 					}
 					return Ok(super::PhaseResult {
 						accepted: result.outcome.is_success(),
@@ -528,8 +527,11 @@ impl ProductionAdwHost {
 					});
 				},
 				Some(ExecutionEvent::Settled(Err(error))) => {
-					let stage =
-						if accepted { Stage::AfterAcceptance } else { Stage::BeforeAcceptance };
+					let stage = if accepted {
+						Stage::AfterAcceptance
+					} else {
+						Stage::BeforeAcceptance
+					};
 					if fallback_eligible(&error, stage) {
 						return Err(RemoteError::PreAcceptanceFailed(error).into());
 					}

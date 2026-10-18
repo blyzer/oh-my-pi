@@ -327,6 +327,7 @@ mod tests {
 
 		fn any_execution_error() -> impl Strategy<Value = ExecutionError> {
 			use std::sync::Arc;
+
 			use omp_core::{Hash32, Str};
 
 			#[derive(Debug)]
@@ -337,34 +338,28 @@ mod tests {
 				}
 			}
 			impl std::error::Error for Cause {}
-			fn cause() -> ForeignError { Arc::new(Cause) }
-			fn digest() -> Digest { Digest::new(Hash32::default(), 0) }
+			fn cause() -> ForeignError {
+				Arc::new(Cause)
+			}
+			fn digest() -> Digest {
+				Digest::new(Hash32::default(), 0)
+			}
 
 			prop_oneof![
-				Just(ExecutionError::Unplaceable {
-					need: crate::Unplaceable::LocalRequired,
-				}),
-				Just(ExecutionError::Auth {
-					backend: crate::BackendId::new_static("b"),
-				}),
-				prop_oneof![
-					Just(CasOp::FindMissing),
-					Just(CasOp::Upload),
-					Just(CasOp::Download),
-				].prop_map(|op| ExecutionError::Cas { op, digest: digest() }),
-				Just(ExecutionError::Capacity {
-					backend: crate::BackendId::new_static("b"),
-				}),
-				Just(ExecutionError::TimedOut {
-					limit: std::time::Duration::from_secs(1),
-				}),
+				Just(ExecutionError::Unplaceable { need: crate::Unplaceable::LocalRequired }),
+				Just(ExecutionError::Auth { backend: crate::BackendId::new_static("b") }),
+				prop_oneof![Just(CasOp::FindMissing), Just(CasOp::Upload), Just(CasOp::Download),]
+					.prop_map(|op| ExecutionError::Cas { op, digest: digest() }),
+				Just(ExecutionError::Capacity { backend: crate::BackendId::new_static("b") }),
+				Just(ExecutionError::TimedOut { limit: std::time::Duration::from_secs(1) }),
 				prop_oneof![
 					Just(RemoteCancel::NotStarted),
 					Just(RemoteCancel::Confirmed),
 					Just(RemoteCancel::Requested),
 					Just(RemoteCancel::Failed),
 					Just(RemoteCancel::Unsupported),
-				].prop_map(|remote| ExecutionError::Cancelled { remote }),
+				]
+				.prop_map(|remote| ExecutionError::Cancelled { remote }),
 				Just(ExecutionError::Transport { source: cause() }),
 				Just(ExecutionError::Infrastructure { source: cause() }),
 				Just(ExecutionError::InputCapture { source: cause() }),

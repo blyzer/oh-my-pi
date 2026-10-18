@@ -38,8 +38,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
 	AdwHost, PhaseResult, PhaseSpec,
 	remote::{
-		AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY,
-		eligible,
+		AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY, eligible,
 	},
 };
 use crate::{
