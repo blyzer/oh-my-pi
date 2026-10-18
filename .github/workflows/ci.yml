@@ -161,7 +161,8 @@ jobs:
   # workspace (not a member of the root one), so it is built and tested here.
   lintx_ratchet:
     name: Error-formatting ratchet (lintx)
-    needs: format
+    needs: [changes, format]
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
