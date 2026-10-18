@@ -16,6 +16,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Assert Linux
+      if: runner.os != 'Linux'
+      shell: bash
+      run: echo "::warning::source-mtimes is Linux-only (GNU touch); skipping" && exit 0
+
     - name: Age sources that match the cached commit
       shell: bash
       env:
