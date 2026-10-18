@@ -94,7 +94,7 @@ args=(
     --container_image=docker://gcr.io/flame-public/rbe-ubuntu24-04@sha256:f7db0d4791247f032fdb4451b7c3ba90e567923a341cc6dc43abfc283436791a
     --runner_exec_properties=EstimatedCPU=8
     --runner_exec_properties=EstimatedMemory=16GB
-    --runner_exec_properties=EstimatedFreeDiskBytes=40GB
+    --runner_exec_properties=EstimatedFreeDiskBytes=60GB
     --runner_exec_properties=remote-snapshot-save-policy=none-available
     --runner_exec_properties=snapshot-read-policy=local-first
     --timeout=60m

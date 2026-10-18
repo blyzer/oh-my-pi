@@ -618,11 +618,16 @@ fn pdf_image_only_document_returns_an_ocr_qualification_without_fake_text() {
 
 #[test]
 fn pdf_page_markers_alone_do_not_count_as_extracted_text() {
-	let error = markit::convert(Path::new("empty-layer.pdf"), &minimal_text_pdf(""))
-		.expect_err("an empty text operator has no extractable text");
+	let conversion = markit::convert(Path::new("empty-layer.pdf"), &minimal_text_pdf(""))
+		.expect("empty text operator returns a qualified conversion")
+		.expect("PDF is supported");
+	assert_eq!(conversion.text, "", "empty layer produces no text");
 	assert_eq!(
-		error.to_string(),
-		"pdf conversion failed: PDF has no extractable text (TextBased, 1 pages): OCR is required"
+		conversion.note.as_deref(),
+		Some(
+			"This PDF is scanned or image-based and has no usable text layer. OCR is required to \
+			 extract its text."
+		)
 	);
 }
 
