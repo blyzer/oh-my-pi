@@ -47,7 +47,7 @@ impl CleansePresentation for TerminalCleansePresentation {
 pub async fn run(args: CleanseArgs) -> miette::Result<()> {
 	let root = env::current_dir().into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let ctx = Arc::new(process_ctx_with(&root, omp_con::Ctx::builder()).into_diagnostic()?);
+	let ctx = Arc::new(process_ctx_with(&root, omp_con::Ctx::builder())?);
 	let host =
 		ProductionCleanseHost::open(root, data_dir, ctx, Arc::new(TerminalCleansePresentation))
 			.into_diagnostic()?;
