@@ -654,7 +654,12 @@ where
 		for digest in plan.streamed {
 			self.stream_blob(digest).await?;
 		}
-		Ok(UploadStats { cas_hits: hits, cas_misses: misses, blobs: misses, bytes: missing_bytes })
+		Ok(UploadStats {
+			cas_hits:   hits,
+			cas_misses: misses,
+			blobs:      misses,
+			bytes:      missing_bytes,
+		})
 	}
 
 	async fn stream_blob(&self, digest: omp_exec::Digest) -> Result<(), ExecutionError> {
@@ -712,10 +717,10 @@ struct ActionData {
 
 /// Statistics produced by a single [`ReapiBackend::upload`] call.
 struct UploadStats {
-	cas_hits:  u32,
+	cas_hits:   u32,
 	cas_misses: u32,
-	blobs:     u32,
-	bytes:     u64,
+	blobs:      u32,
+	bytes:      u64,
 }
 
 fn blob_digest(bytes: &[u8]) -> omp_exec::Digest {

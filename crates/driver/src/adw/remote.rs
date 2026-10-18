@@ -26,12 +26,12 @@ use omp_exec_reapi::{
 	profile::{Credential, Profile},
 	tree::InputFile,
 };
+use omp_observability::{attrs::omp_exec as exec_attrs, semconv::exec_spans};
 use omp_proto::{
 	blob::v1::{Chunk, GetRequest, StatRequest},
 	env::v1::CaptureInputsRequest,
 };
 use tokio_util::sync::CancellationToken;
-use omp_observability::{attrs::omp_exec as exec_attrs, semconv::exec_spans};
 use tracing::Instrument as _;
 
 use super::production::{ProductionAdwHost, ProductionError};
@@ -520,50 +520,50 @@ impl ProductionAdwHost {
 					run_span = Some(tracing::info_span!("omp.exec.run"));
 					accepted = true;
 				},
-			Some(ExecutionEvent::Settled(Ok(result))) => {
-				drop(run_span.take());
-				let mut feedback =
-					StrMut::new(format!("remote command exited {:?}\n", result.outcome));
-				let download_bytes = if let Some(logs) = result.logs {
-					let (stdout, stderr) = async {
-						let stdout = backend
-							.download_blob(logs.stdout)
-							.await
-							.map_err(RemoteError::Execute)?;
-						let stderr = backend
-							.download_blob(logs.stderr)
-							.await
-							.map_err(RemoteError::Execute)?;
-						Ok::<_, ProductionError>((stdout, stderr))
+				Some(ExecutionEvent::Settled(Ok(result))) => {
+					drop(run_span.take());
+					let mut feedback =
+						StrMut::new(format!("remote command exited {:?}\n", result.outcome));
+					let download_bytes = if let Some(logs) = result.logs {
+						let (stdout, stderr) = async {
+							let stdout = backend
+								.download_blob(logs.stdout)
+								.await
+								.map_err(RemoteError::Execute)?;
+							let stderr = backend
+								.download_blob(logs.stderr)
+								.await
+								.map_err(RemoteError::Execute)?;
+							Ok::<_, ProductionError>((stdout, stderr))
+						}
+						.instrument(tracing::info_span!("omp.exec.download"))
+						.await?;
+						feedback.push_str("stdout:\n");
+						feedback.push_str(&String::from_utf8_lossy(&stdout));
+						feedback.push_str("\nstderr:\n");
+						feedback.push_str(&String::from_utf8_lossy(&stderr));
+						(stdout.len() + stderr.len()) as u64
+					} else {
+						0
+					};
+					let exit_code = match result.outcome {
+						omp_exec::Outcome::Exited { code } => code,
+						omp_exec::Outcome::Signalled { signal } => signal,
+					};
+					tracing::info!(
+						{ exec_attrs::EXIT_CODE } = exit_code,
+						{ exec_attrs::CACHE_HIT } = result.cache_hit,
+						{ exec_attrs::DOWNLOAD_BYTES } = download_bytes,
+						"execution settled"
+					);
+					for artifact in result.artifacts.iter() {
+						let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
 					}
-					.instrument(tracing::info_span!("omp.exec.download"))
-					.await?;
-					feedback.push_str("stdout:\n");
-					feedback.push_str(&String::from_utf8_lossy(&stdout));
-					feedback.push_str("\nstderr:\n");
-					feedback.push_str(&String::from_utf8_lossy(&stderr));
-					(stdout.len() + stderr.len()) as u64
-				} else {
-					0
-				};
-				let exit_code = match result.outcome {
-					omp_exec::Outcome::Exited { code } => code,
-					omp_exec::Outcome::Signalled { signal } => signal,
-				};
-				tracing::info!(
-					{ exec_attrs::EXIT_CODE } = exit_code,
-					{ exec_attrs::CACHE_HIT } = result.cache_hit,
-					{ exec_attrs::DOWNLOAD_BYTES } = download_bytes,
-					"execution settled"
-				);
-				for artifact in result.artifacts.iter() {
-					let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
-				}
-				return Ok(super::PhaseResult {
-					accepted: result.outcome.is_success(),
-					feedback: feedback.freeze(),
-				});
-			},
+					return Ok(super::PhaseResult {
+						accepted: result.outcome.is_success(),
+						feedback: feedback.freeze(),
+					});
+				},
 				Some(ExecutionEvent::Settled(Err(error))) => {
 					let stage = if accepted {
 						Stage::AfterAcceptance
