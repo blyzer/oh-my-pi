@@ -118,18 +118,19 @@ impl BuildBuddyRun {
 
 	fn verdict(&self, code: i32) -> ExecutionEvent {
 		ExecutionEvent::Settled(Ok(ExecutionResult {
-			id:        self.id.clone(),
-			backend:   self.config.id.clone(),
-			outcome:   Outcome::Exited { code },
-			logs:      None,
-			artifacts: Arc::from([]),
-			timing:    Timing {
+			id:            self.id.clone(),
+			backend:       self.config.id.clone(),
+			outcome:       Outcome::Exited { code },
+			logs:          None,
+			artifacts:     Arc::from([]),
+			output_digests: std::collections::BTreeMap::new(),
+			timing:        Timing {
 				total: self.started.elapsed().as_millis().min(u32::MAX as u128) as u32,
 				..Timing::default()
 			},
-			transfer:  TransferCounts::default(),
-			cache_hit: false,
-			fallback:  None,
+			transfer:      TransferCounts::default(),
+			cache_hit:     false,
+			fallback:      None,
 		}))
 	}
 }

@@ -99,7 +99,7 @@ impl ExecutionBackend for LocalBackend {
 				.map_err(infrastructure)?;
 			let output_request = match &request.outputs {
 				OutputSpec::Metadata => OutputRequest::Bounded,
-				OutputSpec::Logs | OutputSpec::Paths(_) | OutputSpec::All => OutputRequest::Complete,
+			OutputSpec::Logs | OutputSpec::Artifacts { .. } | OutputSpec::All => OutputRequest::Complete,
 			};
 			let script = quote_argv(&request.argv).map_err(config_error)?;
 			let (_, run) = self
@@ -229,32 +229,34 @@ fn settle(
 	let outcome = ExecOutcome::try_from(status.outcome).unwrap_or(ExecOutcome::Unspecified);
 	let event = match outcome {
 		ExecOutcome::Exited => Ok(ExecutionResult {
-			id:        id.clone(),
-			backend:   backend.to_owned(),
-			outcome:   Outcome::Exited { code: status.exit_code.unwrap_or(1) },
-			logs:      None,
-			artifacts: Arc::from([]),
-			timing:    Timing {
+			id:            id.clone(),
+			backend:       backend.to_owned(),
+			outcome:       Outcome::Exited { code: status.exit_code.unwrap_or(1) },
+			logs:          None,
+			artifacts:     Arc::from([]),
+			output_digests: std::collections::BTreeMap::new(),
+			timing:        Timing {
 				total: status.wall_clock_ms.min(u64::from(u32::MAX)) as u32,
 				..Timing::default()
 			},
-			transfer:  TransferCounts::default(),
-			cache_hit: false,
-			fallback:  None,
+			transfer:      TransferCounts::default(),
+			cache_hit:     false,
+			fallback:      None,
 		}),
 		ExecOutcome::Failed => status.exit_code.map_or_else(
 			|| Err(ExecutionError::Infrastructure { source: Arc::new(LocalError::Failed) }),
 			|code| {
 				Ok(ExecutionResult {
-					id:        id.clone(),
-					backend:   backend.to_owned(),
-					outcome:   Outcome::Exited { code },
-					logs:      None,
-					artifacts: Arc::from([]),
-					timing:    Timing::default(),
-					transfer:  TransferCounts::default(),
-					cache_hit: false,
-					fallback:  None,
+					id:            id.clone(),
+					backend:       backend.to_owned(),
+					outcome:       Outcome::Exited { code },
+					logs:          None,
+					artifacts:     Arc::from([]),
+					output_digests: std::collections::BTreeMap::new(),
+					timing:        Timing::default(),
+					transfer:      TransferCounts::default(),
+					cache_hit:     false,
+					fallback:      None,
 				})
 			},
 		),

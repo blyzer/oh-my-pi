@@ -135,8 +135,11 @@ pub enum OutputSpec {
 	/// Adds stdout and stderr.
 	#[default]
 	Logs,
-	/// Adds the declared output paths, relative to the input root.
-	Paths(Arc<[Str]>),
+	/// Adds digests for the declared output paths, relative to the input root.
+	Artifacts {
+		/// Paths to fetch digests for, relative to the input root.
+		paths: Arc<[Str]>,
+	},
 	/// Every output; needs an explicit operator setting.
 	All,
 }

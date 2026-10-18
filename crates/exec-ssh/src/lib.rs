@@ -189,13 +189,14 @@ async fn run_remote(
 				.send_async(ExecutionEvent::Settled(Ok(ExecutionResult {
 					id,
 					backend,
-					outcome: Outcome::Exited { code },
-					logs: None,
-					artifacts: Arc::from([]),
-					timing: Timing::default(),
-					transfer: TransferCounts::default(),
-					cache_hit: false,
-					fallback: None,
+					outcome:        Outcome::Exited { code },
+					logs:           None,
+					artifacts:      Arc::from([]),
+					output_digests: std::collections::BTreeMap::new(),
+					timing:         Timing::default(),
+					transfer:       TransferCounts::default(),
+					cache_hit:      false,
+					fallback:       None,
 				})))
 				.await;
 		},
