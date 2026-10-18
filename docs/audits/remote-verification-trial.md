@@ -69,3 +69,54 @@ Verified via the 54 passing `omp-exec-reapi` tests including capability negotiat
 | Client local CPU < 5% of local recipe | ✅ [INFERENCE — client spent <1s while remote ran] |
 | Warm remote wall time within 1.5× local | ✅ Slice 0 cached run: 2s vs cold 44s |
 | Cache transfer within Slice 0 stop condition | ✅ Snapshot seeded once; subsequent runs fetch from cache |
+
+## Slice 1 — Timing measurements
+
+**Date:** 2026-10-18. Runs observed during the live `omp adw run verify` session.
+
+### BuildBuddy invocation IDs
+
+| Run | Invocation ID |
+|---|---|
+| `just remote-test-pkg omp-exec-reapi` (cached) | `8cbaab5f-5201-467d-9f79-0db993c6f2c0` |
+| `just remote-seed` | `a6a5b933-45b5-45cf-ba32-f309f816b17d` |
+
+### Observed wall times
+
+| Run | Cache state | Client wall time |
+|---|---|---|
+| `just remote-test-pkg omp-exec-reapi` | **warm** (cache hit) | **2 s** |
+| `just remote-seed` | cold, saves snapshot | **45 s** |
+
+The 2 s figure is a cache hit: the action result was already present in the BuildBuddy CAS from
+the prior seeded run, so the client's only work was handing off the Action digest and collecting
+the cached `ActionResult`. The 45 s seed run covers a cold VM boot, input-root upload, and
+compilation of the `omp-exec-reapi` crate (much smaller than `omp-envd`).
+
+### What is not yet measured
+
+ADR 0040 §"Measurement plan" calls for per-phase breakdown from `ExecutedActionMetadata`:
+local capture time, `FindMissingBlobs` time, upload bytes and time, queue time, input-fetch time,
+execution time, output-download time, and client local CPU plus peak memory sampled per second.
+
+None of these are available yet because the client-side span instrumentation (Task 2) has not been
+wired into the execution path. Until Task 2 ships, the only recorded data is:
+
+- Client wall time (above).
+- BuildBuddy invocation IDs (links to the BB UI where per-phase timelines are readable by hand).
+- No per-phase numbers for capture, FindMissing, upload, queue, execution, or download.
+- No client CPU or peak-memory sample for the Slice 1 client path.
+
+Full per-phase data will be recorded here once Task 2 wires instrumented spans and a structured
+dump of `ExecutedActionMetadata` into the audit output.
+
+### Success-criterion status (partial, ADR 0040 §Measurement plan)
+
+| Criterion | Threshold | Observed | Met? |
+|---|---|---|---|
+| Warm remote wall time within 1.5× warm local | ≤ 1.5× (warm local ~3 min 26 s, from Slice 0 run 10) | 2 s | ✅ well under |
+| Client local CPU < 5% of local recipe | < 5% of ~463 s (warm local) | not yet sampled (Task 2) | — |
+| Client peak memory < 5% of local peak | < 5% of ~3.6 GB (warm local) | not yet sampled (Task 2) | — |
+
+The wall-time criterion is satisfied. The CPU and memory criteria require the Task 2 instrumented
+spans before they can be assessed.
