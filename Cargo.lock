@@ -7742,6 +7742,7 @@ dependencies = [
  "omp-proto",
  "omp-scribe",
  "omp-session",
+ "omp-snapcompact",
  "omp-tool",
  "omp-vocab",
  "parking_lot",
