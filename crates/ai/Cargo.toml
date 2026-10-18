@@ -18,6 +18,7 @@ default = []
 local = []
 test-support = []
 local-applefm = ["local"]
+apple-aux-memory = ["local-applefm"]
 local-embedding = ["local", "dep:fastembed"]
 local-stt = [
 	"local",

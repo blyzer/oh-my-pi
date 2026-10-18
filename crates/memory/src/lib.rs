@@ -6,6 +6,8 @@
 //! indexes are rebuildable.
 
 pub mod bank;
+#[cfg(feature = "apple-aux-memory")]
+pub mod aux_lane;
 pub mod cache;
 pub mod config;
 pub mod diagnose;

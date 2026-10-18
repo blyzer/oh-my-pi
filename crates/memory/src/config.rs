@@ -236,6 +236,22 @@ pub struct MnemopiSettings {
 	/// Bounded shutdown drain in milliseconds.
 	#[serde(default = "default_shutdown_timeout_ms")]
 	pub shutdown_timeout_ms:      u64,
+	/// Auxiliary scoring brain used during retrieval re-ranking.
+	#[cfg(feature = "apple-aux-memory")]
+	#[serde(default)]
+	pub aux_model: AuxModel,
+}
+
+/// Auxiliary retrieval-scoring model wired on the `apple-aux-memory` lane.
+#[cfg(feature = "apple-aux-memory")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuxModel {
+	/// No auxiliary model; retrieval uses only RRF scores.
+	#[default]
+	None,
+	/// Apple Foundation Models session used to score semantic relevance.
+	AppleFM,
 }
 
 const fn default_true() -> bool {
@@ -291,6 +307,8 @@ impl Default for MnemopiSettings {
 			remote_llm:               None,
 			debug:                    false,
 			shutdown_timeout_ms:      default_shutdown_timeout_ms(),
+			#[cfg(feature = "apple-aux-memory")]
+			aux_model:                AuxModel::None,
 		}
 	}
 }

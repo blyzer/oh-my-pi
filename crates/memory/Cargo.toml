@@ -15,9 +15,11 @@ workspace = true
 [features]
 default = []
 local-embedding = ["dep:fastembed"]
+apple-aux-memory = ["dep:omp-ai", "omp-ai/apple-aux-memory"]
 
 [dependencies]
 fastembed = { workspace = true, optional = true }
+omp-ai = { workspace = true, optional = true }
 flume.workspace = true
 jiff.workspace = true
 omp-core.workspace = true
