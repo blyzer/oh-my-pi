@@ -10,7 +10,7 @@ use omp_driver::cleanse::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::pickers;
+use crate::{pickers, process_ctx_with};
 
 struct TerminalCleansePresentation;
 
@@ -47,8 +47,10 @@ impl CleansePresentation for TerminalCleansePresentation {
 pub async fn run(args: CleanseArgs) -> miette::Result<()> {
 	let root = env::current_dir().into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let host = ProductionCleanseHost::open(root, data_dir, Arc::new(TerminalCleansePresentation))
-		.into_diagnostic()?;
+	let ctx = Arc::new(process_ctx_with(&root, omp_con::Ctx::builder())?);
+	let host =
+		ProductionCleanseHost::open(root, data_dir, ctx, Arc::new(TerminalCleansePresentation))
+			.into_diagnostic()?;
 	let cancel = CancellationToken::new();
 	let exit = omp_driver::cleanse::run(&args, &host, &cancel)
 		.await
