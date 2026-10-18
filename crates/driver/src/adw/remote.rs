@@ -156,9 +156,13 @@ pub enum RemoteError {
 	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
 	#[error("remote artifact could not be materialized into the Environment blob store")]
 	Materialize(#[source] omp_env::ClientError),
-	/// A configuration pair is rejected before any network call is made.
-	#[error("remote configuration error: {0}")]
-	Config(Str),
+	/// Action-cache mode `read` or `read-write` is incompatible with the
+	/// BuildBuddy profile while runner recycling is active.
+	#[error(
+		"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
+		 recycling makes AC hits unsafe as execution substitutes)"
+	)]
+	CachePolicyConflict,
 }
 
 fn config_list(value: Str) -> Vec<String> {
@@ -183,10 +187,7 @@ fn cache_policy(ctx: &Ctx) -> omp_exec::CachePolicy {
 /// result, which must not happen under worker-recycling profiles.
 fn validate_cache_policy(policy: omp_exec::CachePolicy, profile: &str) -> Result<(), RemoteError> {
 	if policy != omp_exec::CachePolicy::Off && profile == "buildbuddy" {
-		return Err(RemoteError::Config(Str::new_static(
-			"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
-			 recycling makes AC hits unsafe as execution substitutes)",
-		)));
+		return Err(RemoteError::CachePolicyConflict);
 	}
 	Ok(())
 }
@@ -655,9 +656,12 @@ mod tests {
 	#[test]
 	fn cache_policy_refused_for_buildbuddy_runner_recycling() {
 		let err = validate_cache_policy(omp_exec::CachePolicy::Read, "buildbuddy").unwrap_err();
-		assert!(matches!(err, RemoteError::Config(_)), "expected Config error, got {err:?}",);
+		assert!(
+			matches!(err, RemoteError::CachePolicyConflict),
+			"expected CachePolicyConflict, got {err:?}",
+		);
 		let err = validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "buildbuddy").unwrap_err();
-		assert!(matches!(err, RemoteError::Config(_)));
+		assert!(matches!(err, RemoteError::CachePolicyConflict));
 	}
 
 	#[test]
