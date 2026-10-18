@@ -1,0 +1,12 @@
+name = "verify"
+
+[[phase]]
+name = "check"
+kind = "code"
+command = ["bash", "-c", "echo 'remote execution proof: ok'; uname -sm; date -u"]
+
+[[phase]]
+name = "review"
+kind = "review"
+prompt = "The check phase ran a command remotely. Output confirms the platform and timestamp. Accept if the output is present and shows a Linux platform."
+inputs = ["check"]
