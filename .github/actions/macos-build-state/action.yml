@@ -46,7 +46,10 @@ runs:
         find "$state" -mindepth 1 -maxdepth 1 \( \
           \( -name 'python-*' ! -name "python-$PYTHON_KEY" \) -o \
           \( -name 'target-*' ! -name "target-$TOOLCHAIN_KEY" \) \
-          \) -exec rm -rf {} +
+          \) -print0 | while IFS= read -r -d '' dir; do
+          echo "::notice::Evicted stale build state: $dir"
+          rm -rf "$dir"
+        done
         free_gb=$(( $(df -Pk "$state" | awk 'NR == 2 { print $4 }') / 1048576 ))
         if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
           echo "::warning::${free_gb} GB free, below ${MIN_FREE_GB} GB; discarding the warm target directory"
