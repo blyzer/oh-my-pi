@@ -116,7 +116,19 @@ jobs:
 
       - name: Install smoke
         timeout-minutes: 5
+        continue-on-error: true
         run: scripts/install-smoke-macos.sh dist
+
+      - name: Upload partial artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-macos-arm64-partial-${{ github.sha }}
+          path: |
+            dist/
+            target/release/omp
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload packages
         if: always()
