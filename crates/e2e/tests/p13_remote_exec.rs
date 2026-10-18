@@ -19,13 +19,12 @@ use bytes::Bytes;
 use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 use omp_core::{Hash32, Str};
 use omp_exec::{
-	BackendId, CachePolicy, CancelOutcome, Eligibility, ExecutionBackend, ExecutionError,
-	ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent, NeedSet, OutputSpec, Platform,
-	PlatformRequirement, ResourceRequirements, ExclusionCounts,
+	BackendId, CachePolicy, CancelOutcome, Eligibility, ExclusionCounts, ExecutionBackend,
+	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent, NeedSet,
+	OutputSpec, Platform, PlatformRequirement, ResourceRequirements,
 };
 use omp_exec_reapi::{
-	ExecuteConfig, ReapiBackend,
-	capabilities,
+	ExecuteConfig, ReapiBackend, capabilities,
 	cas::{BlobSource, InputSource},
 	proto::{
 		build::bazel::remote::execution::v2 as wire,
@@ -53,7 +52,7 @@ struct Fake {
 	/// Exit code the fake action should return.
 	exit_code: i32,
 	/// When `Some`, `execute` returns this gRPC error instead of an operation.
-	fault: Option<Code>,
+	fault:     Option<Code>,
 }
 
 type ExecStream = tonic::codegen::BoxStream<longrunning::Operation>;
@@ -170,7 +169,7 @@ fn make_operation(done: Option<bool>, exit_code: i32) -> longrunning::Operation 
 			longrunning::operation::Result::Response(Any {
 				type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse"
 					.to_owned(),
-				value: response.encode_to_vec(),
+				value:    response.encode_to_vec(),
 			})
 		}),
 		..Default::default()
@@ -220,19 +219,19 @@ async fn make_backend(fake: Fake) -> ReapiBackend<FixedSource> {
 		.unwrap();
 	let caps = capabilities::interpret(&server_caps()).unwrap();
 	let config = ExecuteConfig {
-		id:                  BackendId::new_static("p13"),
-		instance:            Str::empty(),
-		profile:             omp_exec_reapi::profile::Profile::reapi(),
-		credential:          None,
-		platform:            Platform::LINUX_X86_64,
-		enforced:            Posture {
+		id:                   BackendId::new_static("p13"),
+		instance:             Str::empty(),
+		profile:              omp_exec_reapi::profile::Profile::reapi(),
+		credential:           None,
+		platform:             Platform::LINUX_X86_64,
+		enforced:             Posture {
 			write:    WriteScope::ReadOnly,
 			network:  NetworkScope::Unrestricted,
 			approval: ApprovalScope::Yolo,
 		},
-		cache:               CachePolicy::Off,
-		platform_properties: BTreeMap::new(),
-		toolchains:          BTreeMap::new(),
+		cache:                CachePolicy::Off,
+		platform_properties:  BTreeMap::new(),
+		toolchains:           BTreeMap::new(),
 		buildbuddy_canceller: None,
 	};
 	ReapiBackend::from_channel(channel, config, caps, FixedSource)
@@ -299,11 +298,11 @@ impl InputSource for FixedSource {
 
 fn new_fake(exit_code: i32) -> Fake {
 	Fake {
-		uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+		uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 		cancelled: Arc::new(AsyncMutex::new(false)),
 		reconnect: false,
 		exit_code,
-		fault:     None,
+		fault: None,
 	}
 }
 
@@ -349,10 +348,7 @@ async fn infra_fault_is_a_typed_execution_error() {
 	};
 	let backend = make_backend(fake).await;
 	let result = backend.start(make_request()).await;
-	assert!(
-		matches!(result, Err(ExecutionError::Capacity { .. })),
-		"expected Capacity error",
-	);
+	assert!(matches!(result, Err(ExecutionError::Capacity { .. })), "expected Capacity error",);
 }
 
 #[tokio::test]
