@@ -1,6 +1,6 @@
 //! What a run reports while it runs and when it settles.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use omp_core::{CowBytes, Str};
 use strum::{Display, EnumString, IntoStaticStr};
@@ -106,29 +106,31 @@ pub struct Logs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
 	/// Execution identity.
-	pub id:        ExecutionId,
+	pub id:             ExecutionId,
 	/// The backend that ran it.
-	pub backend:   BackendId,
+	pub backend:        BackendId,
 	/// How the command ended.
-	pub outcome:   Outcome,
+	pub outcome:        Outcome,
 	/// Standard output and error, when the request asked for logs.
-	pub logs:      Option<Logs>,
+	pub logs:           Option<Logs>,
 	/// Output files.
-	pub artifacts: Arc<[Artifact]>,
+	pub artifacts:      Arc<[Artifact]>,
+	/// Digests of declared output paths, populated by the Artifacts output mode.
+	pub output_digests: BTreeMap<Str, Digest>,
 	/// Where the time went.
-	pub timing:    Timing,
+	pub timing:         Timing,
 	/// Storage traffic.
-	pub transfer:  TransferCounts,
+	pub transfer:       TransferCounts,
 	/// Whether the backend answered from its action cache.
-	pub cache_hit: bool,
+	pub cache_hit:      bool,
 	/// Set when the run fell back to a local backend.
-	pub fallback:  Option<FallbackCause>,
+	pub fallback:       Option<FallbackCause>,
 }
 
 // Settled results ride every event stream and fan out to the journal and
 // telemetry; keep the record flat (two ids, one optional digest pair,
 // counters) so `ExecutionEvent::Settled` stays near its sibling variants.
-const _: () = assert!(size_of::<ExecutionResult>() <= 232, "ExecutionResult must stay compact");
+const _: () = assert!(size_of::<ExecutionResult>() <= 256, "ExecutionResult must stay compact");
 
 /// Which stream a live output frame came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr)]

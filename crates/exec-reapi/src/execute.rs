@@ -707,7 +707,7 @@ fn timeout(duration: Duration) -> WireDuration {
 
 fn output_paths(outputs: &omp_exec::OutputSpec) -> Vec<String> {
 	match outputs {
-		omp_exec::OutputSpec::Paths(paths) => paths.iter().map(ToString::to_string).collect(),
+		omp_exec::OutputSpec::Artifacts { paths } => paths.iter().map(ToString::to_string).collect(),
 		omp_exec::OutputSpec::All => vec![".".to_owned()],
 		omp_exec::OutputSpec::Metadata | omp_exec::OutputSpec::Logs => Vec::new(),
 	}
@@ -874,29 +874,40 @@ where
 		} else {
 			None
 		};
-		let artifacts = action
-			.output_files
-			.into_iter()
-			.filter(|file| match &self.outputs {
-				OutputSpec::Paths(paths) => paths.iter().any(|path| path.as_str() == file.path),
-				OutputSpec::All => true,
-				OutputSpec::Metadata | OutputSpec::Logs => false,
-			})
-			.filter_map(|file| {
-				Some(Artifact {
-					path:       Str::new(file.path),
-					blob:       digest::from_wire(file.digest.as_ref()?).ok()?,
-					executable: file.is_executable,
-					fetched:    false,
-				})
-			})
-			.collect();
+		let (artifacts, output_digests) = {
+			let mut arts: Vec<Artifact> = Vec::new();
+			let mut digests: std::collections::BTreeMap<omp_core::Str, omp_exec::Digest> =
+				std::collections::BTreeMap::new();
+			for file in action.output_files {
+				let include = match &self.outputs {
+					OutputSpec::Artifacts { paths } => {
+						paths.iter().any(|path| path.as_str() == file.path)
+					},
+					OutputSpec::All => true,
+					OutputSpec::Metadata | OutputSpec::Logs => false,
+				};
+				if include {
+					if let Some(d) = file.digest.as_ref().and_then(|d| digest::from_wire(d).ok()) {
+						let path = omp_core::Str::new(&file.path);
+						digests.insert(path.clone(), d);
+						arts.push(Artifact {
+							path,
+							blob: d,
+							executable: file.is_executable,
+							fetched: false,
+						});
+					}
+				}
+			}
+			(Arc::from(arts), digests)
+		};
 		ExecutionEvent::Settled(Ok(ExecutionResult {
 			id: self.id.clone(),
 			backend: self.backend.inner.id.clone(),
 			outcome: Outcome::Exited { code: action.exit_code },
 			logs,
 			artifacts,
+			output_digests,
 			timing: Timing::default(),
 			transfer: TransferCounts::default(),
 			cache_hit: result.cached_result,

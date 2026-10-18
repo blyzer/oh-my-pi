@@ -192,6 +192,7 @@ async fn run_remote(
 					outcome: Outcome::Exited { code },
 					logs: None,
 					artifacts: Arc::from([]),
+					output_digests: std::collections::BTreeMap::new(),
 					timing: Timing::default(),
 					transfer: TransferCounts::default(),
 					cache_hit: false,
