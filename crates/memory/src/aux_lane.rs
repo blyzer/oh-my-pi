@@ -59,7 +59,7 @@ mod tests {
 	fn fake_record(id: &str, content: &str) -> MemoryRecord {
 		MemoryRecord {
 			id:            sf!("{id}"),
-		bank:          BankId::configured("test").expect("valid bank name"),
+			bank:          BankId::configured("test").expect("valid bank name"),
 			content:       Str::new(content),
 			source:        None,
 			session_id:    sf!("s0"),
@@ -74,10 +74,10 @@ mod tests {
 
 	fn fake_result(id: &str, content: &str, score: f64) -> RecallResult {
 		RecallResult {
-			memory:       fake_record(id, content),
+			memory: fake_record(id, content),
 			score,
 			voice_scores: VoiceScores::default(),
-			broadened:    false,
+			broadened: false,
 		}
 	}
 

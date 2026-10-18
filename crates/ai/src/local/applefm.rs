@@ -523,7 +523,8 @@ impl AppleFmSession {
 	pub fn respond(&self, prompt: impl Into<Str>) -> Result<Str> {
 		let options = AppleFmOptions::new(prompt).system_prompt(self.system.clone());
 		let handle = tokio::runtime::Handle::current();
-		handle.block_on(AppleFm.generate(options, CancellationToken::new()))
+		handle
+			.block_on(AppleFm.generate(options, CancellationToken::new()))
 			.map(|g| g.content)
 	}
 }
