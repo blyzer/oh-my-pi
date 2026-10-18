@@ -312,13 +312,16 @@ pub mod omp_aggregate {
 pub mod omp_exec {
 	/// `ExecutionId` UUID that also serves as the REAPI `tool_invocation_id`.
 	pub const ID: &str = "omp.exec.id";
-	/// Operator-named backend identifier (e.g. `"local"`, `"remote"`, `"ssh:myhost"`).
+	/// Operator-named backend identifier (e.g. `"local"`, `"remote"`,
+	/// `"ssh:myhost"`).
 	pub const BACKEND: &str = "omp.exec.backend";
 	/// Placement decision vocabulary value (`local`, `remote`, `ssh`).
 	pub const PLACEMENT: &str = "omp.exec.placement";
-	/// Intent vocabulary value (`check`, `lint`, `test`, `build`, `proof`, etc.).
+	/// Intent vocabulary value (`check`, `lint`, `test`, `build`, `proof`,
+	/// etc.).
 	pub const INTENT: &str = "omp.exec.intent";
-	/// High-level outcome vocabulary value (`completed`, `cancelled`, `infra_error`, `unplaceable`).
+	/// High-level outcome vocabulary value (`completed`, `cancelled`,
+	/// `infra_error`, `unplaceable`).
 	pub const OUTCOME: &str = "omp.exec.outcome";
 	/// Process exit code; present only when `outcome` is `completed`.
 	pub const EXIT_CODE: &str = "omp.exec.exit_code";
@@ -334,7 +337,8 @@ pub mod omp_exec {
 	pub const INPUT_BYTES: &str = "omp.exec.input.bytes";
 	/// Number of blobs already present in CAS (cache hits during upload phase).
 	pub const CAS_HITS: &str = "omp.exec.cas.hits";
-	/// Number of blobs missing from CAS and uploaded (cache misses during upload phase).
+	/// Number of blobs missing from CAS and uploaded (cache misses during upload
+	/// phase).
 	pub const CAS_MISSES: &str = "omp.exec.cas.misses";
 	/// Number of blobs uploaded to CAS.
 	pub const UPLOAD_BLOBS: &str = "omp.exec.upload.blobs";
