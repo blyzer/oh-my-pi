@@ -882,16 +882,26 @@ jobs:
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
         run: scripts/remote-verify.sh remote-heavy
-# Warm the shared BuildBuddy runner snapshot only on explicit dispatch. This avoids
-# handing the repository credential to ordinary pull-request code.
+# Warm the shared BuildBuddy runner snapshot only on explicit dispatch from the
+# omp2 base branch. Restricting to omp2 prevents an attacker from dispatching
+# this job from a branch containing modified scripts/ that could exfiltrate the
+# BuildBuddy API key, which has AC-write permission.
   remote_seed:
     name: Seed BuildBuddy omp2 runner cache
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/omp2' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
     steps:
+      - name: Assert running on omp2
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/omp2" ]; then
+            echo "::error::remote_seed must only run on refs/heads/omp2 (got $GITHUB_REF)"
+            exit 1
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: omp2
