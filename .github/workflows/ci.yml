@@ -319,6 +319,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # sccache is only installed by mozilla-actions/sccache-action on github-hosted
+      # runners. Clear RUSTC_WRAPPER on self-hosted runners so cargo invocations
+      # that run before or instead of the sccache step do not fail with "No such file".
+      - name: Clear sccache on self-hosted runners
+        if: runner.environment != 'github-hosted'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+
       - name: Select pinned Rust toolchain
         run: |
           test "$(uname -m)" = arm64
@@ -479,6 +486,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Clear sccache on self-hosted runners
+        if: runner.environment != 'github-hosted'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Select pinned Rust toolchain
         run: |
