@@ -344,9 +344,13 @@ pub fn cleanse(state: &ServiceState, request: CleanseRequest) -> ServiceResult<C
 	};
 	let presentation =
 		Arc::new(ChatCleansePresentation { request: request.request, all: args.all });
-	let host =
-		ProductionCleanseHost::open(state.project.clone(), state.data_dir.clone(), presentation)
-			.map_err(failed)?;
+	let host = ProductionCleanseHost::open(
+		state.project.clone(),
+		state.data_dir.clone(),
+		Arc::clone(&state.con),
+		presentation,
+	)
+	.map_err(failed)?;
 	let cancel = CancellationToken::new();
 	let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
 	let (tx, rx) = flume::bounded(1);
