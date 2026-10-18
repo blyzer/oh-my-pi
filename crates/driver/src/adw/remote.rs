@@ -17,7 +17,7 @@ use omp_envd::CommandCredentialExecutorFactory as _;
 use omp_exec::{
 	Artifact, BackendId, BuildCommand, BuildSystemAdapter, CargoJust, Digest, Eligibility, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun, InputSet, Intent,
-	Platform, RepoPins,
+	Platform, RepoPins, Stage, fallback_eligible,
 };
 use omp_exec_reapi::{
 	ExecuteConfig, ReapiBackend, Toolchain,
@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use super::production::{ProductionAdwHost, ProductionError};
 use crate::bridges::CommandCredentials;
 
-/// Placement supported by Slice 1. No fallback or local backend is installed.
+/// Execution placement policy; mirrors ADR 0040 Part C.3.
 #[derive(
 	Clone,
 	Copy,
@@ -50,10 +50,14 @@ use crate::bridges::CommandCredentials;
 )]
 #[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
 pub enum AdwExecPolicy {
-	/// Run existing local Environment commands.
+	/// Everything local; `RemoteRequired` is unplaceable.
 	#[default]
 	LocalOnly,
-	/// Offload only eligible code phases, with no fallback on remote errors.
+	/// Local first; `RemoteRequired` goes remote.
+	LocalPreferred,
+	/// `RemotePreferred` and `RemoteRequired` go remote; rest stays local.
+	RemotePreferred,
+	/// Remote only; `LocalRequired` is unplaceable.
 	RemoteOnly,
 }
 omp_con::con_enum!(AdwExecPolicy);
@@ -92,8 +96,13 @@ omp_con::var! {
 	pub static SV_EXEC_UPLOAD_ALLOW = sv_exec_upload_allow: Str {
 		default: Str::default(), flags: archive,
 	};
+	/// Allow local fallback for remote-preferred requests that fail before
+	/// acceptance (ADR 0040 Part C.3). Default off: automatic local rerun of
+	/// a heavy command on a swapping Mac brings back the load this removes.
+	pub static SV_EXEC_FALLBACK_LOCAL = sv_exec_fallback_local: bool {
+		default: false, flags: archive,
+	};
 }
-
 /// Enforced by the Linux runner profile: the remote action cannot write the
 /// local workspace and BuildBuddy's Firecracker worker has networking off.
 pub const REMOTE_POSTURE: Posture = Posture {
@@ -137,6 +146,10 @@ pub enum RemoteError {
 	Manifest,
 	#[error("remote action failed: {0}")]
 	Execute(#[source] ExecutionError),
+	/// The remote action failed before acceptance; the error may permit local
+	/// fallback (ADR 0040 Part C.3).
+	#[error("remote action failed before acceptance: {0}")]
+	PreAcceptanceFailed(#[source] ExecutionError),
 	#[error("BuildBuddy cancellation client could not connect")]
 	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
 	#[error("remote artifact could not be materialized into the Environment blob store")]
@@ -475,6 +488,7 @@ impl ProductionAdwHost {
 			.await
 			.map_err(RemoteError::Execute)?;
 		let mut run = backend.start(request).await.map_err(RemoteError::Execute)?;
+		let mut accepted = false;
 		loop {
 			let event = tokio::select! {
 				event = run.next_event() => event,
@@ -484,6 +498,9 @@ impl ProductionAdwHost {
 				},
 			};
 			match event {
+				Some(ExecutionEvent::Accepted { .. }) => {
+					accepted = true;
+				},
 				Some(ExecutionEvent::Settled(Ok(result))) => {
 					let mut feedback =
 						StrMut::new(format!("remote command exited {:?}\n", result.outcome));
@@ -509,8 +526,16 @@ impl ProductionAdwHost {
 						feedback: feedback.freeze(),
 					});
 				},
-				Some(ExecutionEvent::Settled(Err(source))) => {
-					return Err(RemoteError::Execute(source).into());
+				Some(ExecutionEvent::Settled(Err(error))) => {
+					let stage = if accepted {
+						Stage::AfterAcceptance
+					} else {
+						Stage::BeforeAcceptance
+					};
+					if fallback_eligible(&error, stage) {
+						return Err(RemoteError::PreAcceptanceFailed(error).into());
+					}
+					return Err(RemoteError::Execute(error).into());
 				},
 				Some(_) => {},
 				None => return Err(RemoteError::Manifest.into()),
