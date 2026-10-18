@@ -4,15 +4,15 @@
 //! a path or keeps a second blob store: capture and reads are delegated to
 //! [`crate::cas::InputSource`].
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use omp_adw::Posture;
-use omp_core::Str;
+use omp_core::{Hash32, Str};
 use omp_exec::{
 	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
-	ExecutionRun, InputSet, Logs, Outcome, Platform, Reattach, Timing, TransferCounts,
+	ExecutionRun, InputSet, Logs, Outcome, OutputSpec, Platform, Reattach, Timing, TransferCounts,
 };
 use parking_lot::Mutex;
 use prost::Message as _;
@@ -46,23 +46,27 @@ pub struct Toolchain {
 #[derive(Debug, Clone)]
 pub struct Config {
 	/// Operator identity for this backend.
-	pub id:                  BackendId,
+	pub id:                   BackendId,
 	/// REAPI instance name.
-	pub instance:            Str,
+	pub instance:             Str,
 	/// Service profile (portable REAPI or another profile expressed as data).
-	pub profile:             Profile,
+	pub profile:              Profile,
 	/// Credential written only to the profile's metadata header.
-	pub credential:          Option<Credential>,
+	pub credential:           Option<Credential>,
 	/// Platform offered by this backend.
-	pub platform:            Platform,
+	pub platform:             Platform,
 	/// Enforced posture offered by this backend.
-	pub enforced:            Posture,
+	pub enforced:             Posture,
 	/// Action-cache policy.
-	pub cache:               CachePolicy,
+	pub cache:                CachePolicy,
 	/// Extra action platform properties.
-	pub platform_properties: BTreeMap<Str, Str>,
+	pub platform_properties:  BTreeMap<Str, Str>,
 	/// Toolchain mapping supplied by the composing layer.
-	pub toolchains:          BTreeMap<Str, Toolchain>,
+	pub toolchains:           BTreeMap<Str, Toolchain>,
+	/// Optional BuildBuddy invocation canceller (buildbuddy-cancel feature
+	/// only).
+	#[cfg(feature = "buildbuddy-cancel")]
+	pub buildbuddy_canceller: Option<crate::BuildBuddyCanceller>,
 }
 
 /// A connected generic REAPI backend.
@@ -72,17 +76,19 @@ pub struct ReapiBackend<S> {
 }
 
 struct BackendInner<S> {
-	source:              S,
-	profile:             Profile,
-	credential:          Option<Credential>,
-	instance:            Str,
-	clients:             Clients,
-	caps:                Capabilities,
-	backend_caps:        BackendCapabilities,
-	cache:               CachePolicy,
-	platform_properties: BTreeMap<Str, Str>,
-	toolchains:          BTreeMap<Str, Toolchain>,
-	id:                  BackendId,
+	source:               S,
+	profile:              Profile,
+	credential:           Option<Credential>,
+	instance:             Str,
+	clients:              Clients,
+	caps:                 Capabilities,
+	backend_caps:         BackendCapabilities,
+	cache:                CachePolicy,
+	platform_properties:  BTreeMap<Str, Str>,
+	toolchains:           BTreeMap<Str, Toolchain>,
+	id:                   BackendId,
+	#[cfg(feature = "buildbuddy-cancel")]
+	buildbuddy_canceller: Option<crate::BuildBuddyCanceller>,
 }
 
 #[derive(Clone)]
@@ -196,6 +202,8 @@ where
 				platform_properties: config.platform_properties,
 				toolchains: config.toolchains,
 				id: config.id,
+				#[cfg(feature = "buildbuddy-cancel")]
+				buildbuddy_canceller: config.buildbuddy_canceller,
 			}),
 		})
 	}
@@ -238,6 +246,8 @@ where
 				platform_properties: config.platform_properties,
 				toolchains: config.toolchains,
 				id: config.id,
+				#[cfg(feature = "buildbuddy-cancel")]
+				buildbuddy_canceller: config.buildbuddy_canceller,
 			}),
 		}
 	}
@@ -338,9 +348,77 @@ impl<S> ReapiBackend<S>
 where
 	S: InputSource,
 {
+	/// Downloads one verified REAPI blob from the backend CAS.
+	///
+	/// The returned bytes are verified against both the declared length and
+	/// SHA-256 digest before they escape the backend.
+	pub async fn download_blob(&self, digest: omp_exec::Digest) -> Result<Bytes, ExecutionError> {
+		let resource = cas::read_resource(
+			self.inner.instance.as_str(),
+			&digest.hash.to_hex().to_string(),
+			digest.size,
+			cas::Compression::Identity,
+		);
+		let request = with_metadata(
+			Request::new(bytestream::ReadRequest {
+				resource_name: resource,
+				read_offset:   0,
+				read_limit:    0,
+			}),
+			&self.inner.profile,
+			self.inner.credential.as_ref(),
+		)?;
+		let mut client = self.inner.clients.byte_stream.clone();
+		let mut stream = client
+			.read(request)
+			.await
+			.map_err(|error| {
+				status::classify(
+					error,
+					Phase::Download,
+					&self.inner.id,
+					Duration::from_secs(30),
+					Some(digest),
+				)
+			})?
+			.into_inner();
+		let capacity = usize::try_from(digest.size.min(8 * 1024 * 1024)).unwrap_or(8 * 1024 * 1024);
+		let mut bytes = BytesMut::with_capacity(capacity);
+		while let Some(response) = stream.message().await.map_err(|error| {
+			status::classify(
+				error,
+				Phase::Download,
+				&self.inner.id,
+				Duration::from_secs(30),
+				Some(digest),
+			)
+		})? {
+			bytes.extend_from_slice(&response.data);
+			if bytes.len() as u64 > digest.size {
+				return Err(ExecutionError::OutputRetrieval {
+					source: Arc::new(io::Error::new(
+						io::ErrorKind::InvalidData,
+						"REAPI blob exceeded digest size",
+					)),
+				});
+			}
+		}
+		let bytes = bytes.freeze();
+		if bytes.len() as u64 != digest.size || Hash32::sum(&bytes) != digest.hash {
+			return Err(ExecutionError::OutputRetrieval {
+				source: Arc::new(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"REAPI blob digest mismatch",
+				)),
+			});
+		}
+		Ok(bytes)
+	}
+
 	async fn start_request(&self, request: ExecutionRequest) -> Result<ReapiRun<S>, ExecutionError> {
 		let action = self.prepare_action(&request).await?;
 		let action_timeout = request.timeout;
+		let outputs = request.outputs.clone();
 		let request_id = request.id.clone();
 		let request_wire = wire::ExecuteRequest {
 			instance_name: self.inner.instance.to_string(),
@@ -365,7 +443,7 @@ where
 				Some(action.digest),
 			)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id))
+		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs, action_timeout))
 	}
 
 	async fn reattach_request(&self, handle: Reattach) -> Result<ReapiRun<S>, ExecutionError> {
@@ -379,7 +457,13 @@ where
 		let stream = execution.wait_execution(request).await.map_err(|error| {
 			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), handle.id))
+		Ok(ReapiRun::new(
+			self.clone(),
+			stream.into_inner(),
+			handle.id,
+			OutputSpec::Logs,
+			Duration::from_secs(30 * 60),
+		))
 	}
 
 	async fn prepare_action(
@@ -417,11 +501,16 @@ where
 		};
 		let command_bytes = command.encode_to_vec();
 		let command_digest = blob_digest(&command_bytes);
+		let mut platform_properties = self
+			.inner
+			.profile
+			.platform_properties(request.platform.platform(), &self.inner.platform_properties);
+		if let Some(toolchain) = toolchain.and_then(|toolchain| toolchain.image.as_ref()) {
+			platform_properties.push((self.inner.profile.image_property.clone(), toolchain.clone()));
+			platform_properties.sort_by(|left, right| left.0.cmp(&right.0));
+		}
 		let platform = wire::Platform {
-			properties: self
-				.inner
-				.profile
-				.platform_properties(request.platform.platform(), &self.inner.platform_properties)
+			properties: platform_properties
 				.into_iter()
 				.map(|(name, value)| wire::platform::Property {
 					name:  name.to_string(),
@@ -433,7 +522,7 @@ where
 			command_digest: Some(digest::to_wire(command_digest)),
 			input_root_digest: Some(digest::to_wire(tree.root)),
 			timeout: Some(timeout(request.timeout)),
-			do_not_cache: self.inner.cache == CachePolicy::Off,
+			do_not_cache: matches!(self.inner.cache, CachePolicy::Off | CachePolicy::Read),
 			platform: Some(platform),
 			..Default::default()
 		};
@@ -554,18 +643,22 @@ where
 
 	async fn stream_blob(&self, digest: omp_exec::Digest) -> Result<(), ExecutionError> {
 		let source = self.inner.source.clone();
+		use rand::RngExt as _;
+		let upload_id = format!("{:032x}", rand::rng().random::<u128>());
 		let resource = cas::write_resource(
 			self.inner.instance.as_str(),
-			"omp-upload",
+			&upload_id,
 			&digest.hash.to_hex().to_string(),
 			digest.size,
 			cas::Compression::Identity,
 		);
+		let read_error = Arc::new(Mutex::new(None));
+		let stream_error = read_error.clone();
 		let stream = async_stream::stream! {
 			let mut offset = 0_u64;
 			while offset < digest.size {
 				let len = (digest.size - offset).min(1024 * 1024);
-				let Ok(data) = source.read_range(digest, offset, len).await else { return };
+				let data = match source.read_range(digest, offset, len).await { Ok(data) => data, Err(error) => { *stream_error.lock() = Some(error); return } };
 				offset = offset.saturating_add(data.len() as u64);
 				yield bytestream::WriteRequest { resource_name: resource.clone(), write_offset: offset as i64 - data.len() as i64, finish_write: offset >= digest.size, data };
 			}
@@ -573,7 +666,7 @@ where
 		let request =
 			with_metadata(Request::new(stream), &self.inner.profile, self.inner.credential.as_ref())?;
 		let mut client = self.inner.clients.byte_stream.clone();
-		client.write(request).await.map_err(|error| {
+		let response = client.write(request).await.map_err(|error| {
 			status::classify(
 				error,
 				Phase::Upload,
@@ -582,6 +675,17 @@ where
 				Some(digest),
 			)
 		})?;
+		if let Some(error) = read_error.lock().take() {
+			return Err(ExecutionError::Infrastructure { source: Arc::new(error) });
+		}
+		if response.into_inner().committed_size != digest.size as i64 {
+			return Err(ExecutionError::Infrastructure {
+				source: Arc::new(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"REAPI CAS committed size mismatch",
+				)),
+			});
+		}
 		Ok(())
 	}
 }
@@ -614,9 +718,11 @@ pub struct ReapiRun<S> {
 	backend:     ReapiBackend<S>,
 	stream:      tonic::Streaming<longrunning::Operation>,
 	id:          omp_exec::ExecutionId,
+	outputs:     OutputSpec,
 	operation:   Arc<Mutex<Option<Str>>>,
 	reconnected: bool,
 	accepted:    bool,
+	timeout:     Duration,
 }
 
 impl<S> ReapiRun<S>
@@ -627,14 +733,18 @@ where
 		backend: ReapiBackend<S>,
 		stream: tonic::Streaming<longrunning::Operation>,
 		id: omp_exec::ExecutionId,
+		outputs: OutputSpec,
+		timeout: Duration,
 	) -> Self {
 		Self {
 			backend,
 			stream,
 			id,
+			outputs,
 			operation: Arc::new(Mutex::new(None)),
 			reconnected: false,
 			accepted: false,
+			timeout,
 		}
 	}
 
@@ -749,20 +859,29 @@ where
 		let Some(action) = result.result else {
 			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
 		};
-		let logs = match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
-			(Some(stdout), Some(stderr)) => {
-				match (digest::from_wire(stdout), digest::from_wire(stderr)) {
-					(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
-					(Err(error), _) | (_, Err(error)) => {
-						return ExecutionEvent::Settled(Err(config_error(error)));
-					},
-				}
-			},
-			_ => None,
+		let logs = if matches!(&self.outputs, OutputSpec::Logs | OutputSpec::All) {
+			match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
+				(Some(stdout), Some(stderr)) => {
+					match (digest::from_wire(stdout), digest::from_wire(stderr)) {
+						(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
+						(Err(error), _) | (_, Err(error)) => {
+							return ExecutionEvent::Settled(Err(config_error(error)));
+						},
+					}
+				},
+				_ => None,
+			}
+		} else {
+			None
 		};
 		let artifacts = action
 			.output_files
 			.into_iter()
+			.filter(|file| match &self.outputs {
+				OutputSpec::Paths(paths) => paths.iter().any(|path| path.as_str() == file.path),
+				OutputSpec::All => true,
+				OutputSpec::Metadata | OutputSpec::Logs => false,
+			})
 			.filter_map(|file| {
 				Some(Artifact {
 					path:       Str::new(file.path),
@@ -791,13 +910,31 @@ where
 	S: InputSource,
 {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
-		self.next()
+		let timeout = self.timeout;
+		async move {
+			match tokio::time::timeout(timeout, self.next()).await {
+				Ok(event) => event,
+				Err(_) => {
+					Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit: timeout })))
+				},
+			}
+		}
 	}
 
 	fn cancel(&self) -> impl Future<Output = CancelOutcome> + Send + '_ {
 		let backend = self.backend.clone();
 		let operation = self.operation.clone();
+		#[cfg(feature = "buildbuddy-cancel")]
+		let invocation_id = self.id.clone();
 		async move {
+			#[cfg(feature = "buildbuddy-cancel")]
+			if let Some(canceller) = &backend.inner.buildbuddy_canceller {
+				return match canceller.cancel_invocation(invocation_id.as_str()).await {
+					Ok(()) => CancelOutcome::Requested,
+					Err(error) if error.code() == Code::Unimplemented => CancelOutcome::Unsupported,
+					Err(_) => CancelOutcome::Failed,
+				};
+			}
 			let Some(name) = operation.lock().clone() else {
 				return CancelOutcome::Unsupported;
 			};
@@ -1085,19 +1222,21 @@ mod tests {
 			.await
 			.unwrap();
 		let config = Config {
-			id:                  BackendId::new_static("reapi"),
-			instance:            Str::empty(),
-			profile:             Profile::reapi(),
-			credential:          None,
-			platform:            Platform::LINUX_X86_64,
-			enforced:            Posture {
+			id: BackendId::new_static("reapi"),
+			instance: Str::empty(),
+			profile: Profile::reapi(),
+			credential: None,
+			platform: Platform::LINUX_X86_64,
+			enforced: Posture {
 				write:    WriteScope::ReadOnly,
 				network:  NetworkScope::Unrestricted,
 				approval: ApprovalScope::Yolo,
 			},
-			cache:               CachePolicy::Off,
+			cache: CachePolicy::Off,
 			platform_properties: BTreeMap::new(),
-			toolchains:          BTreeMap::new(),
+			toolchains: BTreeMap::new(),
+			#[cfg(feature = "buildbuddy-cancel")]
+			buildbuddy_canceller: None,
 		};
 		ReapiBackend::from_channel(
 			channel,

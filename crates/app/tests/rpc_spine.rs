@@ -1299,6 +1299,9 @@ async fn rpc_open_session_resumes_the_newest_journal_or_starts_one() {
 	std::fs::create_dir_all(&held).expect("held directory");
 	let older = held.join("older.oms");
 	drop(Session::create(&older, ComponentRegistry::standard()).expect("older journal"));
+	// Sleep long enough for filesystems with 1-second mtime resolution (Linux ext4)
+	// to record a different timestamp on the newer journal.
+	std::thread::sleep(std::time::Duration::from_millis(1100));
 	let newer = held.join("newer.oms");
 	let mut later = Session::create(&newer, ComponentRegistry::standard()).expect("newer journal");
 	later.begin_turn().expect("turn");

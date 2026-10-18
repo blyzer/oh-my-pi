@@ -219,6 +219,19 @@ impl Run {
 	/// dependency order, so the first ready phase is also the earliest-declared
 	/// one that can run.
 	pub fn next_step(&mut self) -> Step {
+		let posture = self.posture;
+		self.next_step_with_posture(|_| posture)
+	}
+
+	/// Advances using the posture of the particular phase about to run.
+	///
+	/// A workflow can mix remote and local code phases. Checking one posture
+	/// for the entire workflow would either reject a valid remote phase or
+	/// let a local phase run under a remote phase's claimed confinement.
+	pub fn next_step_with_posture(
+		&mut self,
+		resolve: impl FnOnce(&Phase) -> Option<Posture>,
+	) -> Step {
 		if self.halted {
 			return Step::Done { accepted: false };
 		}
@@ -250,7 +263,7 @@ impl Run {
 
 		let phase = self.workflow.phases()[index].clone();
 		if !phase.requires.is_empty() {
-			let blocked = match self.posture {
+			let blocked = match resolve(&phase) {
 				Some(posture) => phase.requires.check(&phase.name, &posture).err(),
 				// A declared requirement against an unreported posture is
 				// unverifiable, and unverifiable is not the same as satisfied.
