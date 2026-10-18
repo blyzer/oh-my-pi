@@ -26,11 +26,13 @@ use omp_exec_reapi::{
 	profile::{Credential, Profile},
 	tree::InputFile,
 };
+use omp_observability::{attrs::omp_exec as exec_attrs, semconv::exec_spans};
 use omp_proto::{
 	blob::v1::{Chunk, GetRequest, StatRequest},
 	env::v1::CaptureInputsRequest,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use super::production::{ProductionAdwHost, ProductionError};
 use crate::bridges::CommandCredentials;
@@ -356,6 +358,12 @@ async fn materialize_artifact(
 }
 
 impl ProductionAdwHost {
+	#[tracing::instrument(
+		level = "info",
+		name = "omp.exec.execute",
+		skip_all,
+		fields(exec_id = tracing::field::Empty)
+	)]
 	pub(super) async fn run_remote(
 		&self,
 		phase: &Phase,
@@ -399,6 +407,7 @@ impl ProductionAdwHost {
 			target:      Platform::LINUX_X86_64,
 			host:        host_platform(),
 		};
+		tracing::Span::current().record("exec_id", command.id.as_str());
 		let plan = CargoJust::default()
 			.plan(&command, &pins)
 			.map_err(RemoteError::Plan)?;
@@ -416,8 +425,14 @@ impl ProductionAdwHost {
 				wire_revision: omp_proto::SCHEMA_REV,
 				..Default::default()
 			})
+			.instrument(tracing::info_span!("omp.exec.capture"))
 			.await
 			.map_err(RemoteError::Capture)?;
+		tracing::info!(
+			{ exec_attrs::INPUT_FILES } = capture.files,
+			{ exec_attrs::INPUT_BYTES } = capture.bytes,
+			"capture complete"
+		);
 		if let Some(refused) = capture.refused.first() {
 			return Err(
 				RemoteError::InputRefused {
@@ -488,6 +503,8 @@ impl ProductionAdwHost {
 			.await
 			.map_err(RemoteError::Execute)?;
 		let mut run = backend.start(request).await.map_err(RemoteError::Execute)?;
+		let mut queue_span: Option<tracing::Span> = Some(tracing::info_span!("omp.exec.queue"));
+		let mut run_span: Option<tracing::Span> = None;
 		let mut accepted = false;
 		loop {
 			let event = tokio::select! {
@@ -499,25 +516,46 @@ impl ProductionAdwHost {
 			};
 			match event {
 				Some(ExecutionEvent::Accepted { .. }) => {
+					drop(queue_span.take());
+					run_span = Some(tracing::info_span!("omp.exec.run"));
 					accepted = true;
 				},
 				Some(ExecutionEvent::Settled(Ok(result))) => {
+					drop(run_span.take());
 					let mut feedback =
 						StrMut::new(format!("remote command exited {:?}\n", result.outcome));
-					if let Some(logs) = result.logs {
-						let stdout = backend
-							.download_blob(logs.stdout)
-							.await
-							.map_err(RemoteError::Execute)?;
-						let stderr = backend
-							.download_blob(logs.stderr)
-							.await
-							.map_err(RemoteError::Execute)?;
+					let download_bytes = if let Some(logs) = result.logs {
+						let (stdout, stderr) = async {
+							let stdout = backend
+								.download_blob(logs.stdout)
+								.await
+								.map_err(RemoteError::Execute)?;
+							let stderr = backend
+								.download_blob(logs.stderr)
+								.await
+								.map_err(RemoteError::Execute)?;
+							Ok::<_, ProductionError>((stdout, stderr))
+						}
+						.instrument(tracing::info_span!("omp.exec.download"))
+						.await?;
 						feedback.push_str("stdout:\n");
 						feedback.push_str(&String::from_utf8_lossy(&stdout));
 						feedback.push_str("\nstderr:\n");
 						feedback.push_str(&String::from_utf8_lossy(&stderr));
-					}
+						(stdout.len() + stderr.len()) as u64
+					} else {
+						0
+					};
+					let exit_code = match result.outcome {
+						omp_exec::Outcome::Exited { code } => code,
+						omp_exec::Outcome::Signalled { signal } => signal,
+					};
+					tracing::info!(
+						{ exec_attrs::EXIT_CODE } = exit_code,
+						{ exec_attrs::CACHE_HIT } = result.cache_hit,
+						{ exec_attrs::DOWNLOAD_BYTES } = download_bytes,
+						"execution settled"
+					);
 					for artifact in result.artifacts.iter() {
 						let _ = materialize_artifact(&backend, &materialize_client, artifact).await?;
 					}

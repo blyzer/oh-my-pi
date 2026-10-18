@@ -14,10 +14,12 @@ use omp_exec::{
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
 	ExecutionRun, InputSet, Logs, Outcome, OutputSpec, Platform, Reattach, Timing, TransferCounts,
 };
+use omp_observability::attrs::omp_exec as exec_attrs;
 use parking_lot::Mutex;
 use prost::Message as _;
 use prost_types::Duration as WireDuration;
 use tonic::{Code, Request, Status, metadata::MetadataValue, transport::Channel};
+use tracing::Instrument as _;
 
 use crate::{
 	capabilities::{self, Capabilities},
@@ -534,7 +536,17 @@ where
 		}
 		blobs.push((command_digest, Bytes::from(command_bytes)));
 		blobs.push((action_digest, Bytes::from(action_bytes)));
-		self.upload(&files, blobs).await?;
+		let stats = self
+			.upload(&files, blobs)
+			.instrument(tracing::info_span!("omp.exec.upload"))
+			.await?;
+		tracing::info!(
+			{ exec_attrs::CAS_HITS } = stats.cas_hits,
+			{ exec_attrs::CAS_MISSES } = stats.cas_misses,
+			{ exec_attrs::UPLOAD_BLOBS } = stats.blobs,
+			{ exec_attrs::UPLOAD_BYTES } = stats.bytes,
+			"upload complete"
+		);
 		Ok(ActionData { digest: action_digest })
 	}
 
@@ -542,7 +554,7 @@ where
 		&self,
 		files: &[InputFile],
 		mut generated: Vec<(omp_exec::Digest, Bytes)>,
-	) -> Result<(), ExecutionError> {
+	) -> Result<UploadStats, ExecutionError> {
 		for file in files {
 			if !generated.iter().any(|(digest, _)| digest == &file.digest) {
 				generated.push((
@@ -589,6 +601,10 @@ where
 			.map(digest::from_wire)
 			.collect::<Result<Vec<_>, DigestError>>()
 			.map_err(config_error)?;
+		let total = digests.len() as u32;
+		let misses = missing.len() as u32;
+		let hits = total.saturating_sub(misses);
+		let missing_bytes: u64 = missing.iter().map(|d| d.size).sum();
 		let plan = cas::plan_upload(&missing, &self.inner.caps);
 		for batch in plan.batches {
 			let requests = batch
@@ -638,7 +654,12 @@ where
 		for digest in plan.streamed {
 			self.stream_blob(digest).await?;
 		}
-		Ok(())
+		Ok(UploadStats {
+			cas_hits:   hits,
+			cas_misses: misses,
+			blobs:      misses,
+			bytes:      missing_bytes,
+		})
 	}
 
 	async fn stream_blob(&self, digest: omp_exec::Digest) -> Result<(), ExecutionError> {
@@ -692,6 +713,14 @@ where
 
 struct ActionData {
 	digest: omp_exec::Digest,
+}
+
+/// Statistics produced by a single [`ReapiBackend::upload`] call.
+struct UploadStats {
+	cas_hits:   u32,
+	cas_misses: u32,
+	blobs:      u32,
+	bytes:      u64,
 }
 
 fn blob_digest(bytes: &[u8]) -> omp_exec::Digest {
