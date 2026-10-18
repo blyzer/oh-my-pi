@@ -8,7 +8,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_adw::{ApprovalScope, NetworkScope, Posture, Requirement, WriteScope};
+use omp_adw::{NetworkScope, Posture, Requirement, WriteScope};
 use omp_core::{Str, sf};
 use omp_dom::{NodeSpec, Op, Tag, Txn};
 use omp_envd::{
@@ -19,7 +19,7 @@ use omp_envd::{
 use omp_exec::{
 	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
 	ExecutionPolicy, ExecutionRequest, ExecutionRun, FallbackPolicy, Intent, NeedSet, OutputSpec,
-	Platform, PlatformRequirement, ResourceRequirements, ToolchainId, Unplaceable, place,
+	Platform, PlatformRequirement, ResourceRequirements, ToolchainId, place,
 };
 use omp_exec_local::{Config as LocalConfig, LocalBackend};
 use omp_session::{ComponentRegistry, Session};
