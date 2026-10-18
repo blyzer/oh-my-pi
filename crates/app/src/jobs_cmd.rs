@@ -9,9 +9,7 @@ use crate::cli::{JobsArgs, JobsCommand};
 /// Runs the `omp jobs` command tree.
 pub async fn run(args: JobsArgs) -> miette::Result<()> {
 	let journal = args.journal.ok_or_else(|| {
-		miette!(
-			"a session journal path is required; pass --journal <path> pointing to an .oms file"
-		)
+		miette!("a session journal path is required; pass --journal <path> pointing to an .oms file")
 	})?;
 
 	let session =
@@ -34,13 +32,7 @@ fn ls(board: &JobBoard) -> miette::Result<()> {
 	}
 	println!("{:<32}  {:<10}  {:<12}  {}", "ID", "KIND", "STATUS", "LABEL");
 	for r in &records {
-		println!(
-			"{:<32}  {:<10}  {:<12}  {}",
-			r.id,
-			r.kind,
-			r.status,
-			r.label,
-		);
+		println!("{:<32}  {:<10}  {:<12}  {}", r.id, r.kind, r.status, r.label,);
 	}
 	Ok(())
 }

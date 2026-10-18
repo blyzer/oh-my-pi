@@ -15,8 +15,8 @@ use std::{
 
 use flume::Receiver;
 use omp_core::{FastHashMap, Str};
-use omp_exec::ExecutionRun;
 use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
+use omp_exec::ExecutionRun;
 use omp_journal::{
 	EntryId,
 	blob::{BlobRef, BlobStore},
@@ -86,39 +86,40 @@ pub struct JobSettlement {
 #[derive(Clone, Debug)]
 pub struct JobRecord {
 	/// Current DOM handle.
-	pub handle:      Handle,
+	pub handle:          Handle,
 	/// Stable durable identity.
-	pub id:          Str,
+	pub id:              Str,
 	/// Shared job kind.
-	pub kind:        JobKind,
+	pub kind:            JobKind,
 	/// Journal-derived lifecycle status.
-	pub status:      Str,
+	pub status:          Str,
 	/// User-facing execution type (`bash`, `task`, `eval`, or a tool identity).
-	pub job_type:    Str,
+	pub job_type:        Str,
 	/// Nonempty work label captured when the job started.
-	pub label:       Str,
+	pub label:           Str,
 	/// Owning session or agent identity, when present.
-	pub owner:       Option<Str>,
+	pub owner:           Option<Str>,
 	/// Start timestamp, when present.
-	pub started:     Option<Str>,
+	pub started:         Option<Str>,
 	/// Exact elapsed wall time captured by the settlement patch.
-	pub duration_ms: Option<u64>,
+	pub duration_ms:     Option<u64>,
 	/// Bounded serialized output projected from the DOM.
-	pub output:      Option<Box<RawValue>>,
+	pub output:          Option<Box<RawValue>>,
 	/// Terminal diagnostic projected from the DOM.
-	pub error:       Option<Str>,
+	pub error:           Option<Str>,
 	/// Tool-call entry owned by this detached job.
-	pub call:        Option<EntryId>,
+	pub call:            Option<EntryId>,
 	/// Initial detached `tool.result@1` entry which created this job.
-	pub detached_at: Option<EntryId>,
+	pub detached_at:     Option<EntryId>,
 	/// Execution backend identity for a `JobKind::Execution` job.
-	pub backend:     Option<Str>,
+	pub backend:         Option<Str>,
 	/// Serialized reattach handle for a `JobKind::Execution` job.
 	pub reattach_handle: Option<Str>,
-	/// Serialized request identity and output mode for a `JobKind::Execution` job.
-	pub request:     Option<Str>,
+	/// Serialized request identity and output mode for a `JobKind::Execution`
+	/// job.
+	pub request:         Option<Str>,
 	/// Fallback/error class recorded for a `JobKind::Execution` job.
-	pub fallback:    Option<Str>,
+	pub fallback:        Option<Str>,
 }
 
 /// Live execution state retained after a tool call stops blocking its turn.
@@ -178,7 +179,8 @@ pub const ORPHANED_TOOL_JOB: &str =
 /// `wait` and revive hang forever.
 pub const ORPHANED_SUBAGENT_JOB: &str =
 	"subagent execution was lost across a rewind or restart and can be revived";
-/// Stable diagnostic journaled on an execution job whose backend connection was lost.
+/// Stable diagnostic journaled on an execution job whose backend connection was
+/// lost.
 pub const ORPHANED_EXECUTION_JOB: &str =
 	"execution job was lost across a rewind or restart; reattach if a handle is available";
 
