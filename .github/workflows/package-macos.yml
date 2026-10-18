@@ -77,34 +77,16 @@ jobs:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
 
       # `just build-release`, spelled out so the runner needs no `just`.
-      # sccache caches pre-LTO crate compilations via BuildBuddy when the org
-      # key is available. Fork PRs compile uncached. The LTO link always runs
-      # locally (LTO bitcode is architecture-specific).
-      - name: Install sccache
-        if: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
-        run: |
-          curl -sSLf "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-aarch64-apple-darwin.tar.gz" \
-            | tar -xz --strip-components=1 -C /usr/local/bin sccache-v0.10.0-aarch64-apple-darwin/sccache
-          sccache --version
       # Limit concurrent Cargo units: the LTO CPython link is memory-heavy and
       # unrestricted parallelism can swap until the package timeout.
       - name: Build release omp
         timeout-minutes: 150
         env:
           CARGO_BUILD_JOBS: "4"
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
         run: |
           echo '::group::cargo build (release, LTO, embedded Python)'
-          if [ -n "${BUILDBUDDY_API_KEY-}" ] && command -v sccache >/dev/null 2>&1; then
-            echo "::notice::sccache + BuildBuddy GCS cache active for crate compilations"
-            export SCCACHE_GCS_BUCKET="buildbuddy-grpc-cache"
-            export SCCACHE_GCS_KEY_PATH=""
-            export RUSTC_WRAPPER="sccache"
-            sccache --start-server 2>/dev/null || true
-          fi
-          PYO3_CONFIG_FILE="$[SECRET].txt" \
+          PYO3_CONFIG_FILE="$GITHUB_WORKSPACE/vendor/python-release/pyo3-config.txt" \
             cargo build -p omp-app --bin omp --release --locked
-          if [ -n "${RUSTC_WRAPPER-}" ]; then sccache --show-stats || true; fi
           echo '::endgroup::'
 
       - name: Package
