@@ -891,7 +891,7 @@ where
 						let path = omp_core::Str::new(&file.path);
 						digests.insert(path.clone(), d);
 						arts.push(Artifact {
-							path:       path,
+							path,
 							blob:       d,
 							executable: file.is_executable,
 							fetched:    false,
@@ -902,16 +902,16 @@ where
 			(Arc::from(arts), digests)
 		};
 		ExecutionEvent::Settled(Ok(ExecutionResult {
-			id:            self.id.clone(),
-			backend:       self.backend.inner.id.clone(),
-			outcome:       Outcome::Exited { code: action.exit_code },
+			id: self.id.clone(),
+			backend: self.backend.inner.id.clone(),
+			outcome: Outcome::Exited { code: action.exit_code },
 			logs,
 			artifacts,
 			output_digests,
-			timing:        Timing::default(),
-			transfer:      TransferCounts::default(),
-			cache_hit:     result.cached_result,
-			fallback:      None,
+			timing: Timing::default(),
+			transfer: TransferCounts::default(),
+			cache_hit: result.cached_result,
+			fallback: None,
 		}))
 	}
 }

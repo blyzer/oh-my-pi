@@ -106,25 +106,25 @@ pub struct Logs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
 	/// Execution identity.
-	pub id:        ExecutionId,
+	pub id:             ExecutionId,
 	/// The backend that ran it.
-	pub backend:   BackendId,
+	pub backend:        BackendId,
 	/// How the command ended.
-	pub outcome:   Outcome,
+	pub outcome:        Outcome,
 	/// Standard output and error, when the request asked for logs.
-	pub logs:      Option<Logs>,
+	pub logs:           Option<Logs>,
 	/// Output files.
 	pub artifacts:      Arc<[Artifact]>,
 	/// Digests of declared output paths, populated by the Artifacts output mode.
 	pub output_digests: BTreeMap<Str, Digest>,
 	/// Where the time went.
-	pub timing:    Timing,
+	pub timing:         Timing,
 	/// Storage traffic.
-	pub transfer:  TransferCounts,
+	pub transfer:       TransferCounts,
 	/// Whether the backend answered from its action cache.
-	pub cache_hit: bool,
+	pub cache_hit:      bool,
 	/// Set when the run fell back to a local backend.
-	pub fallback:  Option<FallbackCause>,
+	pub fallback:       Option<FallbackCause>,
 }
 
 // Settled results ride every event stream and fan out to the journal and
