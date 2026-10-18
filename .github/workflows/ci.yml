@@ -312,6 +312,10 @@ jobs:
     # registered keeps the hosted behaviour rather than queueing forever.
     runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -371,6 +375,13 @@ jobs:
       - uses: ./.github/actions/macos-build-state
         with:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+
+      # sccache via GitHub Actions Cache — caches pre-LTO crate compilations
+      # across runs on github-hosted runners. Self-hosted runners keep their
+      # own target dir and do not need it.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        if: runner.environment == 'github-hosted'
 
       - name: Cache Cargo
         # Registry and git sources only. The hosted target/ entry was ~5.2 GB of
@@ -458,6 +469,10 @@ jobs:
   # cold one (371-912 s).
   lint_macos:
     name: Lint workspace (macOS)
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      CARGO_INCREMENTAL: "0"
     needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
     runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
@@ -494,6 +509,11 @@ jobs:
       - uses: ./.github/actions/macos-build-state
         with:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+
+      # sccache via GitHub Actions Cache for github-hosted runners.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        if: runner.environment == 'github-hosted'
 
       - name: Restore Cargo registry
         if: runner.environment == 'github-hosted'

@@ -80,7 +80,7 @@ jobs:
       # Limit concurrent Cargo units: the LTO CPython link is memory-heavy and
       # unrestricted parallelism can swap until the package timeout.
       - name: Build release omp
-        timeout-minutes: 150
+        timeout-minutes: 220
         env:
           CARGO_BUILD_JOBS: "4"
         run: |
