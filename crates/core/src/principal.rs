@@ -112,8 +112,6 @@ impl fmt::Debug for RemotePrincipal {
 }
 
 /// The authenticated person acting through an omp daemon.
-
-/// The authenticated person acting through an omp daemon.
 ///
 /// A principal is derived by the core from the authenticated connection. Its
 /// identifier is intentionally redacted from [`Debug`] output so durable error
