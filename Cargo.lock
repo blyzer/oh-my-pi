@@ -8366,6 +8366,7 @@ version = "2.0.0"
 dependencies = [
  "omp-adw",
  "omp-core",
+ "proptest",
  "serde",
  "strum",
  "thiserror 2.0.20",

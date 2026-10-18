@@ -298,4 +298,171 @@ mod tests {
 		strict.needs.insert(Need::Pty);
 		assert_eq!(admit(&request, &strict), Ok(()));
 	}
+	mod proptests {
+		use proptest::prelude::*;
+
+		use super::*;
+		use crate::{
+			CasOp, Digest, ExecutionError, ForeignError, RemoteCancel, Stage, Unplaceable,
+			fallback_eligible,
+		};
+
+		fn any_eligibility() -> impl Strategy<Value = Eligibility> {
+			prop_oneof![
+				Just(Eligibility::LocalRequired),
+				Just(Eligibility::LocalPreferred),
+				Just(Eligibility::RemotePreferred),
+				Just(Eligibility::RemoteRequired),
+			]
+		}
+
+		fn any_fallback_policy() -> impl Strategy<Value = FallbackPolicy> {
+			prop_oneof![
+				Just(FallbackPolicy::LocalOnly),
+				Just(FallbackPolicy::LocalPreferred),
+				Just(FallbackPolicy::RemotePreferred),
+				Just(FallbackPolicy::RemoteOnly),
+			]
+		}
+
+		fn any_execution_error() -> impl Strategy<Value = ExecutionError> {
+			use std::sync::Arc;
+			use omp_core::{Hash32, Str};
+
+			#[derive(Debug)]
+			struct Cause;
+			impl std::fmt::Display for Cause {
+				fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+					write!(f, "cause")
+				}
+			}
+			impl std::error::Error for Cause {}
+			fn cause() -> ForeignError { Arc::new(Cause) }
+			fn digest() -> Digest { Digest::new(Hash32::default(), 0) }
+
+			prop_oneof![
+				Just(ExecutionError::Unplaceable {
+					need: crate::Unplaceable::LocalRequired,
+				}),
+				Just(ExecutionError::Auth {
+					backend: crate::BackendId::new_static("b"),
+				}),
+				prop_oneof![
+					Just(CasOp::FindMissing),
+					Just(CasOp::Upload),
+					Just(CasOp::Download),
+				].prop_map(|op| ExecutionError::Cas { op, digest: digest() }),
+				Just(ExecutionError::Capacity {
+					backend: crate::BackendId::new_static("b"),
+				}),
+				Just(ExecutionError::TimedOut {
+					limit: std::time::Duration::from_secs(1),
+				}),
+				prop_oneof![
+					Just(RemoteCancel::NotStarted),
+					Just(RemoteCancel::Confirmed),
+					Just(RemoteCancel::Requested),
+					Just(RemoteCancel::Failed),
+					Just(RemoteCancel::Unsupported),
+				].prop_map(|remote| ExecutionError::Cancelled { remote }),
+				Just(ExecutionError::Transport { source: cause() }),
+				Just(ExecutionError::Infrastructure { source: cause() }),
+				Just(ExecutionError::InputCapture { source: cause() }),
+				Just(ExecutionError::InputRefused {
+					path: Str::new_static("a"),
+					rule: Str::new_static("r"),
+				}),
+				Just(ExecutionError::OutputRetrieval { source: cause() }),
+				Just(ExecutionError::Config { source: cause() }),
+			]
+		}
+
+		proptest! {
+			/// `LocalRequired` is never placed remote.
+			#[test]
+			fn local_required_never_remote(policy in any_fallback_policy()) {
+				let backend = linux_backend();
+				let result = place(
+					&request(Eligibility::LocalRequired),
+					&[&backend],
+					&ExecutionPolicy { fallback: policy, cache: CachePolicy::Off },
+				);
+				match result {
+					Ok(Placement::Remote { .. }) => {
+						panic!("LocalRequired must never be placed remote (policy={policy})");
+					},
+					Ok(Placement::Local) | Err(_) => {},
+				}
+			}
+
+			/// `RemoteRequired` is never placed local when any backend admits it.
+			#[test]
+			fn remote_required_never_local_when_backend_admits(policy in any_fallback_policy()) {
+				let backend = linux_backend();
+				let result = place(
+					&request(Eligibility::RemoteRequired),
+					&[&backend],
+					&ExecutionPolicy { fallback: policy, cache: CachePolicy::Off },
+				);
+				match result {
+					Ok(Placement::Local) => {
+						panic!("RemoteRequired must never be placed local (policy={policy})");
+					},
+					Ok(Placement::Remote { .. }) | Err(_) => {},
+				}
+			}
+
+			/// No failure after acceptance is fallback-eligible (never rerun).
+			#[test]
+			fn no_post_acceptance_fallback(error in any_execution_error()) {
+				prop_assert!(
+					!fallback_eligible(&error, Stage::AfterAcceptance),
+					"post-acceptance error must never be fallback-eligible: {error:?}",
+				);
+			}
+
+			/// Cancelled is never fallback-eligible.
+			#[test]
+			fn cancelled_never_fallback_eligible(
+				remote in prop_oneof![
+					Just(RemoteCancel::NotStarted),
+					Just(RemoteCancel::Confirmed),
+					Just(RemoteCancel::Requested),
+					Just(RemoteCancel::Failed),
+					Just(RemoteCancel::Unsupported),
+				],
+				stage in prop_oneof![Just(Stage::BeforeAcceptance), Just(Stage::AfterAcceptance)],
+			) {
+				let error = ExecutionError::Cancelled { remote };
+				prop_assert!(
+					!fallback_eligible(&error, stage),
+					"Cancelled must never be fallback-eligible",
+				);
+			}
+
+			/// All four policies: eligibility and placement are consistent.
+			#[test]
+			fn placement_respects_eligibility_and_policy(
+				eligibility in any_eligibility(),
+				policy in any_fallback_policy(),
+			) {
+				let backend = linux_backend();
+				let result = place(
+					&request(eligibility),
+					&[&backend],
+					&ExecutionPolicy { fallback: policy, cache: CachePolicy::Off },
+				);
+				match (eligibility, policy, result) {
+					(Eligibility::LocalRequired, FallbackPolicy::RemoteOnly, Err(Unplaceable::LocalRequired)) => {},
+					(Eligibility::LocalRequired, _, Ok(Placement::Local)) => {},
+					(Eligibility::RemoteRequired, FallbackPolicy::LocalOnly, Err(Unplaceable::RemoteRequired)) => {},
+					(Eligibility::RemoteRequired, _, Ok(Placement::Remote { .. })) => {},
+					(Eligibility::RemotePreferred, FallbackPolicy::LocalOnly | FallbackPolicy::LocalPreferred, Ok(Placement::Local)) => {},
+					(Eligibility::RemotePreferred, FallbackPolicy::RemotePreferred | FallbackPolicy::RemoteOnly, Ok(Placement::Remote { .. })) => {},
+					(Eligibility::LocalPreferred, _, Ok(Placement::Local)) => {},
+					(e, p, r) => panic!("unexpected placement: eligibility={e:?} policy={p:?} result={r:?}"),
+				}
+			}
+		}
+	}
 }

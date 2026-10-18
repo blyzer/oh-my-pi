@@ -37,7 +37,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	AdwHost, PhaseResult, PhaseSpec,
-	remote::{AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_POLICY, eligible},
+	remote::{
+		AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY,
+		eligible,
+	},
 };
 use crate::{
 	cfg::CfgFiles,
@@ -229,8 +232,27 @@ impl ProductionAdwHost {
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<PhaseResult, ProductionError> {
-		if self.exec_policy() == AdwExecPolicy::RemoteOnly && eligible(binary, args) {
-			return self.run_remote(phase, args, cwd, cancel).await;
+		let policy = self.exec_policy();
+		// Remote-only: eligible phases must go remote; LocalRequired phases cannot.
+		// Remote-preferred: eligible phases go remote first; on a fallback-eligible
+		// pre-acceptance failure, retry local if sv_exec_fallback_local is on.
+		// Local-preferred: local only (RemoteRequired dispatch is handled by the
+		// adapter; at the driver level the binary is already resolved locally).
+		// Local-only: always local.
+		if matches!(policy, AdwExecPolicy::RemoteOnly | AdwExecPolicy::RemotePreferred)
+			&& eligible(binary, args)
+		{
+			let result = self.run_remote(phase, args, cwd, cancel).await;
+			match result {
+				Ok(result) => return Ok(result),
+				Err(ProductionError::Remote(RemoteError::PreAcceptanceFailed(_)))
+					if policy == AdwExecPolicy::RemotePreferred
+						&& SV_EXEC_FALLBACK_LOCAL.get(&self.ctx) =>
+				{
+					// Fall through to local execution.
+				},
+				Err(error) => return Err(error),
+			}
 		}
 		let _directory = match cwd {
 			Some(cwd) => {
