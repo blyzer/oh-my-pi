@@ -14,7 +14,9 @@
 //! scope here and live in `omp-serve` (Part A2/A4 of ADR 0039).
 
 #[cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt as _};
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::{
 	path::{Path, PathBuf},
 	time::SystemTime,
