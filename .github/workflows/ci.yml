@@ -810,18 +810,7 @@ jobs:
 
       - name: Install pinned BuildBuddy client
         if: steps.trust.outputs.remote == 'true'
-        env:
-          BB_VERSION: 5.0.492
-          BB_SHA256: e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/bin"
-          curl --fail --location --silent --show-error \
-            "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-linux-x86_64" \
-            --output "$RUNNER_TEMP/bin/bb"
-          printf '%s  %s\n' "$BB_SHA256" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
-          chmod 0755 "$RUNNER_TEMP/bin/bb"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/buildbuddy-client
 
       # The key is set on these two steps only: nothing else in the job needs
       # it. It is this repository's own BuildBuddy credential, kept apart from
@@ -861,18 +850,7 @@ jobs:
         with:
           ref: omp2
       - name: Install pinned BuildBuddy client
-        env:
-          BB_VERSION: 5.0.492
-          BB_SHA256: e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/bin"
-          curl --fail --location --silent --show-error \
-            "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-linux-x86_64" \
-            --output "$RUNNER_TEMP/bin/bb"
-          printf '%s  %s\n' "$BB_SHA256" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
-          chmod 0755 "$RUNNER_TEMP/bin/bb"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/buildbuddy-client
       - name: Seed omp2 runner snapshot
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
