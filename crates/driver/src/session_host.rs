@@ -13,6 +13,8 @@
 //! `omp.session.v1` gRPC projection and per-verb access control are out of
 //! scope here and live in `omp-serve` (Part A2/A4 of ADR 0039).
 
+#[cfg(unix)]
+use std::{fs, os::unix::fs::PermissionsExt as _};
 use std::{
 	path::{Path, PathBuf},
 	time::SystemTime,
@@ -21,9 +23,6 @@ use std::{
 use omp_agent::Up;
 use omp_core::FastHashMap;
 use tokio_util::sync::CancellationToken;
-
-#[cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use crate::sessions::SessionId;
 
@@ -122,12 +121,8 @@ impl SessionHost {
 		mailbox: KernelMailbox,
 		cancel: CancellationToken,
 	) {
-		let entry = Entry {
-			mailbox,
-			cancel,
-			status:     SessionStatus::Live,
-			created_at: SystemTime::now(),
-		};
+		let entry =
+			Entry { mailbox, cancel, status: SessionStatus::Live, created_at: SystemTime::now() };
 		self.sessions.insert(session_id, entry);
 	}
 
@@ -142,7 +137,8 @@ impl SessionHost {
 	/// [`SessionStatus::Cancelled`]; they are not automatically removed.
 	#[must_use]
 	pub fn list(&self) -> Vec<SessionRef> {
-		self.sessions
+		self
+			.sessions
 			.iter()
 			.map(|(id, entry)| {
 				let status = if entry.cancel.is_cancelled() {
@@ -205,8 +201,7 @@ pub enum SessionHostError {
 
 #[cfg(unix)]
 async fn bind_in_process(data_dir: &Path) -> Result<Mode, SessionHostError> {
-	use tokio::net::UnixListener;
-	use tokio::net::UnixStream;
+	use tokio::net::{UnixListener, UnixStream};
 
 	let run_dir = data_dir.join("run");
 	// Create run/ as 0700.
@@ -257,4 +252,3 @@ async fn bind_in_process(data_dir: &Path) -> Result<Mode, SessionHostError> {
 async fn bind_in_process(_data_dir: &Path) -> Result<Mode, SessionHostError> {
 	Ok(Mode::Daemon)
 }
-
