@@ -1211,6 +1211,8 @@ pub enum Command {
 	},
 	/// Rewrite text files into a dense telegraphic register.
 	Compress(CompressCliArgs),
+	/// Inspect or reattach journalled remote execution jobs.
+	Jobs(JobsArgs),
 	/// Auth-broker verbs are retained as structured errors until a broker
 	/// backend lands.
 	#[command(name = "auth-broker")]
@@ -2529,6 +2531,29 @@ pub enum AuthGatewayCommand {
 	},
 }
 
+/// Execution-job inspection and reattach options.
+#[derive(Clone, Debug, Args)]
+pub struct JobsArgs {
+	/// Override the session journal path to read.
+	#[arg(long, value_name = "PATH")]
+	pub journal: Option<PathBuf>,
+	/// Job operation; defaults to listing all jobs.
+	#[command(subcommand)]
+	pub command: Option<JobsCommand>,
+}
+
+/// Execution-job operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum JobsCommand {
+	/// List all jobs recorded in the session journal.
+	Ls,
+	/// Print the reattach handle for one execution job.
+	Attach {
+		/// Stable job id.
+		id: Str,
+	},
+}
+
 /// Model-catalog command tree.
 #[derive(Clone, Debug, Args)]
 pub struct CatalogArgs {
@@ -2638,6 +2663,7 @@ enum DispatchTarget {
 	Completions,
 	Complete,
 	Compress,
+	Jobs,
 }
 
 const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
@@ -2695,6 +2721,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Completions { .. }) => DispatchTarget::Completions,
 		Some(Command::Complete { .. }) => DispatchTarget::Complete,
 		Some(Command::Compress(_)) => DispatchTarget::Compress,
+		Some(Command::Jobs(_)) => DispatchTarget::Jobs,
 		Some(Command::AuthBroker(_)) => DispatchTarget::AuthBroker,
 		Some(Command::AuthGateway(_)) => DispatchTarget::AuthGateway,
 	}
@@ -3266,6 +3293,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			})
 			.await
 		},
+		Command::Jobs(args) => jobs_cmd::run(args).await,
 		Command::AuthBroker(args) => auth_broker_cmd::run(args).await,
 		Command::AuthGateway(args) => auth_gateway_cmd::run(args).await,
 	}

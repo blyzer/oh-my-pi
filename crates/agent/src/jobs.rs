@@ -15,6 +15,7 @@ use std::{
 
 use flume::Receiver;
 use omp_core::{FastHashMap, Str};
+use omp_exec::ExecutionRun;
 use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::{
 	EntryId,
@@ -33,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream};
 
-/// The three execution shapes represented by the one job primitive.
+/// The four execution shapes represented by the one job primitive.
 #[derive(Clone, Copy, Debug, Deserialize, Display, EnumString, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -44,6 +45,8 @@ pub enum JobKind {
 	Subagent,
 	/// A supervised process or daemon.
 	Process,
+	/// A remote execution backend job with a durable reattach identity.
+	Execution,
 }
 
 #[derive(Clone, Copy, Debug, IntoStaticStr)]
@@ -52,6 +55,7 @@ enum DeliveryJobType {
 	Bash,
 	Task,
 	Tool,
+	Execution,
 }
 
 impl From<JobKind> for DeliveryJobType {
@@ -60,6 +64,7 @@ impl From<JobKind> for DeliveryJobType {
 			JobKind::Tool => Self::Tool,
 			JobKind::Subagent => Self::Task,
 			JobKind::Process => Self::Bash,
+			JobKind::Execution => Self::Execution,
 		}
 	}
 }
@@ -106,6 +111,14 @@ pub struct JobRecord {
 	pub call:        Option<EntryId>,
 	/// Initial detached `tool.result@1` entry which created this job.
 	pub detached_at: Option<EntryId>,
+	/// Execution backend identity for a `JobKind::Execution` job.
+	pub backend:     Option<Str>,
+	/// Serialized reattach handle for a `JobKind::Execution` job.
+	pub reattach_handle: Option<Str>,
+	/// Serialized request identity and output mode for a `JobKind::Execution` job.
+	pub request:     Option<Str>,
+	/// Fallback/error class recorded for a `JobKind::Execution` job.
+	pub fallback:    Option<Str>,
 }
 
 /// Live execution state retained after a tool call stops blocking its turn.
@@ -165,6 +178,9 @@ pub const ORPHANED_TOOL_JOB: &str =
 /// `wait` and revive hang forever.
 pub const ORPHANED_SUBAGENT_JOB: &str =
 	"subagent execution was lost across a rewind or restart and can be revived";
+/// Stable diagnostic journaled on an execution job whose backend connection was lost.
+pub const ORPHANED_EXECUTION_JOB: &str =
+	"execution job was lost across a rewind or restart; reattach if a handle is available";
 
 /// Host state outside the job board derived from the live session's journal,
 /// which outlives that session because the kernel and its environment do.
@@ -392,6 +408,52 @@ impl JobBoard {
 		true
 	}
 
+	/// Attaches a backend-owned execution task to a journalled
+	/// `JobKind::Execution` node.
+	///
+	/// The caller must append the node through
+	/// `omp_session::components::jobs::insert_execution` first. This method
+	/// only installs the disposable cancellation and settlement boundary.
+	pub fn attach_execution_task(
+		&self,
+		dom: &Dom,
+		handle: Handle,
+		cancel: CancellationToken,
+		task: JoinHandle<JobSettlement>,
+	) -> bool {
+		let Some(record) = record(dom, handle) else {
+			return false;
+		};
+		self.notify_registered(&record);
+		self.jobs.lock().insert(handle, RuntimeJob {
+			record,
+			cancel,
+			task: Some(task),
+			_detached: None,
+			recovered: None,
+			orphaned: false,
+		});
+		true
+	}
+
+	/// Attaches a live backend run, supervising it until settlement.
+	///
+	/// Maps terminal [`omp_exec::ExecutionEvent`]s to one durable
+	/// `jobs.settle` patch through [`Self::poll`].
+	pub fn attach_execution_run<R>(
+		&self,
+		dom: &Dom,
+		handle: Handle,
+		cancel: CancellationToken,
+		run: R,
+	) -> bool
+	where
+		R: ExecutionRun + 'static,
+	{
+		let task = tokio::spawn(supervise_execution(run, cancel.clone()));
+		self.attach_execution_task(dom, handle, cancel, task)
+	}
+
 	/// Rebuilds the index after open or rewind. The DOM is the source of truth.
 	pub fn rebuild(&self, session: &Session) {
 		let records = records(session.dom());
@@ -465,6 +527,7 @@ impl JobBoard {
 			let error = match kind {
 				JobKind::Subagent => ORPHANED_SUBAGENT_JOB,
 				JobKind::Tool | JobKind::Process => ORPHANED_TOOL_JOB,
+				JobKind::Execution => ORPHANED_EXECUTION_JOB,
 			};
 			self.commit(session, handle, JobSettlement {
 				status:     Str::new_static("failed"),
@@ -838,6 +901,83 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 	}
 }
 
+async fn supervise_execution<R: ExecutionRun>(
+	mut run: R,
+	cancel: CancellationToken,
+) -> JobSettlement {
+	use omp_exec::ExecutionEvent;
+	loop {
+		tokio::select! {
+			event = run.next_event() => {
+				match event {
+					Some(ExecutionEvent::Settled(Ok(result))) => {
+						let status = if result.outcome.is_success() {
+							Str::new_static("completed")
+						} else {
+							Str::new_static("failed")
+						};
+						return JobSettlement {
+							status,
+							output:     None,
+							error:      None,
+							completion: None,
+						};
+					},
+					Some(ExecutionEvent::Settled(Err(err))) => {
+						return JobSettlement {
+							status:     Str::new_static("failed"),
+							output:     None,
+							error:      Some(Str::new(err.to_string())),
+							completion: None,
+						};
+					},
+					Some(_) => continue,
+					None => {
+						return JobSettlement {
+							status:     Str::new_static("failed"),
+							output:     None,
+							error:      Some(Str::new_static(
+								"execution run ended without a result",
+							)),
+							completion: None,
+						};
+					},
+				}
+			},
+			_ = cancel.cancelled() => {
+				return JobSettlement {
+					status:     Str::new_static("cancelled"),
+					output:     None,
+					error:      None,
+					completion: None,
+				};
+			},
+		}
+	}
+}
+
+/// Returns a cloned [`JobRecord`] and its opaque reattach handle for the given
+/// execution job id, or `None` if the job does not exist, is not of kind
+/// `Execution`, or has no reattach handle recorded.
+///
+/// The reattach handle is the raw serialized string the backend wrote when it
+/// accepted the job. Pass it to the backend's reattach API to reconnect.
+///
+/// # TODO
+/// Wire a backend registry here and call `backend.reattach(handle)` once the
+/// `ExecutionBackend` trait objects land.
+#[must_use]
+pub fn reattach_execution(board: &JobBoard, id: &str) -> Option<(JobRecord, Str)> {
+	let records = board.list();
+	let record = records.into_iter().find(|r| r.id.as_str() == id)?;
+	if record.kind != JobKind::Execution {
+		return None;
+	}
+	let handle = record.reattach_handle.clone()?;
+	// TODO: call backend.reattach(&handle) to reconnect the live run.
+	Some((record, handle))
+}
+
 fn recovered_settlement(dom: &Dom, record: &JobRecord) -> Option<RecoveredSettlement> {
 	recovered_workpool_settlement(dom, record).or_else(|| recovered_tool_settlement(dom, record))
 }
@@ -884,6 +1024,10 @@ fn restart_orphan(record: &JobRecord, recovered: Option<&RecoveredSettlement>) -
 			// The environment host owns durable process generations and may
 			// reconnect them independently of this disposable board.
 			JobKind::Process => false,
+			// An execution job with a reattach handle can be recovered; treat
+			// the missing execution unit as an orphan so poll settles it with
+			// the diagnostic and the CLI reattach path is the recovery route.
+			JobKind::Execution => recovered.is_none(),
 		}
 }
 
@@ -1189,6 +1333,10 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 		error: custom(node, "error").map(Str::new),
 		call: custom(node, "call").and_then(|value| value.parse().ok()),
 		detached_at: prop(node, PropId::Cause).and_then(|value| value.parse().ok()),
+		backend: custom(node, "backend").map(Str::new),
+		reattach_handle: custom(node, "reattach_handle").map(Str::new),
+		request: custom(node, "request").map(Str::new),
+		fallback: custom(node, "fallback").map(Str::new),
 	})
 }
 

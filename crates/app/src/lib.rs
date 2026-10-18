@@ -40,6 +40,7 @@ pub mod ext_cli;
 pub mod gallery_cmd;
 pub mod gateway_rpc;
 pub mod gc_cmd;
+pub mod jobs_cmd;
 pub mod git_cmd;
 pub mod grievances_cmd;
 #[cfg(feature = "gui")]
