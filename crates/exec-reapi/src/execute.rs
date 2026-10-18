@@ -892,9 +892,9 @@ where
 						digests.insert(path.clone(), d);
 						arts.push(Artifact {
 							path,
-							blob:       d,
+							blob: d,
 							executable: file.is_executable,
-							fetched:    false,
+							fetched: false,
 						});
 					}
 				}
