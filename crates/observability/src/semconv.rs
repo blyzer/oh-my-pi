@@ -399,6 +399,68 @@ impl ErrorType {
 	}
 }
 
+/// Span names for the execution telemetry tree (Part J of ADR 0040).
+pub mod exec_spans {
+	/// Root span covering the full lifecycle of one remote or local execution.
+	pub const EXECUTE: &str = "omp.exec.execute";
+	/// Child span covering working-tree capture and Merkle-tree construction.
+	pub const CAPTURE: &str = "omp.exec.capture";
+	/// Child span covering CAS blob upload (missing blobs only).
+	pub const UPLOAD: &str = "omp.exec.upload";
+	/// Child span covering the time the action waits in the remote queue.
+	pub const QUEUE: &str = "omp.exec.queue";
+	/// Child span covering remote (or local) execution of the action.
+	pub const RUN: &str = "omp.exec.run";
+	/// Child span covering output download after execution completes.
+	pub const DOWNLOAD: &str = "omp.exec.download";
+}
+
+vocab! {
+	/// Placement decision recorded on `omp.exec.execute` spans.
+	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+	pub enum ExecPlacement("exec placement", "Returns the byte-exact exec placement.") {
+		/// Executed locally via the envd `ExecHost`.
+		Local => "local",
+		/// Executed on a remote REAPI backend.
+		Remote => "remote",
+		/// Executed on a remote SSH backend.
+		Ssh => "ssh",
+	}
+}
+
+vocab! {
+	/// High-level outcome recorded on `omp.exec.execute` spans.
+	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+	pub enum ExecOutcome("exec outcome", "Returns the byte-exact exec outcome.") {
+		/// The action completed; check the exit code for command success or failure.
+		Completed => "completed",
+		/// The action was cancelled before it started or while running.
+		Cancelled => "cancelled",
+		/// An infrastructure error prevented the action from running or producing a result.
+		InfraError => "infra_error",
+		/// The request was unplaceable under the current policy.
+		Unplaceable => "unplaceable",
+	}
+}
+
+vocab! {
+	/// Typed failure classification recorded on `omp.exec.execute` spans with
+	/// `ExecOutcome::InfraError`.
+	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+	pub enum ExecFailure("exec failure", "Returns the byte-exact exec failure.") {
+		/// Working-tree capture or Merkle-tree construction failed.
+		Capture => "capture",
+		/// Blob upload to CAS failed.
+		Upload => "upload",
+		/// The remote backend rejected or lost the action.
+		Queue => "queue",
+		/// The backend returned no `ActionResult` (connection lost, timeout, etc.).
+		Run => "run",
+		/// Output download from CAS failed.
+		Download => "download",
+	}
+}
+
 /// Normalizes a provider identifier for `gen_ai.provider.name`.
 ///
 /// Unknown and empty provider identifiers pass through unchanged.

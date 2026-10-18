@@ -308,6 +308,48 @@ pub mod omp_aggregate {
 	}
 }
 
+/// Attribute keys for `omp.exec.*` execution spans (Part J of ADR 0040).
+pub mod omp_exec {
+	/// `ExecutionId` UUID that also serves as the REAPI `tool_invocation_id`.
+	pub const ID: &str = "omp.exec.id";
+	/// Operator-named backend identifier (e.g. `"local"`, `"remote"`,
+	/// `"ssh:myhost"`).
+	pub const BACKEND: &str = "omp.exec.backend";
+	/// Placement decision vocabulary value (`local`, `remote`, `ssh`).
+	pub const PLACEMENT: &str = "omp.exec.placement";
+	/// Intent vocabulary value (`check`, `lint`, `test`, `build`, `proof`,
+	/// etc.).
+	pub const INTENT: &str = "omp.exec.intent";
+	/// High-level outcome vocabulary value (`completed`, `cancelled`,
+	/// `infra_error`, `unplaceable`).
+	pub const OUTCOME: &str = "omp.exec.outcome";
+	/// Process exit code; present only when `outcome` is `completed`.
+	pub const EXIT_CODE: &str = "omp.exec.exit_code";
+	/// Typed failure stage when `outcome` is `infra_error`.
+	pub const FAILURE: &str = "omp.exec.failure";
+	/// Whether the result was served from the remote action cache.
+	pub const CACHE_HIT: &str = "omp.exec.cache_hit";
+	/// Whether execution fell back from the originally chosen backend.
+	pub const FALLBACK: &str = "omp.exec.fallback";
+	/// Number of files in the captured input tree.
+	pub const INPUT_FILES: &str = "omp.exec.input.files";
+	/// Total byte size of the captured input tree.
+	pub const INPUT_BYTES: &str = "omp.exec.input.bytes";
+	/// Number of blobs already present in CAS (cache hits during upload phase).
+	pub const CAS_HITS: &str = "omp.exec.cas.hits";
+	/// Number of blobs missing from CAS and uploaded (cache misses during upload
+	/// phase).
+	pub const CAS_MISSES: &str = "omp.exec.cas.misses";
+	/// Number of blobs uploaded to CAS.
+	pub const UPLOAD_BLOBS: &str = "omp.exec.upload.blobs";
+	/// Total bytes uploaded to CAS.
+	pub const UPLOAD_BYTES: &str = "omp.exec.upload.bytes";
+	/// Total bytes downloaded from CAS (stdout/stderr/output files).
+	pub const DOWNLOAD_BYTES: &str = "omp.exec.download.bytes";
+	/// Hostname of the remote REAPI or SSH endpoint.
+	pub const ENDPOINT_HOST: &str = "omp.exec.endpoint.host";
+}
+
 #[cfg(test)]
 mod tests {
 	#[test]
