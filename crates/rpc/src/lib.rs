@@ -12,6 +12,7 @@
 use omp_core::Str;
 
 pub mod client;
+pub mod device_auth;
 pub mod framing;
 pub mod health;
 pub mod hello;
@@ -25,6 +26,7 @@ use std::{
 	io,
 };
 
+pub use device_auth::{DeviceAuthError, DeviceKey, load_or_generate as device_load_or_generate};
 pub use health::{HealthReporter, health_service};
 pub use hello::{HelloService, MIN_SCHEMA_REV, Peer, handshake};
 pub use tls::{TlsConfig, client_tls, server_tls};
