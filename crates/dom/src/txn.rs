@@ -475,7 +475,9 @@ impl Dom {
 	/// Subscribes an actor to a snapshot followed by lossless ordered events.
 	pub fn subscribe(&mut self) -> (Snapshot, flume::Receiver<Event>) {
 		let snapshot = self.snapshot();
-		let (sender, receiver) = flume::unbounded();
+		// 512 ≈ two full screen-repaints at 60 fps with 4 concurrent agents; a
+		// lagging subscriber that fills this buffer is removed by `publish`.
+		let (sender, receiver) = flume::bounded(512);
 		self.subscribers.push(sender);
 		(snapshot, receiver)
 	}
@@ -561,7 +563,7 @@ impl Dom {
 	fn publish(&mut self, event: Event) {
 		self
 			.subscribers
-			.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+			.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
 	}
 
 	fn apply_validated(&mut self, op: &Op) {
