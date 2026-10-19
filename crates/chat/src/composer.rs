@@ -959,6 +959,56 @@ impl Composer {
 			.unwrap_or_default()
 	}
 
+	/// Applies a native TSP edit: replaces `range` (UTF-8 bytes) with `text`.
+	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+		self
+			.ui
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| pane.apply_edit(range, text));
+	}
+
+	/// Undoes the last edit (native TSP undo).
+	pub fn undo(&mut self) {
+		self
+			.ui
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
+				pane.undo_past_transient("");
+			});
+	}
+
+	/// Returns a TSP `picker` node for the open autocomplete dropdown, or
+	/// `None` when the dropdown is closed.
+	#[must_use]
+	pub fn autocomplete_node(&self) -> Option<omp_tui::tsp::wire::Node> {
+		let items = self
+			.ui
+			.with_component::<EditorPane, _>(COMPOSER_ID, EditorPane::autocomplete_items)
+			.flatten()?;
+		if items.is_empty() {
+			return None;
+		}
+		let children = items
+			.iter()
+			.enumerate()
+			.map(|(i, (value, label))| {
+				let mut p = serde_json::Map::new();
+				p.insert("text".into(), serde_json::Value::String(label.as_str().to_owned()));
+				p.insert("value".into(), serde_json::Value::String(value.as_str().to_owned()));
+				omp_tui::tsp::wire::Node {
+					id: Str::from(format!("ac-{i}")),
+					k: omp_tui::tsp::wire::Kind::Item,
+					p,
+					c: Vec::new(),
+				}
+			})
+			.collect();
+		Some(omp_tui::tsp::wire::Node {
+			id: Str::new_static("autocomplete"),
+			k:  omp_tui::tsp::wire::Kind::Picker,
+			p:  serde_json::Map::new(),
+			c:  children,
+		})
+	}
+
 	/// Replaces the draft with text edited outside the composer (
 	/// `handleExternalEditor`): the chips were expanded into `text`, so the
 	/// staged attachment cards are dropped rather than re-collapsed, and the

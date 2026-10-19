@@ -788,8 +788,9 @@ fn tsp_credits_block_frames_until_an_ack_arrives() {
 	assert!(tern.highest_frame() > blocked, "the ack released at least one frame");
 }
 
-/// An overlay suspends the surface so the existing cell renderer owns the
-/// screen, and closing it resumes native drawing (decision 6).
+/// The model picker (Alt+M) now has a native TSP picker node (phase 3), so the
+/// surface stays live while it is open. A cell-only overlay (e.g. a future
+/// overlay without a TSP node) would still suspend — tested separately.
 #[test]
 fn tsp_overlays_suspend_and_resume_the_surface() {
 	let sandbox = Sandbox::new();
@@ -797,12 +798,15 @@ fn tsp_overlays_suspend_and_resume_the_surface() {
 	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
 	assert!(!tern.doc.suspended(), "a live surface starts drawing");
 
-	// Alt+M opens the model selector, which has no TSP node in phase 1.
+	// Alt+M opens the model selector — phase 3 sends a picker node so the
+	// surface stays live (not suspended) while the picker is open.
 	tern.write(b"\x1bm");
-	tern.until("surface suspended under the overlay", |tern| tern.doc.suspended());
+	tern.until("picker node sent to surface", |tern| tern.doc.contains("model-picker"));
+	assert!(!tern.doc.suspended(), "surface stays live with native picker");
 
 	tern.write(b"\x1b");
-	tern.until("surface resumed after the overlay closed", |tern| !tern.doc.suspended());
+	tern
+		.until("surface resumed after the overlay closed", |tern| !tern.doc.contains("model-picker"));
 	let quit = tern.quit();
 	assert!(quit.closes.iter().all(|close| close.keep), "{:?}", quit.closes);
 }

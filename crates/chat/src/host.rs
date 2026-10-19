@@ -4630,6 +4630,63 @@ impl Host {
 					let _ = self.presenter.apply_panel_event(panel_event);
 				}
 			},
+			TspEvent::Edit { id, from, to, text, len, .. } => {
+				if id.as_str() != crate::chrome::COMPOSER_ID {
+					return;
+				}
+				let current = self.presenter.composer.text_displayed();
+				let current_len =
+					u32::try_from(xutf::transcoded_len::<xutf::Utf8, xutf::Utf16Le>(current.as_bytes()))
+						.unwrap_or(u32::MAX);
+				if current_len != len {
+					// Stale edit: the terminal's view diverged from our buffer.
+					return;
+				}
+				let byte_from = utf16_to_byte(&current, from);
+				let byte_to = utf16_to_byte(&current, to);
+				self
+					.presenter
+					.composer
+					.apply_edit(byte_from..byte_to, text.as_str());
+			},
+			TspEvent::Undo { id, .. } => {
+				if id.as_str() == crate::chrome::COMPOSER_ID {
+					self.presenter.composer.undo();
+				}
+			},
+			TspEvent::Send { id, text, .. } => {
+				if id.as_str() == crate::chrome::COMPOSER_ID && !text.trim().is_empty() {
+					let _ = self.presenter.submit(text);
+				}
+			},
+			TspEvent::Select { id, item, .. } => {
+				match id.as_str() {
+					"model-picker" => {
+						// Parse the item index from "mp-N".
+						if let Some(idx) = item
+							.strip_prefix("mp-")
+							.and_then(|s| s.parse::<usize>().ok())
+						{
+							let _ = self.presenter.apply_picker_event(PickerEvent::Pick(idx));
+						}
+					},
+					"history-picker" => {
+						// Parse the item index from "hp-N".
+						if let Some(idx) = item
+							.strip_prefix("hp-")
+							.and_then(|s| s.parse::<usize>().ok())
+						{
+							if let Some(Overlay::History(picker)) = self.presenter.overlays.active() {
+								let recall = picker.entries().get(idx).map(|e| e.prompt.clone());
+								if let Some(text) = recall {
+									let _ = self.presenter.apply_picker_event(PickerEvent::Recall(text));
+								}
+							}
+						}
+					},
+					_ => {},
+				}
+			},
 			_ => {},
 		}
 	}
@@ -4997,7 +5054,16 @@ impl Host {
 			.map(|approval| (approval.id.clone(), approval.reason.clone()));
 		let form = match self.presenter.overlays.active() {
 			Some(Overlay::Panel(panel)) => panel.tsp_node(),
+			Some(Overlay::Models(picker)) => Some(picker.tsp_node()),
+			Some(Overlay::History(picker)) => Some(picker.tsp_node()),
 			_ => None,
+		};
+		// The autocomplete dropdown is surfaced as a picker node when no modal
+		// overlay is open; it is sent alongside the composer, not over it.
+		let autocomplete = if overlay_open {
+			None
+		} else {
+			self.presenter.composer.autocomplete_node()
 		};
 		let native_overlay = approval.is_some() || form.is_some();
 		let Some(surface) = self.tsp_surface.as_mut() else {
@@ -5014,7 +5080,7 @@ impl Host {
 			approval.as_ref().map(|(id, _)| id.as_str()),
 			approval.as_ref().map(|(_, reason)| reason.as_str()),
 		)?;
-		surface.present_form(renderer.writer_mut(), form)?;
+		surface.present_form(renderer.writer_mut(), form.or(autocomplete))?;
 		Ok(true)
 	}
 
@@ -5114,6 +5180,57 @@ impl Host {
 		renderer
 			.present_slots(&mut projection.slots, &layers)
 			.map_err(HostError::from)
+	}
+}
+
+/// Converts a UTF-16 code-unit offset in `text` to a UTF-8 byte offset.
+///
+/// Offsets inside a surrogate pair are clamped to the pair's char start;
+/// an offset beyond the text yields `text.len()`.
+fn utf16_to_byte(text: &str, utf16_offset: u32) -> usize {
+	let mut remaining = utf16_offset as usize;
+	for (byte_offset, ch) in text.char_indices() {
+		if remaining == 0 {
+			return byte_offset;
+		}
+		let units = ch.len_utf16();
+		if remaining < units {
+			return byte_offset;
+		}
+		remaining -= units;
+	}
+	text.len()
+}
+
+#[cfg(test)]
+mod tsp_edit_tests {
+	use super::utf16_to_byte;
+
+	#[test]
+	fn ascii_offset_maps_one_to_one() {
+		let text = "hello world";
+		assert_eq!(utf16_to_byte(text, 0), 0);
+		assert_eq!(utf16_to_byte(text, 5), 5);
+		assert_eq!(utf16_to_byte(text, 11), 11);
+		assert_eq!(utf16_to_byte(text, 99), 11, "beyond text clamps to len");
+	}
+
+	#[test]
+	fn multibyte_utf8_char_counted_as_one_utf16_unit() {
+		// U+00E9 é is 2 UTF-8 bytes, 1 UTF-16 unit.
+		let text = "caf\u{00e9}";
+		assert_eq!(utf16_to_byte(text, 3), 3, "before é");
+		assert_eq!(utf16_to_byte(text, 4), 5, "after é (4 UTF-16 units = 5 bytes)");
+	}
+
+	#[test]
+	fn supplementary_plane_char_is_two_utf16_units() {
+		// U+1F600 😀 is 4 UTF-8 bytes, 2 UTF-16 units (surrogate pair).
+		let text = "a\u{1f600}b";
+		assert_eq!(utf16_to_byte(text, 1), 1, "before emoji");
+		// Offset 1 inside the surrogate pair clamps to start of emoji.
+		assert_eq!(utf16_to_byte(text, 2), 1, "mid-surrogate clamps to emoji start");
+		assert_eq!(utf16_to_byte(text, 3), 5, "after emoji");
 	}
 }
 
