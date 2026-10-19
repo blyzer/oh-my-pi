@@ -742,6 +742,49 @@ fn output_paths(outputs: &omp_exec::OutputSpec) -> Vec<String> {
 	}
 }
 
+/// Returns the millisecond delta between two optional prost Timestamps, or
+/// `None` if either is absent or the delta is negative.
+fn timestamp_delta_ms(
+	start: Option<&prost_types::Timestamp>,
+	end: Option<&prost_types::Timestamp>,
+) -> Option<i64> {
+	let (s, e) = (start?, end?);
+	let delta_s = e.seconds - s.seconds;
+	let delta_ns = i64::from(e.nanos) - i64::from(s.nanos);
+	let ms = delta_s * 1_000 + delta_ns / 1_000_000;
+	if ms >= 0 { Some(ms) } else { None }
+}
+
+/// Emits a tracing event capturing the per-phase breakdown from
+/// [`wire::ExecutedActionMetadata`] when present.  The event rides in the
+/// currently-active span (the `omp.exec.execute` span from `remote.rs`).
+fn emit_action_metadata(meta: &wire::ExecutedActionMetadata) {
+	tracing::info!(
+		{ exec_attrs::WORKER } = %meta.worker,
+		{ exec_attrs::WORKER_QUEUE_MS } = timestamp_delta_ms(
+			meta.queued_timestamp.as_ref(),
+			meta.worker_start_timestamp.as_ref(),
+		),
+		{ exec_attrs::WORKER_WALL_MS } = timestamp_delta_ms(
+			meta.worker_start_timestamp.as_ref(),
+			meta.worker_completed_timestamp.as_ref(),
+		),
+		{ exec_attrs::WORKER_INPUT_FETCH_MS } = timestamp_delta_ms(
+			meta.input_fetch_start_timestamp.as_ref(),
+			meta.input_fetch_completed_timestamp.as_ref(),
+		),
+		{ exec_attrs::WORKER_EXEC_MS } = timestamp_delta_ms(
+			meta.execution_start_timestamp.as_ref(),
+			meta.execution_completed_timestamp.as_ref(),
+		),
+		{ exec_attrs::WORKER_OUTPUT_UPLOAD_MS } = timestamp_delta_ms(
+			meta.output_upload_start_timestamp.as_ref(),
+			meta.output_upload_completed_timestamp.as_ref(),
+		),
+		"worker metadata",
+	);
+}
+
 /// A live REAPI execution stream.
 pub struct ReapiRun<S> {
 	backend:     ReapiBackend<S>,
@@ -888,6 +931,9 @@ where
 		let Some(action) = result.result else {
 			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
 		};
+		if let Some(meta) = action.execution_metadata.as_ref() {
+			emit_action_metadata(meta);
+		}
 		let logs = if matches!(&self.outputs, OutputSpec::Logs | OutputSpec::All) {
 			match (action.stdout_digest.as_ref(), action.stderr_digest.as_ref()) {
 				(Some(stdout), Some(stderr)) => {
