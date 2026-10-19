@@ -877,10 +877,9 @@ impl FilePolicy {
 	/// [`PathPolicy`] before it observes the launch, so the launch ends in a
 	/// read denial. Judging it here again keeps the fact true without relying
 	/// on that order. The backend is no substitute. Bubblewrap masks a
-	/// `read_deny` root, but Seatbelt's `read_deny` refuses only reads (its
-	/// profile allows `process-exec*`), so there an interpreter cannot read a
-	/// hidden script while a hidden native binary still runs when something
-	/// other than the shell launches it, such as `xargs` or `env`.
+	/// `read_deny` root; Seatbelt denies both `file-read*` and
+	/// `process-exec*` for each root, so the kernel enforces the boundary
+	/// for both reads and native execution.
 	fn launchable(&self, program: &Path) -> bool {
 		self.check_read(program).is_ok() && !program.is_dir() && program.executable()
 	}
