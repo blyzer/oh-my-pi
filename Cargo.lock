@@ -8695,6 +8695,7 @@ dependencies = [
  "fastembed",
  "flume",
  "jiff",
+ "omp-ai",
  "omp-core",
  "parking_lot",
  "rusqlite",

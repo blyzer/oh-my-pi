@@ -498,6 +498,44 @@ impl AppleFm {
 	}
 }
 
+/// Lightweight session wrapper used by the `apple-aux-memory` retrieval lane.
+///
+/// Holds a baked-in system prompt and exposes a synchronous [`respond`] method
+/// that is safe to call from a `tokio::task::spawn_blocking` context.
+///
+/// [`respond`]: AppleFmSession::respond
+#[cfg(feature = "apple-aux-memory")]
+pub struct AppleFmSession {
+	system: Str,
+}
+
+#[cfg(feature = "apple-aux-memory")]
+impl AppleFmSession {
+	/// Creates a session with a fixed system prompt.
+	pub fn new(system: impl Into<Str>) -> Result<Self> {
+		Ok(Self { system: system.into() })
+	}
+
+	/// Generates one response synchronously.
+	///
+	/// Must be called from a thread where a Tokio runtime handle is reachable
+	/// (e.g. inside `tokio::task::spawn_blocking`).
+	pub fn respond(&self, prompt: impl Into<Str>) -> Result<Str> {
+		let options = AppleFmOptions::new(prompt).system_prompt(self.system.clone());
+		let handle = tokio::runtime::Handle::current();
+		handle
+			.block_on(AppleFm.generate(options, CancellationToken::new()))
+			.map(|g| g.content)
+	}
+}
+
+/// Constructs an [`AppleFmSession`] pre-loaded with the semantic-relevance
+/// scoring prompt used by the auxiliary recall lane.
+#[cfg(feature = "apple-aux-memory")]
+pub fn aux_session() -> Result<AppleFmSession> {
+	AppleFmSession::new("Score semantic relevance 0-10. Reply with one integer only.")
+}
+
 /// Asynchronous event stream returned by [`AppleFm::stream`].
 pub struct AppleFmStream {
 	rx:     Pin<Box<dyn Stream<Item = Result<AppleFmEvent>> + Send + 'static>>,

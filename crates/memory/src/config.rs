@@ -236,6 +236,22 @@ pub struct MnemopiSettings {
 	/// Bounded shutdown drain in milliseconds.
 	#[serde(default = "default_shutdown_timeout_ms")]
 	pub shutdown_timeout_ms:      u64,
+	/// Auxiliary scoring brain used during retrieval re-ranking.
+	#[cfg(feature = "apple-aux-memory")]
+	#[serde(default)]
+	pub aux_model:                AuxModel,
+}
+
+/// Auxiliary retrieval-scoring model wired on the `apple-aux-memory` lane.
+#[cfg(feature = "apple-aux-memory")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuxModel {
+	/// No auxiliary model; retrieval uses only RRF scores.
+	#[default]
+	None,
+	/// Apple Foundation Models session used to score semantic relevance.
+	AppleFM,
 }
 
 const fn default_true() -> bool {
@@ -269,28 +285,30 @@ const fn default_shutdown_timeout_ms() -> u64 {
 impl Default for MnemopiSettings {
 	fn default() -> Self {
 		Self {
-			db_path:                  None,
-			bank:                     None,
-			scoping:                  BankScoping::PerProject,
-			embedding_variant:        EmbeddingVariant::English,
-			embedding_model:          None,
-			remote_embeddings:        None,
-			auto_recall:              true,
-			auto_retain:              true,
-			polyphonic_recall:        false,
-			enhanced_recall:          false,
-			proactive_linking:        false,
-			working_memory_limit:     default_working_memory_limit(),
+			db_path: None,
+			bank: None,
+			scoping: BankScoping::PerProject,
+			embedding_variant: EmbeddingVariant::English,
+			embedding_model: None,
+			remote_embeddings: None,
+			auto_recall: true,
+			auto_retain: true,
+			polyphonic_recall: false,
+			enhanced_recall: false,
+			proactive_linking: false,
+			working_memory_limit: default_working_memory_limit(),
 			working_memory_ttl_hours: default_working_memory_ttl_hours(),
-			retain_every_n_turns:     default_retain_turns(),
-			recall_limit:             default_recall_limit(),
-			recall_context_turns:     default_recall_context_turns(),
-			recall_max_query_chars:   default_recall_query_chars(),
-			injection_token_limit:    default_injection_tokens(),
-			llm_mode:                 MemoryLlmMode::Smol,
-			remote_llm:               None,
-			debug:                    false,
-			shutdown_timeout_ms:      default_shutdown_timeout_ms(),
+			retain_every_n_turns: default_retain_turns(),
+			recall_limit: default_recall_limit(),
+			recall_context_turns: default_recall_context_turns(),
+			recall_max_query_chars: default_recall_query_chars(),
+			injection_token_limit: default_injection_tokens(),
+			llm_mode: MemoryLlmMode::Smol,
+			remote_llm: None,
+			debug: false,
+			shutdown_timeout_ms: default_shutdown_timeout_ms(),
+			#[cfg(feature = "apple-aux-memory")]
+			aux_model: AuxModel::None,
 		}
 	}
 }
