@@ -5,9 +5,9 @@
 //! the selected backend. Durable SQLite rows are authoritative; all recall
 //! indexes are rebuildable.
 
-pub mod bank;
 #[cfg(feature = "apple-aux-memory")]
 pub mod aux_lane;
+pub mod bank;
 pub mod cache;
 pub mod config;
 pub mod diagnose;
