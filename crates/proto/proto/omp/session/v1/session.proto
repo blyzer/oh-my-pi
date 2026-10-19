@@ -1,0 +1,302 @@
+syntax = "proto3";
+
+package omp.session.v1;
+
+// Session control surface. Served over gRPC by omp-serve's SessionControlRpc.
+//
+// Listeners:
+//   - owner UDS (no authentication; filesystem is the authenticator);
+//   - loopback TCP (device authentication required);
+//   - non-loopback TCP (TLS mandatory plus device authentication).
+//
+// Negotiation uses omp.gateway.v1.Gateway.Hello with capability
+// "session.control.v1".
+
+// Session lifecycle and control verbs over a network connection.
+service SessionControl {
+  // Lists sessions visible to the caller under their granted scopes.
+  rpc ListSessions(ListSessionsRequest) returns (SessionList);
+
+  // Attaches to a session. Streams welcome, snapshot chunks, events,
+  // resync notices, and heartbeats until the stream is cancelled or
+  // the session ends.
+  rpc Attach(AttachRequest) returns (stream AttachFrame);
+
+  // Submits a control command (prompt, steer, queue, interrupt,
+  // abort_tools, pause, cancel) to a live session.
+  rpc Submit(ControlCommand) returns (CommandReceipt);
+
+  // Approves or rejects a pending approval ticket.
+  rpc Approve(ApproveRequest) returns (CommandReceipt);
+
+  // Answers a pending host UI request (select or editor dialog).
+  rpc AnswerUi(UiAnswer) returns (CommandReceipt);
+
+  // Opens a new session, resumes a detached one, or forks an existing
+  // session. Daemon host only; requires the control scope.
+  rpc Open(OpenSessionRequest) returns (SessionRef);
+}
+
+// Filter for listing sessions.
+message ListSessionsRequest {
+  // Optional project root to restrict results. Empty means all visible
+  // sessions.
+  string project_root = 1;
+}
+
+// The set of sessions visible to the caller.
+message SessionList {
+  // Metadata references for each visible session, ordered most-recent
+  // first.
+  repeated SessionRef sessions = 1;
+}
+
+// Lightweight reference to a session, usable as a cursor key.
+message SessionRef {
+  // Stable session identifier (ULID).
+  string session_id = 1;
+  // Human-readable label derived from the workspace or first prompt.
+  string label = 2;
+  // Whether the session is currently attached to a live kernel.
+  bool is_live = 3;
+  // Monotonic epoch of the bridge that last served this session. Zero
+  // when no bridge has ever been started.
+  uint64 epoch = 4;
+  // Project root directory for this session.
+  string project_root = 5;
+}
+
+// Request to attach to a session's event stream.
+message AttachRequest {
+  // Session to attach to.
+  string session_id = 1;
+
+  // Resume cursor from a previous attachment. When set and the epoch
+  // matches the current bridge epoch the server replays events from
+  // (cursor_seq, head]. Any other cursor produces a Resync followed
+  // by fresh snapshot chunks.
+  uint64 resume_epoch = 2;
+  // Sequence number of the last event the client received in a prior
+  // attachment. Used only when resume_epoch is non-zero.
+  uint64 resume_seq = 3;
+}
+
+// A single frame delivered on an Attach stream.
+message AttachFrame {
+  oneof frame {
+    // First frame after a successful attach or resync. Contains session
+    // header, the current epoch, the head sequence number, and the set
+    // of scopes the caller was granted for this session.
+    WelcomeFrame welcome = 1;
+    // One chunk of the DOM snapshot. Chunks arrive in order; the final
+    // chunk has final = true. The payload is canonical omp_dom serde
+    // bytes decoded with Snapshot::from_bytes.
+    SnapshotChunk snapshot_chunk = 2;
+    // A single ordered event following the snapshot. The payload is a
+    // typed Event/Patch encoded as canonical omp_dom serde bytes.
+    EventFrame event = 3;
+    // Signals that the client's resume cursor was not serviceable. A
+    // fresh snapshot follows immediately after this frame.
+    ResyncFrame resync = 4;
+    // Periodic liveness probe carrying the current head sequence number.
+    HeartbeatFrame heartbeat = 5;
+  }
+}
+
+// First frame of an attachment: session header and granted scopes.
+message WelcomeFrame {
+  // Bridge epoch — a random id minted when the bridge started. Changes
+  // on host restart or session reopen.
+  uint64 epoch = 1;
+  // Sequence number of the most recent buffered event at attach time.
+  uint64 head_seq = 2;
+  // Human-readable session label.
+  string label = 3;
+  // Scopes the server granted for this session.
+  repeated string granted_scopes = 4;
+}
+
+// One ordered chunk of the initial DOM snapshot.
+message SnapshotChunk {
+  // Bridge epoch this snapshot belongs to.
+  uint64 epoch = 1;
+  // Monotonic sequence number of this chunk within the snapshot.
+  uint64 seq = 2;
+  // Zero-based chunk index within the snapshot.
+  uint32 index = 3;
+  // Raw snapshot bytes (canonical omp_dom serde encoding).
+  bytes bytes = 4;
+  // True on the last chunk of the snapshot.
+  bool final = 5;
+}
+
+// An ordered DOM event following the snapshot.
+message EventFrame {
+  // Bridge epoch this event belongs to.
+  uint64 epoch = 1;
+  // Host-assigned monotonic sequence number. The cursor for resume.
+  uint64 seq = 2;
+  // Raw event bytes (canonical omp_dom serde encoding of Event/Patch).
+  bytes bytes = 3;
+}
+
+// Signals that the client's resume cursor was stale or from a
+// different epoch. A fresh snapshot stream follows.
+message ResyncFrame {
+  // Human-readable explanation of why the resync was needed.
+  string reason = 1;
+}
+
+// Periodic liveness probe.
+message HeartbeatFrame {
+  // Sequence number of the most recent event in the bridge's ring.
+  uint64 head_seq = 1;
+}
+
+// A control command sent to a live session via Submit.
+//
+// Every mutating message carries a session_id, an idempotency_key (a
+// client-generated ULID for exactly-once delivery), and an optional
+// expected_epoch for optimistic concurrency.
+message ControlCommand {
+  // Target session.
+  string session_id = 1;
+  // Client-generated ULID. Journaled on the entry it creates; a retry
+  // with the same key is a no-op once the key is observed in the DOM.
+  string idempotency_key = 2;
+  // When set, the server rejects the command if the current bridge epoch
+  // differs (optimistic concurrency guard).
+  optional uint64 expected_epoch = 3;
+
+  oneof command {
+    // New user prompt (idle session only). Equivalent to the rpc-mode
+    // prompt verb.
+    PromptCommand prompt = 10;
+    // Steering message added to the current turn. Equivalent to steer.
+    SteerCommand steer = 11;
+    // Follow-up prompt queued for the next turn. Equivalent to queue.
+    QueueCommand queue = 12;
+    // Interrupt the current turn. Equivalent to interrupt.
+    InterruptCommand interrupt = 13;
+    // Abort all running tools in the current turn; siblings continue.
+    AbortToolsCommand abort_tools = 14;
+    // Pause or resume the session.
+    PauseCommand pause = 15;
+    // Cancel the session. Requires control scope.
+    CancelCommand cancel = 16;
+  }
+}
+
+// New user prompt (idle session).
+message PromptCommand {
+  // Prompt text.
+  string text = 1;
+}
+
+// Steering message for the current turn.
+message SteerCommand {
+  // Steering text.
+  string text = 1;
+}
+
+// Follow-up prompt queued for the next turn.
+message QueueCommand {
+  // Follow-up text.
+  string text = 1;
+}
+
+// Interrupt the current turn.
+message InterruptCommand {}
+
+// Abort all running tools in the current turn.
+message AbortToolsCommand {}
+
+// Pause or resume the session.
+message PauseCommand {
+  // True to pause; false to resume.
+  bool pause = 1;
+}
+
+// Cancel the session (control scope required).
+message CancelCommand {}
+
+// Approval decision for a pending ticket.
+//
+// Every mutating message carries session_id, idempotency_key, and
+// optional expected_epoch.
+message ApproveRequest {
+  // Target session.
+  string session_id = 1;
+  // Client-generated ULID for idempotency.
+  string idempotency_key = 2;
+  // When set, the server rejects if the bridge epoch differs.
+  optional uint64 expected_epoch = 3;
+  // The approval ticket to decide.
+  string ticket_id = 4;
+  // True to approve; false to reject.
+  bool approved = 5;
+  // Scope of the approval decision (e.g., "session", "persist").
+  string scope = 6;
+  // Optional human-readable reason for the decision.
+  string reason = 7;
+}
+
+// Answer to a pending host UI request (select or editor dialog).
+//
+// Every mutating message carries session_id, idempotency_key, and
+// optional expected_epoch.
+message UiAnswer {
+  // Target session.
+  string session_id = 1;
+  // Client-generated ULID for idempotency.
+  string idempotency_key = 2;
+  // When set, the server rejects if the bridge epoch differs.
+  optional uint64 expected_epoch = 3;
+  // Correlation id of the UI request being answered.
+  string request_id = 4;
+  // The answer payload (serialized per the UI request type).
+  bytes answer = 5;
+}
+
+// Request to open a new, resumed, or forked session.
+// Requires the control scope; daemon host only.
+message OpenSessionRequest {
+  // Session to resume or fork. Empty to open a new session.
+  string session_id = 1;
+  // Client-generated ULID for idempotency.
+  string idempotency_key = 2;
+  // Project root for the new session (required for new sessions).
+  string project_root = 3;
+
+  oneof kind {
+    // Start a brand-new session.
+    NewSession new_session = 10;
+    // Resume a detached session by its id.
+    ResumeSession resume = 11;
+    // Fork an existing session at a given point.
+    ForkSession fork = 12;
+  }
+}
+
+// Open a brand-new session.
+message NewSession {}
+
+// Resume a previously detached session.
+message ResumeSession {}
+
+// Fork an existing session at its current head.
+message ForkSession {
+  // Optional label for the forked session.
+  string label = 1;
+}
+
+// Receipt returned by every mutating RPC.
+message CommandReceipt {
+  // The idempotency_key echoed from the command.
+  string idempotency_key = 1;
+  // Whether the command was accepted and applied (vs a duplicate no-op).
+  bool accepted = 2;
+  // Sequence number of the journal entry created by this command. Zero
+  // for duplicate idempotent commands.
+  uint64 seq = 3;
+}
