@@ -120,3 +120,68 @@ dump of `ExecutedActionMetadata` into the audit output.
 
 The wall-time criterion is satisfied. The CPU and memory criteria require the Task 2 instrumented
 spans before they can be assessed.
+
+---
+
+## ADR 0047 Gate 2 — Remote CI invocation proof
+
+**Date:** 2026-10-19
+**Host:** aarch64-apple-darwin (M1 Pro); run dispatched via `OMP_REMOTE_KEYCHAIN_SERVICE=buildbuddy-omp2-trial`
+**Commit:** `13cfc5deca` (`feat/session-host`; `omp2` HEAD at time of run)
+**Command:** `just remote-test-pkg omp-exec-reapi`
+
+### Invocation
+
+| Field | Value |
+|---|---|
+| Invocation ID | `03d524aa-71d2-40ed-b92f-f1da843c63af` |
+| BuildBuddy URL | https://app.buildbuddy.io/invocation/03d524aa-71d2-40ed-b92f-f1da843c63af |
+| Runner | Linux x86_64, 11 CPUs, 16 GB |
+| Exit code | 0 (success) |
+
+### Wall time breakdown
+
+| Phase | Time |
+|---|---|
+| Git fetch + checkout + apply patch | ~1 s |
+| Toolchain checks (all warm) | <1 s |
+| `cargo nextest build` (omp-exec-reapi + deps) | 1 min 18 s |
+| nextest run (54 tests) | 0.060 s |
+| `cargo test --doc` | 0.38 s |
+| **Total runner wall time** (stamp `14:17:26` → `14:18:48`) | **82 s** |
+| Client wall time (including git sync, upload, cleanup) | ~97 s |
+
+### Cache state
+
+All four caches were warm: `cache just hit`, `cache nextest hit`, `cache uv hit`, `cache python hit`.
+The build itself compiled from source (no incremental target cache), which accounts for the 78 s compile time.
+With a warm `CARGO_TARGET_DIR` snapshot the build phase would drop further.
+
+### Per-phase data available without Task 2
+
+The runner's `stamp` lines expose coarse phases. Fine-grained `ExecutedActionMetadata` fields
+(upload bytes, queue time, input-fetch time, execution time, download time) are not printed by
+`bb remote` and still require the Task 2 client-side span instrumentation. Phases not yet measured:
+
+- `FindMissingBlobs` round-trip time
+- Input-root upload bytes and time
+- Action queue wait time
+- Output download time
+- Client local CPU (peak and sampled per second)
+- Client peak memory
+
+### Gate 2 criterion
+
+ADR 0047 §6 Gate 2: *"remote invocation proven after PR #250."*
+
+PR #250 (`506b7c143e`) fixed the `refs/remotes/origin/HEAD` resolution in `scripts/remote-verify.sh`.
+This run executed after that fix, authenticating with the Keychain key, dispatching the runner, and
+completing with exit 0 and 54/54 tests passing. The criterion is met.
+
+| Criterion | Met? |
+|---|---|
+| `bb` on PATH | ✅ `/Users/enverfrancisco/.local/bin/bb` |
+| API key resolved (Keychain `buildbuddy-omp2-trial`) | ✅ |
+| Runner launched and produced an invocation ID | ✅ `03d524aa-71d2-40ed-b92f-f1da843c63af` |
+| Run completed with exit 0 | ✅ 54/54 tests passed |
+| Wall time within 1.5× warm local (≤ ~5 min 9 s) | ✅ 82 s runner / 97 s client |
