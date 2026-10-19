@@ -432,6 +432,24 @@ impl MemoryRuntime {
 		})
 	}
 
+	/// Async wrapper for [`Self::search`] that runs the blocking SQLite I/O on
+	/// a `tokio` blocking thread, making it safe to call from async contexts
+	/// without stalling the executor.
+	///
+	/// Unblocks M4 (`aux_lane::rank`) which requires an `await` point after
+	/// assembling recall candidates.
+	pub async fn search_async(
+		self: &Arc<Self>,
+		query: String,
+		query_embedding: Option<Vec<f32>>,
+		bounds: RecallBounds,
+	) -> Result<SearchOutcome> {
+		let this = Arc::clone(self);
+		tokio::task::spawn_blocking(move || this.search(&query, query_embedding.as_deref(), bounds))
+			.await
+			.map_err(|_| Error::EmbeddingWorker)?
+	}
+
 	/// Saves a durable user-stated fact to the write bank.
 	pub fn save(
 		&self,
