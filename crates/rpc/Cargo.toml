@@ -14,6 +14,7 @@ flume.workspace = true
 hyper-util.workspace = true
 omp-core.workspace = true
 omp-proto.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
