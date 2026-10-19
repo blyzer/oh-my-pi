@@ -5553,11 +5553,10 @@ mod tests {
 		host.close_session(session).expect("session closes");
 	}
 
-	/// Live Seatbelt: `read_deny` refuses only reads there, and the profile
-	/// allows `process-exec*`, so the kernel would run a native binary behind a
-	/// `read_deny` root. The shell never launches one: a simple command and an
-	/// `exec` of it each end in a read denial before any spawn, and under a
-	/// disabled network the URL it was given earns no network diag. The same
+	/// Live Seatbelt: `read_deny` roots deny both `file-read*` and
+	/// `process-exec*`, so the kernel refuses both reads and native execution
+	/// behind them. The shell never launches one, and even a non-shell launcher
+	/// (such as `xargs` or `env`) cannot exec the hidden binary. The same
 	/// binary outside the root runs. The binary is this test executable, hard
 	/// linked beside itself (one volume, no copy) and asked only to list tests.
 	#[cfg(target_os = "macos")]

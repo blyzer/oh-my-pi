@@ -246,6 +246,12 @@ pub fn compile(
 	// A deny must follow every built-in and caller allow because the last
 	// matching Seatbelt rule wins.
 	push_scopes(&mut profile, "deny", "file-read*", spec.read_deny.iter().map(PathBuf::as_path));
+	// The base policy's (allow process-exec*) would let xargs, env, or any
+	// non-shell launcher exec a native binary that sits inside a read-deny
+	// root even though reads from there are refused. Mirror each read-deny
+	// path as a process-exec* denial so the kernel enforces the same
+	// boundary for execution.
+	push_scopes(&mut profile, "deny", "process-exec*", spec.read_deny.iter().map(PathBuf::as_path));
 	// One-shot approvals follow ordinary denials without turning a host-read
 	// policy into an allowlist.
 	push_scopes(
@@ -363,7 +369,7 @@ pub fn compile(
 		plan.add_caveat(Caveat::capability(
 			Capability::FsReadDeny,
 			"Seatbelt read denials are path based and can be bypassed through an allowed hardlink to \
-			 the same inode",
+			 the same inode; process-exec* is also denied for each read-deny root",
 		));
 	}
 	if !spec.write_deny.is_empty() {
@@ -737,5 +743,42 @@ mod tests {
 		let profile = plan.profile().expect("seatbelt profile");
 		assert!(profile.contains(protected.to_string_lossy().as_ref()));
 		assert!(profile.contains("(deny file-write-unlink"));
+	}
+
+	#[test]
+	fn read_deny_root_also_denies_process_exec() {
+		let directory = tempfile::tempdir().expect("directory");
+		let mut spec = SandboxSpec::new("/bin/true");
+		spec.deny_read(directory.path()).expect("read deny");
+		let requested = spec.requested_capabilities();
+		let plan = compile(
+			&spec,
+			Path::new("/bin/true"),
+			requested,
+			requested.intersection(Backend::Seatbelt.capabilities()),
+		)
+		.expect("seatbelt plan");
+		let profile = plan.profile().expect("seatbelt profile");
+		let path_str = directory.path().to_string_lossy();
+		assert!(
+			profile.contains("(deny process-exec*"),
+			"process-exec* deny missing from profile: {profile}"
+		);
+		assert!(
+			profile.contains(path_str.as_ref()),
+			"read-deny root path missing from process-exec* deny: {profile}"
+		);
+		// The process-exec* deny must follow the base (allow process-exec*).
+		let base_allow = profile.find("(allow process-exec*)").expect("base allow");
+		let exec_deny = profile.find("(deny process-exec*").expect("exec deny");
+		assert!(base_allow < exec_deny, "deny must follow base allow");
+		// Caveat mentions process-exec*.
+		assert!(
+			plan
+				.caveats()
+				.iter()
+				.any(|c| c.message.contains("process-exec*")),
+			"no caveat mentioning process-exec* found"
+		);
 	}
 }
