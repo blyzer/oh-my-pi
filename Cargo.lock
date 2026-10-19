@@ -7737,6 +7737,7 @@ dependencies = [
  "omp-con",
  "omp-core",
  "omp-dom",
+ "omp-exec",
  "omp-journal",
  "omp-proto",
  "omp-scribe",
