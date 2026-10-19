@@ -1192,6 +1192,8 @@ pub enum Command {
 	/// Operate the credential-injecting inference gateway.
 	#[command(name = "auth-gateway")]
 	AuthGateway(AuthGatewayArgs),
+	/// Connect to a running session host (ADR 0039 A5).
+	Attach(AttachArgs),
 }
 
 /// Shell completion target.
@@ -1508,6 +1510,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "completions", aliases: &[] },
 	CommandSpec { name: "__complete", aliases: &[] },
 	CommandSpec { name: "compress", aliases: &[] },
+	CommandSpec { name: "attach", aliases: &[] },
 ];
 
 /// Returns whether a root command shares the launch option surface.
@@ -2080,6 +2083,17 @@ impl std::ops::Deref for AcpArgs {
 	}
 }
 
+/// Connect to a running session host over its owner-only UDS.
+#[derive(Clone, Debug, Args)]
+pub struct AttachArgs {
+	/// Session id to attach to; defaults to the most recent session.
+	#[arg(short = 's', long, value_name = "SESSION_ID")]
+	pub session_id: Option<String>,
+	/// List available sessions and exit.
+	#[arg(long)]
+	pub list:       bool,
+}
+
 /// Direct typed inference options.
 #[derive(Clone, Debug, Args)]
 pub struct InferArgs {
@@ -2597,6 +2611,7 @@ enum DispatchTarget {
 	Completions,
 	Complete,
 	Compress,
+	Attach,
 }
 
 const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
@@ -2655,6 +2670,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Compress(_)) => DispatchTarget::Compress,
 		Some(Command::AuthBroker(_)) => DispatchTarget::AuthBroker,
 		Some(Command::AuthGateway(_)) => DispatchTarget::AuthGateway,
+		Some(Command::Attach(_)) => DispatchTarget::Attach,
 	}
 }
 
@@ -3223,6 +3239,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		},
 		Command::AuthBroker(args) => auth_broker_cmd::run(args).await,
 		Command::AuthGateway(args) => auth_gateway_cmd::run(args).await,
+		Command::Attach(args) => crate::attach_cmd::run(args).await,
 	}
 }
 
