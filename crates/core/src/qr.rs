@@ -402,8 +402,8 @@ impl Gf {
 		let mut exp = [0u8; 512];
 		let mut log = [0u8; 256];
 		let mut value = 1usize;
-		for power in 0..255 {
-			exp[power] = u8::try_from(value).expect("GF(256) element");
+		for (power, exp_slot) in exp[..255].iter_mut().enumerate() {
+			*exp_slot = u8::try_from(value).expect("GF(256) element");
 			log[value] = u8::try_from(power).expect("GF(256) power");
 			value <<= 1;
 			if value >= 256 {
@@ -522,9 +522,8 @@ impl Matrix {
 		for &cy in centers {
 			for &cx in centers {
 				let (cx, cy) = (usize::from(cx), usize::from(cy));
-				let in_finder = |x: usize, y: usize| {
-					(x < 9 && y < 9) || (x >= last && y < 9) || (x < 9 && y >= last)
-				};
+				let in_finder =
+					|x: usize, y: usize| (x >= last || x < 9) && y < 9 || (x < 9 && y >= last);
 				if in_finder(cx, cy) {
 					continue;
 				}
