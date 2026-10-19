@@ -1207,9 +1207,11 @@ impl ModelPicker {
 	/// `text` = the human-readable name, and `provider` for Tern's grouping.
 	#[must_use]
 	pub fn tsp_node(&self) -> omp_tui::tsp::wire::Node {
+		// Cap at 100 rows to stay within the 64 KiB TSP frame limit.
 		let children = self
 			.rows
 			.iter()
+			.take(100)
 			.enumerate()
 			.map(|(i, row)| {
 				let mut p = serde_json::Map::new();
