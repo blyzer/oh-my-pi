@@ -82,7 +82,7 @@ use crate::{
 	gallery_cmd::GalleryArgs,
 	gc_cmd, git_cmd,
 	git_cmd::GitArgs,
-	grievances_cmd, models_cmd, print_mode, profile_alias, render_cmd,
+	grievances_cmd, jobs_cmd, models_cmd, print_mode, profile_alias, render_cmd,
 	render_cmd::RenderArgs,
 	rpc_mode, say_cmd, setup_cmd, smoke_test, ssh_cmd,
 	ssh_cmd::SshArgs,
