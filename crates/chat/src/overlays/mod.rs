@@ -831,6 +831,36 @@ impl HistoryPicker {
 		};
 		self.ui = Ui::from_root(tree, self.width, self.ctx.clone());
 	}
+
+	/// Returns a TSP `picker` node representing the current history list.
+	///
+	/// Each filtered entry becomes a child `item` with its index as `id` and
+	/// the first prompt line as `text`.
+	#[must_use]
+	pub fn tsp_node(&self) -> omp_tui::tsp::wire::Node {
+		let children = self
+			.entries
+			.iter()
+			.enumerate()
+			.map(|(i, entry)| {
+				let first = entry.prompt.lines().next().unwrap_or_default();
+				let mut p = serde_json::Map::new();
+				p.insert("text".into(), serde_json::Value::String(first.to_owned()));
+				omp_tui::tsp::wire::Node {
+					id: Str::from(format!("hp-{i}")),
+					k: omp_tui::tsp::wire::Kind::Item,
+					p,
+					c: Vec::new(),
+				}
+			})
+			.collect();
+		omp_tui::tsp::wire::Node {
+			id: Str::new_static("history-picker"),
+			k:  omp_tui::tsp::wire::Kind::Picker,
+			p:  serde_json::Map::new(),
+			c:  children,
+		}
+	}
 }
 
 fn history_query_tokens(query: &str) -> Vec<String> {

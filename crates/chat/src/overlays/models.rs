@@ -24,6 +24,7 @@ use omp_tui::{
 	dom,
 	fuzzy::{Query, SearchIndex},
 };
+use serde_json;
 use smallvec::SmallVec;
 use strum::{EnumProperty as _, IntoEnumIterator as _};
 
@@ -1196,6 +1197,44 @@ impl ModelPicker {
 			</select>
 		}
 		.into_component()
+	}
+}
+
+impl ModelPicker {
+	/// Returns a TSP `picker` node representing the current model list.
+	///
+	/// Each row becomes a child `item` node with `id` = the model key,
+	/// `text` = the human-readable name, and `provider` for Tern's grouping.
+	#[must_use]
+	pub fn tsp_node(&self) -> omp_tui::tsp::wire::Node {
+		let children = self
+			.rows
+			.iter()
+			.enumerate()
+			.map(|(i, row)| {
+				let mut p = serde_json::Map::new();
+				p.insert("text".into(), serde_json::Value::String(row.name.as_str().to_owned()));
+				p.insert(
+					"provider".into(),
+					serde_json::Value::String(row.provider.as_str().to_owned()),
+				);
+				omp_tui::tsp::wire::Node {
+					id: Str::from(format!("mp-{i}")),
+					k: omp_tui::tsp::wire::Kind::Item,
+					p,
+					c: Vec::new(),
+				}
+			})
+			.collect();
+		let mut p = serde_json::Map::new();
+		let selected = self.highlighted.unwrap_or(self.current);
+		p.insert("selected".into(), serde_json::Value::Number(selected.into()));
+		omp_tui::tsp::wire::Node {
+			id: Str::new_static("model-picker"),
+			k: omp_tui::tsp::wire::Kind::Picker,
+			p,
+			c: children,
+		}
 	}
 }
 

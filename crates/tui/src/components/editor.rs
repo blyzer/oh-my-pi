@@ -782,6 +782,13 @@ impl EditInput {
 		}
 	}
 
+	/// Applies a programmatic range replacement (native edit from TSP) and
+	/// re-queries completion state. `range` is a UTF-8 byte range.
+	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+		self.editor.apply_edit(range, text);
+		self.refresh_keyword_spans();
+	}
+
 	/// Reports whether the cursor is on the first logical line.
 	pub fn cursor_on_first_line(&self) -> bool {
 		self.editor.buffer().cursor_line() == 0
@@ -791,6 +798,27 @@ impl EditInput {
 	pub fn cursor_on_last_line(&self) -> bool {
 		let buffer = self.editor.buffer();
 		buffer.cursor_line().saturating_add(1) >= buffer.line_count()
+	}
+
+	/// Returns the visible autocomplete suggestions as `(value, label)` pairs,
+	/// or `None` when the dropdown is closed.
+	pub fn autocomplete_items(&self) -> Option<Vec<(omp_core::Str, omp_core::Str)>> {
+		let picker = self.editor.picker()?;
+		let (_, suggestions) = picker.visible_suggestions();
+		Some(
+			suggestions
+				.iter()
+				.map(|s| {
+					let label = match s.display() {
+						SuggestionDisplay::Text(t) => t.clone(),
+						SuggestionDisplay::Emoji { shortcode, .. } => {
+							omp_core::Str::new_static(shortcode)
+						},
+					};
+					(s.value().clone(), label)
+				})
+				.collect(),
+		)
 	}
 
 	fn max_rows(&self) -> u16 {
@@ -2850,6 +2878,22 @@ impl EditorPane {
 			.comp()
 			.downcast_ref::<EditInput>()
 			.is_some_and(|input| input.editor.picker().is_some())
+	}
+
+	/// Applies a programmatic range replacement (native edit from TSP).
+	/// `range` is a UTF-8 byte range inside the current buffer text.
+	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+		self.input_mut().apply_edit(range, text);
+		self.children[0].invalidate();
+	}
+
+	/// Returns visible autocomplete suggestions as `(value, label)` pairs,
+	/// or `None` when the dropdown is closed.
+	pub fn autocomplete_items(&self) -> Option<Vec<(omp_core::Str, omp_core::Str)>> {
+		self.children[0]
+			.comp()
+			.downcast_ref::<EditInput>()
+			.and_then(EditInput::autocomplete_items)
 	}
 
 	#[cfg(test)]
