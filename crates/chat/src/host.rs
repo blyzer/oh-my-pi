@@ -4649,12 +4649,12 @@ impl Host {
 					.composer
 					.apply_edit(byte_from..byte_to, text.as_str());
 			},
-			TspEvent::Undo { id } => {
+			TspEvent::Undo { id, .. } => {
 				if id.as_str() == crate::chrome::COMPOSER_ID {
 					self.presenter.composer.undo();
 				}
 			},
-			TspEvent::Send { id, text } => {
+			TspEvent::Send { id, text, .. } => {
 				if id.as_str() == crate::chrome::COMPOSER_ID && !text.trim().is_empty() {
 					let _ = self.presenter.submit(text);
 				}
