@@ -1,8 +1,9 @@
 /// Declares a branded string identifier with an owned form and a borrowed form,
 /// mirroring `PathBuf`/`Path`. Consumers must depend on `serde`.
 ///
-/// Owned `Name` is backed by [`Str`](crate::Str): use for storage, fields, and map keys.
-/// Borrowed `Name<str>`: brand a `&str` via `Name::from_ref` without allocating.
+/// Owned `Name` is backed by [`Str`](crate::Str): use for storage, fields, and
+/// map keys. Borrowed `Name<str>`: brand a `&str` via `Name::from_ref` without
+/// allocating.
 ///
 /// # Locked ownership convention
 ///

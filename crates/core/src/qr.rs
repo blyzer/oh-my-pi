@@ -522,9 +522,8 @@ impl Matrix {
 		for &cy in centers {
 			for &cx in centers {
 				let (cx, cy) = (usize::from(cx), usize::from(cy));
-				let in_finder = |x: usize, y: usize| {
-					(x >= last || x < 9) && y < 9 || (x < 9 && y >= last)
-				};
+				let in_finder =
+					|x: usize, y: usize| (x >= last || x < 9) && y < 9 || (x < 9 && y >= last);
 				if in_finder(cx, cy) {
 					continue;
 				}
