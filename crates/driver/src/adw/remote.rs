@@ -156,6 +156,13 @@ pub enum RemoteError {
 	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
 	#[error("remote artifact could not be materialized into the Environment blob store")]
 	Materialize(#[source] omp_env::ClientError),
+	/// Action-cache mode `read` or `read-write` is incompatible with the
+	/// BuildBuddy profile while runner recycling is active.
+	#[error(
+		"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
+		 recycling makes AC hits unsafe as execution substitutes)"
+	)]
+	CachePolicyConflict,
 }
 
 fn config_list(value: Str) -> Vec<String> {
@@ -173,6 +180,16 @@ fn cache_policy(ctx: &Ctx) -> omp_exec::CachePolicy {
 		"read-write" => omp_exec::CachePolicy::ReadWrite,
 		_ => omp_exec::CachePolicy::Off,
 	}
+}
+
+/// Returns `Err` when `policy` is non-off and `profile` uses runner recycling
+/// (BuildBuddy). An action-cache hit would substitute for the full execution
+/// result, which must not happen under worker-recycling profiles.
+fn validate_cache_policy(policy: omp_exec::CachePolicy, profile: &str) -> Result<(), RemoteError> {
+	if policy != omp_exec::CachePolicy::Off && profile == "buildbuddy" {
+		return Err(RemoteError::CachePolicyConflict);
+	}
+	Ok(())
 }
 
 fn repo_pins(root: &Path) -> Result<RepoPins, io::Error> {
@@ -464,6 +481,8 @@ impl ProductionAdwHost {
 		} else {
 			return Err(RemoteError::MissingConfiguration.into());
 		};
+		validate_cache_policy(cache_policy(ctx), SV_EXEC_REMOTE_PROFILE.get(ctx).as_str())
+			.map_err(ProductionError::from)?;
 		let credential = Credential::new(credential);
 		let buildbuddy_canceller = if buildbuddy {
 			Some(
@@ -632,5 +651,23 @@ mod tests {
 		assert_eq!(value.len(), 36);
 		assert_eq!(value.as_bytes()[14], b'4');
 		assert!(matches!(value.as_bytes()[19], b'8'..=b'9' | b'a'..=b'b'));
+	}
+
+	#[test]
+	fn cache_policy_refused_for_buildbuddy_runner_recycling() {
+		let err = validate_cache_policy(omp_exec::CachePolicy::Read, "buildbuddy").unwrap_err();
+		assert!(
+			matches!(err, RemoteError::CachePolicyConflict),
+			"expected CachePolicyConflict, got {err:?}",
+		);
+		let err = validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "buildbuddy").unwrap_err();
+		assert!(matches!(err, RemoteError::CachePolicyConflict));
+	}
+
+	#[test]
+	fn cache_policy_off_with_buildbuddy_passes_validation() {
+		validate_cache_policy(omp_exec::CachePolicy::Off, "buildbuddy").unwrap();
+		validate_cache_policy(omp_exec::CachePolicy::Read, "reapi").unwrap();
+		validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "reapi").unwrap();
 	}
 }
