@@ -6,6 +6,7 @@ pub mod acp_client;
 mod acp_events;
 pub mod acp_mode;
 pub mod adw_cmd;
+pub mod attach_cmd;
 pub mod audio_coordinator;
 pub mod auth_broker_cmd;
 pub mod auth_cli;

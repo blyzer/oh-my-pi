@@ -358,6 +358,21 @@ impl DaemonHandle {
 		let bearer_token_file = config.bearer_token_file;
 		let (shutdown, mut rpc_shutdown) = watch::channel(false);
 		let blobs = Arc::new(BlobStore::open(&data_dir)?);
+		{
+			let key_path = data_dir.join("device.key");
+			match omp_rpc::device_load_or_generate(key_path) {
+				Ok((key, true)) => {
+					tracing::info!(
+						pairing_code = %key.pairing_code(),
+						"new device key generated; pairing code for remote enrollment"
+					);
+				},
+				Ok((_, false)) => {},
+				Err(err) => {
+					tracing::warn!(%err, "could not load or generate device key");
+				},
+			}
+		}
 		let auth_rpc = auth_control.map_or_else(
 			|| AuthRpc::new(registry.clone()),
 			|control| AuthRpc::with_control(registry.clone(), control),

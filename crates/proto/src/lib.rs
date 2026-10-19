@@ -398,9 +398,34 @@ pub mod omp {
 			include!(concat!(env!("OUT_DIR"), "/omp.toolhost.v1.rs"));
 		}
 	}
+
+	/// Types generated from `omp.session.v1`: remote session control service.
+	pub mod session {
+		/// Version 1.
+		pub mod v1 {
+			#![allow(
+				missing_docs,
+				clippy::pedantic,
+				clippy::nursery,
+				reason = "prost/tonic output is machine-generated and cannot follow handwritten \
+				          documentation and style conventions"
+			)]
+			#![allow(
+				clippy::allow_attributes_without_reason,
+				reason = "prost/tonic emits compatibility allow attributes without Rust reason \
+				          metadata"
+			)]
+			#![allow(
+				clippy::large_enum_variant,
+				reason = "prost maps protobuf oneofs directly to enums; boxing would change the \
+				          generated Rust API"
+			)]
+			include!(concat!(env!("OUT_DIR"), "/omp.session.v1.rs"));
+		}
+	}
 }
 
 pub use omp::{
-	auth, blob, collab, control, document, env, gateway, identity, inference, policy, telemetry,
-	thread, toolhost, ui,
+	auth, blob, collab, control, document, env, gateway, identity, inference, policy, session,
+	telemetry, thread, toolhost, ui,
 };
