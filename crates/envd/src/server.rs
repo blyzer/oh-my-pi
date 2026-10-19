@@ -219,11 +219,6 @@ struct InvocationExecutionPolicy {
 	core_admission: bool,
 }
 
-/// Tools whose every write goes through a writer that consults the
-/// invocation's [`WriteScope`]: the document host and the document
-/// authority behind it.
-const SCOPED_WRITERS: &[&str] = &["write", "edit", "lsp"];
-
 /// An invocation refused at the environment boundary because its tool could
 /// write around the writers its write scope confines.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -296,9 +291,10 @@ impl InvocationExecutionPolicy {
 	/// processes under the exec sandbox ([`Confinement::ExecSandbox`], whose
 	/// declaration leaves those effects out), or the call's envelope (its
 	/// argument-scoped effects, else the declared maximum) runs commands,
-	/// spawns subagents, or writes documents through anything but the document
-	/// host. Network-only and read-only calls pass, and so do the scoped
-	/// writers, whose writes the scope confines one by one.
+	/// spawns subagents, or writes documents without
+	/// [`Confinement::DocumentAuthority`]. Network-only and read-only calls
+	/// pass, and so do document-authority tools (`write`, `edit`, `lsp`),
+	/// whose writes the scope confines one by one.
 	fn denial(&self, effects: &Effects, confinement: Confinement) -> Option<WriteBoundaryDenied> {
 		let scope = self.write_scope.as_deref()?;
 		let writes_around = confinement.sandboxed()
@@ -311,7 +307,7 @@ impl InvocationExecutionPolicy {
 				.documents
 				.as_ref()
 				.is_some_and(|documents| !documents.write_globs.is_empty())
-				&& !SCOPED_WRITERS.contains(&self.tool.as_str()));
+				&& confinement != Confinement::DocumentAuthority);
 		writes_around.then(|| match scope {
 			WriteScope::PlanFile { .. } => WriteBoundaryDenied::Plan { tool: self.tool.clone() },
 			WriteScope::ReadOnly => WriteBoundaryDenied::ReadOnly { tool: self.tool.clone() },
@@ -16985,10 +16981,11 @@ mod tests {
 			..Effects::empty()
 		};
 		let host = Confinement::Host;
+		let doc_authority = Confinement::DocumentAuthority;
 		let plan = || WriteScope::PlanFile { plan_file: sf!("local://PLAN.md"), target: None };
 		// The scoped writers proceed: the scope confines each of their writes.
 		for tool in ["write", "edit", "lsp"] {
-			assert_eq!(scoped_policy(tool, plan()).denial(&documents, host), None, "{tool}");
+			assert_eq!(scoped_policy(tool, plan()).denial(&documents, doc_authority), None, "{tool}");
 		}
 		assert_eq!(scoped_policy("web_search", plan()).denial(&network, host), None);
 		assert_eq!(scoped_policy("read", WriteScope::ReadOnly).denial(&Effects::empty(), host), None);

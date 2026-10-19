@@ -288,7 +288,7 @@ fn freeform_spec<P: JsonSchema>(kind: FreeformKind, revision: u16) -> ToolSpec {
 			fetch:     None,
 			subagents: 0,
 		},
-		confinement:     omp_tool::Confinement::Host,
+		confinement:     omp_tool::Confinement::DocumentAuthority,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),
