@@ -3467,7 +3467,8 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 	}
 }
 
-/// `approve {promptId, approved, scope?, reason?}` → [`Up::Approve`].
+/// `approve {promptId, approved, scope?, reason?, decidedBy?}` →
+/// [`Up::Approve`].
 fn approve_response(
 	id: Option<RequestId>,
 	command: &str,
@@ -3502,7 +3503,10 @@ fn approve_response(
 			approved,
 			scope,
 			source: omp_agent::ApprovalSource::External,
-			decided_by: None,
+			decided_by: params
+				.get("decidedBy")
+				.and_then(Value::as_str)
+				.map(Str::new),
 			reason: params.get("reason").and_then(Value::as_str).map(Str::new),
 			audited: false,
 		},

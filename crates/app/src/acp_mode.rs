@@ -1560,12 +1560,17 @@ fn approval(params: &Map<String, Value>) -> Result<(Str, ApprovalDecision), &'st
 		"session" | "always" => ApprovalScope::Session,
 		_ => return Err("session/approve has an invalid scope"),
 	};
+	let decided_by = params
+		.get("decidedBy")
+		.and_then(Value::as_str)
+		.map(Str::new);
+	let reason = params.get("reason").and_then(Value::as_str).map(Str::new);
 	Ok((Str::new(id), ApprovalDecision {
 		approved,
 		scope,
 		source: ApprovalSource::External,
-		decided_by: None,
-		reason: None,
+		decided_by,
+		reason,
 		audited: false,
 	}))
 }
