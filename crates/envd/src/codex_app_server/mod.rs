@@ -13,7 +13,6 @@
 //! - `executor`: probe and spawn.
 
 mod executor;
-mod frame;
 mod policy;
 mod session;
 mod wire;

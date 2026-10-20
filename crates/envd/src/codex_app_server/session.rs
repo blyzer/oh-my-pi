@@ -34,11 +34,13 @@ use tokio::{
 };
 
 use super::{
-	frame::{FrameError, LineReader},
 	policy::{WirePolicy, applied_policy, wire_policy},
 	wire::{self, Envelope, JsonRpcMessage, Method, RequestId},
 };
-use crate::child_tree::ChildTree;
+use crate::{
+	child_tree::ChildTree,
+	line_reader::{FrameError, LineReader},
+};
 
 /// The boxed input stream; boxed once, at construction.
 pub type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
