@@ -3,6 +3,8 @@
 //! Hard rules:
 //! - The child is spawned with explicit program and arguments supplied by the
 //!   caller; this module never reads configuration or credentials.
+//! - The child's environment is a [`ChildEnv`]: the ambient allowlist unless
+//!   the caller supplies another. It never inherits OMP's whole environment.
 //! - Transport is stdio only: OMP owns the process.
 //! - Process isolation and teardown come from [`ChildTree`].
 //! - ACP has no sandbox parameter; the only mappable policy is
@@ -20,7 +22,7 @@ use super::{
 	delegated_session::{AcpDelegatedSession, AcpSessionConfig},
 	policy::supported_policies,
 };
-use crate::child_tree::ChildTree;
+use crate::{child_env::ChildEnv, child_tree::ChildTree};
 
 /// Largest inbound line accepted. Same cap as the Codex adapter.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -43,6 +45,7 @@ pub struct AcpExecutor {
 	program: OsString,
 	args:    Vec<OsString>,
 	cfg:     AcpSessionConfig,
+	env:     ChildEnv,
 }
 
 impl AcpExecutor {
@@ -65,6 +68,7 @@ impl AcpExecutor {
 				terminate_grace:   TERMINATE_GRACE,
 				max_frame_bytes:   MAX_FRAME_BYTES,
 			},
+			env:     ChildEnv::ambient(),
 		}
 	}
 
@@ -72,6 +76,15 @@ impl AcpExecutor {
 	#[must_use]
 	pub const fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
 		self.cfg.handshake_timeout = timeout;
+		self
+	}
+
+	/// Replaces the child's environment. The default is [`ChildEnv::ambient`];
+	/// a profile that needs the user's own login names those variables with
+	/// [`ChildEnv::with_inherited`].
+	#[must_use]
+	pub fn with_env(mut self, env: ChildEnv) -> Self {
+		self.env = env;
 		self
 	}
 
@@ -126,6 +139,7 @@ impl DelegatedExecutor for AcpExecutor {
 		// and immediately killing it.
 		let mut cmd = Command::new(&self.program);
 		cmd.args(&self.args).kill_on_drop(true);
+		self.env.apply_tokio(&mut cmd);
 		match cmd.spawn() {
 			Ok(mut child) => {
 				let _ = child.kill().await;
@@ -144,6 +158,7 @@ impl DelegatedExecutor for AcpExecutor {
 	) -> Result<(Self::Session, SessionInfo), ExecutorError> {
 		let mut cmd = Command::new(&self.program);
 		cmd.args(&self.args);
+		self.env.apply_tokio(&mut cmd);
 		if !request.workdir.as_os_str().is_empty() {
 			cmd.current_dir(&request.workdir);
 		}

@@ -1124,3 +1124,62 @@ mod executor_tests {
 		let _peer = rx.try_recv().expect("peer sent");
 	}
 }
+
+#[cfg(test)]
+mod child_env_tests {
+	use std::{ffi::OsStr, fs};
+
+	use omp_agent::delegated::{DelegatedExecutor, ExecutionMode, SessionRequest, UnknownAuth};
+
+	use crate::{acp_client::AcpExecutor, child_env::ChildEnv};
+
+	fn request(dir: &std::path::Path) -> SessionRequest {
+		SessionRequest {
+			mode:         ExecutionMode::CliManaged,
+			workdir:      dir.to_path_buf(),
+			policy:       omp_agent::delegated::DelegatedPolicy::STRICTEST,
+			resume:       None,
+			unknown_auth: UnknownAuth::Proceed,
+		}
+	}
+
+	/// Spawns `sh -c 'env > FILE'` as the "agent" through the real `open`; the
+	/// handshake then fails (the script never speaks ACP), but the file holds
+	/// exactly the environment the child was given.
+	async fn child_environment(executor: AcpExecutor, dir: &std::path::Path) -> String {
+		let file = dir.join("seen.env");
+		let _ = executor.open(&request(dir)).await;
+		fs::read_to_string(&file).unwrap_or_default()
+	}
+
+	fn spy(dir: &std::path::Path) -> AcpExecutor {
+		let file = dir.join("seen.env");
+		AcpExecutor::new("sh", ["-c".to_owned(), format!("env > '{}'", file.display())])
+			.with_handshake_timeout(std::time::Duration::from_millis(500))
+	}
+
+	#[tokio::test]
+	async fn the_default_environment_hides_a_parent_secret_from_the_agent() {
+		let dir = tempfile::tempdir().expect("dir");
+		// SAFETY: set before the child spawns; the name is unique to this test.
+		unsafe { std::env::set_var("OMP_ACP_TEST_PARENT_API_KEY", "must-not-leak-1") };
+		let seen = child_environment(spy(dir.path()), dir.path()).await;
+		assert!(seen.contains("PATH="), "child lost its ambient PATH: {seen:?}");
+		assert!(!seen.contains("must-not-leak-1"), "child inherited a parent secret: {seen:?}");
+	}
+
+	#[tokio::test]
+	async fn an_operator_named_variable_reaches_the_agent_and_only_that_one() {
+		let dir = tempfile::tempdir().expect("dir");
+		// SAFETY: set before the child spawns; names are unique to this test.
+		unsafe {
+			std::env::set_var("OMP_ACP_TEST_NAMED_API_KEY", "named-value-2");
+			std::env::set_var("OMP_ACP_TEST_OTHER_API_KEY", "must-not-leak-3");
+		}
+		let env = ChildEnv::ambient().with_inherited(["OMP_ACP_TEST_NAMED_API_KEY"]);
+		assert!(env.contains(OsStr::new("OMP_ACP_TEST_NAMED_API_KEY")));
+		let seen = child_environment(spy(dir.path()).with_env(env), dir.path()).await;
+		assert!(seen.contains("OMP_ACP_TEST_NAMED_API_KEY=named-value-2"), "{seen:?}");
+		assert!(!seen.contains("must-not-leak-3"), "an unnamed sibling secret leaked: {seen:?}");
+	}
+}

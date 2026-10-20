@@ -55,7 +55,11 @@ use super::{
 		ChildBridgeTransport, PreludeStubWire, SessionBridgeHost,
 	},
 };
-use crate::{exec::ExecHost, exec_sandbox::ExecSandbox};
+use crate::{
+	child_env::{is_ambient_name, is_secret_name},
+	exec::ExecHost,
+	exec_sandbox::ExecSandbox,
+};
 
 /// Private argv selector used to re-enter `omp` as an eval kernel child.
 pub const EVAL_CHILD_ARG: &str = "__omp-eval-child";
@@ -63,8 +67,6 @@ pub const EVAL_CHILD_ARG: &str = "__omp-eval-child";
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BRIDGE_PROGRESS_BYTES: usize = 256 * 1024;
 const CHILD_TIMEOUT_EXIT: i32 = 124;
-const SECRET_MARKERS: &[&str] =
-	&["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "PRIVATE_KEY", "CREDENTIAL"];
 const MAX_RUNTIME_CWD_BYTES: usize = 16 * 1024;
 const MAX_MANAGED_ENV_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_MANAGED_ENV_BYTES: usize = 2 * 1024 * 1024;
@@ -1814,30 +1816,11 @@ fn stage_external_runner() -> io::Result<PathBuf> {
 }
 
 fn spawn_env_allowed(name: &OsStr) -> bool {
+	if is_secret_name(name) {
+		return false;
+	}
 	let upper = name.to_string_lossy().to_ascii_uppercase();
-	let secret = SECRET_MARKERS.iter().any(|marker| upper.contains(marker));
-	!secret
-		&& (matches!(
-			upper.as_str(),
-			"PATH"
-				| "HOME" | "USER"
-				| "LOGNAME"
-				| "SHELL"
-				| "TMPDIR"
-				| "TEMP" | "TMP"
-				| "LANG" | "TERM"
-				| "COLORTERM"
-				| "NO_COLOR"
-				| "SYSTEMROOT"
-				| "WINDIR"
-				| "COMSPEC"
-				| "PATHEXT"
-				| "USERPROFILE"
-				| "APPDATA"
-				| "LOCALAPPDATA"
-		) || upper.starts_with("LC_")
-			|| upper.starts_with("OMP_EVAL_")
-			|| upper.starts_with("OMP_PY_"))
+	is_ambient_name(name) || upper.starts_with("OMP_EVAL_") || upper.starts_with("OMP_PY_")
 }
 
 fn resolve_configured_python(command: &OsStr) -> Option<PathBuf> {
