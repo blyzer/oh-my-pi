@@ -99,27 +99,35 @@ ADR 0040 §"Measurement plan" calls for per-phase breakdown from `ExecutedAction
 local capture time, `FindMissingBlobs` time, upload bytes and time, queue time, input-fetch time,
 execution time, output-download time, and client local CPU plus peak memory sampled per second.
 
-None of these are available yet because the client-side span instrumentation (Task 2) has not been
-wired into the execution path. Until Task 2 ships, the only recorded data is:
+Task 2 span instrumentation is now wired (`omp-exec-reapi` `settle()` emits a `"worker metadata"`
+tracing event carrying the following attributes whenever `ExecutedActionMetadata` is present in
+the `ActionResult`):
 
-- Client wall time (above).
-- BuildBuddy invocation IDs (links to the BB UI where per-phase timelines are readable by hand).
-- No per-phase numbers for capture, FindMissing, upload, queue, execution, or download.
-- No client CPU or peak-memory sample for the Slice 1 client path.
+| Attribute | Source field |
+|---|---|
+| `omp.exec.worker` | `ExecutedActionMetadata.worker` |
+| `omp.exec.worker.queue_ms` | `queued_timestamp` → `worker_start_timestamp` |
+| `omp.exec.worker.wall_ms` | `worker_start_timestamp` → `worker_completed_timestamp` |
+| `omp.exec.worker.input_fetch_ms` | `input_fetch_start_timestamp` → `input_fetch_completed_timestamp` |
+| `omp.exec.worker.exec_ms` | `execution_start_timestamp` → `execution_completed_timestamp` |
+| `omp.exec.worker.output_upload_ms` | `output_upload_start_timestamp` → `output_upload_completed_timestamp` |
 
-Full per-phase data will be recorded here once Task 2 wires instrumented spans and a structured
-dump of `ExecutedActionMetadata` into the audit output.
+The `usage_stats.cpu_nanos` and `usage_stats.peak_memory_bytes` fields from the assignment brief are
+BuildBuddy-specific extensions not present in the standard REAPI v2 proto vendored here; they are not
+wired. Client CPU and peak memory criteria below therefore remain unassessable until a
+BuildBuddy-specific auxiliary-metadata decoder is added or the fields are observed on a live run.
 
 ### Success-criterion status (partial, ADR 0040 §Measurement plan)
 
 | Criterion | Threshold | Observed | Met? |
 |---|---|---|---|
 | Warm remote wall time within 1.5× warm local | ≤ 1.5× (warm local ~3 min 26 s, from Slice 0 run 10) | 2 s | ✅ well under |
-| Client local CPU < 5% of local recipe | < 5% of ~463 s (warm local) | not yet sampled (Task 2) | — |
-| Client peak memory < 5% of local peak | < 5% of ~3.6 GB (warm local) | not yet sampled (Task 2) | — |
+| Client local CPU < 5% of local recipe | < 5% of ~463 s (warm local) | not yet sampled (no BuildBuddy cpu_nanos extension) | — |
+| Client peak memory < 5% of local peak | < 5% of ~3.6 GB (warm local) | not yet sampled (no BuildBuddy peak_memory_bytes extension) | — |
 
-The wall-time criterion is satisfied. The CPU and memory criteria require the Task 2 instrumented
-spans before they can be assessed.
+The wall-time criterion is satisfied. Worker-side timing fields are now captured in spans via Task 2
+(worker queue, wall, input-fetch, exec, and output-upload milliseconds). Client CPU and peak memory
+require a BuildBuddy-specific extension proto not in the vendored REAPI v2; those criteria remain open.
 
 ---
 

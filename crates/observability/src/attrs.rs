@@ -348,6 +348,20 @@ pub mod omp_exec {
 	pub const DOWNLOAD_BYTES: &str = "omp.exec.download.bytes";
 	/// Hostname of the remote REAPI or SSH endpoint.
 	pub const ENDPOINT_HOST: &str = "omp.exec.endpoint.host";
+	/// Worker name reported by `ExecutedActionMetadata`.
+	pub const WORKER: &str = "omp.exec.worker";
+	/// Worker-side queue wait time in milliseconds (queued → worker_start).
+	pub const WORKER_QUEUE_MS: &str = "omp.exec.worker.queue_ms";
+	/// Worker-side total elapsed time in milliseconds (worker_start →
+	/// worker_completed).
+	pub const WORKER_WALL_MS: &str = "omp.exec.worker.wall_ms";
+	/// Worker-side input-fetch time in milliseconds.
+	pub const WORKER_INPUT_FETCH_MS: &str = "omp.exec.worker.input_fetch_ms";
+	/// Worker-side command execution time in milliseconds (execution_start →
+	/// execution_completed).
+	pub const WORKER_EXEC_MS: &str = "omp.exec.worker.exec_ms";
+	/// Worker-side output-upload time in milliseconds.
+	pub const WORKER_OUTPUT_UPLOAD_MS: &str = "omp.exec.worker.output_upload_ms";
 }
 
 #[cfg(test)]
