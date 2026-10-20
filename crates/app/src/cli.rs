@@ -20,7 +20,7 @@ use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
 use omp_catalog::settings::TierSetting;
 use omp_core::{FastHashSet, SecretString, Str, encoding::hex};
-use omp_driver::{cleanse::CleanseArgs, compress::CompressArgs};
+use omp_driver::{adw::remote::AdwExecPolicy, cleanse::CleanseArgs, compress::CompressArgs};
 use omp_envd::{site::TrustedModule, worker::ExtHostSpec};
 use omp_ext::{config::ContributedCliValue, workspace_trust::WorkspaceTrust};
 const ROOT_LICENSE: &str = include_str!("../../../LICENSE");
@@ -1078,6 +1078,9 @@ pub enum AdwCommand {
 		/// Attempts one phase may consume before the run halts.
 		#[arg(long, default_value_t = omp_adw::DEFAULT_MAX_ATTEMPTS)]
 		max_attempts: u32,
+		/// Placement for this process only, overriding `sv_exec_policy`.
+		#[arg(long, value_name = "POLICY")]
+		exec_policy: Option<AdwExecPolicy>,
 	},
 }
 
@@ -4744,6 +4747,29 @@ mod tests {
 				.expect_err("command help is a clap display")
 				.kind(),
 			ErrorKind::DisplayHelp
+		);
+	}
+
+	#[test]
+	fn adw_run_exec_policy_parses_the_typed_placement_and_rejects_unknown_values() {
+		let policy = |arguments: &[&str]| {
+			let Some(Command::Adw(AdwArgs { command: AdwCommand::Run { exec_policy, .. } })) =
+				parse_from_os(arguments.iter().map(OsString::from))
+					.expect("adw run parses")
+					.command
+			else {
+				panic!("adw run for {arguments:?}");
+			};
+			exec_policy
+		};
+		assert_eq!(policy(&["omp", "adw", "run", "verify"]), None);
+		assert_eq!(
+			policy(&["omp", "adw", "run", "verify", "--exec-policy", "remote-only"]),
+			Some(AdwExecPolicy::RemoteOnly)
+		);
+		assert!(
+			parse_from_os(["omp", "adw", "run", "verify", "--exec-policy", "elsewhere"].map(OsString::from))
+				.is_err()
 		);
 	}
 
