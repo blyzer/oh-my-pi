@@ -1080,7 +1080,7 @@ pub enum AdwCommand {
 		max_attempts: u32,
 		/// Placement for this process only, overriding `sv_exec_policy`.
 		#[arg(long, value_name = "POLICY")]
-		exec_policy: Option<AdwExecPolicy>,
+		exec_policy:  Option<AdwExecPolicy>,
 	},
 }
 
@@ -4768,8 +4768,10 @@ mod tests {
 			Some(AdwExecPolicy::RemoteOnly)
 		);
 		assert!(
-			parse_from_os(["omp", "adw", "run", "verify", "--exec-policy", "elsewhere"].map(OsString::from))
-				.is_err()
+			parse_from_os(
+				["omp", "adw", "run", "verify", "--exec-policy", "elsewhere"].map(OsString::from)
+			)
+			.is_err()
 		);
 	}
 
