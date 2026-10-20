@@ -33,5 +33,6 @@ pub mod subagent;
 pub mod telemetry_upload;
 pub mod v1_import;
 pub use session_host::SessionHost;
+pub mod delegated_policy;
 pub mod delegated_resolver;
 pub mod workspace_trust;
