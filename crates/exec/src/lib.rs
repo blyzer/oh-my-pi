@@ -51,6 +51,7 @@ mod error;
 mod ids;
 mod place;
 mod platform;
+mod report;
 mod request;
 mod result;
 
@@ -74,6 +75,7 @@ pub use place::{Placement, admit, place};
 pub use platform::{
 	Arch, Need, NeedIndexError, NeedSet, Os, Platform, PlatformRequirement, ResourceRequirements,
 };
+pub use report::{BuildReport, BuildStatus};
 pub use request::{
 	BuildCommand, CacheDecl, Eligibility, EnvEntry, Exclusion, ExclusionCounts, ExecutionPlan,
 	ExecutionRequest, InputSet, Intent, OutputSpec,
