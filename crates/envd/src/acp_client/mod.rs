@@ -29,7 +29,7 @@
 pub mod session;
 pub mod wire;
 
-pub use session::{AcpSession, InboundMessage, MAX_FRAME_BYTES, SessionError};
+pub use session::{AcpSession, InboundMessage, MAX_FRAME_BYTES, MalformedLine, SessionError};
 
 #[cfg(test)]
 mod tests;

@@ -82,20 +82,35 @@ pub enum InboundMessage {
 	Malformed {
 		/// The raw bytes.
 		line:   Bytes,
-		/// A human-readable description of the parse failure.
-		reason: Str,
+		/// Why the line was refused.
+		reason: MalformedLine,
 	},
+}
+
+/// Why an inbound line is not a JSON-RPC message.
+#[derive(Debug, thiserror::Error)]
+pub enum MalformedLine {
+	/// The line is not valid UTF-8.
+	#[error("line is not valid UTF-8")]
+	Utf8(#[source] std::str::Utf8Error),
+	/// The line is not a JSON-RPC envelope.
+	#[error("line is not a JSON-RPC envelope")]
+	Envelope(#[source] serde_json::Error),
+	/// The envelope is JSON but is neither a request, a response, nor a
+	/// notification.
+	#[error("envelope is neither a request, a response nor a notification")]
+	Unclassified,
 }
 
 /// Error produced by [`AcpSession`].
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
 	/// A frame violated the hard size cap or a stream-level I/O error.
-	#[error("framing error: {0}")]
+	#[error("framing error")]
 	Frame(#[from] FrameError),
 	/// Serializing an outbound message failed (should be impossible for our
 	/// typed structs, but the type system requires the branch).
-	#[error("serialization failed: {0}")]
+	#[error("serialization failed")]
 	Serialize(#[source] serde_json::Error),
 }
 
@@ -240,20 +255,20 @@ impl<R: AsyncRead + Unpin> AcpSession<R> {
 			// Borrow the bytes for zero-copy deserialization of the envelope.
 			let text = match std::str::from_utf8(&line) {
 				Ok(s) => s,
-				Err(e) => {
+				Err(error) => {
 					return Ok(Some(InboundMessage::Malformed {
 						line,
-						reason: Str::new(e.to_string()),
+						reason: MalformedLine::Utf8(error),
 					}));
 				},
 			};
 
 			let env: Envelope<'_> = match serde_json::from_str(text) {
 				Ok(e) => e,
-				Err(e) => {
+				Err(error) => {
 					return Ok(Some(InboundMessage::Malformed {
 						line,
-						reason: Str::new(e.to_string()),
+						reason: MalformedLine::Envelope(error),
 					}));
 				},
 			};
@@ -263,7 +278,7 @@ impl<R: AsyncRead + Unpin> AcpSession<R> {
 				None => {
 					return Ok(Some(InboundMessage::Malformed {
 						line,
-						reason: Str::new_static("not a valid JSON-RPC message"),
+						reason: MalformedLine::Unclassified,
 					}));
 				},
 			};
