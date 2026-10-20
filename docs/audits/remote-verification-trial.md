@@ -140,8 +140,32 @@ from the warm average. Cache state was not recorded.
 CPU passes. Peak memory misses the 5% threshold. Warm wall time misses 1.5x on the three-rep mean
 (1.83x); only rep 3 (210.9 s, 1.25x) is under it, and whether reps 1 and 2 hit a cold runner is not
 recorded. The earlier "2 s" wall figure was an action-cache hit and does not satisfy the criterion.
-Worker-side timing fields are captured in spans via Task 2. Client numbers for the omp REAPI backend
-itself (`omp adw run --exec-policy remote-only`) are still unmeasured.
+Worker-side timing fields are captured in spans via Task 2.
+
+### G1 measurement through the omp REAPI backend, `omp-core`, 2026-10-20
+
+`omp adw run g1 --exec-policy remote-only --max-attempts 1` (one code phase, `just test-pkg omp-core`)
+against local `just test-pkg omp-core`, interleaved, 3 repetitions, `buildbuddy` profile, digest-pinned
+image `ghcr.io/blyzer/omp-reapi@sha256:107dbf04...` (tag `2026-10-16-path`), `sv_exec_remote_cache off`.
+Local rep 1 was cold and is excluded from the warm average.
+
+| Metric | Local warm (reps 2-3) | omp REAPI client (reps 1-3) | Ratio |
+|---|---|---|---|
+| Wall | 10.9 s | 64.3 s (45.5, 53.2, 94.1) | 5.9x |
+| CPU (user+sys) | 11.2 s | 2.2 s | 20% |
+| Peak memory (process-tree RSS) | 438 MiB | 227 MiB | 52% |
+
+All three criteria fail on this recipe. The recipe is too small to judge them: the client spends a fixed
+capture (3816 files, 77 MB) and upload (4403 CAS lookups, all hits) cost of tens of seconds, and its CPU and
+memory are the debug `omp` binary, not the recipe's work. The ADR targets the link-bound `omp-envd` recipe.
+
+`omp-envd` did not run remotely: the pinned image has no `cmake`, so `audiopus_sys` fails to build (remote exit
+101; `omp adw run` now prints the rejected attempt's remote stdout and stderr, which showed this). The image
+recipe (`scripts/exec-image/Dockerfile`) installs `pkg-config` and `build-essential` but not `cmake`. A traced
+attempt for the `omp-envd` action showed upload 34 s, queue 57 ms, worker input fetch 0.3 s, execute 73.9 s.
+These are one trace, not a repetition set.
+
+Not recorded: the remote runner's warm or cold state, and the `omp-envd` client numbers.
 
 ---
 
