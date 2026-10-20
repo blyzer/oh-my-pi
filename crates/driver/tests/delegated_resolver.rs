@@ -468,7 +468,8 @@ async fn wait_time_at_approval_desk_excluded_from_turn_timeout() {
 		request.respond(approve_once()).expect("reply sent");
 	};
 	let (tx, rx) = flume::unbounded();
-	let turn_fut = session.run_turn(&input(), tight, &cancel, &mut resolver, &tx);
+	let input = input();
+	let turn_fut = session.run_turn(&input, tight, &cancel, &mut resolver, &tx);
 	let (result, ()) = tokio::join!(turn_fut, driver);
 	drop(tx);
 	assert!(
