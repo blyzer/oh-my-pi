@@ -33,3 +33,4 @@ pub mod telemetry_upload;
 pub mod v1_import;
 pub use session_host::SessionHost;
 pub mod workspace_trust;
+pub mod delegated_resolver;
