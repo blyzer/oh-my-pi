@@ -6,6 +6,15 @@ Closes: CLI-4, CLI-5, CLI-6 (`docs/parked/2026-10-10-native-cli-integration-next
 Context: `docs/adr/0043-native-cli-integration.md` (proposed, not edited by this note),
 `docs/research/native-cli-integration.md`.
 
+> **Superseded in part, 2026-10-20 (owner decision, see ADR 0043 "Amendment 2026-10-20").** The verdict
+> tables and "remain disabled" statements below are the 2026-10-13/14 evidence and are left as written. What
+> changed: (1) section 6.1 became the plan, with one ACP client and per-CLI launch profiles; (2) the gate is now a
+> recorded handshake transcript per binary, not the absence of implementation; (3) **Gemini CLI is dropped**,
+> because Google stopped serving it for individual, AI Pro and AI Ultra accounts on 2026-06-18; (4) the "Codex,
+> Claude and Antigravity do not expose ACP" line is true of the CLIs but not of their bridges: Claude has
+> `@agentclientprotocol/claude-agent-acp`, Antigravity has Google's `agy_acp_server.par`, and DeepSeek Harness
+> (`dsh --profile acp`, not covered below) exposes ACP itself. Codex keeps its native app-server adapter.
+
 # Update after official-source review (read 2026-10-14)
 
 The U9-U27 register was rechecked against vendor documentation, vendor repositories, and tagged releases only. **14 of 19 items moved from UNVERIFIED:** 9 are now `confirmed`, 5 are `refuted`, and 5 remain `UNVERIFIED`. The capability gate does not change for any vendor: no installed-binary transcript or equivalent end-to-end proof was added.
