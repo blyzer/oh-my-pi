@@ -5,16 +5,12 @@
 # nothing may be fetched at run time.
 #
 # Build and pin workflow (run when rust-toolchain.toml, fetch-python.sh TAG/VER,
-# or the nextest pin changes):
+# or the nextest pin changes). The build context MUST be the repository root,
+# because the CPython layer copies crates/py:
 #
-#   docker build -t omp-exec-remote:candidate scripts/exec-image/
-#   DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' omp-exec-remote:candidate \
-#            | sed 's/.*@//')
-#   docker tag omp-exec-remote:candidate ghcr.io/blyzer/omp-reapi@$DIGEST
-#   docker push ghcr.io/blyzer/omp-reapi@$DIGEST
+#   docker build -f scripts/exec-image/Dockerfile -t omp-exec-remote:candidate .
 #
-# Then update sv_exec_remote_image to the new digest and commit.
-# See scripts/exec-image/README.md for the full procedure.
+# Then push the tag and read the registry digest; see scripts/exec-image/README.md.
 
 FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
 
@@ -51,6 +47,16 @@ RUN apt-get update \
 # which fails on older gcc, per the comment in remote-verify-runner.sh).
 RUN cargo install --locked just \
     && ln -sf /usr/local/cargo/bin/just /usr/local/bin/just
+
+# The pinned toolchain. The remote action has no network, so rustup cannot fetch it
+# on first use. Channel and components come from rust-toolchain.toml so the image
+# cannot drift from the repository pin.
+COPY rust-toolchain.toml /tmp/rust-toolchain.toml
+RUN channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml) \
+    && components=$(sed -n 's/^components *= *\[\(.*\)\]/\1/p' /tmp/rust-toolchain.toml | tr -d '" ' | tr ',' ' ') \
+    && args="" && for c in $components; do args="$args -c $c"; done \
+    && rustup toolchain install "$channel" --profile minimal $args \
+    && rm /tmp/rust-toolchain.toml
 
 RUN curl -LsSf https://get.nexte.st/0.9.146/linux \
         | tar zxf - -C /usr/local/cargo/bin \
