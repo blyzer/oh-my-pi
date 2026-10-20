@@ -55,6 +55,10 @@ pub struct PhaseRecord {
 	pub status:   PhaseStatus,
 	/// What the run decided in response, rendered for the operator.
 	pub decision: Str,
+	/// What the host reported for this attempt (a code phase's captured
+	/// output, a reviewer's reason). Empty when the host stopped before
+	/// producing a result.
+	pub feedback: Str,
 }
 
 /// The typed failure of one phase dispatch.
@@ -216,6 +220,7 @@ pub async fn run<H: AdwHost>(
 							attempt,
 							status: PhaseStatus::Failed,
 							decision: Str::new_static("failed"),
+							feedback: Str::default(),
 						});
 						return Ok(failed(records, phase.name.as_str(), attempt, source));
 					},
@@ -257,6 +262,7 @@ pub async fn run<H: AdwHost>(
 						PhaseStatus::Rejected
 					},
 					decision: describe(&outcome),
+					feedback,
 				});
 			},
 			// Dispatch is serial, so nothing is ever in flight here; a wait
@@ -456,6 +462,7 @@ mod tests {
 			attempt:  1,
 			status:   PhaseStatus::Failed,
 			decision: Str::new_static("failed"),
+			feedback: Str::default(),
 		}]);
 		assert!(matches!(
 			exit.status,
