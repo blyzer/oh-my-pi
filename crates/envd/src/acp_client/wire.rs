@@ -337,24 +337,25 @@ pub struct UpdateParams {
 pub enum SessionUpdateEnvelope {
 	/// A chunk of the agent's response text.
 	AgentMessageChunk {
-		#[serde(default)]
+		#[serde(default, rename = "messageId")]
 		message_id: Option<Str>,
 		content:    TextContent,
 	},
 	/// A chunk of the user's own message being echoed back.
 	UserMessageChunk {
-		#[serde(default)]
+		#[serde(default, rename = "messageId")]
 		message_id: Option<Str>,
 		content:    TextContent,
 	},
 	/// A chunk of the agent's reasoning.
 	AgentThoughtChunk {
-		#[serde(default)]
+		#[serde(default, rename = "messageId")]
 		message_id: Option<Str>,
 		content:    TextContent,
 	},
 	/// A new tool call has been initiated.
 	ToolCall {
+		#[serde(rename = "toolCallId")]
 		tool_call_id: Str,
 		#[serde(default)]
 		title:        Option<Str>,
@@ -362,6 +363,7 @@ pub enum SessionUpdateEnvelope {
 	},
 	/// An update to an existing tool call.
 	ToolCallUpdate {
+		#[serde(rename = "toolCallId")]
 		tool_call_id: Str,
 		#[serde(default)]
 		status:       Option<ToolCallStatus>,
@@ -374,16 +376,25 @@ pub enum SessionUpdateEnvelope {
 	/// The agent's execution plan.
 	Plan { entries: Vec<IgnoredAny> },
 	/// Available slash commands changed.
-	AvailableCommandsUpdate { available_commands: Vec<IgnoredAny> },
+	AvailableCommandsUpdate {
+		#[serde(rename = "availableCommands")]
+		available_commands: Vec<IgnoredAny>,
+	},
 	/// Current mode changed.
-	CurrentModeUpdate { current_mode_id: Str },
+	CurrentModeUpdate {
+		#[serde(rename = "currentModeId")]
+		current_mode_id: Str,
+	},
 	/// Configuration options changed.
-	ConfigOptionUpdate { config_options: Vec<IgnoredAny> },
+	ConfigOptionUpdate {
+		#[serde(rename = "configOptions")]
+		config_options: Vec<IgnoredAny>,
+	},
 	/// Session metadata (title, timestamp) changed.
 	SessionInfoUpdate {
 		#[serde(default)]
 		title:      Option<Str>,
-		#[serde(default)]
+		#[serde(default, rename = "updatedAt")]
 		updated_at: Option<Str>,
 	},
 	/// Context window usage and cumulative cost.
@@ -402,6 +413,7 @@ pub enum SessionUpdateEnvelope {
 	},
 	/// A context compaction update.
 	CompactionUpdate {
+		#[serde(rename = "compactionId")]
 		compaction_id: Str,
 		status:        Str,
 		#[serde(default)]
@@ -410,7 +422,11 @@ pub enum SessionUpdateEnvelope {
 		error:         Option<Str>,
 	},
 	/// A content block appended to a compaction's summary.
-	CompactionSummaryChunk { compaction_id: Str, content: IgnoredAny },
+	CompactionSummaryChunk {
+		#[serde(rename = "compactionId")]
+		compaction_id: Str,
+		content:       IgnoredAny,
+	},
 	/// An unknown update variant; stored as raw bytes for forward-compat.
 	#[serde(other)]
 	Unknown,

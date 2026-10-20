@@ -27,11 +27,14 @@ use crate::line_reader::{FrameError, LineReader};
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 /// Construct a session paired with a full mock agent (read + write).
-fn make_pair(cap: usize) -> (AcpSession<DuplexStream>, DuplexStream, DuplexStream) {
+fn make_pair(cap: usize) -> (DuplexStream, AcpSession<DuplexStream>, DuplexStream) {
 	let (agent_to_client_read, agent_to_client_write) = duplex(256 * 1024);
 	let (client_to_agent_read, client_to_agent_write) = duplex(256 * 1024);
 	let session = AcpSession::new(agent_to_client_read, client_to_agent_write, cap);
-	(session, client_to_agent_read, agent_to_client_write)
+	// Return: (client_to_agent_read, session, agent_to_client_write)
+	// Tests destructure as (_, mut session, mut agent_tx) or (mut read, mut
+	// session, mut agent_tx)
+	(client_to_agent_read, session, agent_to_client_write)
 }
 
 async fn recv_line(stream: &mut DuplexStream) -> String {
