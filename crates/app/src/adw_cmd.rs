@@ -8,7 +8,7 @@ use std::{
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
 use omp_driver::{
-	adw::{RunStatus, definition, production::ProductionAdwHost},
+	adw::{RunStatus, definition, production::ProductionAdwHost, remote::AdwExecPolicy},
 	workspace_trust::evaluate_workspace,
 };
 use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
@@ -20,12 +20,13 @@ use crate::{cli::AdwCommand, process_ctx_with};
 pub async fn run(command: AdwCommand) -> miette::Result<()> {
 	match command {
 		AdwCommand::List { project } => list(&project),
-		AdwCommand::Run { workflow, project, model, max_attempts } => {
+		AdwCommand::Run { workflow, project, model, max_attempts, exec_policy } => {
 			execute(
 				&workflow,
 				&project,
 				model.unwrap_or_else(|| Str::new_static("default")),
 				max_attempts,
+				exec_policy,
 			)
 			.await
 		},
@@ -61,10 +62,15 @@ async fn execute(
 	project: &Path,
 	model: Str,
 	max_attempts: u32,
+	exec_policy: Option<AdwExecPolicy>,
 ) -> miette::Result<()> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let host = open_host(project, data_dir, model)?;
+	let host = match exec_policy {
+		Some(policy) => host.with_exec_policy(policy),
+		None => host,
+	};
 	let cancel = CancellationToken::new();
 	let exit = {
 		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);
@@ -95,6 +101,9 @@ async fn execute(
 			},
 			record.decision
 		);
+		if record.status != omp_driver::adw::PhaseStatus::Accepted && !record.feedback.is_empty() {
+			println!("{}", record.feedback);
+		}
 	}
 	match exit.status {
 		RunStatus::Accepted => println!("Workflow `{workflow}` accepted every phase."),
