@@ -112,22 +112,60 @@ the `ActionResult`):
 | `omp.exec.worker.exec_ms` | `execution_start_timestamp` → `execution_completed_timestamp` |
 | `omp.exec.worker.output_upload_ms` | `output_upload_start_timestamp` → `output_upload_completed_timestamp` |
 
-The `usage_stats.cpu_nanos` and `usage_stats.peak_memory_bytes` fields from the assignment brief are
-BuildBuddy-specific extensions not present in the standard REAPI v2 proto vendored here; they are not
-wired. Client CPU and peak memory criteria below therefore remain unassessable until a
-BuildBuddy-specific auxiliary-metadata decoder is added or the fields are observed on a live run.
+Client CPU and peak memory do not need BuildBuddy `usage_stats` fields. ADR 0040 §Measurement plan
+samples the client's own process tree, which `scripts/measure-recipe.py` does (wall and user+sys CPU
+from `wait4` rusage of the whole tree, summed process-tree RSS once a second).
+
+### G1 measurement, `omp-envd`, 2026-10-20
+
+Local recipe `just test-pkg omp-envd` against `just remote-test-pkg omp-envd` (the `bb remote` path,
+not the omp REAPI backend). Three repetitions each. The local arm ran first, then the remote arm, so
+the arms are not interleaved. Local rep 1 was a cold build (1357.6 s, 1356.5 s CPU) and is excluded
+from the warm average. Cache state was not recorded.
+
+| Metric | Local warm (reps 2-3) | Remote client (reps 1-3) | Ratio |
+|---|---|---|---|
+| Wall | 168.4 s | 308.7 s (270.3, 444.8, 210.9) | 1.83x |
+| CPU (user+sys) | 100.3 s | 1.5 s | 1.5% |
+| Peak memory (process-tree RSS) | 2616.6 MiB | 201.9 MiB | 7.7% |
 
 ### Success-criterion status (partial, ADR 0040 §Measurement plan)
 
 | Criterion | Threshold | Observed | Met? |
 |---|---|---|---|
-| Warm remote wall time within 1.5× warm local | ≤ 1.5× (warm local ~3 min 26 s, from Slice 0 run 10) | 2 s | ✅ well under |
-| Client local CPU < 5% of local recipe | < 5% of ~463 s (warm local) | not yet sampled (no BuildBuddy cpu_nanos extension) | — |
-| Client peak memory < 5% of local peak | < 5% of ~3.6 GB (warm local) | not yet sampled (no BuildBuddy peak_memory_bytes extension) | — |
+| Warm remote wall time within 1.5× warm local | ≤ 1.5× | 1.83× on the 3-rep mean (168.4 s local, 308.7 s remote) | no |
+| Client local CPU < 5% of local recipe | < 5% | 1.5% | yes |
+| Client peak memory < 5% of local peak | < 5% | 7.7% (about 200 MiB, the `bb` client) | no |
 
-The wall-time criterion is satisfied. Worker-side timing fields are now captured in spans via Task 2
-(worker queue, wall, input-fetch, exec, and output-upload milliseconds). Client CPU and peak memory
-require a BuildBuddy-specific extension proto not in the vendored REAPI v2; those criteria remain open.
+CPU passes. Peak memory misses the 5% threshold. Warm wall time misses 1.5x on the three-rep mean
+(1.83x); only rep 3 (210.9 s, 1.25x) is under it, and whether reps 1 and 2 hit a cold runner is not
+recorded. The earlier "2 s" wall figure was an action-cache hit and does not satisfy the criterion.
+Worker-side timing fields are captured in spans via Task 2.
+
+### G1 measurement through the omp REAPI backend, `omp-core`, 2026-10-20
+
+`omp adw run g1 --exec-policy remote-only --max-attempts 1` (one code phase, `just test-pkg omp-core`)
+against local `just test-pkg omp-core`, interleaved, 3 repetitions, `buildbuddy` profile, digest-pinned
+image `ghcr.io/blyzer/omp-reapi@sha256:107dbf04...` (tag `2026-10-16-path`), `sv_exec_remote_cache off`.
+Local rep 1 was cold and is excluded from the warm average.
+
+| Metric | Local warm (reps 2-3) | omp REAPI client (reps 1-3) | Ratio |
+|---|---|---|---|
+| Wall | 10.9 s | 64.3 s (45.5, 53.2, 94.1) | 5.9x |
+| CPU (user+sys) | 11.2 s | 2.2 s | 20% |
+| Peak memory (process-tree RSS) | 438 MiB | 227 MiB | 52% |
+
+All three criteria fail on this recipe. The recipe is too small to judge them: the client spends a fixed
+capture (3816 files, 77 MB) and upload (4403 CAS lookups, all hits) cost of tens of seconds, and its CPU and
+memory are the debug `omp` binary, not the recipe's work. The ADR targets the link-bound `omp-envd` recipe.
+
+`omp-envd` did not run remotely: the pinned image has no `cmake`, so `audiopus_sys` fails to build (remote exit
+101; `omp adw run` now prints the rejected attempt's remote stdout and stderr, which showed this). The image
+recipe (`scripts/exec-image/Dockerfile`) installs `pkg-config` and `build-essential` but not `cmake`. A traced
+attempt for the `omp-envd` action showed upload 34 s, queue 57 ms, worker input fetch 0.3 s, execute 73.9 s.
+These are one trace, not a repetition set.
+
+Not recorded: the remote runner's warm or cold state, and the `omp-envd` client numbers.
 
 ---
 
