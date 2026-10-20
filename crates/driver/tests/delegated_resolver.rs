@@ -12,13 +12,12 @@ use std::{sync::Arc, time::Duration};
 use omp_agent::{
 	ApprovalBook, ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource,
 	delegated::{
-		ActiveSession, ApprovalPosture, AuthStatus, Capabilities, CliSessionId, CliVersion,
-		DelegatedEvent, DelegatedPolicy, DelegatedPrompt, DenyAll, ExecutionMode, ExecutorError,
-		Feature, FeatureSet, LifecycleEvent, NetworkPosture, PermissionAnswer, PermissionKind,
-		PermissionRequest, PermissionTally, ProbeReport, PromptId, PromptRole, PromptSection,
-		SandboxPosture, SessionRequest, TurnEnd, TurnId, TurnInput, TurnLimits, TurnReport,
-		UnknownAuth, VersionRange,
-		mock::{MockConfig, MockExecutor, MockSession, Step},
+		ActiveSession, ApprovalPosture, Capabilities, CliVersion, DelegatedEvent, DelegatedPolicy,
+		DelegatedPrompt, ExecutionMode, ExecutorError, FeatureSet, LifecycleEvent, NetworkPosture,
+		PermissionAnswer, PermissionKind, PermissionRequest, PermissionResolver, PermissionTally,
+		PromptId, PromptRole, PromptSection, SandboxPosture, SessionRequest, TurnEnd, TurnId,
+		TurnInput, TurnLimits, TurnReport, UnknownAuth, VersionRange,
+		mock::{MockExecutor, MockSession, Step},
 		start_session,
 	},
 };
@@ -131,7 +130,7 @@ async fn open(exec: &MockExecutor) -> Session {
 }
 
 /// Runs one turn with `resolver`, returns the result and all forwarded events.
-async fn run_with<R: omp_agent::delegated::PermissionResolver>(
+async fn run_with<R: PermissionResolver>(
 	session: &mut Session,
 	resolver: &mut R,
 	cancel: &CancellationToken,
