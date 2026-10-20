@@ -11,6 +11,7 @@ pub mod cleanse;
 pub mod collab;
 pub mod commit;
 pub mod compress;
+pub mod delegated_prompt;
 pub mod discovery;
 pub mod ext_updates;
 pub mod headless;
