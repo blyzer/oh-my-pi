@@ -30,11 +30,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	executor::{CODEX_VERSIONS, CodexExecutor, capabilities},
-	frame::LineReader,
 	policy::wire_policy,
 	session::{CodexSession, SessionConfig, Transport, parse_version},
 	wire,
 };
+use crate::line_reader::LineReader;
 
 type Active = ActiveSession<CodexSession>;
 

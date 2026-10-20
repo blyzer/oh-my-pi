@@ -1,6 +1,9 @@
 //! Environment-host composition for project-scoped filesystem, process,
 //! document, tool, and extension authority.
 
+/// ACP (Agent Client Protocol) wire transport — newline-delimited JSON-RPC,
+/// typed serde structs, and cancel-safe correlation table.
+pub mod acp_client;
 /// Approval-tier resolution and env-owned invocation admission.
 pub mod admission;
 /// Approval prompts relayed to the connection that issued a daemon command.
@@ -41,6 +44,9 @@ pub mod host_info;
 pub mod host_settings;
 mod http_egress;
 mod journal_runtime;
+/// Shared cancel-safe, size-capped newline reader used by both `acp_client`
+/// and `codex_app_server`.
+pub mod line_reader;
 #[cfg(test)]
 mod loopback_upstream;
 pub mod lsp_settings;

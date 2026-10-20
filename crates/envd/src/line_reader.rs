@@ -2,6 +2,10 @@
 //!
 //! The reader owns its partial-line buffer, so [`LineReader::next_line`] is
 //! cancel-safe: dropping the future between reads loses no byte.
+//!
+//! Both the Codex `app-server` adapter and the ACP server transport use this
+//! reader. It lives here rather than inside either module so neither has to
+//! re-implement it.
 
 use bytes::{Buf as _, Bytes, BytesMut};
 use thiserror::Error;
