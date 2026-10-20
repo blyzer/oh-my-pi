@@ -104,7 +104,7 @@ pub(super) fn capabilities() -> Capabilities {
 }
 
 /// An open version range: ACP versioning is protocol-level, not CLI-level.
-fn open_version_range() -> omp_agent::delegated::VersionRange {
+const fn open_version_range() -> omp_agent::delegated::VersionRange {
 	omp_agent::delegated::VersionRange {
 		min_inclusive: omp_agent::delegated::CliVersion::new(0, 0, 0),
 		max_exclusive: None,

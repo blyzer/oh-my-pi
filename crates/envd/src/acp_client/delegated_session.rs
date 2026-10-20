@@ -201,7 +201,7 @@ impl AcpDelegatedSession {
 		))
 	}
 
-	fn make_crashed(&mut self) -> ExecutorError {
+	fn make_crashed(&self) -> ExecutorError {
 		ExecutorError::Crashed { executor: self.executor.clone(), exit: ExitFact::Unknown }
 	}
 
@@ -287,10 +287,9 @@ impl AcpDelegatedSession {
 		match update.update {
 			wire::SessionUpdateEnvelope::AgentMessageChunk { ref content, .. } => {
 				if let Some(text) = &content.text {
-					self.queue.push_back(DelegatedEvent::AgentTextDelta {
-						turn: turn.clone(),
-						text: text.clone(),
-					});
+					self
+						.queue
+						.push_back(DelegatedEvent::AgentTextDelta { turn, text: text.clone() });
 				}
 			},
 			wire::SessionUpdateEnvelope::ToolCall { tool_call_id, title, status } => {
@@ -301,10 +300,10 @@ impl AcpDelegatedSession {
 					self
 						.queue
 						.push_back(DelegatedEvent::Tool(ToolEvent::Started {
-							turn:  turn.clone(),
-							call:  CallId::new(tool_call_id.clone()),
-							kind:  ToolKind::External,
-							label: label.clone(),
+							turn: turn.clone(),
+							call: CallId::new(tool_call_id.clone()),
+							kind: ToolKind::External,
+							label,
 						}));
 					self
 						.queue
@@ -400,19 +399,20 @@ impl AcpDelegatedSession {
 			});
 		// Wait briefly for the turn to complete naturally.
 		let grace = self.cfg.terminate_grace;
-		let _ = timeout(grace, async {
-			loop {
-				match self.read_one().await {
-					Ok(()) => {},
-					Err(_) => break,
-				}
-			}
-		})
-		.await;
+		let _ = timeout(grace, async { while self.read_one().await.is_ok() {} }).await;
 		Ok(())
 	}
 }
 
+#[allow(
+	unknown_lints,
+	reason = "unused_async_trait_impl is not available on every supported nightly"
+)]
+#[allow(
+	clippy::unused_async_trait_impl,
+	reason = "start_turn, answer and interrupt only enqueue frames; DelegatedSession requires \
+	          async methods"
+)]
 impl DelegatedSession for AcpDelegatedSession {
 	async fn start_turn<'a>(
 		&'a mut self,
@@ -421,24 +421,18 @@ impl DelegatedSession for AcpDelegatedSession {
 		self.queue.clear();
 		self.pending.clear();
 
-		// ACP delivers the whole prompt as a single `session/prompt` call with
-		// one text block per section.
+		// ACP's `session/prompt` has no system field, so every section is delivered
+		// verbatim as its own `text` block, in order. The digest is computed over
+		// the very sections delivered, so it equals `DelegatedPrompt::digest` by
+		// construction; merging sections would change the bytes and end every turn
+		// with `PromptRewritten`. The system/user split cannot be expressed on the
+		// wire: the agent sees an ordered list of text blocks.
 		let sections = input.prompt.sections();
-		let prompt_text: String = sections
-			.iter()
-			.map(|s| s.text.as_str())
-			.collect::<Vec<_>>()
-			.join("\n\n");
-
-		let delivered_section = omp_agent::delegated::PromptSection {
-			role: omp_agent::delegated::PromptRole::User,
-			text: Str::from(prompt_text),
-		};
-
-		// `blocks` borrows from `delivered_section.text`; it is dropped before
-		// we move `delivered_section` into the digest call.
 		let id = {
-			let blocks = vec![TextContentBlock::text(delivered_section.text.as_str())];
+			let blocks: Vec<TextContentBlock<'_>> = sections
+				.iter()
+				.map(|section| TextContentBlock::text(section.text.as_str()))
+				.collect();
 			self
 				.inner
 				.send_request("session/prompt", PromptParams {
@@ -447,10 +441,7 @@ impl DelegatedSession for AcpDelegatedSession {
 				})
 				.map_err(|error| session_error(&self.executor, error))?
 		};
-
-		// Compute the digest from what we actually sent: one concatenated
-		// section delivered as a user turn.
-		let forwarded = DelegatedPrompt::digest_of(&[delivered_section], input.prompt.bands());
+		let forwarded = DelegatedPrompt::digest_of(sections, input.prompt.bands());
 
 		self.turn_live = true;
 
@@ -716,7 +707,7 @@ where
 
 /// Maps an ACP `ToolCallStatus` to a `ToolOutcome` when the call is complete.
 /// Returns `None` when the status means the call is still in progress.
-fn tool_status_to_outcome(status: wire::ToolCallStatus) -> Option<ToolOutcome> {
+const fn tool_status_to_outcome(status: wire::ToolCallStatus) -> Option<ToolOutcome> {
 	match status {
 		wire::ToolCallStatus::Completed => Some(ToolOutcome::Succeeded),
 		wire::ToolCallStatus::Cancelled => Some(ToolOutcome::Interrupted),

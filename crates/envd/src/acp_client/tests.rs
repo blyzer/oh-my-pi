@@ -797,21 +797,38 @@ mod executor_tests {
 	// ─── prompt digest ────────────────────────────────────────────────────────
 
 	#[tokio::test]
-	async fn prompt_digest_is_stable_and_non_zero() {
+	async fn every_prompt_section_is_one_text_block_and_the_digest_matches_the_host() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let prompt = simple_prompt();
+		let sections = vec![
+			PromptSection { role: PromptRole::System, text: Str::new_static("be careful") },
+			PromptSection { role: PromptRole::User, text: Str::new_static("hello world") },
+		];
+		let bands = [omp_core::Hash32::new([7u8; 32]); 4];
+		let prompt = omp_agent::delegated::DelegatedPrompt::from_sections(sections, bands);
+		let expected = prompt.digest();
 		let input = omp_agent::delegated::TurnInput { prompt };
-
 		let peer_fut = async {
 			let line = peer.recv().await;
 			let v: serde_json::Value = serde_json::from_str(&line).unwrap();
 			let id = v["id"].as_i64().unwrap();
 			peer.reply(id, r#"{"stopReason":"end_turn"}"#).await;
+			v["params"]["prompt"].clone()
 		};
-		let (accepted, ()) = tokio::join!(session.start_turn(&input), peer_fut);
+		let (accepted, blocks) = tokio::join!(session.start_turn(&input), peer_fut);
 		let accepted = accepted.expect("start_turn ok");
-		assert_ne!(accepted.forwarded, omp_core::Hash32::new([0u8; 32]));
+		assert_eq!(
+			blocks,
+			serde_json::json!([
+				{"type": "text", "text": "be careful"},
+				{"type": "text", "text": "hello world"},
+			]),
+			"each section travels as its own block, verbatim and in order"
+		);
+		assert_eq!(
+			accepted.forwarded, expected,
+			"the host compares these digests; a mismatch ends the session as PromptRewritten"
+		);
 	}
 
 	// ─── permission ───────────────────────────────────────────────────────────
