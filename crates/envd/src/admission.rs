@@ -240,10 +240,11 @@ pub const fn effective_approval_mode(
 /// The mode a call to a tool of `confinement` is admitted under.
 ///
 /// [`effective_approval_mode`] sees the sandbox only for a tool that sandbox
-/// confines ([`Confinement::ExecSandbox`]). A [`Confinement::Host`] tool sees
-/// none, so a defaulted `Yolo` is `Write` for it even while the sandbox is
-/// active, and its mode is the same under every sandbox state. Explicit
-/// `Yolo` is respected for both only in a trusted workspace.
+/// confines ([`Confinement::ExecSandbox`]). A [`Confinement::Host`] or
+/// [`Confinement::DocumentAuthority`] tool sees none, so a defaulted `Yolo`
+/// is `Write` for it even while the sandbox is active, and its mode is the
+/// same under every sandbox state. Explicit `Yolo` is respected for all
+/// variants only in a trusted workspace.
 #[must_use]
 pub const fn call_approval_mode(
 	configured: ConfiguredApproval,
@@ -1774,7 +1775,9 @@ mod tests {
 		let sandboxes = [SandboxState::Active, SandboxState::Off, UNAVAILABLE];
 		let modes = [defaulted(Yolo), explicit(Yolo), explicit(Write), explicit(AlwaysAsk)];
 		for (domain, effects, declared_tier) in tier_envelopes() {
-			for confinement in [Confinement::Host, Confinement::ExecSandbox] {
+			for confinement in
+				[Confinement::Host, Confinement::ExecSandbox, Confinement::DocumentAuthority]
+			{
 				for configured in modes {
 					for sandbox in sandboxes {
 						let decision = resolve_approval(
@@ -1957,6 +1960,32 @@ mod tests {
 					"host_tool",
 					&effects,
 					Confinement::Host,
+					configured,
+					sandbox,
+					override_policy,
+				)
+			};
+			let unconfined = decide(SandboxState::Off);
+			for sandbox in sandbox_states() {
+				prop_assert_eq!(&decide(sandbox), &unconfined, "{}", sandbox);
+			}
+		}
+	}
+	proptest! {
+		/// `DocumentAuthority` tools are admitted identically to `Host` tools:
+		/// the sandbox never changes their decision.
+		#[test]
+		fn document_authority_tools_are_admitted_as_if_no_sandbox_existed(
+			effects in any_effects(),
+			configured in any_configured(),
+			override_policy in any_override(),
+		) {
+			let decide = |sandbox| {
+				resolve_approval(
+					"call",
+					"doc_tool",
+					&effects,
+					Confinement::DocumentAuthority,
 					configured,
 					sandbox,
 					override_policy,

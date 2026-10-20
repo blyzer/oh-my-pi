@@ -530,8 +530,9 @@ const _: () = assert!(size_of::<Effects>() <= 96, "Effects must stay compact");
 /// extension, or an MCP server sends never carries it. Approval reads it to
 /// decide whether an active sandbox counts as confinement for the call: a
 /// defaulted `yolo` that only an active sandbox keeps alive covers
-/// [`Confinement::ExecSandbox`] tools, and a [`Confinement::Host`] tool is
-/// admitted exactly as it would be with no sandbox at all.
+/// [`Confinement::ExecSandbox`] tools; a [`Confinement::Host`] or
+/// [`Confinement::DocumentAuthority`] tool is admitted exactly as it would be
+/// with no sandbox at all.
 #[derive(
 	Clone,
 	Copy,
@@ -567,6 +568,15 @@ pub enum Confinement {
 	/// own jobs run unsandboxed in the session process, and neither variant
 	/// accounts for them.
 	ExecSandbox,
+	/// Effects happen in the environment host and exclusively through the
+	/// document authority: the tool reads or writes documents only through the
+	/// document host, which enforces the write scope per call. An active sandbox
+	/// confines none of its declared effects. Admission is identical to `Host`.
+	///
+	/// This is the confinement for `write`, `edit`, and `lsp`: tools whose
+	/// every document write routes through the document host and is therefore
+	/// naturally scoped by any active write scope.
+	DocumentAuthority,
 }
 
 impl Confinement {
