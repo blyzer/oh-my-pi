@@ -437,3 +437,673 @@ fn cancel_notification_serializes_correctly() {
 	assert!(json.contains("\"method\":\"session/cancel\""), "{json}");
 	assert!(json.contains("\"sessionId\":\"sess1\""), "{json}");
 }
+
+// ─── AcpExecutor / AcpDelegatedSession tests ─────────────────────────────────
+
+mod executor_tests {
+	use std::{path::PathBuf, time::Duration};
+
+	use omp_agent::delegated::{
+		ApprovalPosture, CliSessionId, DelegatedEvent, DelegatedSession, ExecutorError, FrameFault,
+		NetworkPosture, PermissionAnswer, PromptRole, PromptSection, SandboxPosture, SessionRequest,
+		UnknownAuth,
+	};
+	use omp_core::Str;
+	use tokio::io::{AsyncWriteExt as _, DuplexStream, duplex};
+
+	use crate::{
+		acp_client::{
+			delegated_session::{AcpDelegatedSession, AcpSessionConfig},
+			executor::{self, AcpExecutor},
+			policy::{ACP_POLICY, is_supported},
+		},
+		line_reader::LineReader,
+	};
+
+	// ─── helpers ──────────────────────────────────────────────────────────────
+
+	const TIMEOUT: Duration = Duration::from_secs(5);
+
+	fn cfg() -> AcpSessionConfig {
+		AcpSessionConfig {
+			handshake_timeout: TIMEOUT,
+			terminate_grace:   Duration::from_millis(100),
+			max_frame_bytes:   64 * 1024,
+		}
+	}
+
+	fn strict_request(cwd: &'static str) -> SessionRequest {
+		SessionRequest {
+			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			workdir:      PathBuf::from(cwd),
+			policy:       ACP_POLICY,
+			resume:       None,
+			unknown_auth: UnknownAuth::Proceed,
+		}
+	}
+
+	fn simple_prompt() -> omp_agent::delegated::DelegatedPrompt {
+		let sections =
+			vec![PromptSection { role: PromptRole::User, text: Str::new_static("hello world") }];
+		let bands = [omp_core::Hash32::new([0u8; 32]); 4];
+		omp_agent::delegated::DelegatedPrompt::from_sections(sections, bands)
+	}
+
+	struct MockPeer {
+		client_rx: LineReader<DuplexStream>,
+		agent_tx:  DuplexStream,
+	}
+
+	impl MockPeer {
+		async fn recv(&mut self) -> String {
+			let line = tokio::time::timeout(TIMEOUT, self.client_rx.next_line())
+				.await
+				.expect("recv timeout")
+				.expect("frame error")
+				.expect("eof before line");
+			String::from_utf8(line.to_vec()).expect("utf8")
+		}
+
+		async fn send(&mut self, msg: &str) {
+			self
+				.agent_tx
+				.write_all(msg.as_bytes())
+				.await
+				.expect("write");
+			self.agent_tx.write_all(b"\n").await.expect("newline");
+		}
+
+		async fn reply(&mut self, id: i64, result: &str) {
+			self
+				.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#))
+				.await;
+		}
+
+		async fn close(&mut self) {
+			self.agent_tx.shutdown().await.expect("shutdown");
+		}
+
+		async fn handshake_new(&mut self, session_id: &str) {
+			let init = self.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&init).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			self
+				.reply(
+					id,
+					r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"authMethods":[]}"#,
+				)
+				.await;
+			let new = self.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&new).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			assert_eq!(v["method"], "session/new");
+			self
+				.reply(id, &format!(r#"{{"sessionId":"{session_id}"}}"#))
+				.await;
+		}
+
+		async fn handshake_load(&mut self, session_id: &str) {
+			let init = self.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&init).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			self
+				.reply(
+					id,
+					r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}"#,
+				)
+				.await;
+			let load = self.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&load).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			assert_eq!(v["method"], "session/load");
+			self
+				.reply(id, &format!(r#"{{"sessionId":"{session_id}"}}"#))
+				.await;
+		}
+	}
+
+	/// Open a session through the real handshake path.
+	async fn open_session(request: &SessionRequest) -> (AcpDelegatedSession, MockPeer) {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let mut peer =
+			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			request,
+			cfg(),
+		);
+		let (result, ()) = tokio::join!(handshake, peer.handshake_new("sess-1"));
+		let (session, _info) = result.expect("handshake ok");
+		(session, peer)
+	}
+
+	/// Drains events until the first `Permission`, skipping lifecycle events.
+	async fn next_permission(session: &mut AcpDelegatedSession) -> omp_agent::delegated::PromptId {
+		loop {
+			let event = session.next_event().await.expect("event");
+			if let DelegatedEvent::Permission(req) = event {
+				return req.prompt;
+			}
+		}
+	}
+
+	// ─── policy ───────────────────────────────────────────────────────────────
+
+	#[test]
+	fn strictest_is_supported_looser_is_not() {
+		assert!(is_supported(ACP_POLICY));
+		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+			SandboxPosture::WorkspaceWrite,
+			NetworkPosture::Disabled,
+			ApprovalPosture::AlwaysAsk,
+		)));
+		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+			SandboxPosture::ReadOnly,
+			NetworkPosture::Open,
+			ApprovalPosture::AlwaysAsk,
+		)));
+		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+			SandboxPosture::ReadOnly,
+			NetworkPosture::Disabled,
+			ApprovalPosture::Yolo,
+		)));
+	}
+
+	// ─── handshake ────────────────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn handshake_success_new_session() {
+		let request = strict_request("/tmp/work");
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let mut peer =
+			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		);
+		let (result, ()) = tokio::join!(handshake, peer.handshake_new("my-session"));
+		let (_session, info) = result.expect("handshake");
+		assert_eq!(info.session, CliSessionId::new("my-session"));
+		assert!(!info.resumed);
+		assert_eq!(info.workdir, PathBuf::from("/tmp/work"));
+		assert_eq!(info.policy, ACP_POLICY);
+	}
+
+	/// Non-empty `authMethods` → `AuthRequired`; no `session/new` is sent.
+	#[tokio::test]
+	async fn unauthenticated_agent_gives_auth_required() {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let request = strict_request("/tmp");
+
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		);
+		let peer_fut = async move {
+			let mut rx = LineReader::new(client_read, 64 * 1024);
+			let line = rx.next_line().await.expect("ok").expect("line");
+			let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+			let id = v["id"].as_i64().unwrap();
+			let mut tx = agent_write;
+			tx.write_all(
+				format!(
+					r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":1,"authMethods":["oauth2"]}}}}"#
+				)
+				.as_bytes(),
+			)
+			.await
+			.ok();
+			tx.write_all(b"\n").await.ok();
+			// No session/new response — client must not request it.
+		};
+		let (result, ()) = tokio::join!(handshake, peer_fut);
+		assert!(matches!(result, Err(ExecutorError::AuthRequired { .. })), "got: {result:?}");
+	}
+
+	/// Relative `workdir` is rejected before any I/O.
+	#[tokio::test]
+	async fn relative_cwd_rejected() {
+		let (agent_read, _aw) = duplex(1024);
+		let (_cr, client_write) = duplex(1024);
+		let request = SessionRequest {
+			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			workdir:      PathBuf::from("relative/path"),
+			policy:       ACP_POLICY,
+			resume:       None,
+			unknown_auth: UnknownAuth::Proceed,
+		};
+		let result = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		)
+		.await;
+		assert!(matches!(result, Err(ExecutorError::WorkdirNotAbsolute { .. })), "got: {result:?}");
+	}
+
+	/// `PolicyUnmappable` for anything looser than `STRICTEST`.
+	#[tokio::test]
+	async fn policy_looser_than_strictest_is_unmappable() {
+		let (agent_read, _aw) = duplex(1024);
+		let (_cr, client_write) = duplex(1024);
+		let request = SessionRequest {
+			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			workdir:      PathBuf::from("/tmp"),
+			policy:       omp_agent::delegated::DelegatedPolicy::new(
+				SandboxPosture::WorkspaceWrite,
+				NetworkPosture::Disabled,
+				ApprovalPosture::AlwaysAsk,
+			),
+			resume:       None,
+			unknown_auth: UnknownAuth::Proceed,
+		};
+		let result = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		)
+		.await;
+		assert!(matches!(result, Err(ExecutorError::PolicyUnmappable { .. })), "got: {result:?}");
+	}
+
+	/// `session/load` is used when the agent advertises it and `resume` is set.
+	#[tokio::test]
+	async fn session_load_used_on_resume() {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let mut peer =
+			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		let request = SessionRequest {
+			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			workdir:      PathBuf::from("/tmp"),
+			policy:       ACP_POLICY,
+			resume:       Some(CliSessionId::new("old-sess")),
+			unknown_auth: UnknownAuth::Proceed,
+		};
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		);
+		let (result, ()) = tokio::join!(handshake, peer.handshake_load("old-sess"));
+		let (_session, info) = result.expect("load ok");
+		assert!(info.resumed);
+		assert_eq!(info.session, CliSessionId::new("old-sess"));
+	}
+
+	/// When `loadSession` is false, resume returns `ResumeFailed`.
+	#[tokio::test]
+	async fn resume_fails_when_load_session_not_advertised() {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let request = SessionRequest {
+			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			workdir:      PathBuf::from("/tmp"),
+			policy:       ACP_POLICY,
+			resume:       Some(CliSessionId::new("old")),
+			unknown_auth: UnknownAuth::Proceed,
+		};
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		);
+		let peer_fut = async move {
+			let mut rx = LineReader::new(client_read, 64 * 1024);
+			let line = rx.next_line().await.expect("ok").expect("line");
+			let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+			let id = v["id"].as_i64().unwrap();
+			let mut tx = agent_write;
+			tx.write_all(
+				format!(
+					r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":false}},"authMethods":[]}}}}"#
+				)
+				.as_bytes(),
+			)
+			.await
+			.ok();
+			tx.write_all(b"\n").await.ok();
+		};
+		let (result, ()) = tokio::join!(handshake, peer_fut);
+		assert!(matches!(result, Err(ExecutorError::ResumeFailed { .. })), "got: {result:?}");
+	}
+
+	// ─── prompt digest ────────────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn prompt_digest_is_stable_and_non_zero() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let prompt = simple_prompt();
+		let input = omp_agent::delegated::TurnInput { prompt };
+
+		let peer_fut = async {
+			let line = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			peer.reply(id, r#"{"stopReason":"end_turn"}"#).await;
+		};
+		let (accepted, ()) = tokio::join!(session.start_turn(&input), peer_fut);
+		let accepted = accepted.expect("start_turn ok");
+		assert_ne!(accepted.forwarded, omp_core::Hash32::new([0u8; 32]));
+	}
+
+	// ─── permission ───────────────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn permission_allow_once_selects_allow_once() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+
+		// The peer sends the permission request, then immediately replies to
+		// session/prompt — the answer arrives asynchronously via session.answer().
+		let peer_fut = async {
+			let pl = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&pl).unwrap();
+			let pid = v["id"].as_i64().unwrap();
+			peer.send(
+				r#"{"jsonrpc":"2.0","id":99,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"tc1","title":"rm -rf /"},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Deny","kind":"reject_once"}]}}"#,
+			)
+			.await;
+			// Reply to session/prompt immediately; answer comes later.
+			peer.reply(pid, r#"{"stopReason":"end_turn"}"#).await;
+			peer
+		};
+		let (accepted, mut peer) = tokio::join!(session.start_turn(&input), peer_fut);
+		let _ = accepted.expect("start ok");
+
+		let prompt_id = next_permission(&mut session).await;
+		session
+			.answer(&prompt_id, PermissionAnswer::AllowOnce)
+			.await
+			.expect("answer");
+
+		// Now read the answer the session sent to the peer.
+		let answer = peer.recv().await;
+		assert!(answer.contains("\"outcome\":\"selected\""), "{answer}");
+		assert!(answer.contains("allow_once"), "{answer}");
+	}
+
+	#[tokio::test]
+	async fn permission_deny_selects_reject_once() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+
+		let peer_fut = async {
+			let pl = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&pl).unwrap();
+			let pid = v["id"].as_i64().unwrap();
+			peer.send(
+				r#"{"jsonrpc":"2.0","id":100,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"tc2","title":"edit"},"options":[{"optionId":"allow_once","name":"Allow","kind":"allow_once"},{"optionId":"reject_once","name":"Deny","kind":"reject_once"}]}}"#,
+			)
+			.await;
+			peer.reply(pid, r#"{"stopReason":"end_turn"}"#).await;
+			peer
+		};
+		let (accepted, mut peer) = tokio::join!(session.start_turn(&input), peer_fut);
+		let _ = accepted.expect("start ok");
+
+		let prompt_id = next_permission(&mut session).await;
+		session
+			.answer(&prompt_id, PermissionAnswer::Deny)
+			.await
+			.expect("answer");
+
+		let answer = peer.recv().await;
+		assert!(answer.contains("\"outcome\":\"selected\""), "{answer}");
+		assert!(answer.contains("reject_once"), "{answer}");
+	}
+
+	/// When no matching option exists (only allow_always), we send `cancelled`.
+	#[tokio::test]
+	async fn permission_unknown_option_sends_cancelled() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+
+		let peer_fut = async {
+			let pl = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&pl).unwrap();
+			let pid = v["id"].as_i64().unwrap();
+			// Only allow_always: no allow_once / reject_once.
+			peer.send(
+				r#"{"jsonrpc":"2.0","id":101,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"tc3","title":"network"},"options":[{"optionId":"always","name":"Always","kind":"allow_always"}]}}"#,
+			)
+			.await;
+			peer.reply(pid, r#"{"stopReason":"end_turn"}"#).await;
+			peer
+		};
+		let (accepted, mut peer) = tokio::join!(session.start_turn(&input), peer_fut);
+		let _ = accepted.expect("start ok");
+
+		let prompt_id = next_permission(&mut session).await;
+		// Deny with only allow_always → no reject_once option → Cancelled.
+		session
+			.answer(&prompt_id, PermissionAnswer::Deny)
+			.await
+			.expect("answer");
+
+		let answer = peer.recv().await;
+		assert!(answer.contains("\"outcome\":\"cancelled\""), "{answer}");
+	}
+
+	// ─── cancel mid-turn ──────────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn cancel_mid_turn_sends_session_cancel_notification() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+
+		// The peer reads session/prompt and holds it; the session is now live.
+		// start_turn returns after sending the prompt request.
+		let peer_fut = async {
+			let pl = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&pl).unwrap();
+			let pid = v["id"].as_i64().unwrap();
+			(peer, pid)
+		};
+		let (accepted, (mut peer, pid)) = tokio::join!(session.start_turn(&input), peer_fut);
+		let _ = accepted.expect("start ok");
+
+		// Now call interrupt, which sends session/cancel.
+		session.interrupt().await.expect("interrupt ok");
+
+		// Peer reads the cancel notification and replies to session/prompt.
+		let cancel_line = peer.recv().await;
+		peer.reply(pid, r#"{"stopReason":"cancelled"}"#).await;
+
+		assert!(cancel_line.contains("session/cancel"), "{cancel_line}");
+	}
+
+	// ─── peer crash ───────────────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn peer_crash_gives_crashed_error() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		peer.close().await;
+		let result = session.next_event().await;
+		assert!(matches!(result, Err(ExecutorError::Crashed { .. })), "got: {result:?}");
+	}
+
+	// ─── oversize / malformed ─────────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn oversize_frame_gives_malformed_oversize() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		// cfg() sets max_frame_bytes = 64 KiB; this frame exceeds it.
+		let huge_title = "x".repeat(64 * 1024 + 100);
+		let msg = format!(
+			r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"notice","severity":"info","title":"{huge_title}"}}}}}}"#
+		);
+		peer.send(&msg).await;
+		let result = session.next_event().await;
+		assert!(
+			matches!(
+				result,
+				Err(ExecutorError::MalformedStream { fault: FrameFault::Oversize { .. }, .. })
+			),
+			"got: {result:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn malformed_json_gives_malformed_not_json() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		peer.send("this is not json").await;
+		let result = session.next_event().await;
+		assert!(
+			matches!(result, Err(ExecutorError::MalformedStream { fault: FrameFault::NotJson, .. })),
+			"got: {result:?}"
+		);
+	}
+
+	// ─── drop kills process tree ──────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn drop_kills_sh_child() {
+		#[cfg(unix)]
+		use nix::unistd::Pid;
+		use tokio::process::Command;
+
+		use crate::{child_tree::ChildTree, test_process::process_terminated};
+
+		let dir = tempfile::tempdir().expect("tempdir");
+		let pid_file = dir.path().join("grandchild.pid");
+		let script = format!("sleep 300 & echo $! > '{}'; wait", pid_file.display());
+		let mut cmd = Command::new("sh");
+		cmd.arg("-c").arg(&script);
+		let spawned = ChildTree::spawn(cmd).expect("spawn sh");
+
+		// Wait for the grandchild to write its pid.
+		let grandchild_pid: i32 = {
+			let mut pid = None;
+			for _ in 0..200 {
+				if let Ok(text) = std::fs::read_to_string(&pid_file)
+					&& let Ok(p) = text.trim().parse()
+				{
+					pid = Some(p);
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(25)).await;
+			}
+			pid.expect("grandchild pid file never appeared")
+		};
+
+		#[cfg(unix)]
+		assert!(!process_terminated(Pid::from_raw(grandchild_pid)), "grandchild alive before drop");
+
+		// Drop the tree → kills the whole process group.
+		drop(spawned.tree);
+
+		// Give the OS time to propagate the signal.
+		#[cfg(unix)]
+		{
+			for _ in 0..200 {
+				if process_terminated(Pid::from_raw(grandchild_pid)) {
+					return;
+				}
+				tokio::time::sleep(Duration::from_millis(25)).await;
+			}
+			panic!("grandchild {grandchild_pid} outlived the dropped ChildTree");
+		}
+	}
+
+	// ─── start_session end-to-end ─────────────────────────────────────────────
+
+	#[tokio::test]
+	async fn start_session_end_to_end() {
+		use omp_agent::delegated::{Capabilities, ExecutionMode, start_session};
+
+		struct MemExec {
+			caps: Capabilities,
+			tx:   flume::Sender<MockPeer>,
+		}
+
+		impl omp_agent::delegated::DelegatedExecutor for MemExec {
+			type Session = AcpDelegatedSession;
+
+			fn capabilities(&self) -> &Capabilities {
+				&self.caps
+			}
+
+			async fn probe(&self) -> Result<omp_agent::delegated::ProbeReport, ExecutorError> {
+				Ok(omp_agent::delegated::ProbeReport {
+					version: omp_agent::delegated::CliVersion::new(0, 0, 0),
+					auth:    omp_agent::delegated::AuthStatus::Unknown,
+				})
+			}
+
+			async fn open<'a>(
+				&'a self,
+				request: &'a SessionRequest,
+			) -> Result<(Self::Session, omp_agent::delegated::SessionInfo), ExecutorError> {
+				let (agent_read, agent_write) = duplex(256 * 1024);
+				let (client_read, client_write) = duplex(256 * 1024);
+				let mut peer = MockPeer {
+					client_rx: LineReader::new(client_read, 64 * 1024),
+					agent_tx:  agent_write,
+				};
+				let handshake = AcpDelegatedSession::handshake(
+					AcpExecutor::executor_id(),
+					agent_read,
+					client_write,
+					None,
+					request,
+					cfg(),
+				);
+				let (result, ()) = tokio::join!(handshake, peer.handshake_new("contract-sess"));
+				let (session, info) = result?;
+				let _ = self.tx.send(peer);
+				Ok((session, info))
+			}
+		}
+
+		let (tx, rx) = flume::bounded(1);
+		let exec = MemExec { caps: executor::capabilities(), tx };
+		let request = SessionRequest {
+			mode:         ExecutionMode::CliManaged,
+			workdir:      PathBuf::from("/tmp"),
+			policy:       ACP_POLICY,
+			resume:       None,
+			unknown_auth: UnknownAuth::Proceed,
+		};
+		let active = start_session(&exec, &request)
+			.await
+			.expect("start_session ok");
+		assert!(active.is_open());
+		assert_eq!(active.info().policy, ACP_POLICY);
+		let _peer = rx.try_recv().expect("peer sent");
+	}
+}
