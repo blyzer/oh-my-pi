@@ -12,7 +12,7 @@ CLI/provider discovery
   -> delegated-executor contract
   -> Codex app-server adapter
   -> event/approval/security validation
-  -> optional Claude/Gemini adapters
+  -> optional ACP client + per-CLI launch profiles (amended 2026-10-20; Codex keeps its native adapter)
 ```
 
 ## Tasks
@@ -44,7 +44,11 @@ execution contract and policy permit it.
 Feasibility result (2026-10-13): `capability-gated`; see
 [`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U9-U12).
 
-### CLI-5 — Gemini/Antigravity feasibility
+Update (2026-10-20, owner decision): Claude Code is reached through the ACP client and the
+`@agentclientprotocol/claude-agent-acp` bridge (Node 22, outside OMP), with a Python Agent SDK extension
+kept as a deferred alternative. See ADR 0043, "Amendment 2026-10-20".
+
+### CLI-5 — Gemini/Antigravity feasibility (superseded 2026-10-20 by the ACP client)
 
 Verify Gemini JSON/JSONL headless behavior and the current Antigravity replacement/interface.
 Keep unsupported modes disabled and documented.
@@ -52,7 +56,7 @@ Keep unsupported modes disabled and documented.
 Feasibility result (2026-10-13): Gemini CLI and Antigravity `agy` are both `capability-gated`; see
 [`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U13-U21).
 
-### CLI-6 — Optional provider adapters
+### CLI-6 — Optional provider adapters (superseded 2026-10-20 by the ACP client)
 
 Investigate xAI and Devin official CLI/agent interfaces. Represent Devin as an asynchronous
 agent executor if that is its actual semantic model; do not force token-streaming semantics.
@@ -61,9 +65,12 @@ Feasibility result (2026-10-13): Grok `capability-gated`, Devin `capability-gate
 ACP server per `--help`, no handshake run); see
 [`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U22-U28, U30-U42).
 
-Plan change: Gemini (`--acp`), Grok (`agent stdio`) and Devin (`acp`) all expose ACP, so CLI-5/CLI-6 should be built as one
-ACP client adapter with per-CLI launch profiles (section 6.1 of the feasibility note), not three adapters. Codex (app-server)
-stays separate. The shared protocol is unverified against each binary (U29), so this does not enable any CLI yet.
+Plan change (superseded again 2026-10-20, owner decision): Gemini CLI is dropped, because Google stopped serving it for
+individual, AI Pro and AI Ultra accounts on 2026-06-18. DeepSeek Harness (`dsh --profile acp`), Devin (`acp`), Grok
+(`agent stdio`), Antigravity (Google's ACP server) and Claude Code (the ACP bridge over the Agent SDK) are built as one ACP
+client with per-CLI launch profiles (section 6.1 of the feasibility note), not as separate adapters. Codex (app-server)
+stays separate. A profile is enabled only after a real handshake transcript is recorded. See ADR 0043, "Amendment
+2026-10-20", and the Kata epic `nkas`.
 
 ### CLI-7 — Security and lifecycle tests
 
