@@ -440,8 +440,8 @@ async fn session_scope_approval_becomes_allow_once_because_no_session_grant() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_time_at_approval_desk_excluded_from_turn_timeout() {
-	// Turn timeout is 100 ms but the "host" answers after 3600 s; the
-	// paused clock means this test is instantaneous in wall time.
+	// Turn timeout is 100 ms but the "host" answers after 100 s, inside the
+	// 120 s approval bound; the paused clock makes this instantaneous.
 	let exec = executor();
 	exec.push_turn([
 		started(1),
@@ -454,7 +454,7 @@ async fn wait_time_at_approval_desk_excluded_from_turn_timeout() {
 	let cancel = CancellationToken::new();
 	let mut resolver = RoutePermissionResolver::new(approval_route, cancel.clone());
 
-	// Very tight limits; the approval takes 3600 seconds.
+	// Very tight limits; the approval takes 100 seconds.
 	let tight = TurnLimits {
 		timeout:         Duration::from_millis(100),
 		idle:            Duration::from_millis(100),
@@ -462,8 +462,8 @@ async fn wait_time_at_approval_desk_excluded_from_turn_timeout() {
 	};
 
 	let driver = async {
-		// Simulated human takes "3600 s" (paused clock, so instant in real time).
-		tokio::time::sleep(Duration::from_secs(3600)).await;
+		// Simulated human takes 100 s (paused clock, so instant in real time).
+		tokio::time::sleep(Duration::from_secs(100)).await;
 		let request = inbox.recv().await.expect("ticket arrives");
 		request.respond(approve_once()).expect("reply sent");
 	};
@@ -474,6 +474,6 @@ async fn wait_time_at_approval_desk_excluded_from_turn_timeout() {
 	drop(tx);
 	assert!(
 		result.is_ok(),
-		"an hour at the approval desk must not count against the turn timeout: {result:?}",
+		"100 s at the approval desk must not count against the turn timeout: {result:?}",
 	);
 }

@@ -15,11 +15,12 @@
 //!   `ApprovalTicket::unreachable_decision` returns `approved: false`.
 //! - A dropped or disconnected route produces the same result through the same
 //!   mechanism.
-//! - An unattended session (no host actor connected to the inbox) also drops
-//!   the reply sender, causing the same denial path.
-//! - `ApprovalTicket::timeout_decision` denies for a ticket whose reasons
-//!   declare no explicit `true` default, which is the case for every spec this
-//!   resolver files (it sets `default: Some(false)`).
+//! - An unanswered ticket times out after [`APPROVAL_TIMEOUT_MS`] and denies:
+//!   `ApprovalTicket::timeout_decision` denies because every spec this resolver
+//!   files sets `default: Some(false)`. A host that receives the ticket and
+//!   never answers does not disconnect the reply channel (the route keeps its
+//!   own sender while the ticket is pending), so this timeout is the only thing
+//!   that ends the wait for an unattended host.
 //!
 //! # Single-use narrowing
 //!
@@ -39,6 +40,10 @@ use omp_agent::{
 };
 use omp_core::{Str, sf};
 use tokio_util::sync::CancellationToken;
+
+/// Longest a delegated permission request waits for a human before it denies.
+/// Matches the 120 s every other OMP approval prompt uses.
+pub const APPROVAL_TIMEOUT_MS: u64 = 120_000;
 
 /// Converts a delegated [`PermissionRequest`] to an OMP approval ticket via
 /// `route` and maps the decision back.
@@ -137,9 +142,10 @@ fn spec_from_request(request: &PermissionRequest) -> ApprovalSpec {
 		default: Some(false),
 		route: Str::new_static("user"),
 		approver: None,
-		// No explicit timeout: the turn-level limits and route cancellation
-		// cover the wait; an explicit timeout_ms would add a second race.
-		timeout_ms: 0,
+		// Bounded: the route keeps a reply sender while the ticket is pending,
+		// so an unanswered ticket never disconnects. Only this timeout (deny by
+		// the `default` above) or cancellation ends the wait.
+		timeout_ms: APPROVAL_TIMEOUT_MS,
 		unreachable: Str::new_static("deny"),
 		require_human: true,
 		pattern: None,
