@@ -3,12 +3,15 @@
 //!
 //! # Profile table
 //!
-//! Each supported executor has two convars that name the binary and extra
-//! arguments to pass it. Both carry only `flags: archive` — **no**
-//! `PROJECT` flag — so a project cfg overlay cannot change them. The con
-//! engine rejects any attempt with [`omp_con::ConError::ProjectVarDenied`],
-//! which is the same enforcement that protects every other `sv_exec_remote_*`
-//! variable in `adw/remote.rs`.
+//! Each supported executor has an operator convar naming the binary to start.
+//! It carries only `flags: archive` — **no** `PROJECT` flag — so a project cfg
+//! overlay cannot change it. The con engine rejects any attempt with
+//! [`omp_con::ConError::ProjectVarDenied`], the same enforcement that protects
+//! every `sv_exec_remote_*` variable in `adw/remote.rs`.
+//!
+//! There is deliberately no operator-supplied argument list: each executor
+//! passes exactly the arguments its protocol needs, so an operator cannot add a
+//! flag that weakens the agent's own sandbox or approval settings.
 //!
 //! # Registry
 //!
@@ -20,8 +23,10 @@
 //! # Host function
 //!
 //! [`run_delegated_turn`] composes `start_session` + `ActiveSession::run_turn`
-//! around a caller-supplied session and cancellation token. It journals the
-//! normalized [`DelegatedEvent`]s into the session as follows:
+//! around a caller-supplied session and cancellation token. Events are
+//! journaled into the session as the turn runs (not after it ends), so a long
+//! turn is visible while it is in flight and a host crash loses at most the
+//! event being written:
 //!
 //! | Event kind            | Session journal operation          |
 //! |-----------------------|------------------------------------|
@@ -33,8 +38,12 @@
 //! | `ToolEvent`           | **gap** — no session representation exists; events are forwarded on the channel only |
 //! | `Permission`          | **gap** — permission prompts are not journaled; the decision is not recorded in the session |
 //!
-//! Cancellation cancels `run_turn`, which interrupt/kills the CLI and returns
-//! `ExecutorError::Cancelled`. The session is not reused after cancellation.
+//! One session serves exactly one turn: the host always terminates the agent's
+//! process tree when the turn ends, whatever the outcome. Cancelling interrupts
+//! the CLI (killing it if it does not settle in time) and the result is
+//! `ExecutorError::Cancelled`. A journal failure is reported only when the turn
+//! itself succeeded; a turn that failed, crashed or was cancelled reports its
+//! own error.
 
 use std::{ffi::OsString, time::Instant};
 
@@ -64,34 +73,19 @@ omp_con::var! {
 		default: Str::new_static("codex"),
 		flags: archive,
 	};
-	/// Extra arguments prepended before Codex's own flags.
-	/// Space-separated. Always operator-controlled; a project cfg cannot override it.
-	pub static SV_DELEGATED_CODEX_ARGS = sv_delegated_codex_args: Str {
-		default: Str::default(),
-		flags: archive,
-	};
 }
 
-/// The program and extra arguments for one executor profile.
+/// The program for one executor profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutorProfile {
 	/// Binary name or absolute path.
 	pub program: OsString,
-	/// Extra arguments prepended before the executor's own flags.
-	pub args:    Vec<OsString>,
 }
 
 /// Reads the Codex executor profile from `ctx`.
 #[must_use]
 pub fn codex_profile(ctx: &Ctx) -> ExecutorProfile {
-	let program = OsString::from(SV_DELEGATED_CODEX_PROGRAM.get(ctx).as_str());
-	let extra = SV_DELEGATED_CODEX_ARGS.get(ctx);
-	let args = if extra.is_empty() {
-		Vec::new()
-	} else {
-		extra.split_whitespace().map(OsString::from).collect()
-	};
-	ExecutorProfile { program, args }
+	ExecutorProfile { program: OsString::from(SV_DELEGATED_CODEX_PROGRAM.get(ctx).as_str()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,9 +135,6 @@ impl ExecutorRegistry {
 	pub fn from_ctx(ctx: &Ctx) -> Self {
 		let profile = codex_profile(ctx);
 		let codex = CodexExecutor::new(profile.program);
-		// `profile.args` are captured for future use; `CodexExecutor::new`
-		// does not yet expose an extra-args API (gap noted in final message).
-		let _ = profile.args;
 		Self { executors: vec![ExecutorKind::Codex(codex)] }
 	}
 
@@ -374,38 +365,67 @@ where
 
 	let mut active: ActiveSession<E::Session> = start_session(executor, request).await?;
 
-	// Collect events into a separate channel then drain+journal them; a closed
-	// downstream `events` does not stop the turn.
+	// The turn pushes events into `tx` as it runs; this side journals them as
+	// they arrive, so a long turn is visible in the session while it is still
+	// running and a host crash loses at most the event in flight. A closed
+	// downstream `events` never stops the turn.
 	let (tx, rx) = flume::unbounded::<DelegatedEvent>();
-
 	let mut state = JournalState::new();
+	let mut journal_failure: Option<SessionError> = None;
 
-	let turn_result = active.run_turn(input, limits, cancel, resolver, &tx).await;
-
-	// Drop the sender so the receiver reaches end-of-stream.
-	drop(tx);
-
-	// Drain events, journal each, and forward to the caller.
-	while let Ok(event) = rx.recv() {
-		let _ = events.send(event.clone());
-		journal_event(&event, &mut state, &executor_id, session)?;
-	}
-
-	let elapsed_ms = state.started_at.map(|t| t.elapsed().as_millis() as u64);
-
-	// Close any open assistant stream/message with the correct stop reason.
-	let stop_reason = match &turn_result {
-		Ok(report) => report.end.to_string(),
-		Err(ExecutorError::Cancelled { .. }) => "interrupted".to_owned(),
-		Err(_) => "error".to_owned(),
+	let journal = async {
+		while let Ok(event) = rx.recv_async().await {
+			let _ = events.send(event.clone());
+			// After the first journal failure keep forwarding but stop writing:
+			// the turn's own outcome must still reach the caller.
+			if journal_failure.is_none()
+				&& let Err(error) = journal_event(&event, &mut state, &executor_id, session)
+			{
+				journal_failure = Some(error);
+			}
+		}
 	};
-	state.close_assistant(session, &stop_reason)?;
+	let turn = async {
+		// The turn owns the only sender, so the channel closes when it ends and
+		// the journaling side reaches end-of-stream.
+		let result = active.run_turn(input, limits, cancel, resolver, &tx).await;
+		drop(tx);
+		result
+	};
+	let (turn_result, ()) = tokio::join!(turn, journal);
 
-	if state.turn_started {
-		state.record_receipt(session, elapsed_ms)?;
+	let elapsed_ms = state
+		.started_at
+		.map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+
+	// Close any open assistant stream/message with the correct stop reason, and
+	// record the receipt, whatever the turn's outcome.
+	if journal_failure.is_none() {
+		let stop_reason = match &turn_result {
+			Ok(report) => report.end.to_string(),
+			Err(ExecutorError::Cancelled { .. }) => "interrupted".to_owned(),
+			Err(_) => "error".to_owned(),
+		};
+		journal_failure = state.close_assistant(session, &stop_reason).err();
+	}
+	if journal_failure.is_none() && state.turn_started {
+		journal_failure = state.record_receipt(session, elapsed_ms).err();
 	}
 
-	turn_result.map_err(DelegatedHostError::Executor)
+	// Orderly end: interrupt, bounded grace, kill, reap.
+	let teardown = active.terminate().await;
+
+	// The turn's own outcome wins: a journal or teardown failure must not hide a
+	// turn that failed, was cancelled, or succeeded.
+	match turn_result {
+		Err(error) => Err(DelegatedHostError::Executor(error)),
+		Ok(_) if journal_failure.is_some() => {
+			Err(DelegatedHostError::Session(journal_failure.expect("checked is_some")))
+		},
+		Ok(report) => teardown
+			.map(|()| report)
+			.map_err(DelegatedHostError::Executor),
+	}
 }
 
 /// Journals one event into `session`.
@@ -570,22 +590,6 @@ mod tests {
 		);
 		// Value must not have changed.
 		assert_eq!(SV_DELEGATED_CODEX_PROGRAM.get(&ctx).as_str(), "my-codex");
-	}
-
-	#[test]
-	fn project_overlay_cannot_change_codex_args() {
-		let ctx = Ctx::new();
-
-		let err = ctx
-			.exec(
-				"sv_delegated_codex_args --inject-flag",
-				Source::Project(Str::new_static("config.cfg")),
-			)
-			.unwrap_err();
-		assert!(
-			matches!(err, ConError::ProjectVarDenied { .. }),
-			"expected ProjectVarDenied, got {err:?}"
-		);
 	}
 
 	// -----------------------------------------------------------------------
@@ -782,6 +786,241 @@ mod tests {
 				Err(DelegatedHostError::Executor(ExecutorError::PolicyUnmappable { .. }))
 			),
 			"expected PolicyUnmappable, got {result:?}"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// Journaling behavior
+	// -----------------------------------------------------------------------
+
+	fn assistant_text(session: &Session) -> Option<String> {
+		let dom = session.dom();
+		let turn = dom.children(dom.body()).last().copied()?;
+		let node = dom.children(turn).iter().rev().copied().find(|h| {
+			dom.get(*h)
+				.is_some_and(|n| n.tag == Tag::Known(KnownTag::Assistant))
+		})?;
+		match dom.get(node)?.prop(&PropId::Text.into())? {
+			omp_dom::Value::Str(text) => Some(text.as_str().to_owned()),
+			_ => None,
+		}
+	}
+
+	#[tokio::test]
+	async fn streamed_deltas_are_journaled_in_order_as_one_assistant_text() {
+		let executor = MockExecutor::new(mock_caps());
+		let turn_id = TurnId::new(Str::new_static("turn-1"));
+		executor.push_turn(vec![
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnStarted {
+				turn: turn_id.clone(),
+			})),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id.clone(),
+				text: Str::new_static("hel"),
+			}),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id.clone(),
+				text: Str::new_static("lo "),
+			}),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id.clone(),
+				text: Str::new_static("world"),
+			}),
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnCompleted {
+				turn:    turn_id,
+				outcome: TurnEnd::Completed,
+			})),
+		]);
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let (tx, _rx) = flume::unbounded();
+		let cancel = CancellationToken::new();
+		let mut resolver = DenyAll;
+		run_turn_on(
+			&executor,
+			&request(workdir()),
+			&simple_input(),
+			any_limits(),
+			&mut resolver,
+			&cancel,
+			&tx,
+			&mut session,
+		)
+		.await
+		.expect("turn");
+		assert_eq!(assistant_text(&session).as_deref(), Some("hello world"));
+	}
+
+	#[tokio::test]
+	async fn a_crashed_turn_still_journals_what_was_streamed() {
+		use omp_agent::delegated::ExitFact;
+		let executor = MockExecutor::new(mock_caps());
+		let turn_id = TurnId::new(Str::new_static("turn-1"));
+		executor.push_turn(vec![
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnStarted {
+				turn: turn_id.clone(),
+			})),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id,
+				text: Str::new_static("partial answer"),
+			}),
+			Step::Crash(ExitFact::Unknown),
+		]);
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let (tx, _rx) = flume::unbounded();
+		let cancel = CancellationToken::new();
+		let mut resolver = DenyAll;
+		let result = run_turn_on(
+			&executor,
+			&request(workdir()),
+			&simple_input(),
+			any_limits(),
+			&mut resolver,
+			&cancel,
+			&tx,
+			&mut session,
+		)
+		.await;
+		assert!(
+			matches!(result, Err(DelegatedHostError::Executor(ExecutorError::Crashed { .. }))),
+			"{result:?}"
+		);
+		assert_eq!(assistant_text(&session).as_deref(), Some("partial answer"));
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_turn_keeps_the_text_it_streamed_and_forwards_the_delta() {
+		use omp_agent::delegated::{
+			AuthStatus, ProbeReport,
+			mock::{InterruptScript, MockConfig, ProbeScript},
+		};
+		let config = MockConfig {
+			probe: ProbeScript::Report(ProbeReport {
+				version: CliVersion::new(1, 0, 0),
+				auth:    AuthStatus::Authenticated,
+			}),
+			interrupt: InterruptScript::Cooperative,
+			..MockConfig::default()
+		};
+		let executor = MockExecutor::new(mock_caps()).with_config(config);
+		let turn_id = TurnId::new(Str::new_static("turn-1"));
+		executor.push_turn(vec![
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnStarted {
+				turn: turn_id.clone(),
+			})),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id,
+				text: Str::new_static("before cancel"),
+			}),
+			Step::Sleep(Duration::from_secs(60)),
+		]);
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let (tx, rx) = flume::unbounded();
+		let cancel = CancellationToken::new();
+		let mut resolver = DenyAll;
+		let cancel_clone = cancel.clone();
+		tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			cancel_clone.cancel();
+		});
+		let result = run_turn_on(
+			&executor,
+			&request(workdir()),
+			&simple_input(),
+			any_limits(),
+			&mut resolver,
+			&cancel,
+			&tx,
+			&mut session,
+		)
+		.await;
+		assert!(
+			matches!(result, Err(DelegatedHostError::Executor(ExecutorError::Cancelled { .. }))),
+			"{result:?}"
+		);
+		assert_eq!(assistant_text(&session).as_deref(), Some("before cancel"));
+		assert!(
+			rx.try_iter()
+				.any(|e| matches!(e, DelegatedEvent::AgentTextDelta { .. }))
+		);
+	}
+
+	#[tokio::test]
+	async fn streamed_text_reaches_session_subscribers_while_the_cli_is_still_running() {
+		use omp_agent::delegated::{
+			AuthStatus, ProbeReport,
+			mock::{InterruptScript, MockConfig, ProbeScript},
+		};
+		let config = MockConfig {
+			probe: ProbeScript::Report(ProbeReport {
+				version: CliVersion::new(1, 0, 0),
+				auth:    AuthStatus::Authenticated,
+			}),
+			interrupt: InterruptScript::Cooperative,
+			..MockConfig::default()
+		};
+		let executor = MockExecutor::new(mock_caps()).with_config(config);
+		let turn_id = TurnId::new(Str::new_static("turn-1"));
+		// The CLI streams one delta and then sleeps far longer than the test waits.
+		executor.push_turn(vec![
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnStarted {
+				turn: turn_id.clone(),
+			})),
+			Step::Event(DelegatedEvent::AgentTextDelta {
+				turn: turn_id,
+				text: Str::new_static("already streamed"),
+			}),
+			Step::Sleep(Duration::from_secs(30)),
+		]);
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let (_snapshot, events) = session.subscribe();
+		let (tx, _rx) = flume::unbounded();
+		let cancel = CancellationToken::new();
+		let mut resolver = DenyAll;
+
+		// A subscriber, like the TUI actor, must see the delta before the turn ends.
+		let watcher = {
+			let cancel = cancel.clone();
+			tokio::spawn(async move {
+				let seen = tokio::time::timeout(Duration::from_secs(5), async {
+					while let Ok(event) = events.recv_async().await {
+						if let omp_dom::Event::Stream { text: Some(text), .. } = event {
+							return Some(text.as_str().to_owned());
+						}
+					}
+					None
+				})
+				.await
+				.ok()
+				.flatten();
+				// Only now end the still-running turn.
+				cancel.cancel();
+				seen
+			})
+		};
+		let result = run_turn_on(
+			&executor,
+			&request(workdir()),
+			&simple_input(),
+			any_limits(),
+			&mut resolver,
+			&cancel,
+			&tx,
+			&mut session,
+		)
+		.await;
+		assert!(
+			matches!(result, Err(DelegatedHostError::Executor(ExecutorError::Cancelled { .. }))),
+			"{result:?}"
+		);
+		let seen = watcher.await.expect("watcher task");
+		assert_eq!(
+			seen.as_deref(),
+			Some("already streamed"),
+			"no delta reached subscribers before the turn ended"
 		);
 	}
 }
