@@ -674,6 +674,134 @@ mod executor_tests {
 		assert!(matches!(result, Err(ExecutorError::AuthRequired { .. })), "got: {result:?}");
 	}
 
+	/// The id of the JSON-RPC request in `line`.
+	fn request_id(line: &str) -> i64 {
+		serde_json::from_str::<serde_json::Value>(line).unwrap()["id"]
+			.as_i64()
+			.unwrap()
+	}
+
+	/// Runs the handshake against a peer whose `session/new` fails with `error`
+	/// (the raw JSON of the JSON-RPC `error` member).
+	async fn handshake_failing_session_new(error: &str) -> Result<(), ExecutorError> {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let mut peer =
+			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		let request = strict_request("/tmp");
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			cfg(),
+		);
+		let script = async {
+			let id = request_id(&peer.recv().await);
+			peer
+				.reply(
+					id,
+					r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"authMethods":[]}"#,
+				)
+				.await;
+			let id = request_id(&peer.recv().await);
+			peer
+				.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{error}}}"#))
+				.await;
+		};
+		let (result, ()) = tokio::join!(handshake, script);
+		result.map(|_| ())
+	}
+
+	/// Runs one turn against a peer that answers the prompt with `error` and
+	/// returns the failure the turn ends with.
+	async fn prompt_failure(error: &str) -> omp_agent::delegated::RemoteFailure {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let script = async {
+			let id = request_id(&peer.recv().await);
+			peer
+				.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{error}}}"#))
+				.await;
+		};
+		let (accepted, ()) = tokio::join!(session.start_turn(&input), script);
+		accepted.expect("start_turn ok");
+		loop {
+			if let DelegatedEvent::Failure { failure, .. } = session.next_event().await.expect("event")
+			{
+				return failure;
+			}
+		}
+	}
+
+	/// Grok's signed-out answer: `-32000` with `data: "no auth method id
+	/// provided"`.
+	const MISSING_LOGIN: &str =
+		r#"{"code":-32000,"message":"Authentication required","data":"no auth method id provided"}"#;
+
+	/// Grok fails `session/new` while signed out; that is a missing login.
+	#[tokio::test]
+	async fn session_new_missing_login_gives_auth_required() {
+		let result = handshake_failing_session_new(MISSING_LOGIN).await;
+		assert!(matches!(result, Err(ExecutorError::AuthRequired { .. })), "got: {result:?}");
+	}
+
+	/// A `session/new` rejection that is not the missing-login shape stays a
+	/// protocol rejection carrying its code.
+	#[tokio::test]
+	async fn session_new_other_rejections_stay_rejections() {
+		for error in [
+			r#"{"code":-32000,"message":"Authentication required","data":"something else"}"#,
+			r#"{"code":-32000,"message":"Authentication required"}"#,
+			r#"{"code":-32603,"message":"x","data":"no auth method id provided"}"#,
+		] {
+			let result = handshake_failing_session_new(error).await;
+			assert!(
+				matches!(
+					result,
+					Err(ExecutorError::Protocol {
+						violation: omp_agent::delegated::ProtocolViolation::RequestRejected { .. },
+						..
+					})
+				),
+				"{error} gave {result:?}"
+			);
+		}
+	}
+
+	/// A prompt that fails with the missing-login shape ends the turn as
+	/// `AuthRequired`, not as an internal failure.
+	#[tokio::test]
+	async fn prompt_missing_login_ends_the_turn_as_auth_required() {
+		let failure = prompt_failure(MISSING_LOGIN).await;
+		assert!(
+			matches!(failure, omp_agent::delegated::RemoteFailure::AuthRequired),
+			"got: {failure:?}"
+		);
+	}
+
+	/// Everything that is not exactly the missing-login shape stays internal:
+	/// dsh answers a signed-out prompt with `-32603`, Devin with `-32000` and
+	/// no `data`, and a structured `data` is not text.
+	#[tokio::test]
+	async fn other_prompt_errors_stay_internal() {
+		for error in [
+			r#"{"code":-32603,"message":"Internal error"}"#,
+			r#"{"code":-32603,"message":"x","data":"no auth method id provided"}"#,
+			r#"{"code":-32000,"message":"Authentication required"}"#,
+			r#"{"code":-32000,"message":"x","data":"something else"}"#,
+			r#"{"code":-32000,"message":"x","data":{"detail":"no auth method id provided"}}"#,
+		] {
+			let failure = prompt_failure(error).await;
+			assert!(
+				matches!(failure, omp_agent::delegated::RemoteFailure::Internal),
+				"{error} gave {failure:?}"
+			);
+		}
+	}
+
 	/// Relative `workdir` is rejected before any I/O.
 	#[tokio::test]
 	async fn relative_cwd_rejected() {

@@ -515,16 +515,20 @@ impl DelegatedSession for AcpDelegatedSession {
 				}
 			}
 
-			if let InboundMessage::ErrorResponse { .. } = msg {
+			if let InboundMessage::ErrorResponse { code, ref data, .. } = msg {
 				self.turn_live = false;
 				self
 					.pending
 					.retain(|k, _| !k.as_str().starts_with("__prompt_rpc_"));
 				let turn = self.turn.clone();
-				self.queue.push_back(DelegatedEvent::Failure {
-					turn,
-					failure: omp_agent::delegated::RemoteFailure::Internal,
-				});
+				let failure = if wire::is_missing_login(code, data.as_ref()) {
+					omp_agent::delegated::RemoteFailure::AuthRequired
+				} else {
+					omp_agent::delegated::RemoteFailure::Internal
+				};
+				self
+					.queue
+					.push_back(DelegatedEvent::Failure { turn, failure });
 				continue;
 			}
 
@@ -692,9 +696,12 @@ where
 						}
 					});
 				},
-				InboundMessage::ErrorResponse { id: Some(wire::RequestId::Int(i)), code }
+				InboundMessage::ErrorResponse { id: Some(wire::RequestId::Int(i)), code, data }
 					if i == rpc_id =>
 				{
+					if wire::is_missing_login(code, data.as_ref()) {
+						return Err(ExecutorError::AuthRequired { executor: executor.clone() });
+					}
 					return Err(ExecutorError::Protocol {
 						executor:  executor.clone(),
 						violation: ProtocolViolation::RequestRejected { code },
