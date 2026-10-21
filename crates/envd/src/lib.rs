@@ -12,6 +12,8 @@ pub mod blobs;
 pub mod browser_daemon;
 pub mod browser_fetch;
 pub mod browser_relay;
+/// The environment a spawned child process is allowed to see.
+pub mod child_env;
 mod child_tree;
 /// Codex `app-server` adapter for the delegated-executor contract (ADR 0043).
 pub mod codex_app_server;

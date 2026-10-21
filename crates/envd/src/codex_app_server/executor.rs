@@ -4,9 +4,11 @@
 //! Hard rules, enforced here rather than trusted:
 //!
 //! - the child is spawned with explicit arguments and working directory and
-//!   with the inherited environment untouched; this module never reads, copies
-//!   or names any Codex configuration or credential path, and the contract
-//!   gives it no way to receive one;
+//!   with a [`ChildEnv`] environment: the ambient allowlist (`PATH`, `HOME`,
+//!   locale, ...) and nothing secret-looking from OMP's own environment, plus
+//!   whatever the operator names; this module never reads, copies or names any
+//!   Codex configuration or credential path, and the contract gives it no way
+//!   to receive one (the CLI finds its own login through `HOME`);
 //! - the transport is stdio only: OMP owns the process, never attaches to a
 //!   shared daemon or socket;
 //! - process isolation and teardown come from [`ChildTree`].
@@ -23,7 +25,7 @@ use super::{
 	policy::supported_policies,
 	session::{CodexSession, SessionConfig, Transport, parse_version},
 };
-use crate::child_tree::ChildTree;
+use crate::{child_env::ChildEnv, child_tree::ChildTree};
 
 /// Largest inbound line accepted. Item payloads with command output can be
 /// large; this bounds memory, not usefulness.
@@ -46,6 +48,7 @@ pub struct CodexExecutor {
 	caps:    Capabilities,
 	program: OsString,
 	cfg:     SessionConfig,
+	env:     ChildEnv,
 }
 
 impl CodexExecutor {
@@ -61,6 +64,7 @@ impl CodexExecutor {
 				handshake_timeout: HANDSHAKE_TIMEOUT,
 				versions:          CODEX_VERSIONS,
 			},
+			env:     ChildEnv::ambient(),
 		}
 	}
 
@@ -68,6 +72,13 @@ impl CodexExecutor {
 	#[must_use]
 	pub const fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
 		self.cfg.handshake_timeout = timeout;
+		self
+	}
+
+	/// Replaces the child's environment. The default is [`ChildEnv::ambient`].
+	#[must_use]
+	pub fn with_env(mut self, env: ChildEnv) -> Self {
+		self.env = env;
 		self
 	}
 
@@ -84,6 +95,7 @@ impl CodexExecutor {
 	fn command(&self) -> Command {
 		let mut command = Command::new(&self.program);
 		command.stdin(Stdio::piped());
+		self.env.apply_tokio(&mut command);
 		command
 	}
 }
