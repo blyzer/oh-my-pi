@@ -27,7 +27,7 @@ pub mod policy;
 pub mod session;
 pub mod wire;
 
-pub use delegated_session::AcpDelegatedSession;
+pub use delegated_session::{AcpDelegatedSession, AcpProfile, LoginNotice};
 pub use executor::AcpExecutor;
 pub use session::{AcpSession, InboundMessage, MAX_FRAME_BYTES, MalformedLine, SessionError};
 

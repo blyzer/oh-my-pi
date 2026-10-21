@@ -267,10 +267,6 @@ pub struct InitializeResult {
 	/// Agent implementation info.
 	#[serde(default)]
 	pub agent_info:         Option<AgentInfo>,
-	/// Authentication methods required. Non-empty means the agent is not
-	/// authenticated; the client must not start a login flow.
-	#[serde(default)]
-	pub auth_methods:       Vec<Str>,
 }
 
 /// Minimal subset of agent capabilities we inspect.
@@ -508,6 +504,40 @@ pub enum ToolCallStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CancelParams<'a> {
 	pub session_id: &'a str,
+}
+
+// ─── session setup a profile asks for ────────────────────────────────────────
+
+/// `session/set_mode` request params (client → agent).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModeParams<'a> {
+	/// Session to change.
+	pub session_id: &'a str,
+	/// The mode id the agent advertised in `session/new`.
+	pub mode_id:    &'a str,
+}
+
+/// `session/set_config_option` request params (client → agent).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConfigOptionParams<'a> {
+	/// Session to change.
+	pub session_id: &'a str,
+	/// The option id the agent advertised in `session/new`.
+	pub config_id:  &'a str,
+	/// The value, sent exactly as the profile gives it.
+	pub value:      &'a str,
+}
+
+/// Params of a vendor notification that reports why an agent stopped, such as
+/// Devin's `_cognition.ai/agent_stopped`. Only the typed `cause` is decoded;
+/// any message text is left alone because providers can echo secrets into it.
+#[derive(Debug, Default, Deserialize)]
+pub struct AgentStoppedParams {
+	/// Why the agent stopped, when it says.
+	#[serde(default)]
+	pub cause: Option<Str>,
 }
 
 // ─── session/request_permission ──────────────────────────────────────────────

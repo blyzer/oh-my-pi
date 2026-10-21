@@ -444,16 +444,16 @@ mod executor_tests {
 	use std::{path::PathBuf, time::Duration};
 
 	use omp_agent::delegated::{
-		ApprovalPosture, CliSessionId, DelegatedEvent, DelegatedSession, ExecutorError, FrameFault,
-		NetworkPosture, PermissionAnswer, PromptRole, PromptSection, SandboxPosture, SessionRequest,
-		UnknownAuth,
+		ApprovalPosture, CliSessionId, DelegatedEvent, DelegatedExecutor, DelegatedSession,
+		ExecutorError, ExecutorId, FrameFault, NetworkPosture, PermissionAnswer, PromptRole,
+		PromptSection, SandboxPosture, SessionRequest, UnknownAuth,
 	};
 	use omp_core::Str;
 	use tokio::io::{AsyncWriteExt as _, DuplexStream, duplex};
 
 	use crate::{
 		acp_client::{
-			delegated_session::{AcpDelegatedSession, AcpSessionConfig},
+			delegated_session::{AcpDelegatedSession, AcpProfile, AcpSessionConfig, LoginNotice},
 			executor::{self, AcpExecutor},
 			policy::{ACP_POLICY, is_supported},
 		},
@@ -469,6 +469,7 @@ mod executor_tests {
 			handshake_timeout: TIMEOUT,
 			terminate_grace:   Duration::from_millis(100),
 			max_frame_bytes:   64 * 1024,
+			profile:           AcpProfile::default(),
 		}
 	}
 
@@ -560,21 +561,57 @@ mod executor_tests {
 				.reply(id, &format!(r#"{{"sessionId":"{session_id}"}}"#))
 				.await;
 		}
+
+		/// Receives the next request, checks its method, answers it with
+		/// `result`, and returns its params.
+		async fn answer(&mut self, method: &str, result: &str) -> serde_json::Value {
+			let request: serde_json::Value = serde_json::from_str(&self.recv().await).unwrap();
+			assert_eq!(request["method"], method);
+			self.reply(request["id"].as_i64().unwrap(), result).await;
+			request["params"].clone()
+		}
+
+		/// Receives the next request, checks its method, and answers it with
+		/// the JSON-RPC `error` member given.
+		async fn reject(&mut self, method: &str, error: &str) {
+			let request: serde_json::Value = serde_json::from_str(&self.recv().await).unwrap();
+			assert_eq!(request["method"], method);
+			let id = request["id"].as_i64().unwrap();
+			self
+				.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{error}}}"#))
+				.await;
+		}
+	}
+
+	/// The two in-memory pipes of a session and the peer that holds their far
+	/// ends.
+	fn pair() -> (DuplexStream, DuplexStream, MockPeer) {
+		let (agent_read, agent_write) = duplex(256 * 1024);
+		let (client_read, client_write) = duplex(256 * 1024);
+		let peer =
+			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		(agent_read, client_write, peer)
 	}
 
 	/// Open a session through the real handshake path.
 	async fn open_session(request: &SessionRequest) -> (AcpDelegatedSession, MockPeer) {
-		let (agent_read, agent_write) = duplex(256 * 1024);
-		let (client_read, client_write) = duplex(256 * 1024);
-		let mut peer =
-			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
+		open_session_with(request, AcpProfile::default()).await
+	}
+
+	/// As [`open_session`], for a profile that asks for no setup request (a
+	/// profile with a session mode or config option needs its own script).
+	async fn open_session_with(
+		request: &SessionRequest,
+		profile: AcpProfile,
+	) -> (AcpDelegatedSession, MockPeer) {
+		let (agent_read, client_write, mut peer) = pair();
 		let handshake = AcpDelegatedSession::handshake(
 			AcpExecutor::executor_id(),
 			agent_read,
 			client_write,
 			None,
 			request,
-			cfg(),
+			AcpSessionConfig { profile, ..cfg() },
 		);
 		let (result, ()) = tokio::join!(handshake, peer.handshake_new("sess-1"));
 		let (session, _info) = result.expect("handshake ok");
@@ -613,6 +650,17 @@ mod executor_tests {
 		)));
 	}
 
+	/// A host that runs several ACP CLIs tells them apart by executor id; an
+	/// executor that is not named keeps the shared default.
+	#[test]
+	fn an_executor_can_be_named_and_defaults_to_the_shared_id() {
+		let unnamed = AcpExecutor::new("agent", ["acp"]);
+		assert_eq!(unnamed.capabilities().executor, AcpExecutor::executor_id());
+		let named = AcpExecutor::new("agent", ["acp"]).with_id(ExecutorId::new_static("devin"));
+		assert_eq!(named.capabilities().executor, ExecutorId::new_static("devin"));
+		assert_ne!(named.capabilities().executor, AcpExecutor::executor_id());
+	}
+
 	// ─── handshake ────────────────────────────────────────────────────────────
 
 	#[tokio::test]
@@ -638,13 +686,13 @@ mod executor_tests {
 		assert_eq!(info.policy, ACP_POLICY);
 	}
 
-	/// Non-empty `authMethods` → `AuthRequired`; no `session/new` is sent.
+	/// A real agent lists the login methods it supports whether or not it is
+	/// signed in (Devin and Grok both do, while working), so advertising one
+	/// must not refuse the agent: the handshake goes on to `session/new`.
 	#[tokio::test]
-	async fn unauthenticated_agent_gives_auth_required() {
-		let (agent_read, agent_write) = duplex(256 * 1024);
-		let (client_read, client_write) = duplex(256 * 1024);
+	async fn advertised_login_methods_do_not_refuse_the_agent() {
+		let (agent_read, client_write, mut peer) = pair();
 		let request = strict_request("/tmp");
-
 		let handshake = AcpDelegatedSession::handshake(
 			AcpExecutor::executor_id(),
 			agent_read,
@@ -653,25 +701,123 @@ mod executor_tests {
 			&request,
 			cfg(),
 		);
-		let peer_fut = async move {
-			let mut rx = LineReader::new(client_read, 64 * 1024);
-			let line = rx.next_line().await.expect("ok").expect("line");
-			let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
-			let id = v["id"].as_i64().unwrap();
-			let mut tx = agent_write;
-			tx.write_all(
-				format!(
-					r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":1,"authMethods":["oauth2"]}}}}"#
+		let script = async {
+			let id = request_id(&peer.recv().await);
+			peer
+				.reply(
+					id,
+					r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[{"id":"devin-browser","name":"Log in with browser","description":"Sign in via your browser"}]}"#,
 				)
-				.as_bytes(),
-			)
-			.await
-			.ok();
-			tx.write_all(b"\n").await.ok();
-			// No session/new response — client must not request it.
+				.await;
+			peer
+				.answer("session/new", r#"{"sessionId":"sess-1"}"#)
+				.await;
 		};
-		let (result, ()) = tokio::join!(handshake, peer_fut);
-		assert!(matches!(result, Err(ExecutorError::AuthRequired { .. })), "got: {result:?}");
+		let (result, ()) = tokio::join!(handshake, script);
+		assert!(result.is_ok(), "got: {result:?}");
+	}
+
+	/// `initialize` replies shaped like the ones signed-in Devin and Grok send:
+	/// `authMethods` holds objects, so a decoder that expects strings would
+	/// refuse the agent before `session/new`.
+	#[test]
+	fn initialize_result_decodes_the_replies_real_agents_send() {
+		for raw in [
+			r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}},"authMethods":[{"id":"devin-browser","name":"Log in with browser","description":"Sign in via your browser"}]}"#,
+			r#"{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[{"id":"xai.api_key","name":"xai.api_key","description":"key"},{"id":"cached_token","name":"cached_token","description":"cached"},{"id":"grok.com","name":"Grok","description":"Sign in"}]}"#,
+		] {
+			let parsed: crate::acp_client::wire::InitializeResult =
+				serde_json::from_str(raw).expect("a real agent's reply decodes");
+			assert_eq!(parsed.protocol_version, 1);
+			assert!(parsed.agent_capabilities.load_session);
+		}
+	}
+
+	fn mode_profile(mode: &'static str) -> AcpProfile {
+		AcpProfile { session_mode: Some(Str::new_static(mode)), ..AcpProfile::default() }
+	}
+
+	/// A profile's session mode is sent as `session/set_mode` right after
+	/// `session/new`.
+	#[tokio::test]
+	async fn profile_session_mode_is_sent_after_session_new() {
+		let (agent_read, client_write, mut peer) = pair();
+		let request = strict_request("/tmp");
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			AcpSessionConfig { profile: mode_profile("ask"), ..cfg() },
+		);
+		let script = async {
+			peer.handshake_new("sess-1").await;
+			peer.answer("session/set_mode", "{}").await
+		};
+		let (result, params) = tokio::join!(handshake, script);
+		result.expect("handshake ok");
+		assert_eq!(params["sessionId"], "sess-1");
+		assert_eq!(params["modeId"], "ask");
+	}
+
+	/// An agent that rejects the mode the profile asks for cannot enforce the
+	/// policy, so the session must not open.
+	#[tokio::test]
+	async fn a_rejected_session_mode_fails_closed() {
+		let (agent_read, client_write, mut peer) = pair();
+		let request = strict_request("/tmp");
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			AcpSessionConfig { profile: mode_profile("ask"), ..cfg() },
+		);
+		let script = async {
+			peer.handshake_new("sess-1").await;
+			peer
+				.reject("session/set_mode", r#"{"code":-32602,"message":"unknown mode"}"#)
+				.await;
+		};
+		let (result, ()) = tokio::join!(handshake, script);
+		assert!(matches!(result, Err(ExecutorError::PolicyUnmappable { .. })), "got: {result:?}");
+	}
+
+	/// Config options go out in the order the profile lists them, with the value
+	/// exactly as given (dsh's model option takes JSON text).
+	#[tokio::test]
+	async fn profile_config_options_are_sent_in_order() {
+		let (agent_read, client_write, mut peer) = pair();
+		let request = strict_request("/tmp");
+		let profile = AcpProfile {
+			config_options: vec![
+				(Str::new_static("model"), Str::new_static(r#"["deepseek-account","deepseek-flash"]"#)),
+				(Str::new_static("reasoning_effort"), Str::new_static("high")),
+			],
+			..AcpProfile::default()
+		};
+		let handshake = AcpDelegatedSession::handshake(
+			AcpExecutor::executor_id(),
+			agent_read,
+			client_write,
+			None,
+			&request,
+			AcpSessionConfig { profile, ..cfg() },
+		);
+		let script = async {
+			peer.handshake_new("sess-1").await;
+			let first = peer.answer("session/set_config_option", "{}").await;
+			let second = peer.answer("session/set_config_option", "{}").await;
+			(first, second)
+		};
+		let (result, (first, second)) = tokio::join!(handshake, script);
+		result.expect("handshake ok");
+		assert_eq!(first["configId"], "model");
+		assert_eq!(first["value"], r#"["deepseek-account","deepseek-flash"]"#);
+		assert_eq!(second["configId"], "reasoning_effort");
+		assert_eq!(second["value"], "high");
 	}
 
 	/// The id of the JSON-RPC request in `line`.
@@ -714,14 +860,21 @@ mod executor_tests {
 		result.map(|_| ())
 	}
 
-	/// Runs one turn against a peer that answers the prompt with `error` and
-	/// returns the failure the turn ends with.
-	async fn prompt_failure(error: &str) -> omp_agent::delegated::RemoteFailure {
+	/// Runs one turn against a peer that sends `notices` and then answers the
+	/// prompt with `error`, and returns the failure the turn ends with.
+	async fn prompt_failure_after(
+		profile: AcpProfile,
+		notices: &[&str],
+		error: &str,
+	) -> omp_agent::delegated::RemoteFailure {
 		let request = strict_request("/tmp");
-		let (mut session, mut peer) = open_session(&request).await;
+		let (mut session, mut peer) = open_session_with(&request, profile).await;
 		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
 		let script = async {
 			let id = request_id(&peer.recv().await);
+			for notice in notices {
+				peer.send(notice).await;
+			}
 			peer
 				.send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{error}}}"#))
 				.await;
@@ -733,6 +886,70 @@ mod executor_tests {
 			{
 				return failure;
 			}
+		}
+	}
+
+	/// Runs one turn with no profile; see [`prompt_failure_after`].
+	async fn prompt_failure(error: &str) -> omp_agent::delegated::RemoteFailure {
+		prompt_failure_after(AcpProfile::default(), &[], error).await
+	}
+
+	/// Devin's missing-login notice: typed, and sent before the prompt's error.
+	fn devin_notice() -> LoginNotice {
+		LoginNotice {
+			method: Str::new_static("_cognition.ai/agent_stopped"),
+			cause:  Str::new_static("auth_required"),
+		}
+	}
+
+	const AGENT_STOPPED_AUTH: &str = r#"{"jsonrpc":"2.0","method":"_cognition.ai/agent_stopped","params":{"cause":"auth_required","stats":{"toolCalls":0}}}"#;
+
+	/// Signed-out Devin answers the prompt with a plain `-32000` and no `data`,
+	/// but says why in a typed notice first. A profile that names the notice
+	/// ends the turn as `AuthRequired`.
+	#[tokio::test]
+	async fn a_typed_login_notice_ends_the_turn_as_auth_required() {
+		let profile = AcpProfile { login_notice: Some(devin_notice()), ..AcpProfile::default() };
+		let failure = prompt_failure_after(
+			profile,
+			&[AGENT_STOPPED_AUTH],
+			r#"{"code":-32000,"message":"Please log in to use Devin."}"#,
+		)
+		.await;
+		assert!(
+			matches!(failure, omp_agent::delegated::RemoteFailure::AuthRequired),
+			"got: {failure:?}"
+		);
+	}
+
+	/// The notice only counts when the profile names it and its cause matches:
+	/// without a profile, with another cause, or under another method name the
+	/// turn stays an internal failure.
+	#[tokio::test]
+	async fn a_login_notice_that_is_not_the_profiles_is_ignored() {
+		let devin = AcpProfile { login_notice: Some(devin_notice()), ..AcpProfile::default() };
+		let cases = [
+			(AcpProfile::default(), AGENT_STOPPED_AUTH),
+			(
+				devin.clone(),
+				r#"{"jsonrpc":"2.0","method":"_cognition.ai/agent_stopped","params":{"cause":"rate_limited"}}"#,
+			),
+			(
+				devin,
+				r#"{"jsonrpc":"2.0","method":"_other.ai/agent_stopped","params":{"cause":"auth_required"}}"#,
+			),
+		];
+		for (profile, notice) in cases {
+			let failure = prompt_failure_after(
+				profile,
+				&[notice],
+				r#"{"code":-32000,"message":"Please log in to use Devin."}"#,
+			)
+			.await;
+			assert!(
+				matches!(failure, omp_agent::delegated::RemoteFailure::Internal),
+				"{notice} gave {failure:?}"
+			);
 		}
 	}
 
