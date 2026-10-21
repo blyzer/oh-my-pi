@@ -1362,7 +1362,6 @@ async fn deltas_tools_and_usage_are_normalized_and_usage_is_per_turn() {
 async fn failures_are_typed() {
 	for (info, expected) in [
 		(r#""unauthorized""#, "auth_required"),
-		(r#"{"code":-32000,"data":"no auth method id provided"}"#, "auth_required"),
 		(r#""rateLimitExceeded""#, "rate_limited"),
 		(r#""contextWindowExceeded""#, "context_overflow"),
 		(r#""badRequest""#, "refused"),

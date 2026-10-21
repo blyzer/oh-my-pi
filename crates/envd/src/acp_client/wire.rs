@@ -31,11 +31,54 @@ pub enum RequestId {
 	Text(Str),
 }
 
+/// A value that is read and discarded, kept as a unit type so the enums that
+/// hold it can still derive `Eq` (serde's `IgnoredAny` is not `Eq`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ignored;
+
+impl<'de> Deserialize<'de> for Ignored {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		IgnoredAny::deserialize(deserializer).map(|_| Self)
+	}
+}
+
+/// Text detail or an intentionally ignored structured detail.
+///
+/// The `message` field of a JSON-RPC error is never decoded: providers can
+/// echo secrets into it (same policy as the Codex wire module).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum ErrorData {
+	/// A textual provider detail (the only variant we classify on).
+	Text(Str),
+	/// Any other shape; silently ignored.
+	Other(Ignored),
+}
+
+/// JSON-RPC code Grok uses for "Authentication required".
+const MISSING_LOGIN_CODE: i64 = -32000;
+/// `data` text Grok attaches when no authentication method was selected.
+const MISSING_LOGIN_DATA: &str = "no auth method id provided";
+
+/// Whether an error response means the agent has no usable login.
+///
+/// Only this exact shape is recognised. Other agents report a missing login
+/// with a different or ambiguous code (dsh answers `-32603` at the prompt),
+/// so they stay ordinary failures until a per-binary rule is decided.
+#[must_use]
+pub fn is_missing_login(code: i64, data: Option<&ErrorData>) -> bool {
+	code == MISSING_LOGIN_CODE
+		&& matches!(data, Some(ErrorData::Text(text)) if text.contains(MISSING_LOGIN_DATA))
+}
+
 /// The `error` member of a JSON-RPC error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct RpcError {
 	/// Standard JSON-RPC error code.
 	pub code: i64,
+	/// Optional provider detail attached to the error.
+	#[serde(default)]
+	pub data: Option<ErrorData>,
 }
 
 /// Every member an ACP JSON-RPC line may carry, borrowed from the line.
@@ -71,7 +114,7 @@ pub enum JsonRpcMessage<'a> {
 	/// A successful response to a client request.
 	Response { id: RequestId, result: &'a RawValue },
 	/// An error response to a client request.
-	Error { id: Option<RequestId>, code: i64 },
+	Error { id: Option<RequestId>, code: i64, data: Option<ErrorData> },
 }
 
 impl<'a> Envelope<'a> {
@@ -89,7 +132,9 @@ impl<'a> Envelope<'a> {
 			// Successful response.
 			(Some(id), None, Some(result), None, _) => Some(JsonRpcMessage::Response { id, result }),
 			// Error response (id may be absent for parse errors).
-			(id, None, None, Some(err), _) => Some(JsonRpcMessage::Error { id, code: err.code }),
+			(id, None, None, Some(err), _) => {
+				Some(JsonRpcMessage::Error { id, code: err.code, data: err.data })
+			},
 			_ => None,
 		}
 	}

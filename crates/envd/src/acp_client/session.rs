@@ -37,8 +37,8 @@ use tokio::{
 };
 
 use super::wire::{
-	Envelope, JsonRpcMessage, Method, OutError, OutErrorBody, OutNotification, OutRequest,
-	OutResponse, RequestId,
+	Envelope, ErrorData, JsonRpcMessage, Method, OutError, OutErrorBody, OutNotification,
+	OutRequest, OutResponse, RequestId,
 };
 use crate::line_reader::{FrameError, LineReader};
 
@@ -63,7 +63,11 @@ pub enum InboundMessage {
 	ErrorResponse {
 		/// Id of the matched request (absent for parse-error responses).
 		id:   Option<RequestId>,
+		/// The JSON-RPC error code.
 		code: i64,
+		/// The provider detail, when the agent sent one. `message` is never
+		/// decoded: it can echo provider diagnostics.
+		data: Option<ErrorData>,
 	},
 	/// An agent-to-client request waiting for our answer.
 	AgentRequest {
@@ -297,11 +301,11 @@ impl<R: AsyncRead + Unpin> AcpSession<R> {
 					let result = result.to_owned();
 					return Ok(Some(InboundMessage::Response { id, result }));
 				},
-				JsonRpcMessage::Error { id, code } => {
+				JsonRpcMessage::Error { id, code, data } => {
 					if let Some(RequestId::Int(i)) = &id {
 						self.pending.remove(i);
 					}
-					return Ok(Some(InboundMessage::ErrorResponse { id, code }));
+					return Ok(Some(InboundMessage::ErrorResponse { id, code, data }));
 				},
 				JsonRpcMessage::Request { id, method, params } => {
 					let method = Method::classify(&method);

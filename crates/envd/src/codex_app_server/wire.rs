@@ -653,33 +653,13 @@ pub enum ErrorCode {
 }
 
 /// `codexErrorInfo`: a plain code or an object with details.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
 pub enum ErrorInfo {
 	/// A plain code.
 	Code(ErrorCode),
-	/// An object form with an optional provider-specific code and detail.
-	Detailed(ErrorDetails),
-}
-
-/// Provider-specific details carried with an unrecognized turn error.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorDetails {
-	/// JSON-RPC/provider error code, when supplied.
-	pub code: Option<i64>,
-	/// Provider detail, when supplied as text.
-	pub data: Option<ErrorDetailData>,
-}
-
-/// Text detail or an intentionally ignored structured detail.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(untagged)]
-pub enum ErrorDetailData {
-	/// Textual provider detail.
-	Text(Str),
-	/// Structured detail not used for classification.
-	Other(IgnoredAnyCopy),
+	/// An object form (connection failures and similar).
+	Detailed(IgnoredAnyCopy),
 }
 
 /// A `Copy` ignored value.
@@ -694,7 +674,7 @@ impl<'de> Deserialize<'de> for IgnoredAnyCopy {
 
 /// A turn error. The message text is deliberately not decoded: it can echo
 /// provider diagnostics, and typed failures carry the facts.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnError {
 	/// The reason code, when given.
