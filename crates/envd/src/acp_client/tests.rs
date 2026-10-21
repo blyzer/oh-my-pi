@@ -831,6 +831,45 @@ mod executor_tests {
 		);
 	}
 
+	#[tokio::test]
+	async fn every_event_of_a_turn_carries_the_id_start_turn_returned() {
+		let request = strict_request("/tmp");
+		let (mut session, mut peer) = open_session(&request).await;
+		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+
+		let peer_fut = async {
+			let line = peer.recv().await;
+			let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+			let id = v["id"].as_i64().unwrap();
+			peer.send(
+				r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}"#,
+			)
+			.await;
+			peer.reply(id, r#"{"stopReason":"end_turn"}"#).await;
+		};
+		let (accepted, ()) = tokio::join!(session.start_turn(&input), peer_fut);
+		let accepted = accepted.expect("start_turn ok");
+
+		let mut seen = 0;
+		loop {
+			let event = session.next_event().await.expect("event");
+			let done = matches!(
+				event,
+				DelegatedEvent::Lifecycle(omp_agent::delegated::LifecycleEvent::TurnCompleted { .. })
+			);
+			assert_eq!(
+				event.turn(),
+				Some(&accepted.turn),
+				"the host ends the session as TurnMismatch when an event names another turn: {event:?}"
+			);
+			seen += 1;
+			if done {
+				break;
+			}
+		}
+		assert!(seen >= 3, "started, a text delta and completed were all checked, saw {seen}");
+	}
+
 	// ─── permission ───────────────────────────────────────────────────────────
 
 	#[tokio::test]
