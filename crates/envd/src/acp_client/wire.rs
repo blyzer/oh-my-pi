@@ -244,20 +244,16 @@ pub struct AgentInfo {
 
 /// `session/new` request params (client → agent).
 ///
-/// We always send an empty `mcpServers` list; the agent connects to MCP
-/// servers under its own configuration.
+/// ACP requires `mcpServers` on every `session/new`, even when empty: a real
+/// agent (the `dsh` harness) rejects a request without it. We send an empty
+/// list; the agent connects to MCP servers under its own configuration.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams<'a> {
 	/// Working directory for the session; must be an absolute path.
 	pub cwd:         &'a str,
-	/// MCP server list. Serializes as an empty JSON array when unused.
-	#[serde(skip_serializing_if = "slice_is_empty")]
+	/// MCP server list. Always serialized, as `[]` when unused.
 	pub mcp_servers: &'a [&'a str],
-}
-
-fn slice_is_empty(s: &[&str]) -> bool {
-	s.is_empty()
 }
 
 /// `session/new` response (agent → client).
