@@ -77,6 +77,10 @@ pub struct AcpDelegatedSession {
 	queue:      std::collections::VecDeque<DelegatedEvent>,
 	/// Active permission prompts.
 	pending:    HashMap<PromptId, PendingPermission>,
+	/// The turn in flight, named by the request id of its `session/prompt`. ACP
+	/// has no turn id of its own, and the host requires every event of a turn
+	/// to carry the id `start_turn` returned, so each event is stamped with it.
+	turn:       TurnId,
 	terminated: bool,
 }
 
@@ -196,6 +200,7 @@ impl AcpDelegatedSession {
 				queue: std::collections::VecDeque::new(),
 				pending: HashMap::new(),
 				terminated: false,
+				turn: TurnId::new(Str::default()),
 			},
 			info,
 		))
@@ -283,7 +288,7 @@ impl AcpDelegatedSession {
 
 	/// Maps a `session/update` notification to zero or more queued events.
 	fn on_update(&mut self, update: wire::UpdateParams) {
-		let turn = TurnId::new(update.session_id.clone());
+		let turn = self.turn.clone();
 		match update.update {
 			wire::SessionUpdateEnvelope::AgentMessageChunk { ref content, .. } => {
 				if let Some(text) = &content.text {
@@ -372,9 +377,9 @@ impl AcpDelegatedSession {
 			.pending
 			.insert(prompt.clone(), PendingPermission { rpc_id: id, options });
 
-		// Turn id: we use session_id as a proxy since ACP does not expose
-		// a separate turn id in permission requests.
-		let turn = TurnId::new(self.session_id.clone());
+		// A permission request belongs to the turn in flight; ACP does not carry
+		// a turn id in it, so it takes the id `start_turn` returned.
+		let turn = self.turn.clone();
 		let call = Some(CallId::new(params.tool_call.tool_call_id));
 
 		self
@@ -448,6 +453,7 @@ impl DelegatedSession for AcpDelegatedSession {
 		// Record turn id: ACP doesn't provide a separate turn id; we use the
 		// RPC request id as the turn handle.
 		let turn = TurnId::new(Str::from(id.to_string()));
+		self.turn = turn.clone();
 
 		// The session/prompt response (stop_reason) marks the end of the turn,
 		// but events arrive as notifications beforehand. We enqueue
@@ -497,7 +503,7 @@ impl DelegatedSession for AcpDelegatedSession {
 						.pending
 						.retain(|k, _| !k.as_str().starts_with("__prompt_rpc_"));
 
-					let turn = TurnId::new(self.session_id.clone());
+					let turn = self.turn.clone();
 					let outcome = stop_reason_to_end(prompt_result.stop_reason);
 					self
 						.queue
@@ -514,7 +520,7 @@ impl DelegatedSession for AcpDelegatedSession {
 				self
 					.pending
 					.retain(|k, _| !k.as_str().starts_with("__prompt_rpc_"));
-				let turn = TurnId::new(self.session_id.clone());
+				let turn = self.turn.clone();
 				self.queue.push_back(DelegatedEvent::Failure {
 					turn,
 					failure: omp_agent::delegated::RemoteFailure::Internal,
