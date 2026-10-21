@@ -1079,9 +1079,11 @@ top of it in PR 1d.
 
 ## Status in omp
 
-**Status: Not started.** Proposed 2026-10-08 against `omp2` at `929f902235`. None of the components
-exist: no `omp-exec`, no REAPI client, no router, no `sv_exec_*` convars and no `omp.exec.*`
-telemetry. The reusable pieces are listed in Context.
+**Status: Partially implemented.** Re-verified against `omp2` at `9e0c073d04`.
+
+Implemented: `omp-exec` domain crate (`crates/exec/`) with `BuildReport`, `BuildStatus`, `place()`, `CargoJust` adapter, and `ExecutionPolicy`; REAPI client backend (`crates/exec-reapi/`); BuildBuddy Run API backend (`crates/exec-buildbuddy/`); local backend (`crates/exec-local/`); SSH backend (`crates/exec-ssh/`). Operator convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_remote_endpoint`, `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`, `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`, `sv_exec_fallback_local`. Telemetry: `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`, `omp.exec.run`, `omp.exec.download` spans emitted; `ExecutedActionMetadata` fields captured in `omp.exec.worker.*` tracing events (PR #351). `BuildReport`/`BuildStatus` added PR #350. Client CPU and memory measurement via `scripts/measure-recipe.py` (PRs #352, #353). Gate 2 proven 2026-10-19: `bb remote` dispatched `just remote-test-pkg omp-exec-reapi` to a Linux runner, 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af` (PR #339; `docs/audits/remote-verification-trial.md`).
+
+Open: no `omp-envd` run through the omp REAPI backend is recorded. The 2026-10-20 attempt failed on a missing `cmake` in the pinned image; the image recipe now installs `cmake` and `ninja-build` (PR #360, `scripts/exec-image/Dockerfile`), and no later `omp-envd` run is recorded. The wall-time criterion (1.83× on the `omp-envd` three-rep `bb remote` mean, target ≤ 1.5×) and the client peak-memory criterion (7.7% vs the 5% target) both fail on that measurement (`docs/audits/remote-verification-trial.md` §G1). `BuildExecutionPort` is deferred to ADR 0047.
 
 ### BuildBuddy coverage of REAPI
 

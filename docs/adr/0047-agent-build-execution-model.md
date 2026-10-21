@@ -69,7 +69,7 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
 
 ## Status in omp
 
-**Not started.** No `omp-exec` crate, adapter, backend, `BuildReport` or `omp.exec.*` telemetry exists. The vertical slice in the research report lists the exact files it would touch and is blocked on Gate 1. Remote CI invocation remains unproven pending Gate 2.
+**Partially implemented.** Re-verified against `omp2` at `9e0c073d04`. The `omp-exec` crate (`crates/exec/`), `CargoJust` adapter, `place()` router, `BuildReport`, `BuildStatus`, and all four backends (`omp-exec-reapi`, `omp-exec-buildbuddy`, `omp-exec-local`, `omp-exec-ssh`) exist. `omp.exec.*` telemetry spans and `omp.exec.worker.*` tracing events from `ExecutedActionMetadata` are wired (PRs #350, #351, #352, #353). Gate 2 proven 2026-10-19: remote CI invocation dispatched and 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af` (PR #339). Open: `BuildExecutionPort` is explicitly deferred by this ADR; no `omp-envd` run through the omp REAPI backend is recorded (the 2026-10-20 attempt failed on a missing `cmake`, which the image recipe now installs, PR #360); the wall-time and client peak-memory success criteria both fail on the available `omp-envd` `bb remote` measurement (`docs/audits/remote-verification-trial.md` §G1).
 
 ## References
 
