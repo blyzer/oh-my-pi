@@ -222,6 +222,10 @@ pub struct InitializeResult {
 	/// Agent implementation info.
 	#[serde(default)]
 	pub agent_info:         Option<AgentInfo>,
+	/// Authentication methods required. Non-empty means the agent is not
+	/// authenticated; the client must not start a login flow.
+	#[serde(default)]
+	pub auth_methods:       Vec<Str>,
 }
 
 /// Minimal subset of agent capabilities we inspect.
@@ -530,3 +534,21 @@ pub enum PermissionOutcome {
 
 /// JSON-RPC error code −32800 from the ACP schema (request cancelled).
 pub const ERR_REQUEST_CANCELLED: i64 = -32800;
+
+// ─── session/load ────────────────────────────────────────────────────────────
+
+/// `session/load` request params (client → agent); resumes an existing session.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionParams<'a> {
+	/// Session to resume.
+	pub session_id: &'a str,
+}
+
+/// `session/load` response (agent → client).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionResult {
+	/// The confirmed session id (should match the request).
+	pub session_id: Str,
+}

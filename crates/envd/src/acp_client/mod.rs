@@ -1,34 +1,34 @@
-//! ACP (Agent Client Protocol) wire transport for `omp-envd`.
+//! ACP (Agent Client Protocol) wire transport and delegated executor for
+//! `omp-envd`.
 //!
-//! This module implements the newline-delimited JSON-RPC transport layer for
-//! the Agent Client Protocol v1 (<https://agentclientprotocol.com>), spec
-//! version 2026-10-19.  In ACP, OMP acts as the **client** (editor side) and
-//! the agent is the server.  The data flow is the mirror of the Codex adapter
-//! in `codex_app_server`, where OMP drives a CLI agent over its own JSON-RPC
-//! dialect.
+//! This module implements the ACP v1 client:
 //!
-//! ## Structure
-//!
-//! - [`wire`]: typed serde structs for every ACP v1 message variant this
-//!   transport needs.  No `json!`, no untyped `Value` traversal.
+//! - [`wire`]: typed serde structs for every ACP v1 message this transport
+//!   needs.  No `json!`, no untyped `Value` traversal.
 //! - [`session`]: the correlation table, framing (via [`crate::line_reader`]),
 //!   and cancel-safe `next_message`.
+//! - [`delegated_session`]: [`AcpDelegatedSession`] implementing
+//!   [`omp_agent::delegated::DelegatedSession`] over ACP.
+//! - [`executor`]: [`AcpExecutor`] implementing
+//!   [`omp_agent::delegated::DelegatedExecutor`], spawning the agent over stdio
+//!   with [`crate::child_tree`] process-group teardown.
+//! - [`policy`]: the single ACP-mappable policy
+//!   ([`DelegatedPolicy::STRICTEST`]).
 //!
 //! ## Shared framing
 //!
 //! [`crate::line_reader::LineReader`] is the same size-capped, cancel-safe
 //! newline reader used by `codex_app_server`.  It is not copied: both modules
 //! import it from `crate::line_reader`.
-//!
-//! ## Non-goals
-//!
-//! This slice is transport and wire only.  A `DelegatedExecutor` implementation
-//! (spawning the agent, process-group teardown via `child_tree`, approval
-//! routing) is the next task.
 
+pub mod delegated_session;
+pub mod executor;
+pub mod policy;
 pub mod session;
 pub mod wire;
 
+pub use delegated_session::AcpDelegatedSession;
+pub use executor::AcpExecutor;
 pub use session::{AcpSession, InboundMessage, MAX_FRAME_BYTES, MalformedLine, SessionError};
 
 #[cfg(test)]
