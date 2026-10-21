@@ -1183,3 +1183,13 @@ mod child_env_tests {
 		assert!(!seen.contains("must-not-leak-3"), "an unnamed sibling secret leaked: {seen:?}");
 	}
 }
+
+#[test]
+fn session_new_always_carries_mcp_servers_even_when_empty() {
+	// ACP requires `mcpServers` on every `session/new`. A real agent (DeepSeek
+	// Harness 0.2.0-rc.2) rejects a request without it: -32602 "mcpServers:
+	// Required value is missing". See docs/research/acp-handshakes.
+	let params = super::wire::NewSessionParams { cwd: "/work", mcp_servers: &[] };
+	let value = serde_json::to_value(&params).expect("serialize");
+	assert_eq!(value, serde_json::json!({"cwd": "/work", "mcpServers": []}));
+}
