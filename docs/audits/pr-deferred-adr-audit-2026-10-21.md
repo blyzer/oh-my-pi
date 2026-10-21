@@ -114,9 +114,9 @@ Codex adapter (`omp_envd::codex_app_server`) and ACP client (`omp_envd::acp_clie
 
 | ID | Deferred item | Gate | Prerequisite satisfied on 9e0c073d04? | Classification | Parallel-safe? |
 |----|---------------|------|----------------------------------------|----------------|----------------|
-| 0043-A | ACP launch profile: DeepSeek Harness (`dsh --profile acp`) | PP | No — profile not built; handshake transcript pending | AN | Yes — profile file only |
-| 0043-B | ACP launch profile: Devin (`devin acp`) | PP | No — profile not built | AN | Yes |
-| 0043-C | ACP launch profile: Grok (`grok agent stdio`) | PP | No — profile not built; docs-only evidence | AN | Yes |
+| 0043-A | ACP launch profile: DeepSeek Harness (`dsh --profile acp`) | PP | No: `ExecutorRegistry` builds only the Codex executor (`crates/driver/src/delegated_host.rs`). A no-credential handshake is recorded (`docs/research/acp-handshakes/dsh-no-credential.md`, #363), but ADR 0043 also requires a completed prompt, `session/cancel` and a denied permission, which the README records for no binary | BD | Yes: `crates/driver/src/delegated_host.rs` |
+| 0043-B | ACP launch profile: Devin (`devin acp`) | PP | No: same registry and recording gaps. Also `AcpExecutor` returns `AuthRequired` from `initialize` whenever `authMethods` is non-empty (`crates/envd/src/acp_client/delegated_session.rs:150`), which Devin always advertises, so a signed-in Devin is refused until that heuristic is replaced | BD | Yes |
+| 0043-C | ACP launch profile: Grok (`grok agent stdio`) | PP | No: same registry and recording gaps. Grok fails `session/new` with `-32000` and expects an authentication step the client never sends (README finding 3); the operator reports the account quota is exhausted | BD | Yes |
 | 0043-D | ACP launch profile: Antigravity (`agy_acp_server.par`) | PP + EX | No — `agy_acp_server.par` authentication method and Python dependency unverified | BD | Yes |
 | 0043-E | ACP launch profile: Claude Code (via `@agentclientprotocol/claude-agent-acp`, Node 22) | PP + EX | No — bridge licence conflict (`proprietary` vs `Apache-2.0`); node bridge not installed by OMP | BD | Yes |
 | 0043-F | `omp-sandbox` wrapping an arbitrary agent child (`DelegatedPolicy` enforcement) | PP | No — unverified per ADR status | AN | Yes — isolated test |
@@ -178,7 +178,7 @@ ADR status as written: **Not started. Blocked on Gate 1.** This is stale. G1 req
 | 0047-G1 | Owner acceptance of ADR | OD | Not verified in writing — ADR status still says "Not started"; G2 closed by #339 | BD | — |
 | 0047-G2 | Remote invocation proven | PP | Yes — #339 merged; invocation ID recorded | AD | — |
 | 0047-G3 | Credential containment proof | OD + PP | No — first remote backend credential model undecided | BD | Yes |
-| 0047-G4 | Local parity and F11 closed | PP | Partial — #267 (F11a-f) merged; `BuildReport` in #350; F11 for cleanse in #330; re-verify exactly | AN (verify) | Yes |
+| 0047-G4 | Local parity and F11 closed | PP | Verified for the criteria named in the TRUST-F11 row: F11e is open for `cleanse`. `BuildReport` landed in #350 | AN | Yes: `crates/driver/src/cleanse/production.rs` |
 | 0047-G5 | Capture correctness (git-semantics `CaptureInputs`) | PP | Yes — `capture_inputs` merged #293 | AD | — |
 | 0047-G6 | Structured results (`BuildReport`/`BuildStatus`) | PP | Yes — merged #350 | AD | — |
 | 0047-G7 | Observability correlation chain (`omp.exec.*` spans) | PP | Yes — #318, #329, #351 merged | AD | — |
@@ -222,7 +222,7 @@ PR2 (trust rows, locked grant writer) landed #191, #196. PR3–PR8 (driver plumb
 | TRUST-PR3 | Driver trust plumbing (nothing outside `omp-ext` reads a trust decision) | PP | Partial — #272, #273, #274, #275, #276, #277 merged (trust slices 3–8); re-verify exactly | AD (likely) | — |
 | TRUST-PR4 | `omp trust`, workspace trust CLI | PP | Yes — #274 merged | AD | — |
 | TRUST-MCP | Explicit per-workspace MCP approval | PP | Yes — #273 gates project MCP on workspace trust | AD | — |
-| TRUST-F11 | F11: `omp adw run` code phases sandboxed, operator cfg applied, Ctrl-C wired | PP | Partial — #267 (F11a-f) merged 2026-10-11; exact residual coverage unverified | AN (verify) | Yes |
+| TRUST-F11 | F11: `omp adw run` code phases sandboxed, operator cfg applied, Ctrl-C wired | PP | F11a-d and F11f were reported closed by a code read (not re-read here). F11e is open for cleanse, verified by reading: `crates/driver/src/cleanse/production.rs:136` builds default `KernelOptions` (`include_workspace: true`, `crates/driver/src/headless/kernel.rs:129`) while ADW sets it false (`adw/production.rs:365`, test at `:901`). Bounded by workspace trust (`kernel.rs:2498`): only a trusted workspace's `.omp/extensions` load | AN | Yes: `crates/driver/src/cleanse/production.rs` |
 | TRUST-F2 | F2: native `.omp/extensions` with self-declared grants | OD | Not started as of parked note; unverified on HEAD | AN | Yes |
 | TRUST-F3 | F3: LSP/DAP project binaries not gated | PP | Partial — #265 (sv_lsp_project_binaries off by default) merged; full gating unverified | AN (verify) | Yes |
 | TRUST-HOSTS | `hosts.toml` writes and `.cfg.lock` sibling follow symlinks | PP | Partial — #263 merged (harden cfg-lock readers); exact symlink fix unverified | AN (verify) | Yes |
@@ -276,10 +276,10 @@ Source: `docs/adr/0043-native-cli-integration.md` §Amendment 2026-10-20.
 | Classification | Count |
 |----------------|-------|
 | AD (already done, ADR text stale) | 28 (25 confirmed, 3 marked "likely") |
-| AN (actionable now) | 26 (20 confirmed, 6 marked "verify") |
-| BD (blocked on named dependency) | 40 |
+| AN (actionable now) | 23 (19 confirmed, 4 marked "verify") |
+| BD (blocked on named dependency) | 43 |
 | ST (stale/obsolete) | 1 |
-| **Total rows** | **95**, counted from the tables by the classification column. The previous summary (87) did not match its own tables. 9 rows (`AD (likely)`, `AN (verify)`) are not verified |
+| **Total rows** | **95**, counted from the tables by the classification column. 7 rows (`AD (likely)`, `AN (verify)`) are not verified. Refreshed 2026-10-21 after #368: 0043-A/B/C moved from actionable to blocked; the F11 rows are now confirmed |
 
 ---
 
@@ -289,9 +289,9 @@ Ranked by value (impact × readiness):
 
 | Rank | ID | Work | Why now | Touches |
 |------|----|------|---------|---------|
-| 1 | 0040-L + 0047-ADR | Update `docs/adr/0040-remote-build-and-test-execution.md` and `docs/adr/0047-agent-build-execution-model.md` status text to reflect all merged slices | IN PROGRESS as lane A: branch `docs/adr-status-reconciliation`, worktree `/private/tmp/omp-parallel/adr-status-reconciliation`, uncommitted. Not a new item | `docs/adr/0040-*.md`, `docs/adr/0047-*.md`, `docs/adr/STATUS.md` |
-| 2 | 0043-A–C | Build ACP launch profiles for DeepSeek Harness, Devin, Grok | ACP client is live (#361); first `dsh` handshake transcript is recorded (#363). Where profiles live was not verified: #362 introduced an operator-only profile table in `crates/driver`, so a location under `crates/envd/src/acp_client/` is unverified | Unverified; read #362 before assigning |
-| 3 | 0047-G4 (verify) | Verify F11 residual closure after #267 and #330 | F11 (code phases sandboxed, operator cfg applied, Ctrl-C wired) is the documented open security finding; #267 and #330 are merged; a targeted audit of `crates/driver/src/adw/production.rs` and `crates/driver/src/cleanse/production.rs` against F11's criteria would confirm or name the residual | Read-only audit: `crates/driver`, `crates/adw` |
+| 1 | 0040-L + 0047-ADR | Update the ADR 0040 and 0047 status text | DONE: #368 merged; the STATUS rows for ADRs 0042-0048 are #369 | `docs/adr/` |
+| 2 | 0043-A–C | ACP launch profiles for DeepSeek Harness, Devin, Grok | Not data-only. Prerequisites, in order: register an ACP executor in `ExecutorRegistry` (`crates/driver/src/delegated_host.rs`; only Codex is registered); replace the `authMethods` heuristic (`crates/envd/src/acp_client/delegated_session.rs:150`); record a completed prompt, `session/cancel` and a denied permission per binary, which ADR 0043 requires before a profile is enabled | `crates/driver/src/delegated_host.rs`, `crates/envd/src/acp_client/` |
+| 3 | 0047-G4 / TRUST-F11 | Close F11e for cleanse: set `include_workspace: false` for cleanse child kernels as ADW does, with a test | F11e is verified open (TRUST-F11 row); the change mirrors `crates/driver/src/adw/production.rs:360-371` | `crates/driver/src/cleanse/production.rs` |
 | 4 | FOLLOW-0007 | Copy gitignored files into the CoW subagent view | Acknowledged open gap in ADR 0007 status. The implementation approach was not verified: this audit did not read the snapshot or reflink code, so a design step comes before any change | `crates/envd/src/workspace/` (unverified) |
 | 5 | FOLLOW-0035 | Continue error-variant migration toward zero (one crate at a time) | Ratchet holds per-crate baselines in `tools/lintx/baselines/error-formatting.toml`; each crate is independent; can run in parallel worktrees without coordination | One crate per worktree; no shared files |
 
@@ -304,7 +304,7 @@ The following could not be verified with available evidence:
 1. **ADR 0040-H (SSH backend completeness).** `crates/exec-ssh` exists and has tests, but the ADR implementation plan described it as Slice 3 with specific interfaces. Whether it fully satisfies the spec was not confirmed by reading its source in this pass.
 2. **ADR 0041-A (`#344` coverage).** PR #344 is titled "ADR 0041 phase 3 — editor edit/undo/send, autocomplete and picker TSP". Whether `screen` surfaces are also in scope was not confirmed; the ADR status says "not started" for screen surfaces.
 3. **TRUST-PR3 residual.** Trust slices 3–8 (#272–#277) landed after the parked handoff that called PR3–PR8 "not started". Whether they fully cover driver plumbing and envd gating was not verified by reading the code; the parked note's language predates those PRs.
-4. **TRUST-F11 residual.** #267 is titled "F11a-f"; whether every sub-item of F11 (five items in the audit) is closed was not verified on HEAD.
+4. **TRUST-F11 residual.** Resolved in this refresh: F11e is open for cleanse; see the TRUST-F11 row. F11a-d and F11f rest on a code read that was not repeated here.
 5. **0048-B9.** Resolved in this pass: `limits.py:39` still reads `SCHEMA_REV = 7`, so B9 is open. The `processes.md` and `build.rs` halves were not re-read.
 6. **ADR 0047 G1 written acceptance.** The ADR status text has not been updated; whether the owner has given a written acceptance in a PR description or commit was not searched exhaustively.
 7. **`ACCT-2` `--api-key` precedence.** The parked note said "not started" in the 2026-10-06 session; whether any subsequent PR (#251 or later) addressed it was not confirmed.
