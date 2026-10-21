@@ -272,6 +272,7 @@ impl CodexSession {
 	}
 
 	// -----------------------------------------------------------------------
+
 	// Handshake
 	// -----------------------------------------------------------------------
 
@@ -932,9 +933,18 @@ fn exit_fact(status: std::process::ExitStatus) -> ExitFact {
 	status.code().map_or(ExitFact::Unknown, ExitFact::Code)
 }
 
-const fn remote_failure(info: Option<wire::ErrorInfo>) -> RemoteFailure {
+fn remote_failure(info: Option<wire::ErrorInfo>) -> RemoteFailure {
 	use wire::ErrorCode;
-	let Some(wire::ErrorInfo::Code(code)) = info else {
+	let Some(info) = info else {
+		return RemoteFailure::Internal;
+	};
+	let wire::ErrorInfo::Code(code) = info else {
+		if let wire::ErrorInfo::Detailed(details) = info
+			&& details.code == Some(-32000)
+			&& details.data.as_ref().is_some_and(|data| matches!(data, wire::ErrorDetailData::Text(text) if text.contains("no auth method id provided")))
+		{
+			return RemoteFailure::AuthRequired;
+		}
 		return RemoteFailure::Internal;
 	};
 	match code {
