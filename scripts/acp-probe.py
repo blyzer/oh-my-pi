@@ -10,12 +10,32 @@ transcript shows what the binary does rather than what our client expects.
         --set DSH_HOME={home}/.dsh -- /path/to/dsh --profile acp
 
 Isolation:
-  * HOME is a fresh temporary directory; the real one is never touched.
+  * HOME is a fresh temporary directory; the real one is never touched,
+    unless --inherit-login is given (see below).
   * The environment is cleared. Only PATH, HOME, TERM and LANG are set, plus
     each --set NAME=VALUE ({home} expands to the temporary home) and each
     --pass-env NAME copied from this process. A name passed this way is
     redacted from the transcript.
   * The agent runs in its own process group and is killed at the end.
+
+Opt-ins (both are recorded in the transcript):
+  * --inherit-login runs the agent with the operator's real HOME so the
+    vendor's own process uses its own existing login. Nothing is copied or
+    read by this script, and no token is passed through the environment, but
+    the agent can read and write its normal files there (session history).
+    Use it only for a binary the operator has signed in to and has budget for.
+  * --connect-only stops after initialize and session/new. No prompt is sent,
+    so no model quota is spent.
+
+Optional steps that set up and exercise the gate (all recorded):
+  * --set-mode ID sends session/set_mode after session/new.
+  * --config ID=VALUE (repeatable) sends session/set_config_option; VALUE is
+    sent as the text given (dsh's model option takes JSON text such as
+    '["deepseek-account","deepseek-flash"]').
+  * --permission-prompt TEXT sends a prompt that needs a tool and records how
+    many session/request_permission requests the agent made (each is
+    rejected) and how the turn ended. An agent that runs the tool without
+    asking shows 0 requests.
 
 Steps (each is recorded, a failed step does not stop the run):
   initialize, session/new, session/new with a relative cwd, session/prompt
@@ -30,6 +50,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import signal
@@ -42,6 +63,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROTOCOL_VERSION = 1
+
+# Session, message and account identifiers all look alike, and an account id
+# must not reach a committed transcript. Every UUID becomes a placeholder; the
+# same UUID always maps to the same placeholder, so correlations stay visible.
+UUID_RE = re.compile(
+    r"(?<![0-9a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F])")
 
 
 class Agent:
@@ -183,7 +210,7 @@ def probe(args, command, home, real_home):
 
     env = {
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "HOME": home,
+        "HOME": real_home if args.inherit_login else home,
         "TERM": "dumb",
         "LANG": "en_US.UTF-8",
     }
@@ -230,42 +257,79 @@ def probe(args, command, home, real_home):
         if new and "result" in new:
             session_id = new["result"].get("sessionId")
 
-        rel_id = agent.request("session/new", {"cwd": "relative/path", "mcpServers": []})
-        record("session/new (relative cwd)", "error: cwd must be absolute",
-               agent.wait_response(rel_id, args.timeout))
-
-        bad_id = agent.request("session/prompt", {
-            "sessionId": "no-such-session",
-            "prompt": [{"type": "text", "text": "x"}],
-        })
-        record("session/prompt (unknown session)", "error",
-               agent.wait_response(bad_id, args.timeout))
-
-        unk_id = agent.request("session/does-not-exist", {})
-        record("unknown method", "error -32601", agent.wait_response(unk_id, args.timeout))
-
-        if session_id:
-            prompt_id = agent.request("session/prompt", {
-                "sessionId": session_id,
-                "prompt": [{"type": "text", "text": args.prompt}],
+        if session_id and args.set_mode:
+            mode_id = agent.request("session/set_mode", {
+                "sessionId": session_id, "modeId": args.set_mode,
             })
-            time.sleep(args.cancel_after)
-            agent.notify("session/cancel", {"sessionId": session_id})
-            prompt = agent.wait_response(prompt_id, args.timeout)
-            note = ""
-            if prompt and "result" in prompt:
-                note = "stopReason={}".format(prompt["result"].get("stopReason"))
-            record("session/prompt then session/cancel after {}s".format(args.cancel_after),
-                   "result with stopReason cancelled, or an error", prompt, note)
+            record("session/set_mode {}".format(args.set_mode), "result",
+                   agent.wait_response(mode_id, args.timeout))
+        for item in args.config if session_id else []:
+            config_id, _, value = item.partition("=")
+            cfg_id = agent.request("session/set_config_option", {
+                "sessionId": session_id, "configId": config_id, "value": value,
+            })
+            record("session/set_config_option {}".format(config_id), "result",
+                   agent.wait_response(cfg_id, args.timeout))
+        if session_id and args.permission_prompt:
+            before = len(agent.frames)
+            perm_id = agent.request("session/prompt", {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": args.permission_prompt}],
+            })
+            perm = agent.wait_response(perm_id, args.timeout * 3)
+            asked = sum(1 for direction, text in agent.frames[before:]
+                        if direction == "<-" and "session/request_permission" in text)
+            note = "permission requests from the agent: {}".format(asked)
+            if perm and "result" in perm:
+                note += ", stopReason={}".format(perm["result"].get("stopReason"))
+            if args.check_file:
+                note += ", {} created: {}".format(
+                    args.check_file,
+                    "yes" if os.path.exists(os.path.join(work, args.check_file)) else "no")
+            record("session/prompt that needs a tool",
+                   "permission requests, each answered with a rejection", perm, note)
+
+        if not args.connect_only:
+            rel_id = agent.request("session/new", {"cwd": "relative/path", "mcpServers": []})
+            record("session/new (relative cwd)", "error: cwd must be absolute",
+                   agent.wait_response(rel_id, args.timeout))
+
+            bad_id = agent.request("session/prompt", {
+                "sessionId": "no-such-session",
+                "prompt": [{"type": "text", "text": "x"}],
+            })
+            record("session/prompt (unknown session)", "error",
+                   agent.wait_response(bad_id, args.timeout))
+
+            unk_id = agent.request("session/does-not-exist", {})
+            record("unknown method", "error -32601", agent.wait_response(unk_id, args.timeout))
+
+            if session_id:
+                prompt_id = agent.request("session/prompt", {
+                    "sessionId": session_id,
+                    "prompt": [{"type": "text", "text": args.prompt}],
+                })
+                time.sleep(args.cancel_after)
+                agent.notify("session/cancel", {"sessionId": session_id})
+                prompt = agent.wait_response(prompt_id, args.timeout)
+                note = ""
+                if prompt and "result" in prompt:
+                    note = "stopReason={}".format(prompt["result"].get("stopReason"))
+                record("session/prompt then session/cancel after {}s".format(args.cancel_after),
+                       "result with stopReason cancelled, or an error", prompt, note)
 
     exit_code, clean = agent.stop()
     steps.append(("close stdin", "agent exits", "exit code {}{}".format(
         exit_code, "" if clean else " (had to be killed)")))
 
+    uuids = {}
+
     def redact(text):
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[REDACTED]")
+        text = UUID_RE.sub(
+            lambda match: uuids.setdefault(match.group(0), "<uuid-{}>".format(len(uuids) + 1)), text)
         return text.replace(home, "<home>").replace(real_home, "<real-home>")
 
     out_lines = [
@@ -276,7 +340,10 @@ def probe(args, command, home, real_home):
         "",
         "- Command: `{}`".format(redact(" ".join(command))),
         "- Version: {}".format(version or "not recorded"),
-        "- Isolation: fresh temporary HOME, cleared environment; passed through: {}; set: {}".format(
+        "- Isolation: {}; passed through: {}; set: {}".format(
+            "the operator's own HOME (the vendor process uses its own login; nothing copied), "
+            "environment otherwise cleared" if args.inherit_login
+            else "fresh temporary HOME, cleared environment",
             ", ".join(args.pass_env) or "none",
             ", ".join(item.split("=")[0] for item in args.set) or "none"),
         "- Permission requests from the agent are answered with a rejection.",
@@ -315,6 +382,22 @@ def main():
     parser.add_argument("--prompt", default="Reply with the single word: ok")
     parser.add_argument("--cancel-after", type=float, default=2.0, help="seconds before session/cancel")
     parser.add_argument("--timeout", type=float, default=40.0, help="seconds to wait per response")
+    parser.add_argument("--inherit-login", action="store_true",
+                        help="run with the operator's real HOME so the vendor process uses its own "
+                             "existing login; nothing is copied, but the agent can read and write "
+                             "its normal files there")
+    parser.add_argument("--connect-only", action="store_true",
+                        help="stop after initialize and session/new: no prompt is sent, so no model "
+                             "quota is spent")
+    parser.add_argument("--set-mode", default="", metavar="ID",
+                        help="send session/set_mode with this mode id after session/new")
+    parser.add_argument("--config", action="append", default=[], metavar="ID=VALUE",
+                        help="send session/set_config_option after session/new (repeatable)")
+    parser.add_argument("--permission-prompt", default="", metavar="TEXT",
+                        help="a prompt that needs a tool; records the permission requests it causes")
+    parser.add_argument("--check-file", default="", metavar="NAME",
+                        help="a file the permission prompt asks the agent to create in the working "
+                             "directory; the transcript records whether it exists afterwards")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     sys.exit(run(parser.parse_args()))
 
