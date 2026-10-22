@@ -162,12 +162,13 @@ impl OverlayStore {
 /// Public construction path for one immutable [`CatalogOverlay`].
 #[derive(Clone, Debug)]
 pub struct CatalogOverlayBuilder {
-	source:     ProvenanceSource,
-	auth_specs: Vec<AuthSpec>,
-	providers:  Vec<ProviderDef>,
-	models:     Vec<ModelOverlay>,
-	routes:     Vec<RouteOverlay>,
-	aliases:    Vec<ScopedAlias>,
+	source:        ProvenanceSource,
+	auth_specs:    Vec<AuthSpec>,
+	wire_policies: Vec<crate::WirePolicy>,
+	providers:     Vec<ProviderDef>,
+	models:        Vec<ModelOverlay>,
+	routes:        Vec<RouteOverlay>,
+	aliases:       Vec<ScopedAlias>,
 }
 
 impl CatalogOverlayBuilder {
@@ -177,6 +178,7 @@ impl CatalogOverlayBuilder {
 		Self {
 			source,
 			auth_specs: Vec::new(),
+			wire_policies: Vec::new(),
 			providers: Vec::new(),
 			models: Vec::new(),
 			routes: Vec::new(),
@@ -193,6 +195,13 @@ impl CatalogOverlayBuilder {
 	/// Adds one interned authentication-specification addition.
 	pub fn with_auth_spec(mut self, spec: AuthSpec) -> Self {
 		self.auth_specs.push(spec);
+		self
+	}
+
+	/// Adds one wire policy that this layer's provider and model records name
+	/// by its content id ([`crate::WirePolicy::content_id`]).
+	pub fn with_wire_policy(mut self, policy: crate::WirePolicy) -> Self {
+		self.wire_policies.push(policy);
 		self
 	}
 
@@ -223,12 +232,13 @@ impl CatalogOverlayBuilder {
 	/// Freezes the accumulated layer for publication in an [`OverlayStack`].
 	pub fn build(self) -> CatalogOverlay {
 		CatalogOverlay {
-			source:     self.source,
-			auth_specs: self.auth_specs.into_boxed_slice(),
-			providers:  self.providers.into_boxed_slice(),
-			models:     self.models.into_boxed_slice(),
-			routes:     self.routes.into_boxed_slice(),
-			aliases:    self.aliases.into_boxed_slice(),
+			source:        self.source,
+			auth_specs:    self.auth_specs.into_boxed_slice(),
+			wire_policies: self.wire_policies.into_boxed_slice(),
+			providers:     self.providers.into_boxed_slice(),
+			models:        self.models.into_boxed_slice(),
+			routes:        self.routes.into_boxed_slice(),
+			aliases:       self.aliases.into_boxed_slice(),
 		}
 	}
 }
@@ -510,22 +520,26 @@ mod tests {
 	use omp_core::IntoStr;
 
 	use super::*;
-	use crate::{Catalog, EvidenceConfidence, ProvenanceKind, ProvenanceSource};
+	use crate::{
+		Catalog, EvidenceConfidence, ExactSelector, ModelPatch, ProvenanceKind, ProvenanceSource,
+		UnsafeTrustScope,
+	};
 
 	fn overlay(origin: &str) -> CatalogOverlay {
 		CatalogOverlay {
-			auth_specs: Box::new([]),
-			source:     ProvenanceSource {
+			auth_specs:    Box::new([]),
+			wire_policies: Box::new([]),
+			source:        ProvenanceSource {
 				kind:           ProvenanceKind::Configured,
 				origin:         origin.to_str(),
 				revision:       None,
 				confidence:     EvidenceConfidence::Declared,
 				observed_at_ms: None,
 			},
-			providers:  Box::new([]),
-			models:     Box::new([]),
-			routes:     Box::new([]),
-			aliases:    Box::new([]),
+			providers:     Box::new([]),
+			models:        Box::new([]),
+			routes:        Box::new([]),
+			aliases:       Box::new([]),
 		}
 	}
 
@@ -694,5 +708,58 @@ mod tests {
 				.all(|oauth| rebuilt.oauth_spec(&oauth.id).is_some())
 		);
 		assert!(rebuilt.provider(&provider.id).is_some());
+	}
+
+	/// A layer may add a wire policy and point a model at it by content id. The
+	/// policy must be resolvable afterwards, and the bundled ones must stay
+	/// resolvable too: lookup binary-searches a sorted id array.
+	#[test]
+	fn overlay_wire_policy_is_resolvable_and_keeps_bundled_policies_resolvable() {
+		let catalog = Catalog::embedded();
+		let model = catalog.models().first().expect("bundled model");
+		let provider = catalog
+			.route(&model.routes[0])
+			.expect("model route")
+			.provider
+			.clone();
+		let bundled = catalog
+			.wire_policy(&model.wire_policy)
+			.expect("bundled policy")
+			.clone();
+		let mut changed = bundled.clone();
+		changed.role.supports_developer_role =
+			Some(!bundled.role.supports_developer_role.unwrap_or(false));
+		let id = changed.content_id();
+		assert_ne!(id, model.wire_policy);
+		assert!(catalog.wire_policy(&id).is_none());
+
+		let layer = CatalogOverlayBuilder::new(ProvenanceSource {
+			kind:           ProvenanceKind::Configured,
+			origin:         "test".to_str(),
+			revision:       None,
+			confidence:     EvidenceConfidence::Declared,
+			observed_at_ms: None,
+		})
+		.with_wire_policy(changed.clone())
+		.with_model(ModelOverlay {
+			selector: ExactSelector::new(provider, model.key.clone()),
+			added:    None,
+			patch:    ModelPatch { wire_policy: Some(id.clone()), ..ModelPatch::default() },
+		})
+		.build();
+		let stack = OverlayStack::from_layers([(OverlaySource::UserConfig, layer)]);
+		let patched = catalog
+			.with_overlay_stack(&stack, UnsafeTrustScope::ALL)
+			.expect("overlay materializes");
+
+		assert_eq!(patched.model(&model.key).expect("model").wire_policy, id);
+		assert_eq!(patched.wire_policy(&id), Some(&changed));
+		for existing in catalog.models() {
+			assert!(
+				patched.wire_policy(&existing.wire_policy).is_some(),
+				"bundled policy {} lost",
+				existing.wire_policy
+			);
+		}
 	}
 }

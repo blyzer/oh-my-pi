@@ -2,7 +2,7 @@
 
 use std::{
 	cmp::Reverse,
-	collections::BTreeMap,
+	collections::{BTreeMap, BTreeSet},
 	env, fs, io,
 	iter::FusedIterator,
 	path::{Path, PathBuf},
@@ -22,7 +22,8 @@ use omp_catalog::{
 	ModelAvailability, ModelKey, ModelLimits, ModelOverlay, ModelPatch, ModelProvenance, ModelSpec,
 	OverlaySource, OverlayStack, OverlayStore, PremiumMultiplier, Pricing, ProvenanceKind,
 	ProvenanceSource, ProviderDef, ProviderId, RouteDef, RouteId, RouteOverlay, RoutePatch,
-	ThinkingPolicy, ThinkingRouting, UnsafeTrustScope, WireModelId,
+	SourceWirePolicy, ThinkingPolicy, ThinkingRouting, UnsafeTrustScope, WireModelId, WirePolicy,
+	WirePolicyId, compile_wire_policy,
 };
 use omp_core::{Str, string_id};
 use serde::{Deserialize, Serialize};
@@ -373,8 +374,13 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 	let catalog = omp_catalog::Catalog::embedded();
 	let mut models = Vec::new();
 	let mut references = Vec::new();
+	let mut derived = DerivedWirePolicies::default();
 	for (provider, definition) in &config.providers {
 		let provider_id = ProviderId::from_ref(provider.as_str());
+		let provider_compat = definition
+			.compat
+			.as_ref()
+			.map_or_else(Vec::new, |compat| parse_compat(compat, provider, None));
 		let configured_auth = definition
 			.auth
 			.as_deref()
@@ -385,6 +391,14 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 		}
 		let base_provider = catalog.provider(ProviderId::from_ref(provider.as_str()));
 		let configured_route = if let Some(base_provider) = base_provider {
+			if !provider_compat.is_empty() {
+				// A bundled provider's models and discovery defaults carry their own
+				// policy ids, so the provider record is replaced and each bundled
+				// model patched below.
+				let mut replaced = base_provider.clone();
+				derived.apply_to_provider(catalog, &mut replaced, &provider_compat);
+				builder = builder.with_provider(replaced);
+			}
 			for route_id in &base_provider.routes {
 				let Some(route) = catalog.route(route_id) else {
 					continue;
@@ -420,6 +434,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 			if let Some(auth) = &configured_auth {
 				added_provider.auth = Box::new([auth.id.clone()]);
 			}
+			derived.apply_to_provider(catalog, &mut added_provider, &provider_compat);
 			let mut added_route: RouteDef = template_route.clone();
 			added_route.id = route_id.clone();
 			added_route.provider = ProviderId::from(provider.as_str());
@@ -500,6 +515,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 			}
 			Some(route_id)
 		};
+		let mut handled: BTreeSet<ModelKey> = BTreeSet::new();
 		for (name, model) in definition.configured_models() {
 			let wire = model.wire_id(name);
 			let key = ModelKey::provider_scoped(provider_id, wire);
@@ -632,6 +648,20 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					&source,
 				)
 			});
+			let model_compat = model
+				.compat
+				.as_ref()
+				.map_or_else(Vec::new, |compat| parse_compat(compat, provider, Some(wire)));
+			// Provider `compat` first, then the model's own on top.
+			let wire_policy = existing
+				.map(|model| model.wire_policy.clone())
+				.or_else(|| added.as_ref().map(|spec| spec.wire_policy.clone()))
+				.and_then(|current| {
+					let provided = derived.apply(catalog, &current, &provider_compat);
+					let policy = derived.apply(catalog, &provided, &model_compat);
+					(policy != current).then_some(policy)
+				});
+			handled.insert(key.clone());
 			for (field, reference) in [
 				(ReferenceField::CompactionModel, &model.compaction_model),
 				(ReferenceField::ContextPromotionTarget, &model.context_promotion_target),
@@ -652,6 +682,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 				patch: ModelPatch {
 					display_name: model.name.clone(),
 					capabilities,
+					wire_policy,
 					limits,
 					thinking,
 					pricing,
@@ -661,6 +692,32 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 				},
 			});
 		}
+		if base_provider.is_some() && !provider_compat.is_empty() {
+			for candidate in catalog.models() {
+				let belongs = candidate.routes.iter().any(|route_id| {
+					catalog
+						.route(route_id)
+						.is_some_and(|route| route.provider.as_str() == provider.as_str())
+				});
+				if !belongs || handled.contains(&candidate.key) {
+					continue;
+				}
+				let policy = derived.apply(catalog, &candidate.wire_policy, &provider_compat);
+				if policy != candidate.wire_policy {
+					models.push(ModelOverlay {
+						selector: omp_catalog::ExactSelector::new(
+							provider.clone(),
+							candidate.key.clone(),
+						),
+						added:    None,
+						patch:    ModelPatch { wire_policy: Some(policy), ..ModelPatch::default() },
+					});
+				}
+			}
+		}
+	}
+	for policy in derived.into_policies() {
+		builder = builder.with_wire_policy(policy);
 	}
 	// References resolve once every configured key is known: inside the
 	// declaring provider first, then catalog-wide against the configured
@@ -780,6 +837,103 @@ fn configured_provider_template<'a>(
 		.or_else(|| catalog.routes().first())
 		.expect("embedded catalog has a route template");
 	(provider, route)
+}
+
+/// The understood keys of one authored `compat` table, one sparse source per
+/// key.
+///
+/// Each key is checked on its own. v1 imports copy v1-only keys here, and a
+/// refusal would stop the whole catalog from composing, so a key this build
+/// does not understand, or whose value it cannot compile, is skipped and
+/// reported once, here, rather than on every policy it would have touched.
+fn parse_compat(
+	compat: &toml::Value,
+	provider: &str,
+	model: Option<&str>,
+) -> Vec<SourceWirePolicy> {
+	let Some(table) = compat.as_table() else {
+		tracing::warn!(provider, model, "ignoring `compat`: it is not a table");
+		return Vec::new();
+	};
+	let mut sources = Vec::new();
+	for (key, value) in table {
+		let single = toml::Value::Table(toml::Table::from_iter([(key.clone(), value.clone())]));
+		match single.try_into::<SourceWirePolicy>() {
+			Ok(source) => match compile_wire_policy(WirePolicy::overrides(), &source) {
+				Ok(_) => sources.push(source),
+				Err(error) => {
+					tracing::warn!(provider, model, key, %error, "ignoring `compat` key with an invalid value");
+				},
+			},
+			Err(error) => {
+				tracing::warn!(provider, model, key, %error, "ignoring unsupported `compat` key");
+			},
+		}
+	}
+	sources
+}
+
+/// Wire policies derived from authored `compat`, keyed by content id so equal
+/// results collapse into one record. Only policies the bundled catalog does
+/// not already hold are kept; the overlay carries those.
+#[derive(Default)]
+struct DerivedWirePolicies(BTreeMap<WirePolicyId, WirePolicy>);
+
+impl DerivedWirePolicies {
+	/// `base` with `sources` applied in order. Returns `base` unchanged when
+	/// there is nothing to apply or `base` names no known policy.
+	fn apply(
+		&mut self,
+		catalog: &omp_catalog::Catalog,
+		base: &WirePolicyId,
+		sources: &[SourceWirePolicy],
+	) -> WirePolicyId {
+		if sources.is_empty() {
+			return base.clone();
+		}
+		let Some(mut policy) = self
+			.0
+			.get(base)
+			.or_else(|| catalog.wire_policy(base))
+			.cloned()
+		else {
+			return base.clone();
+		};
+		for source in sources {
+			// `parse_compat` already compiled each source against an empty policy;
+			// compilation depends only on the source, so this cannot fail.
+			if let Ok(next) = compile_wire_policy(policy.clone(), source) {
+				policy = next;
+			}
+		}
+		let id = policy.content_id();
+		if catalog.wire_policy(&id).is_none() {
+			self.0.entry(id.clone()).or_insert(policy);
+		}
+		id
+	}
+
+	/// Applies `sources` to a provider's own policy and to the defaults every
+	/// row discovery produces for it inherits.
+	fn apply_to_provider(
+		&mut self,
+		catalog: &omp_catalog::Catalog,
+		provider: &mut ProviderDef,
+		sources: &[SourceWirePolicy],
+	) {
+		provider.wire_policy = self.apply(catalog, &provider.wire_policy, sources);
+		if let Some(defaults) = &mut provider.discovery_defaults {
+			defaults.wire_policy = self.apply(catalog, &defaults.wire_policy, sources);
+			defaults.extended_wire_policy = defaults
+				.extended_wire_policy
+				.take()
+				.map(|id| self.apply(catalog, &id, sources));
+		}
+	}
+
+	fn into_policies(self) -> impl Iterator<Item = WirePolicy> {
+		self.0.into_values()
+	}
 }
 /// Chat-capable capability record with otherwise unknown evidence.
 ///
@@ -1744,5 +1898,181 @@ mod tests {
 			lower_user_overlay(&config),
 			Err(ModelsConfigError::InvalidProviderDiscovery { .. })
 		));
+	}
+
+	// ---- `compat`: authored wire-policy properties --------------------------
+
+	/// Lowers a config written one line per element. Short lines keep rustfmt
+	/// from re-wrapping a long literal and corrupting an escape in it.
+	fn materialized(lines: &[&str]) -> omp_catalog::Catalog {
+		let value: ModelsConfig = toml::from_str(&lines.join("\n")).expect("decode");
+		let overlay = lower_user_overlay(&value).expect("overlay");
+		let stack = omp_catalog::OverlayStack::from_layers([(OverlaySource::UserConfig, overlay)]);
+		omp_catalog::Catalog::embedded()
+			.with_overlay_stack(&stack, omp_catalog::UnsafeTrustScope::ALL)
+			.expect("materialize")
+	}
+
+	/// A keyless OpenAI-compatible provider that discovers its models, followed
+	/// by `extra` lines.
+	fn gateway<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+		let mut lines = vec![
+			"[providers.gw]",
+			"baseUrl='http://127.0.0.1:9/v1'",
+			"auth='none'",
+			"[providers.gw.discovery]",
+			"type='openai-models-list'",
+		];
+		lines.extend_from_slice(extra);
+		lines
+	}
+
+	fn policy_of(
+		catalog: &omp_catalog::Catalog,
+		id: &omp_catalog::WirePolicyId,
+	) -> omp_catalog::WirePolicy {
+		catalog
+			.wire_policy(id)
+			.expect("every referenced wire policy is interned")
+			.clone()
+	}
+
+	fn model_developer_role(catalog: &omp_catalog::Catalog, key: &str) -> Option<bool> {
+		let model = catalog
+			.models()
+			.iter()
+			.find(|model| model.key.as_str() == key)
+			.expect("model");
+		policy_of(catalog, &model.wire_policy)
+			.role
+			.supports_developer_role
+	}
+
+	/// The developer-role flag of a provider's own policy and of the discovery
+	/// defaults every row discovered for it inherits.
+	fn provider_developer_role(catalog: &omp_catalog::Catalog, provider: &str) -> [Option<bool>; 2] {
+		let definition = catalog
+			.provider(ProviderId::from_ref(provider))
+			.expect("provider");
+		let defaults = catalog
+			.discovery_defaults(ProviderId::from_ref(provider))
+			.expect("discovery defaults");
+		[
+			policy_of(catalog, &definition.wire_policy)
+				.role
+				.supports_developer_role,
+			policy_of(catalog, &defaults.wire_policy)
+				.role
+				.supports_developer_role,
+		]
+	}
+
+	/// Without `compat` a configured OpenAI-compatible provider inherits the
+	/// template's `developer` role; this is the behavior `compat` exists to
+	/// change.
+	#[test]
+	fn configured_provider_inherits_the_developer_role_without_compat() {
+		let catalog =
+			materialized(&gateway(&["[providers.gw.models.fast]", "api='openai-completions'"]));
+		assert_ne!(model_developer_role(&catalog, "gw/fast"), Some(false));
+	}
+
+	/// Provider-level `compat` reaches the provider record, its discovery
+	/// defaults (which every discovered row inherits) and its declared models.
+	#[test]
+	fn provider_compat_sets_the_wire_policy_of_models_and_discovered_rows() {
+		let catalog = materialized(&gateway(&[
+			"[providers.gw.compat]",
+			"supportsDeveloperRole=false",
+			"[providers.gw.models.fast]",
+			"api='openai-completions'",
+		]));
+		assert_eq!(model_developer_role(&catalog, "gw/fast"), Some(false));
+		assert_eq!(
+			provider_developer_role(&catalog, "gw"),
+			[Some(false), Some(false)],
+			"the provider record and the defaults a discovered row inherits"
+		);
+	}
+
+	/// A model's own `compat` is applied on top of the provider's.
+	#[test]
+	fn model_compat_is_applied_on_top_of_provider_compat() {
+		let catalog = materialized(&gateway(&[
+			"[providers.gw.compat]",
+			"supportsDeveloperRole=false",
+			"[providers.gw.models.plain]",
+			"api='openai-completions'",
+			"[providers.gw.models.special]",
+			"api='openai-completions'",
+			"[providers.gw.models.special.compat]",
+			"supportsDeveloperRole=true",
+		]));
+		assert_eq!(model_developer_role(&catalog, "gw/plain"), Some(false));
+		assert_eq!(model_developer_role(&catalog, "gw/special"), Some(true));
+	}
+
+	/// `compat` on a `modelOverrides` entry reaches the row discovery produces
+	/// for that model, through the override's patch.
+	#[test]
+	fn model_override_compat_applies_to_the_overridden_row() {
+		let catalog = materialized(&gateway(&[
+			"[providers.gw.modelOverrides.\"vendor/x\"]",
+			"supportsStreaming=true",
+			"[providers.gw.modelOverrides.\"vendor/x\".compat]",
+			"supportsDeveloperRole=false",
+		]));
+		assert_eq!(model_developer_role(&catalog, "gw/vendor/x"), Some(false));
+	}
+
+	/// v1 imports copy v1-only keys into `compat`. A refusal would stop the
+	/// whole catalog from composing, so keys this build does not understand are
+	/// skipped and the understood ones still apply.
+	#[test]
+	fn compat_keys_this_build_does_not_understand_are_skipped_not_fatal() {
+		let catalog = materialized(&gateway(&[
+			"[providers.gw.compat]",
+			"supportsStore=true",
+			"notARealKey='x'",
+			"supportsDeveloperRole=false",
+			"[providers.gw.models.fast]",
+			"api='openai-completions'",
+		]));
+		assert_eq!(model_developer_role(&catalog, "gw/fast"), Some(false));
+	}
+
+	/// Provider-level `compat` on a bundled provider covers every bundled model
+	/// of that provider and the defaults its discovered rows inherit, and
+	/// nothing else.
+	#[test]
+	fn compat_on_a_bundled_provider_patches_only_its_models() {
+		let embedded = omp_catalog::Catalog::embedded();
+		let first_of = |provider: &str| {
+			embedded
+				.models()
+				.iter()
+				.find(|model| {
+					model.routes.iter().any(|route| {
+						embedded
+							.route(route)
+							.is_some_and(|route| route.provider.as_str() == provider)
+					})
+				})
+				.expect("bundled model")
+				.key
+				.clone()
+		};
+		let inside = first_of("openai");
+		let outside = first_of("anthropic");
+		let flipped = !model_developer_role(embedded, inside.as_str()).unwrap_or(false);
+		let setting = format!("supportsDeveloperRole={flipped}");
+		let catalog = materialized(&["[providers.openai.compat]", &setting]);
+		assert_eq!(model_developer_role(&catalog, inside.as_str()), Some(flipped));
+		assert_eq!(
+			model_developer_role(&catalog, outside.as_str()),
+			model_developer_role(embedded, outside.as_str()),
+			"another provider's models are untouched"
+		);
+		assert_eq!(provider_developer_role(&catalog, "openai"), [Some(flipped), Some(flipped)]);
 	}
 }
