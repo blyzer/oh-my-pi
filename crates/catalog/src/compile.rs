@@ -4217,7 +4217,16 @@ fn axis_map_to_thinking_policy(source: AxisMap) -> Result<ThinkingPolicy, Compil
 	Ok(serde_json::from_value(Value::Object(object))?)
 }
 
-fn compile_wire_policy(
+/// Applies sparse authored compatibility properties to `policy`.
+///
+/// Every axis the source leaves unset keeps the value already in `policy`, so
+/// the result differs from `policy` only where the source speaks. A value the
+/// compiler cannot parse is a [`CompileError`].
+///
+/// # Errors
+///
+/// Returns [`CompileError`] when a source string names no known policy value.
+pub fn compile_wire_policy(
 	mut policy: WirePolicy,
 	source: &SourceWirePolicy,
 ) -> Result<WirePolicy, CompileError> {

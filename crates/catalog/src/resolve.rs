@@ -20,7 +20,7 @@ use crate::{
 	ProvenanceKind, ProvenanceSource, ProviderDef, ProviderFamily, ProviderId, ReasoningFeatureBits,
 	RoleBits, RouteDef, RouteId, RouteRestrictions, SamplingControlBits, StructuredOutputBits,
 	TextVerbosityBits, ThinkingPolicyId, ThinkingRouting, ToolFeatureBits, TransportKind,
-	TrustDomain, WireModelId, WirePolicyId, compile::CompiledCatalog,
+	TrustDomain, WireModelId, WirePolicy, WirePolicyId, compile::CompiledCatalog,
 };
 
 /// An exact provider and normalized-model selector.
@@ -343,19 +343,23 @@ pub struct RouteOverlay {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CatalogOverlay {
 	/// Evidence source assigned to every field changed by this layer.
-	pub(crate) source:     ProvenanceSource,
+	pub(crate) source:        ProvenanceSource,
 	/// Interned authentication-specification additions or replacements.
 	#[serde(default)]
-	pub(crate) auth_specs: Box<[AuthSpec]>,
+	pub(crate) auth_specs:    Box<[AuthSpec]>,
+	/// Wire-policy additions, referenced by id from this layer's provider and
+	/// model records.
+	#[serde(default)]
+	pub(crate) wire_policies: Box<[WirePolicy]>,
 	/// Complete provider additions or higher-precedence replacements.
 	#[serde(default)]
-	pub(crate) providers:  Box<[ProviderDef]>,
+	pub(crate) providers:     Box<[ProviderDef]>,
 	/// Model additions and patches.
-	pub(crate) models:     Box<[ModelOverlay]>,
+	pub(crate) models:        Box<[ModelOverlay]>,
 	/// Route additions and patches.
-	pub(crate) routes:     Box<[RouteOverlay]>,
+	pub(crate) routes:        Box<[RouteOverlay]>,
 	/// Exact alias additions or replacements.
-	pub(crate) aliases:    Box<[ScopedAlias]>,
+	pub(crate) aliases:       Box<[ScopedAlias]>,
 }
 
 impl CatalogOverlay {
@@ -384,6 +388,7 @@ impl CatalogOverlay {
 	/// Returns whether this layer contributes no catalog records.
 	pub const fn is_empty(&self) -> bool {
 		self.auth_specs.is_empty()
+			&& self.wire_policies.is_empty()
 			&& self.providers.is_empty()
 			&& self.models.is_empty()
 			&& self.routes.is_empty()
@@ -394,12 +399,14 @@ impl CatalogOverlay {
 	/// source while preserving their supplied precedence order.
 	pub fn combined(source: ProvenanceSource, overlays: impl IntoIterator<Item = Self>) -> Self {
 		let mut auth_specs = Vec::new();
+		let mut wire_policies = Vec::new();
 		let mut providers = Vec::new();
 		let mut models = Vec::new();
 		let mut routes = Vec::new();
 		let mut aliases = Vec::new();
 		for overlay in overlays {
 			auth_specs.extend(overlay.auth_specs);
+			wire_policies.extend(overlay.wire_policies);
 			providers.extend(overlay.providers);
 			models.extend(overlay.models);
 			routes.extend(overlay.routes);
@@ -408,6 +415,7 @@ impl CatalogOverlay {
 		Self {
 			source,
 			auth_specs: auth_specs.into_boxed_slice(),
+			wire_policies: wire_policies.into_boxed_slice(),
 			providers: providers.into_boxed_slice(),
 			models: models.into_boxed_slice(),
 			routes: routes.into_boxed_slice(),
@@ -423,6 +431,7 @@ pub(crate) fn retain_additive_models(
 	mut valid: impl FnMut(&ModelSpec) -> bool,
 ) -> CatalogOverlay {
 	overlay.auth_specs = Box::new([]);
+	overlay.wire_policies = Box::new([]);
 	overlay.providers = Box::new([]);
 	overlay.routes = Box::new([]);
 	overlay.models = overlay
@@ -1029,11 +1038,20 @@ pub(crate) fn materialize_overlay_stack(
 	resolver.add_stack(stack, scope)?;
 	let overlays = resolver.overlays;
 	let mut auth_specs = catalog.auth_specs.into_vec();
+	let mut wire_policies: BTreeMap<WirePolicyId, WirePolicy> = catalog
+		.wire_policies
+		.into_vec()
+		.into_iter()
+		.map(|policy| (policy.content_id(), policy))
+		.collect();
 	let mut providers = catalog.providers.into_vec();
 	let mut routes = catalog.routes.into_vec();
 	let mut models = catalog.models.into_vec();
 	let mut aliases = catalog.aliases.into_vec();
 	for overlay in overlays {
+		for policy in overlay.wire_policies {
+			wire_policies.insert(policy.content_id(), policy);
+		}
 		for spec in overlay.auth_specs {
 			if let Some(existing) = auth_specs
 				.iter_mut()
@@ -1148,6 +1166,7 @@ pub(crate) fn materialize_overlay_stack(
 	models.sort_by(|left, right| left.key.cmp(&right.key));
 	aliases.sort_by(|left, right| left.alias.cmp(&right.alias));
 	catalog.auth_specs = auth_specs.into_boxed_slice();
+	catalog.wire_policies = wire_policies.into_values().collect();
 	catalog.providers = providers.into_boxed_slice();
 	catalog.routes = routes.into_boxed_slice();
 	catalog.models = models.into_boxed_slice();
@@ -1678,10 +1697,11 @@ mod tests {
 		});
 		resolver
 			.add_discovery(CatalogOverlay {
-				auth_specs: Box::new([]),
-				source:     source(ProvenanceKind::Discovered, "discovery"),
-				providers:  Box::new([]),
-				models:     Box::new([ModelOverlay {
+				auth_specs:    Box::new([]),
+				wire_policies: Box::new([]),
+				source:        source(ProvenanceKind::Discovered, "discovery"),
+				providers:     Box::new([]),
+				models:        Box::new([ModelOverlay {
 					selector: ExactSelector::new("p", "m"),
 					added:    None,
 					patch:    ModelPatch {
@@ -1691,21 +1711,22 @@ mod tests {
 						..ModelPatch::default()
 					},
 				}]),
-				routes:     Box::new([RouteOverlay {
+				routes:        Box::new([RouteOverlay {
 					route: RouteId::from("r"),
 					added: None,
 					patch: RoutePatch { priority: Some(Some(2)), ..RoutePatch::default() },
 				}]),
-				aliases:    Box::new([]),
+				aliases:       Box::new([]),
 			})
 			.expect("discovery overlay accepted");
 		resolver
 			.add_user(
 				CatalogOverlay {
-					auth_specs: Box::new([]),
-					source:     source(ProvenanceKind::Configured, "user"),
-					providers:  Box::new([]),
-					models:     Box::new([ModelOverlay {
+					auth_specs:    Box::new([]),
+					wire_policies: Box::new([]),
+					source:        source(ProvenanceKind::Configured, "user"),
+					providers:     Box::new([]),
+					models:        Box::new([ModelOverlay {
 						selector: ExactSelector::new("p", "m"),
 						added:    None,
 						patch:    ModelPatch {
@@ -1714,12 +1735,12 @@ mod tests {
 							..ModelPatch::default()
 						},
 					}]),
-					routes:     Box::new([RouteOverlay {
+					routes:        Box::new([RouteOverlay {
 						route: RouteId::from("r"),
 						added: None,
 						patch: RoutePatch { priority: Some(Some(3)), ..RoutePatch::default() },
 					}]),
-					aliases:    Box::new([]),
+					aliases:       Box::new([]),
 				},
 				UnsafeTrustScope::NONE,
 			)
@@ -1747,11 +1768,12 @@ mod tests {
 		let routes = [route("r", "p", 1)];
 		let models = [model("m", &["r"], true)];
 		let make = || CatalogOverlay {
-			auth_specs: Box::new([]),
-			source:     source(ProvenanceKind::Configured, "user"),
-			providers:  Box::new([]),
-			models:     Box::new([]),
-			routes:     Box::new([RouteOverlay {
+			auth_specs:    Box::new([]),
+			wire_policies: Box::new([]),
+			source:        source(ProvenanceKind::Configured, "user"),
+			providers:     Box::new([]),
+			models:        Box::new([]),
+			routes:        Box::new([RouteOverlay {
 				route: RouteId::from("r"),
 				added: None,
 				patch: RoutePatch {
@@ -1764,7 +1786,7 @@ mod tests {
 					..RoutePatch::default()
 				},
 			}]),
-			aliases:    Box::new([]),
+			aliases:       Box::new([]),
 		};
 		let mut denied = CatalogResolver::new(BundledCatalog {
 			providers: &providers,
@@ -1876,12 +1898,13 @@ mod tests {
 		});
 		resolver
 			.add_discovery(CatalogOverlay {
-				auth_specs: Box::new([]),
-				source:     source(ProvenanceKind::Discovered, "discovery"),
-				providers:  Box::new([]),
-				models:     Box::new([]),
-				routes:     Box::new([]),
-				aliases:    Box::new([ScopedAlias {
+				auth_specs:    Box::new([]),
+				wire_policies: Box::new([]),
+				source:        source(ProvenanceKind::Discovered, "discovery"),
+				providers:     Box::new([]),
+				models:        Box::new([]),
+				routes:        Box::new([]),
+				aliases:       Box::new([ScopedAlias {
 					provider:   ProviderId::from("p"),
 					definition: CatalogAlias {
 						alias:      "current".into_str(),
@@ -1895,12 +1918,13 @@ mod tests {
 		resolver
 			.add_user(
 				CatalogOverlay {
-					auth_specs: Box::new([]),
-					source:     source(ProvenanceKind::Configured, "user"),
-					providers:  Box::new([]),
-					models:     Box::new([]),
-					routes:     Box::new([]),
-					aliases:    Box::new([ScopedAlias {
+					auth_specs:    Box::new([]),
+					wire_policies: Box::new([]),
+					source:        source(ProvenanceKind::Configured, "user"),
+					providers:     Box::new([]),
+					models:        Box::new([]),
+					routes:        Box::new([]),
+					aliases:       Box::new([ScopedAlias {
 						provider:   ProviderId::from("p"),
 						definition: CatalogAlias {
 							alias:      "current".into_str(),

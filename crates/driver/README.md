@@ -64,6 +64,18 @@ presentation adapter.
   return on switching back. The `task` tool follows the presented session: a
   resumed child at the recursion ceiling is not advertised `task`, exactly as
   a child spawned at that depth is not.
+- `models.toml` `compat` (on a provider, a model, or a `modelOverrides` entry)
+  sets wire-policy properties such as `supportsDeveloperRole = false` for a
+  gateway that rejects the `developer` message role. `discovery::models`
+  derives a wire policy from the base the row would otherwise use, plus the
+  provider's `compat`, plus the model's, and the overlay carries it
+  (`CatalogOverlayBuilder::with_wire_policy`). For a configured provider the
+  provider record and its discovery defaults carry it, so every discovered row
+  inherits it; for a bundled provider its models are patched and its provider
+  record replaced. Each key is checked alone: v1 imports copy v1-only keys
+  here, and a refusal would stop the whole catalog composing, so a key this
+  build does not understand, or whose value it cannot compile, is skipped with
+  a `tracing` warning.
 - `v1_import` is the one-shot v1 (TypeScript `omp`) migrator behind
   `omp config import-v1` and the automatic first run. Imported API keys go
   through the control-plane write, which stores them under the kind their
