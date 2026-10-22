@@ -15,10 +15,11 @@
 //!
 //! # Registry
 //!
-//! [`ExecutorKind`] is a closed enum (one variant per supported executor).
+//! [`ExecutorKind`] is a closed enum (one variant per kind of executor).
 //! [`ExecutorRegistry`] resolves an executor id to a concrete executor
-//! without boxing on the hot path. The registry owns a `CodexExecutor` (the
-//! only concrete executor today) and builds it once from the profile table.
+//! without boxing on the hot path. The registry owns the `CodexExecutor` and
+//! every ACP executor the operator enabled (see [`crate::delegated_acp`]),
+//! built once from the profile table.
 //!
 //! # Host function
 //!
@@ -56,7 +57,7 @@ use omp_agent::delegated::{
 use omp_con::Ctx;
 use omp_core::Str;
 use omp_dom::{Handle, KnownTag, PropId, Sid, Tag};
-use omp_envd::codex_app_server::CodexExecutor;
+use omp_envd::{acp_client::AcpExecutor, codex_app_server::CodexExecutor};
 use omp_journal::data::TurnReceipt;
 use omp_session::{Session, SessionError};
 use thiserror::Error;
@@ -94,11 +95,12 @@ pub fn codex_profile(ctx: &Ctx) -> ExecutorProfile {
 
 /// A resolved executor, usable without heap allocation on the turn hot path.
 ///
-/// Variants are ordered: `Codex` is first because it is the only executor
-/// today; future executors become new variants.
+/// Variants are ordered: `Codex` first, then the operator-enabled ACP CLIs.
 pub enum ExecutorKind {
 	/// The Codex CLI adapter.
 	Codex(CodexExecutor),
+	/// An ACP agent CLI (dsh, Devin, Grok) under its launch profile.
+	Acp(AcpExecutor),
 }
 
 impl ExecutorKind {
@@ -107,6 +109,7 @@ impl ExecutorKind {
 	pub fn id(&self) -> &ExecutorId {
 		match self {
 			Self::Codex(e) => &e.capabilities().executor,
+			Self::Acp(e) => &e.capabilities().executor,
 		}
 	}
 
@@ -115,6 +118,7 @@ impl ExecutorKind {
 	pub fn capabilities(&self) -> &Capabilities {
 		match self {
 			Self::Codex(e) => e.capabilities(),
+			Self::Acp(e) => e.capabilities(),
 		}
 	}
 }
@@ -134,8 +138,13 @@ impl ExecutorRegistry {
 	#[must_use]
 	pub fn from_ctx(ctx: &Ctx) -> Self {
 		let profile = codex_profile(ctx);
-		let codex = CodexExecutor::new(profile.program);
-		Self { executors: vec![ExecutorKind::Codex(codex)] }
+		let mut executors = vec![ExecutorKind::Codex(CodexExecutor::new(profile.program))];
+		executors.extend(
+			crate::delegated_acp::enabled_executors(ctx)
+				.into_iter()
+				.map(ExecutorKind::Acp),
+		);
+		Self { executors }
 	}
 
 	/// Looks up an executor by its declared id.
@@ -339,6 +348,9 @@ pub async fn run_delegated_turn<R: PermissionResolver>(
 ) -> Result<TurnReport, DelegatedHostError> {
 	match registry.get(executor_id) {
 		Some(ExecutorKind::Codex(executor)) => {
+			run_turn_on(executor, request, input, limits, &mut resolver, cancel, events, session).await
+		},
+		Some(ExecutorKind::Acp(executor)) => {
 			run_turn_on(executor, request, input, limits, &mut resolver, cancel, events, session).await
 		},
 		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
