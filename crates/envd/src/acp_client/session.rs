@@ -79,6 +79,10 @@ pub enum InboundMessage {
 	/// A notification; no response is expected.
 	Notification {
 		method: Method,
+		/// The method name exactly as the agent sent it. [`Method`] folds every
+		/// vendor-specific name into `Unknown`, and a profile recognises its
+		/// vendor's notices by this name.
+		name:   Str,
 		/// Raw params.
 		params: Option<Box<RawValue>>,
 	},
@@ -312,10 +316,10 @@ impl<R: AsyncRead + Unpin> AcpSession<R> {
 					let params = params.map(|p| p.to_owned());
 					return Ok(Some(InboundMessage::AgentRequest { id, method, params }));
 				},
-				JsonRpcMessage::Notification { method, params } => {
-					let method = Method::classify(&method);
+				JsonRpcMessage::Notification { method: name, params } => {
+					let method = Method::classify(&name);
 					let params = params.map(|p| p.to_owned());
-					return Ok(Some(InboundMessage::Notification { method, params }));
+					return Ok(Some(InboundMessage::Notification { method, name, params }));
 				},
 			}
 		}

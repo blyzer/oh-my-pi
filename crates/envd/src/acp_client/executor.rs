@@ -19,7 +19,7 @@ use omp_agent::delegated::{
 use tokio::process::Command;
 
 use super::{
-	delegated_session::{AcpDelegatedSession, AcpSessionConfig},
+	delegated_session::{AcpDelegatedSession, AcpProfile, AcpSessionConfig},
 	policy::supported_policies,
 };
 use crate::{child_env::ChildEnv, child_tree::ChildTree};
@@ -51,9 +51,9 @@ pub struct AcpExecutor {
 impl AcpExecutor {
 	/// Creates an executor that runs `program` with `args`.
 	///
-	/// The executor id is fixed (`acp-executor`); the version range is open
-	/// because ACP versioning is negotiated per-session rather than via a
-	/// `--version` flag.
+	/// The executor id defaults to `acp-executor` (see
+	/// [`AcpExecutor::with_id`]); the version range is open because ACP
+	/// versioning is negotiated per-session rather than via a `--version` flag.
 	#[must_use]
 	pub fn new(
 		program: impl Into<OsString>,
@@ -67,6 +67,7 @@ impl AcpExecutor {
 				handshake_timeout: HANDSHAKE_TIMEOUT,
 				terminate_grace:   TERMINATE_GRACE,
 				max_frame_bytes:   MAX_FRAME_BYTES,
+				profile:           AcpProfile::default(),
 			},
 			env:     ChildEnv::ambient(),
 		}
@@ -79,12 +80,29 @@ impl AcpExecutor {
 		self
 	}
 
+	/// Sets what the CLI behind this executor needs: the session mode and config
+	/// options that make it enforce a policy, and its typed missing-login
+	/// notice.
+	#[must_use]
+	pub fn with_profile(mut self, profile: AcpProfile) -> Self {
+		self.cfg.profile = profile;
+		self
+	}
+
 	/// Replaces the child's environment. The default is [`ChildEnv::ambient`];
 	/// a profile that needs the user's own login names those variables with
 	/// [`ChildEnv::with_inherited`].
 	#[must_use]
 	pub fn with_env(mut self, env: ChildEnv) -> Self {
 		self.env = env;
+		self
+	}
+
+	/// Names this executor, so a host that runs several ACP CLIs (dsh, Devin,
+	/// Grok) can tell their sessions and journal entries apart.
+	#[must_use]
+	pub fn with_id(mut self, id: ExecutorId) -> Self {
+		self.caps = capabilities_for(id);
 		self
 	}
 
@@ -97,6 +115,11 @@ impl AcpExecutor {
 
 /// The features every ACP session exposes.
 pub(super) fn capabilities() -> Capabilities {
+	capabilities_for(AcpExecutor::executor_id())
+}
+
+/// The features every ACP session exposes, under the executor id `id`.
+fn capabilities_for(id: ExecutorId) -> Capabilities {
 	let features = FeatureSet::EMPTY
 		.with(Feature::Interrupt)
 		.with(Feature::Permissions)
@@ -108,12 +131,7 @@ pub(super) fn capabilities() -> Capabilities {
 	// so the host can request it; the executor checks `loadSession` at open
 	// time and returns ResumeFailed if it is absent.
 	let features = features.with(Feature::Resume);
-	Capabilities::new(
-		AcpExecutor::executor_id(),
-		open_version_range(),
-		features,
-		supported_policies(),
-	)
+	Capabilities::new(id, open_version_range(), features, supported_policies())
 }
 
 /// An open version range: ACP versioning is protocol-level, not CLI-level.
@@ -148,7 +166,7 @@ impl DelegatedExecutor for AcpExecutor {
 					auth:    AuthStatus::Unknown,
 				})
 			},
-			Err(_) => Err(ExecutorError::ExecutableMissing { executor: Self::executor_id() }),
+			Err(_) => Err(ExecutorError::ExecutableMissing { executor: self.caps.executor.clone() }),
 		}
 	}
 
@@ -164,15 +182,15 @@ impl DelegatedExecutor for AcpExecutor {
 		}
 
 		let spawned = ChildTree::spawn(cmd)
-			.map_err(|_| ExecutorError::ExecutableMissing { executor: Self::executor_id() })?;
+			.map_err(|_| ExecutorError::ExecutableMissing { executor: self.caps.executor.clone() })?;
 
 		let (session, info) = AcpDelegatedSession::handshake(
-			Self::executor_id(),
+			self.caps.executor.clone(),
 			spawned.stdout,
 			spawned.stdin,
 			Some(spawned.tree),
 			request,
-			self.cfg,
+			self.cfg.clone(),
 		)
 		.await?;
 

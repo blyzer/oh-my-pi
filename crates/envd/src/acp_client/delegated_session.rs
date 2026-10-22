@@ -15,7 +15,7 @@ use omp_agent::delegated::{
 	TurnAccepted, TurnEnd, TurnId, TurnInput,
 };
 use omp_core::Str;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use tokio::{
 	io::{AsyncRead, AsyncWrite},
 	time::timeout,
@@ -32,8 +32,34 @@ use super::{
 };
 use crate::child_tree::ChildTree;
 
+/// A vendor notification that reports a missing login with a typed cause, such
+/// as Devin's `_cognition.ai/agent_stopped` with `cause: "auth_required"`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoginNotice {
+	/// The notification method name, exactly as the agent sends it.
+	pub method: Str,
+	/// The `cause` value that means the login is missing.
+	pub cause:  Str,
+}
+
+/// What one CLI needs on top of the generic ACP client.
+///
+/// ACP has no sandbox parameter, so a profile asks for session setup that makes
+/// the agent enforce a policy itself, and names the vendor signals the client
+/// may trust. It never carries a credential.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AcpProfile {
+	/// Sent as `session/set_mode` right after the session opens. An agent that
+	/// rejects it cannot enforce the policy, so the open fails.
+	pub session_mode:   Option<Str>,
+	/// Sent as `session/set_config_option`, in order, after the session opens.
+	pub config_options: Vec<(Str, Str)>,
+	/// The vendor's typed missing-login notification, when it has one.
+	pub login_notice:   Option<LoginNotice>,
+}
+
 /// Configuration for an [`AcpDelegatedSession`].
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AcpSessionConfig {
 	/// How long the `initialize` + `session/new` exchange may take.
 	pub handshake_timeout: std::time::Duration,
@@ -42,6 +68,8 @@ pub struct AcpSessionConfig {
 	pub terminate_grace:   std::time::Duration,
 	/// Maximum inbound frame size.
 	pub max_frame_bytes:   usize,
+	/// What the CLI behind this session needs.
+	pub profile:           AcpProfile,
 }
 
 impl Default for AcpSessionConfig {
@@ -50,6 +78,7 @@ impl Default for AcpSessionConfig {
 			handshake_timeout: std::time::Duration::from_secs(30),
 			terminate_grace:   std::time::Duration::from_secs(2),
 			max_frame_bytes:   super::MAX_FRAME_BYTES,
+			profile:           AcpProfile::default(),
 		}
 	}
 }
@@ -64,24 +93,26 @@ struct PendingPermission {
 
 /// A live ACP session implementing [`DelegatedSession`].
 pub struct AcpDelegatedSession {
-	executor:   omp_agent::delegated::ExecutorId,
-	session_id: Str,
+	executor:       omp_agent::delegated::ExecutorId,
+	session_id:     Str,
 	/// The underlying transport.
-	inner:      AcpSession<Box<dyn AsyncRead + Unpin + Send>>,
+	inner:          AcpSession<Box<dyn AsyncRead + Unpin + Send>>,
 	/// The owned child process tree; absent for in-memory transports.
-	tree:       Option<ChildTree>,
-	cfg:        AcpSessionConfig,
+	tree:           Option<ChildTree>,
+	cfg:            AcpSessionConfig,
 	/// Turn currently in flight (session/prompt sent; not yet completed).
-	turn_live:  bool,
+	turn_live:      bool,
 	/// Buffered events not yet consumed by `next_event`.
-	queue:      std::collections::VecDeque<DelegatedEvent>,
+	queue:          std::collections::VecDeque<DelegatedEvent>,
 	/// Active permission prompts.
-	pending:    HashMap<PromptId, PendingPermission>,
+	pending:        HashMap<PromptId, PendingPermission>,
 	/// The turn in flight, named by the request id of its `session/prompt`. ACP
 	/// has no turn id of its own, and the host requires every event of a turn
 	/// to carry the id `start_turn` returned, so each event is stamped with it.
-	turn:       TurnId,
-	terminated: bool,
+	turn:           TurnId,
+	terminated:     bool,
+	/// A profile's typed missing-login notice arrived during this turn.
+	login_required: bool,
 }
 
 impl std::fmt::Debug for AcpDelegatedSession {
@@ -147,11 +178,6 @@ impl AcpDelegatedSession {
 			await_response(&mut session, &executor_id, init_id, "initialize", cfg.handshake_timeout)
 				.await?;
 
-		// Non-empty authMethods means the agent is unauthenticated.
-		if !init_result.auth_methods.is_empty() {
-			return Err(ExecutorError::AuthRequired { executor: executor_id });
-		}
-
 		let load_session = init_result.agent_capabilities.load_session;
 
 		// ── session/new or session/load ──────────────────────────────────────
@@ -181,6 +207,56 @@ impl AcpDelegatedSession {
 			result.session_id
 		};
 
+		// ── session setup the profile asks for ───────────────────────────────
+		if let Some(mode) = &cfg.profile.session_mode {
+			let id = session
+				.send_request("session/set_mode", wire::SetModeParams {
+					session_id: session_id.as_str(),
+					mode_id:    mode.as_str(),
+				})
+				.map_err(|error| session_error(&executor_id, error))?;
+			match await_response::<_, IgnoredAny>(
+				&mut session,
+				&executor_id,
+				id,
+				"session/set_mode",
+				cfg.handshake_timeout,
+			)
+			.await
+			{
+				Ok(_) => {},
+				// An agent that refuses the mode cannot enforce what was asked,
+				// so the session must not open.
+				Err(ExecutorError::Protocol {
+					violation: ProtocolViolation::RequestRejected { .. },
+					..
+				}) => {
+					return Err(ExecutorError::PolicyUnmappable {
+						executor:  executor_id,
+						requested: request.policy,
+					});
+				},
+				Err(other) => return Err(other),
+			}
+		}
+		for (config_id, value) in &cfg.profile.config_options {
+			let id = session
+				.send_request("session/set_config_option", wire::SetConfigOptionParams {
+					session_id: session_id.as_str(),
+					config_id:  config_id.as_str(),
+					value:      value.as_str(),
+				})
+				.map_err(|error| session_error(&executor_id, error))?;
+			let IgnoredAny = await_response(
+				&mut session,
+				&executor_id,
+				id,
+				"session/set_config_option",
+				cfg.handshake_timeout,
+			)
+			.await?;
+		}
+
 		let resumed = request.resume.is_some();
 		let info = SessionInfo {
 			session: CliSessionId::new(session_id.clone()),
@@ -201,6 +277,7 @@ impl AcpDelegatedSession {
 				pending: HashMap::new(),
 				terminated: false,
 				turn: TurnId::new(Str::default()),
+				login_required: false,
 			},
 			info,
 		))
@@ -236,7 +313,7 @@ impl AcpDelegatedSession {
 	/// Classifies an inbound message and appends events to `self.queue`.
 	fn dispatch(&mut self, msg: InboundMessage) -> Result<(), ExecutorError> {
 		match msg {
-			InboundMessage::Notification { method: Method::SessionUpdate, params } => {
+			InboundMessage::Notification { method: Method::SessionUpdate, params, .. } => {
 				let Some(raw) = params else {
 					return Err(
 						self.malformed(FrameFault::MissingField { field: "session/update.params" }),
@@ -250,8 +327,17 @@ impl AcpDelegatedSession {
 			InboundMessage::Malformed { .. } => {
 				return Err(self.malformed(FrameFault::NotJson));
 			},
-			InboundMessage::Notification { .. } => {
-				// Forward-compat: ignore unknown notifications.
+			InboundMessage::Notification { name, params, .. } => {
+				// A profile's typed missing-login notice. Every other
+				// notification is forward-compat noise and is ignored.
+				if let Some(notice) = &self.cfg.profile.login_notice
+					&& name == notice.method
+					&& let Some(raw) = params
+					&& let Ok(stopped) = serde_json::from_str::<wire::AgentStoppedParams>(raw.get())
+					&& stopped.cause.as_ref() == Some(&notice.cause)
+				{
+					self.login_required = true;
+				}
 			},
 			InboundMessage::AgentRequest { id, method: Method::SessionRequestPermission, params } => {
 				let Some(raw) = params else {
@@ -425,6 +511,7 @@ impl DelegatedSession for AcpDelegatedSession {
 	) -> Result<TurnAccepted, ExecutorError> {
 		self.queue.clear();
 		self.pending.clear();
+		self.login_required = false;
 
 		// ACP's `session/prompt` has no system field, so every section is delivered
 		// verbatim as its own `text` block, in order. The digest is computed over
@@ -521,7 +608,7 @@ impl DelegatedSession for AcpDelegatedSession {
 					.pending
 					.retain(|k, _| !k.as_str().starts_with("__prompt_rpc_"));
 				let turn = self.turn.clone();
-				let failure = if wire::is_missing_login(code, data.as_ref()) {
+				let failure = if self.login_required || wire::is_missing_login(code, data.as_ref()) {
 					omp_agent::delegated::RemoteFailure::AuthRequired
 				} else {
 					omp_agent::delegated::RemoteFailure::Internal
