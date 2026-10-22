@@ -31,7 +31,10 @@ use super::{
 	FilesystemResolver, ProcessOutput, RepairOutcome, Report, TargetChoice, assignment_prompt,
 	discovery_schema, scan_project_files,
 };
-use crate::adw::remote::{AdwExecPolicy, SV_EXEC_POLICY};
+use crate::{
+	adw::remote::{AdwExecPolicy, SV_EXEC_POLICY},
+	headless::{KernelOptions, kernel::LaunchExtensionPolicy},
+};
 
 /// Boxed presentation failure retained as a typed UI boundary.
 pub type PresentationError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -94,6 +97,22 @@ pub struct ProductionCleanseHost {
 	environment:  OnceCell<omp_envd::ProjectEnvironment>,
 }
 
+/// Kernel options for a cleanse model phase.
+///
+/// Workspace-owned native extensions (`.omp/extensions`) are excluded: a
+/// project must not also choose the code its own cleanse phases' kernels
+/// load. The ADW host makes the same choice for its model phases.
+fn child_kernel_options() -> KernelOptions {
+	KernelOptions {
+		ephemeral: true,
+		extensions: LaunchExtensionPolicy {
+			include_workspace: false,
+			..LaunchExtensionPolicy::default()
+		},
+		..KernelOptions::default()
+	}
+}
+
 impl ProductionCleanseHost {
 	/// Opens checker discovery and a journal-first parent session.
 	pub fn open(
@@ -133,7 +152,7 @@ impl ProductionCleanseHost {
 			&self.root,
 			model,
 			ctx,
-			crate::headless::KernelOptions { ephemeral: true, ..Default::default() },
+			child_kernel_options(),
 		)
 		.await?;
 		let outcome = kernel
@@ -475,5 +494,17 @@ impl CleanseHost for ProductionCleanseHost {
 			}],
 		})?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::child_kernel_options;
+
+	#[test]
+	fn model_phase_kernels_exclude_workspace_extensions() {
+		let options = child_kernel_options();
+		assert!(!options.extensions.include_workspace);
+		assert!(options.ephemeral);
 	}
 }
