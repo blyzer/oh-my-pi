@@ -347,6 +347,34 @@ fn partial_window_receipts_merge_fieldwise_and_reset_deterministically() {
 	assert_eq!(quota.minimum_remaining(at(300)), None);
 }
 
+/// The store holds one connection for its lifetime. A connection per
+/// operation made every read delete the write-ahead log and its shared-memory
+/// file, so hydration cost `2 + accounts` teardowns and a host with slow file
+/// deletes stalled startup for seconds. The assertion is on the number of
+/// connections opened rather than on elapsed time, which this machine cannot
+/// measure reliably.
+#[test]
+fn hydration_opens_one_connection_whatever_the_account_count() {
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("app.sqlite");
+	let route = RouteId::from("route");
+
+	let store = Arc::new(AccountStateStore::open(&path).unwrap());
+	assert_eq!(store.connection_opens(), 1, "opening the store opens exactly one connection");
+	let pool = AccountPool::with_store(Arc::clone(&store)).unwrap();
+	for index in 0..16 {
+		pool
+			.upsert(record(&format!("account-{index}"), &format!("principal-{index}"), &route))
+			.unwrap();
+	}
+	assert_eq!(store.connection_opens(), 1, "writes reuse the store's connection");
+
+	let reopened = Arc::new(AccountStateStore::open(&path).unwrap());
+	let hydrated = AccountPool::with_store(Arc::clone(&reopened)).unwrap();
+	assert_eq!(hydrated.accounts().len(), 16, "every account hydrated");
+	assert_eq!(reopened.connection_opens(), 1, "hydration must not open a connection per account");
+}
+
 #[test]
 fn durable_account_state_survives_reopen_and_account_removal() {
 	let directory = tempfile::tempdir().unwrap();
