@@ -879,6 +879,13 @@ fn tsp_fallback_paths_never_open_a_surface() {
 	] {
 		let sandbox = Sandbox::new();
 		let mut tern = FakeTern::spawn(&sandbox, &script);
+		// The DA1 request closes the startup probe burst, so every case has
+		// reached the point where a `hello` query would already have been
+		// written. Waiting for it keeps process startup out of the `QUIET`
+		// budget, which a host with slow file operations overruns, and it
+		// stops the two suppression cases from passing on a chat that never
+		// started.
+		tern.until("startup probe reached the terminal", |tern| tern.fenced.is_some());
 		tern.settle(QUIET);
 		assert!(tern.opens().is_empty(), "{label} opened a surface:\n{}", tern.report());
 		assert!(tern.frames().is_empty(), "{label} sent frames:\n{}", tern.report());
