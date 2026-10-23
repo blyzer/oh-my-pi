@@ -115,7 +115,7 @@ pub use omp_macros::dom;
 pub use overlay::{Layer, OverlayAnchor, OverlayBand, OverlayId, OverlayMargin, OverlayOptions};
 pub use paste::{Pasted, PastedImage};
 pub use props::{Prop, PropValue, Props};
-pub use pump::{DebugOp, DebugQuery, TerminalEvent};
+pub use pump::{ArrivedAt, DebugOp, DebugQuery, TerminalEvent};
 pub use renderer::{DeliveryError, OutputState, PaintStats, Renderer, file_link_target};
 pub use rich::{
 	Clip, Measure, Pipeline, Prefix, Prefixed, Restyle, RichSink, RichText, Rows, Tee, Wrap,

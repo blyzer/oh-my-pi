@@ -1697,3 +1697,68 @@ fn console_words_drive_focus_and_guest_state() {
 	h.host.console("cl_escape_unhook nothing").expect("console");
 	assert!(h.host.escape_hooks().is_empty());
 }
+
+/// A repeated `Ctrl+C` is measured between the times the two presses
+/// *arrived*, not the times the host got round to handling them. The host
+/// handles one event and repaints before it reads the next, so a slow repaint
+/// can push the handling of a second press past the window even though the two
+/// arrived together (one terminal read). Covers both the plain binding and the
+/// shipped multi-action program.
+#[test]
+fn a_repeat_ctrl_c_is_measured_between_arrivals_not_between_handling_times() {
+	for program in [None, Some(SHIPPED_CTRL_C)] {
+		let mut h = harness(idle_session());
+		if let Some(program) = program {
+			h.con.run(program).expect("shipped bind");
+		}
+		let first = Instant::now();
+		assert_ne!(
+			h.host.key_at(Key::Ctrl('c'), first).expect("first ctrl+c"),
+			NativeEffect::Quit,
+			"{program:?}"
+		);
+		// The host is busy well past the 500ms window before it reaches the
+		// second press, which arrived 10ms after the first.
+		std::thread::sleep(Duration::from_millis(650));
+		assert_eq!(
+			h.host
+				.key_at(Key::Ctrl('c'), first + Duration::from_millis(10))
+				.expect("second ctrl+c"),
+			NativeEffect::Quit,
+			"{program:?}: two presses that arrived together quit, however late they were handled"
+		);
+	}
+}
+
+/// The window still bounds the gesture: presses that arrived more than 500ms
+/// apart are two first presses, however promptly each was handled.
+#[test]
+fn ctrl_c_presses_that_arrived_more_than_the_window_apart_do_not_quit() {
+	for program in [None, Some(SHIPPED_CTRL_C)] {
+		let mut h = harness(idle_session());
+		if let Some(program) = program {
+			h.con.run(program).expect("shipped bind");
+		}
+		let first = Instant::now();
+		assert_ne!(
+			h.host.key_at(Key::Ctrl('c'), first).expect("first ctrl+c"),
+			NativeEffect::Quit,
+			"{program:?}"
+		);
+		assert_ne!(
+			h.host
+				.key_at(Key::Ctrl('c'), first + Duration::from_millis(600))
+				.expect("second ctrl+c"),
+			NativeEffect::Quit,
+			"{program:?}: a press 600ms after the first is a new first press"
+		);
+		// ...and that new first press opens a fresh window.
+		assert_eq!(
+			h.host
+				.key_at(Key::Ctrl('c'), first + Duration::from_millis(700))
+				.expect("third ctrl+c"),
+			NativeEffect::Quit,
+			"{program:?}: the press at 700ms repeats the one at 600ms"
+		);
+	}
+}

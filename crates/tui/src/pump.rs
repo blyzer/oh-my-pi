@@ -37,6 +37,39 @@ use tokio::sync::watch;
 
 use crate::input::{Chord, InputDecoder, InputEvent, Keymap};
 
+/// When the decoder actor decoded an input event, which is when its bytes
+/// reached the host: every event decoded from one terminal read shares it.
+///
+/// A host that measures a gesture window (a repeated `Ctrl+C`) from this, not
+/// from when it gets round to handling the event, is not fooled by a slow
+/// repaint between two presses. It is neither compared nor serialized, so it
+/// leaves event equality and the `OMP_TUI_DEBUG` wire format alone; a
+/// deserialized event is stamped with the time it was decoded.
+#[derive(Clone, Copy, Debug)]
+pub struct ArrivedAt(Instant);
+
+impl ArrivedAt {
+	/// Stamps the current instant.
+	#[must_use]
+	pub fn now() -> Self {
+		Self(Instant::now())
+	}
+
+	/// The instant the event was decoded.
+	#[must_use]
+	pub const fn instant(self) -> Instant {
+		self.0
+	}
+}
+
+impl PartialEq for ArrivedAt {
+	fn eq(&self, _: &Self) -> bool {
+		true
+	}
+}
+
+impl Eq for ArrivedAt {}
+
 /// One decoded terminal event.
 ///
 /// Real input, debug-injected input, and debug queries share a single mailbox
@@ -53,6 +86,9 @@ pub enum TerminalEvent {
 		event:              InputEvent,
 		/// A submit key follows this paste in the same terminal read.
 		submit_after_paste: bool,
+		/// When the event was decoded.
+		#[serde(skip, default = "ArrivedAt::now")]
+		at:                 ArrivedAt,
 	},
 	/// Terminal geometry may have changed; resolve it with
 	/// [`crate::Terminal::take_resize`]. Delivered ahead of queued input
@@ -438,14 +474,11 @@ fn send_inputs(events: &mut Vec<InputEvent>, events_tx: &flume::Sender<TerminalE
 		InputEvent::Chord(event) => event.pressed && event.key == Some(crate::Key::Enter),
 		_ => false,
 	});
+	let at = ArrivedAt::now();
 	for (index, event) in events.into_iter().enumerate() {
 		let submit_after_paste =
 			matches!(&event, InputEvent::Paste(_)) && last_submit.is_some_and(|submit| submit > index);
-		let event = if submit_after_paste {
-			TerminalEvent::InputWithMeta { event, submit_after_paste }
-		} else {
-			TerminalEvent::Input(event)
-		};
+		let event = TerminalEvent::InputWithMeta { event, submit_after_paste, at };
 		if events_tx.send(event).is_err() {
 			return false;
 		}
@@ -568,5 +601,58 @@ async fn deadline(at: Option<Instant>) {
 			tokio::time::sleep_until(at.into()).await;
 		},
 		None => future::pending::<()>().await,
+	}
+}
+
+#[cfg(test)]
+mod arrival_tests {
+	use std::time::Duration;
+
+	use super::*;
+
+	/// Two presses decoded from one terminal read share the instant that read
+	/// decoded them, however long the consumer takes to get to the second: a
+	/// host measuring a gesture window from that instant is immune to a slow
+	/// repaint between the two.
+	#[test]
+	fn events_decoded_from_one_read_share_their_arrival_whatever_the_consumer_does() {
+		let (tx, rx) = flume::unbounded();
+		let mut events =
+			vec![InputEvent::Key(crate::Key::Ctrl('c')), InputEvent::Key(crate::Key::Ctrl('c'))];
+		let before = Instant::now();
+		assert!(send_inputs(&mut events, &tx));
+		let decoded = Instant::now();
+		// The consumer is busy (a slow repaint) before it reaches either event.
+		std::thread::sleep(Duration::from_millis(60));
+		let arrivals: Vec<Instant> = rx
+			.try_iter()
+			.map(|event| match event {
+				TerminalEvent::InputWithMeta { at, .. } => at.instant(),
+				other => panic!("decoded input carries its arrival, got {other:?}"),
+			})
+			.collect();
+		assert_eq!(arrivals.len(), 2);
+		assert_eq!(arrivals[0], arrivals[1], "one read, one arrival");
+		assert!(
+			arrivals[0] >= before && arrivals[0] <= decoded,
+			"stamped when decoded, not when the consumer received it"
+		);
+	}
+
+	/// The stamp is neither compared nor serialized.
+	#[test]
+	fn arrival_is_ignored_by_equality_and_the_wire_format() {
+		let event = |at| TerminalEvent::InputWithMeta {
+			event: InputEvent::Key(crate::Key::Char('x')),
+			submit_after_paste: false,
+			at,
+		};
+		let earlier = ArrivedAt::now();
+		std::thread::sleep(Duration::from_millis(5));
+		assert_eq!(event(earlier), event(ArrivedAt::now()));
+		let json = serde_json::to_string(&event(earlier)).expect("event serializes");
+		assert!(!json.contains("\"at\""), "the arrival is not on the wire: {json}");
+		let decoded: TerminalEvent = serde_json::from_str(&json).expect("event deserializes");
+		assert_eq!(decoded, event(earlier));
 	}
 }

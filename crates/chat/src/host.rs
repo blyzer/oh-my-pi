@@ -741,6 +741,12 @@ pub(crate) struct Presenter {
 	wall_clock: WallClock,
 	/// Last `cl_clear` press, for  double-press exit window.
 	pub(crate) last_clear: Option<Instant>,
+	/// When the input event being routed was decoded. The double-press window
+	/// is measured between arrivals, not between the times the host got round
+	/// to handling each press, so a slow repaint between two presses cannot
+	/// stretch it. `None` outside terminal input (native calls, scripted
+	/// commands), which read the clock.
+	pub(crate) input_arrival: Option<Instant>,
 	/// Double-Left gesture state ( `#detectLeftDoubleTap`).
 	left_taps: LeftTaps,
 	/// The one clock every gesture, countdown, and animation deadline reads.
@@ -1225,6 +1231,7 @@ impl Presenter {
 			turn_started: None,
 			wall_clock,
 			last_clear: None,
+			input_arrival: None,
 			left_taps: LeftTaps::default(),
 			clock: PresentationClock::start(),
 			intro,
@@ -2994,7 +3001,7 @@ impl Presenter {
 				if self.overlays.modal() {
 					return Ok(Routed::Ignored);
 				}
-				let now = Instant::now();
+				let now = self.input_arrival.unwrap_or_else(Instant::now);
 				let repeated = self
 					.last_clear
 					.is_some_and(|prior| now.duration_since(prior) <= Duration::from_millis(500));
@@ -4392,18 +4399,19 @@ impl Host {
 						},
 						TerminalEvent::Input(event) => {
 							if let Some(pause) =
-								self.terminal_input(terminal, renderer, size, event, false)?
+								self.terminal_input(terminal, renderer, size, event, false, None)?
 							{
 								return Ok(pause);
 							}
 						},
-						TerminalEvent::InputWithMeta { event, submit_after_paste } => {
+						TerminalEvent::InputWithMeta { event, submit_after_paste, at } => {
 							if let Some(pause) = self.terminal_input(
 								terminal,
 								renderer,
 								size,
 								event,
 								submit_after_paste,
+								Some(at.instant()),
 							)? {
 								return Ok(pause);
 							}
@@ -4528,6 +4536,7 @@ impl Host {
 		size: Size,
 		event: InputEvent,
 		submit_after_paste: bool,
+		arrived: Option<Instant>,
 	) -> Result<Option<Pause>, HostError> {
 		if terminal.handle_input_event(&event, renderer)? {
 			if self.drain_tsp(terminal) {
@@ -4568,7 +4577,10 @@ impl Host {
 			self.present(renderer, size)?;
 			return Ok(None);
 		}
-		let routed = self.input(event, submit_after_paste, size)?;
+		self.presenter.input_arrival = arrived;
+		let routed = self.input(event, submit_after_paste, size);
+		self.presenter.input_arrival = None;
+		let routed = routed?;
 		if let Some(text) = self.presenter.clipboard.take() {
 			self.clipboard_write = Some(terminal.copy_to_clipboard(&text)?);
 		}
@@ -5431,6 +5443,18 @@ impl NativeHost {
 	pub fn key(&mut self, key: Key) -> Result<NativeEffect, HostError> {
 		let routed = self.presenter.route_key(key)?;
 		Ok(self.finish_native_input(routed))
+	}
+
+	/// Routes one real native key that arrived at `at`.
+	///
+	/// A host that knows when the key reached it passes that time here so a
+	/// repeated `Ctrl+C` is measured between arrivals; [`Self::key`] reads the
+	/// clock when the key is handled.
+	pub fn key_at(&mut self, key: Key, at: Instant) -> Result<NativeEffect, HostError> {
+		self.presenter.input_arrival = Some(at);
+		let routed = self.presenter.route_key(key);
+		self.presenter.input_arrival = None;
+		Ok(self.finish_native_input(routed?))
 	}
 
 	/// Routes an exact native chord edge, including key release.
