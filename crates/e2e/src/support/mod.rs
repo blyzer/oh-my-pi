@@ -15,6 +15,7 @@ mod process;
 mod scratch;
 mod scripted;
 mod storage;
+mod stream_rules;
 mod time;
 
 pub use builders::{assert_all_entries_caused, journal_entries};
@@ -33,6 +34,7 @@ pub use process::{OwnedProcess, install_omp_binary_env, omp_binary};
 #[cfg(unix)]
 pub use process::{process_group_alive, wait_process_group_dead};
 pub use scratch::Scratch;
-pub use scripted::{CapturedRequests, ScriptedInference, scripted_stream};
+pub use scripted::{CapturedRequests, ScriptedInference, hanging_stream, scripted_stream};
 pub use storage::{create_session, reopen_session};
+pub use stream_rules::{guard_directors, text_response};
 pub use time::{DEFAULT_TIMEOUT, DeterministicBarrier, Gate, within};

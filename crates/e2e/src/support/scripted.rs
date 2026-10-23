@@ -7,6 +7,7 @@ use std::{
 	time::SystemTime,
 };
 
+use futures::StreamExt as _;
 use omp_agent::Inference;
 use omp_ai::{ChatEvent, ChatRequest, ChatStream, RequestId, ResponseMeta};
 use parking_lot::Mutex;
@@ -44,7 +45,19 @@ impl Inference for ScriptedInference {
 
 /// Wraps canonical events in the production stream handshake.
 pub fn scripted_stream(events: Vec<ChatEvent>) -> ChatStream {
-	let events = std::iter::once(ChatEvent::Started(ResponseMeta {
+	ChatStream::ordinary(Box::pin(futures::stream::iter(handshake(events).map(Ok))))
+}
+
+/// Like [`scripted_stream`], but never ends after `events`: the response stays
+/// open until the consumer drops it, so only an interrupt can finish the turn.
+pub fn hanging_stream(events: Vec<ChatEvent>) -> ChatStream {
+	ChatStream::ordinary(Box::pin(
+		futures::stream::iter(handshake(events).map(Ok)).chain(futures::stream::pending()),
+	))
+}
+
+fn handshake(events: Vec<ChatEvent>) -> impl Iterator<Item = ChatEvent> {
+	std::iter::once(ChatEvent::Started(ResponseMeta {
 		request_id:          RequestId::from("e2e-scripted-request"),
 		provider:            "scripted".into(),
 		route:               "scripted/e2e".into(),
@@ -53,6 +66,4 @@ pub fn scripted_stream(events: Vec<ChatEvent>) -> ChatStream {
 		created_at:          SystemTime::UNIX_EPOCH,
 	}))
 	.chain(events)
-	.map(Ok);
-	ChatStream::ordinary(Box::pin(futures::stream::iter(events)))
 }

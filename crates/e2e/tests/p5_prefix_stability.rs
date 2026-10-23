@@ -225,7 +225,7 @@ mod roster {
 	};
 	pub use omp_agent::{
 		SV_TOOLS,
-		directors::{goal::Goal, plan::Plan, vibe::Vibe},
+		directors::{goal::Goal, plan::Plan, stream_rules::FAMILY as STREAM_RULES, vibe::Vibe},
 	};
 	pub use omp_ai::settings::AI_EXTERNAL_THINKING as THINK;
 	use omp_ai::{
@@ -235,7 +235,7 @@ mod roster {
 	use omp_con::Ctx;
 	use omp_core::{Hash32, Str};
 	use omp_dom::{KnownTag, NodeSpec, Op, PropId, Txn, Value as DomValue};
-	use omp_e2e::support::{CapturedRequests, create_session, scripted_stream};
+	use omp_e2e::support::{CapturedRequests, create_session, guard_directors, scripted_stream};
 	use omp_journal::blob::BlobStore;
 	use omp_proto::toolhost::v1::HookEventId;
 	use omp_session::Session;
@@ -559,7 +559,7 @@ mod roster {
 				DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blob store")),
 				CanonicalPromptSource,
 			)
-			.with_director_registry(DirectorRegistry::standard())
+			.with_director_registry(guard_directors())
 			.with_con_context(Arc::clone(&con))
 			.with_hook_gate(gate)
 			.with_runtime_flags(RuntimeFlags {
@@ -596,7 +596,16 @@ mod roster {
 		}
 
 		fn stack(&self) -> DirectorStack {
-			DirectorStack::from_dom(self.session.dom(), &DirectorRegistry::standard())
+			DirectorStack::from_dom(self.session.dom(), &guard_directors())
+		}
+
+		/// Engages the `stream-rules` Director with the one rule these tests
+		/// use: any text response containing `danger`.
+		pub fn engage_stream_rules(&mut self) {
+			self
+				.stack()
+				.engage_registered(&mut self.session, STREAM_RULES)
+				.expect("stream rules engage");
 		}
 
 		pub fn engage(&mut self, director: Box<dyn omp_agent::Director>) {
@@ -711,6 +720,15 @@ mod roster {
 		/// The text the model received as tool results, after request `index`.
 		pub fn messages_after(&self, index: usize) -> String {
 			format!("{:?}", self.requests.lock()[index].messages)
+		}
+
+		/// Every message of request `index`, one `Debug` rendering each.
+		pub fn thread(&self, index: usize) -> Vec<String> {
+			self.requests.lock()[index]
+				.messages
+				.iter()
+				.map(|message| format!("{message:?}"))
+				.collect()
 		}
 
 		/// Adds one open todo between requests.
@@ -834,6 +852,46 @@ async fn p5_volatile_facts_preserve_system_prefix_and_reach_latest_message() {
 	let next_turn = rig.latest_message(rig.first_request("new-turn"));
 	assert!(next_turn.contains("<system-notice>\nturn: 3\n"));
 	assert!(next_turn.contains("todo:\n- Move volatile facts to the message stream [in_progress]"));
+}
+
+/// ADR 0038: a stream-rule redirect only appends to the thread. The resample
+/// request carries the system bands and the `tools` array byte for byte as the
+/// request the rule interrupted did, and its thread is that request's thread
+/// extended by exactly the injection, ahead of the trailing volatile notice.
+#[tokio::test]
+async fn p5_stream_rule_redirect_extends_the_interrupted_thread_and_nothing_else() {
+	use roster::*;
+
+	let mut rig = Rig::new(Setup::default());
+	rig.engage_stream_rules();
+	rig.turn("redirect", vec![text("a danger answer"), text("a clean answer")])
+		.await;
+	let first = rig.first_request("redirect");
+	assert_eq!(rig.requests.lock().len() - first, 2, "the match redirects within the turn");
+	let (interrupted, resample) = (first, first + 1);
+	assert!(!rig.system_prefix_bytes(interrupted).is_empty());
+	assert_eq!(
+		rig.system_prefix_bytes(resample),
+		rig.system_prefix_bytes(interrupted),
+		"the redirect rewrote the system prefix"
+	);
+	assert_eq!(
+		rig.fingerprint(resample),
+		rig.fingerprint(interrupted),
+		"the redirect changed the tools array"
+	);
+
+	let before = rig.thread(interrupted);
+	let after = rig.thread(resample);
+	let stable = before.len() - 1;
+	assert_eq!(after.len(), before.len() + 1, "the redirect adds exactly one message");
+	assert_eq!(after[..stable], before[..stable], "the redirect rewrote the interrupted thread");
+	assert!(
+		after[stable].contains("role: System") && after[stable].contains("Avoid that word."),
+		"the injection follows the interrupted thread: {}",
+		after[stable]
+	);
+	assert_eq!(after.last(), before.last(), "the volatile notice stays last and unchanged");
 }
 
 /// Every transition ADR 0024 lists leaves the `tools` array byte-identical:
