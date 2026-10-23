@@ -3163,7 +3163,11 @@ mod tests {
 					.await
 					.expect("key wakes the event loop")
 					.expect("key decodes");
-				assert_eq!(event, TerminalEvent::Input(InputEvent::Key(Key::Char('x'))));
+				assert_eq!(event, TerminalEvent::InputWithMeta {
+					event:              InputEvent::Key(Key::Char('x')),
+					submit_after_paste: false,
+					at:                 crate::ArrivedAt::now(),
+				});
 				platform::deactivate();
 			});
 	}
@@ -3182,12 +3186,15 @@ mod tests {
 				.expect("event arrives")
 				.expect("event decodes");
 			match event {
-				TerminalEvent::Input(InputEvent::Response(response)) => {
+				TerminalEvent::Input(InputEvent::Response(response))
+				| TerminalEvent::InputWithMeta { event: InputEvent::Response(response), .. } => {
 					terminal
 						.handle_response(&response, renderer)
 						.expect("response applies");
 				},
-				TerminalEvent::Input(event) => events.push(event),
+				TerminalEvent::Input(event) | TerminalEvent::InputWithMeta { event, .. } => {
+					events.push(event);
+				},
 				TerminalEvent::Resize => {
 					// Process-wide SIGWINCH tests can race this terminal.
 					terminal.resize_ready = false;
@@ -3240,7 +3247,9 @@ mod tests {
 			.await
 			.expect("response arrives")
 			.expect("response decodes");
-		let TerminalEvent::Input(InputEvent::Response(response)) = event else {
+		let (TerminalEvent::Input(InputEvent::Response(response))
+		| TerminalEvent::InputWithMeta { event: InputEvent::Response(response), .. }) = event
+		else {
 			panic!("expected the trailing terminal response, got {event:?}");
 		};
 		terminal
