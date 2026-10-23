@@ -70,7 +70,9 @@ the wire.
 
 - Budgeting and lowering: `ConstraintBudgetCaps { maximum_tools, maximum_strict }` and unit tests in `crates/ai/src/plan.rs`; `ConstraintDisposition` in `crates/tool/src/registry.rs`.
 - Typed degradation reasons such as `catalog.strict-schema-unsupported` appear in `crates/ai/src/codec/openai_chat.rs` and `openai_responses.rs`.
-- Not found or unproved: a joined test spending the strict budget in priority order across registrations, every grammar dialect fallback, and the declaration-time error for `on_unsupported=ERROR`.
+- Proved in `crates/tool/tests/contracts.rs` (2026-10-22, `omp2` at `1cc90158cc`): strict and tool-count budgets are spent in priority order across core and extension registrations with typed `Dropped` receipts; each grammar dialect (Lark, Regex, Ebnf) stays native only on a route that enforces that dialect and otherwise falls back to the plain JSON Schema as `catalog.grammar-unsupported`; `on_unsupported=Error` refuses instead of dropping for a non-strict route, an out-of-subset schema, an unsupported dialect, and a lost strict or tool-count budget.
+- Diverges from the decision text: the refusal in point 4 above is raised when `Registry::advertise` lowers the tool for a route, not at registration, so it is a lowering-time error rather than a declaration-time one.
+- Not checked: provider-codec emission of each dialect in `crates/ai/src/codec`.
 
 ## References
 
