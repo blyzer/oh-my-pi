@@ -925,6 +925,34 @@ mod tests {
 		Watch::new(set, omp_core::FastHashSet::default(), StreamRuleInterrupt::Always, context, 1)
 	}
 
+	/// A watch over `patterns`, each its own text-scoped rule.
+	fn text_watch(patterns: &[String]) -> Watch {
+		let rules = patterns
+			.iter()
+			.enumerate()
+			.map(|(index, pattern)| RulePattern {
+				name:           sf!("rule-{index}"),
+				body:           Str::new_static("Follow the repository rule."),
+				pattern:        Str::new(pattern),
+				scope:          vec![Str::new_static("text")],
+				globs:          Vec::new(),
+				interrupt_mode: None,
+			})
+			.collect();
+		let set = std::sync::Arc::new(
+			StreamRuleSet::compile(rules)
+				.set
+				.expect("generated conditions compile"),
+		);
+		Watch::new(
+			set,
+			omp_core::FastHashSet::default(),
+			StreamRuleInterrupt::Always,
+			StreamRuleContext::Discard,
+			1,
+		)
+	}
+
 	fn fragment<'a>(index: u32, source: StreamSource<'a>, text: &'a [u8]) -> StreamFragment<'a> {
 		StreamFragment { index, source, bytes: text }
 	}
@@ -1264,6 +1292,46 @@ mod tests {
 				matched = !matches!(watch.block_end(0), StreamVerdict::Pass);
 			}
 			prop_assert_eq!(matched, expected);
+		}
+	}
+
+	proptest! {
+		/// The lazy DFA reports a match one byte after it ends. Fed one byte at a
+		/// time, the watch must therefore interrupt after the earliest matching
+		/// prefix of length `L` has been consumed plus at most one more byte:
+		/// never before the text can match, never later than `L + 1`. A match
+		/// ending on the last byte is reported at `block_end` (ADR 0038, proptests).
+		#[test]
+		fn first_hit_is_reported_within_one_byte_of_the_earliest_matching_prefix(
+			patterns in proptest::collection::vec("[a-z]{1,4}", 1..5),
+			text in proptest::collection::vec(any::<u8>(), 0..96),
+		) {
+			let regex_set = regex::bytes::RegexSet::new(&patterns).expect("generated patterns compile");
+			let earliest = (0..=text.len()).find(|&len| regex_set.is_match(&text[..len]));
+			let mut watch = text_watch(&patterns);
+			let mut reported = None;
+			for (offset, byte) in text.iter().enumerate() {
+				let verdict =
+					watch.fragment(fragment(0, StreamSource::Text, std::slice::from_ref(byte)));
+				if !matches!(verdict, StreamVerdict::Pass) {
+					reported = Some(offset + 1);
+					break;
+				}
+			}
+			if reported.is_none() && !matches!(watch.block_end(0), StreamVerdict::Pass) {
+				reported = Some(text.len());
+			}
+			prop_assert_eq!(reported.is_some(), earliest.is_some());
+			if let (Some(reported), Some(earliest)) = (reported, earliest) {
+				prop_assert!(
+					reported >= earliest,
+					"hit after {reported} bytes, before the earliest matching prefix of {earliest}"
+				);
+				prop_assert!(
+					reported <= earliest + 1,
+					"hit after {reported} bytes, more than one byte past the earliest matching prefix of {earliest}"
+				);
+			}
 		}
 	}
 }

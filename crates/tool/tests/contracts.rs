@@ -2457,3 +2457,211 @@ fn detached_artifact_lifetime_is_explicit_and_session_is_the_conservative_defaul
 		"wire job references must carry an explicit resource owner"
 	);
 }
+
+/// A tool whose schema takes a freeform `input` string, as a grammar tool must.
+const GRAMMAR_SCHEMA: &[u8] = br#"{"type":"object","properties":{"input":{"type":"string"}}}"#;
+
+fn lone_tool(name: &str, schema: &'static [u8], constraint: Constraint) -> Registry {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			FakeTool::new(1, name, schema, constraint, Arc::new(AtomicUsize::new(0))).named(name),
+			Presentation::Slot,
+			claims("omp/tests", Precedence::CORE),
+		)
+		.unwrap();
+	registry
+}
+
+const fn route(strict_schema: bool, grammar: GrammarBits) -> LoweringCaps {
+	LoweringCaps { strict_schema, grammar, maximum_tools: None, maximum_strict: None }
+}
+
+/// Every grammar dialect has its own capability bit. A route that enforces the
+/// dialect keeps the grammar native; a route that enforces only the other
+/// dialects, or none, gets the plain JSON Schema and a typed `Dropped` receipt
+/// naming the dialect (ADR 0021, fallback).
+#[test]
+fn each_grammar_dialect_is_native_only_where_the_route_enforces_that_dialect() {
+	let dialects = [
+		(GrammarSyntax::Lark, GrammarBits::LARK, ToolGrammarSyntax::Lark, "lark"),
+		(GrammarSyntax::Regex, GrammarBits::REGEX, ToolGrammarSyntax::Regex, "regex"),
+		(GrammarSyntax::Ebnf, GrammarBits::EBNF, ToolGrammarSyntax::Ebnf, "ebnf"),
+	];
+	for (syntax, bit, wire, name) in dialects {
+		let registry = lone_tool(name, GRAMMAR_SCHEMA, Constraint::Grammar {
+			syntax,
+			definition: sf!("start: x"),
+			priority: 7,
+			on_unsupported: Fallback::Unspecified,
+		});
+
+		let native = registry.advertise(route(false, bit)).unwrap();
+		let grammar = native[0]
+			.definition
+			.input
+			.grammar()
+			.unwrap_or_else(|| panic!("{name}: a route that enforces it keeps the grammar"));
+		assert_eq!(grammar.syntax, wire, "{name}");
+		assert_eq!(native[0].disposition, Some(ConstraintDisposition::Required), "{name}");
+		assert!(native[0].adjustments.is_empty(), "{name}: nothing is dropped");
+
+		let others = dialects
+			.iter()
+			.filter(|other| other.1 != bit)
+			.fold(GrammarBits::empty(), |all, other| all | other.1);
+		let expected_feature = format!("tool.{name}.{name}");
+		for (label, unsupported) in
+			[("the other dialects only", others), ("no grammar", GrammarBits::empty())]
+		{
+			let lowered = registry.advertise(route(false, unsupported)).unwrap();
+			assert!(
+				lowered[0].definition.input.grammar().is_none(),
+				"{name} on a route with {label} must not stay native"
+			);
+			assert!(lowered[0].definition.input.json_schema().is_some(), "{name} on {label}");
+			assert_eq!(
+				lowered[0].disposition,
+				Some(ConstraintDisposition::Prefer),
+				"{name} on {label}"
+			);
+			assert!(
+				matches!(
+					lowered[0].adjustments.as_slice(),
+					[Adjustment::Dropped { feature, reason }]
+						if reason.0 == "catalog.grammar-unsupported"
+							&& feature.0.as_str() == expected_feature
+				),
+				"{name} on {label}: {:?}",
+				lowered[0].adjustments
+			);
+		}
+	}
+}
+
+/// `on_unsupported = Error` means the intent must not silently weaken: where
+/// the route cannot honor it, lowering refuses with a typed error naming the
+/// feature. The same tool declared with `Unspecified` still degrades.
+#[test]
+fn on_unsupported_error_refuses_where_unspecified_would_drop() {
+	let outside_subset =
+		br#"{"type":"object","allOf":[{"if":{"required":["async"]},"then":{"required":["name"]}}]}"#;
+	let refusal = |registry: &Registry, caps: LoweringCaps| match registry.advertise(caps).err() {
+		Some(RegistryError::UnsupportedConstraint { feature, .. }) => feature,
+		other => panic!("expected an unsupported-constraint refusal, got {other:?}"),
+	};
+	let schema = |on_unsupported| Constraint::Schema { priority: 100, on_unsupported };
+
+	// A route with no strict-schema support.
+	let strict_off = route(false, GrammarBits::empty());
+	assert_eq!(
+		refusal(&lone_tool("guarded", GRAMMAR_SCHEMA, schema(Fallback::Error)), strict_off),
+		"schema"
+	);
+	assert!(
+		lone_tool("guarded", GRAMMAR_SCHEMA, schema(Fallback::Unspecified))
+			.advertise(strict_off)
+			.is_ok()
+	);
+
+	// A route with strict schemas, for a schema outside the strict subset.
+	let strict_on = route(true, GrammarBits::empty());
+	assert_eq!(
+		refusal(&lone_tool("guarded", outside_subset, schema(Fallback::Error)), strict_on),
+		"strict-schema-subset"
+	);
+	assert!(
+		lone_tool("guarded", outside_subset, schema(Fallback::Unspecified))
+			.advertise(strict_on)
+			.is_ok()
+	);
+
+	// A route that does not enforce the grammar's dialect, for each dialect.
+	for (syntax, name) in [
+		(GrammarSyntax::Lark, "lark"),
+		(GrammarSyntax::Regex, "regex"),
+		(GrammarSyntax::Ebnf, "ebnf"),
+	] {
+		let grammar = |on_unsupported| Constraint::Grammar {
+			syntax,
+			definition: sf!("start: x"),
+			priority: 7,
+			on_unsupported,
+		};
+		assert_eq!(
+			refusal(&lone_tool(name, GRAMMAR_SCHEMA, grammar(Fallback::Error)), strict_off),
+			name
+		);
+		assert!(
+			lone_tool(name, GRAMMAR_SCHEMA, grammar(Fallback::Unspecified))
+				.advertise(strict_off)
+				.is_ok()
+		);
+	}
+}
+
+/// A budget is spent in priority order. A lower-priority tool that loses a
+/// budget is downgraded or skipped when it can live with that; one declared
+/// `on_unsupported = Error` cannot, so lowering refuses instead of losing it.
+#[test]
+fn on_unsupported_error_refuses_when_a_budget_would_drop_it() {
+	let build = |second: Fallback| {
+		let mut registry = Registry::new();
+		for (name, priority, on_unsupported) in
+			[("first", 2, Fallback::Unspecified), ("second", 1, second)]
+		{
+			registry
+				.register(
+					FakeTool::new(
+						1,
+						name,
+						br#"{"type":"object"}"#,
+						Constraint::Schema { priority, on_unsupported },
+						Arc::new(AtomicUsize::new(0)),
+					)
+					.named(name),
+					Presentation::Slot,
+					claims("omp/tests", Precedence::CORE),
+				)
+				.unwrap();
+		}
+		registry
+	};
+	let strict_budget = LoweringCaps {
+		strict_schema:  true,
+		grammar:        GrammarBits::empty(),
+		maximum_tools:  None,
+		maximum_strict: Some(1),
+	};
+	let count_budget =
+		LoweringCaps { maximum_strict: None, maximum_tools: Some(1), ..strict_budget };
+	let refusal = |registry: &Registry, caps: LoweringCaps| match registry.advertise(caps).err() {
+		Some(RegistryError::UnsupportedConstraint { name, feature, .. }) => (name, feature),
+		other => panic!("expected an unsupported-constraint refusal, got {other:?}"),
+	};
+
+	// The loser that can live with it is downgraded, or skipped.
+	assert_eq!(
+		build(Fallback::Unspecified)
+			.advertise(strict_budget)
+			.unwrap()
+			.len(),
+		2
+	);
+	assert_eq!(
+		build(Fallback::Unspecified)
+			.advertise(count_budget)
+			.unwrap()
+			.len(),
+		1
+	);
+	// The loser that cannot is refused, naming the budget it lost.
+	assert_eq!(
+		refusal(&build(Fallback::Error), strict_budget),
+		("second".into(), "strict-schema-budget")
+	);
+	assert_eq!(
+		refusal(&build(Fallback::Error), count_budget),
+		("second".into(), "tool-count-budget")
+	);
+}
