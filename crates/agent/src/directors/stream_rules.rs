@@ -1334,4 +1334,109 @@ mod tests {
 			}
 		}
 	}
+
+	/// ADR 0038 (proptests): a Pass-path fragment allocates nothing.
+	///
+	/// The counter is installed as the unit-test binary's global allocator but
+	/// counts only on a thread that has armed it, so no other test sees it.
+	mod allocation {
+		use std::{
+			alloc::{GlobalAlloc, Layout, System},
+			cell::Cell,
+		};
+
+		use super::*;
+
+		thread_local! {
+			// Const-initialized and without a destructor, so reading them from inside
+			// the allocator neither allocates nor re-enters it.
+			static ARMED: Cell<bool> = const { Cell::new(false) };
+			static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+		}
+
+		fn note() {
+			ARMED.with(|armed| {
+				if armed.get() {
+					ALLOCATIONS.with(|count| count.set(count.get() + 1));
+				}
+			});
+		}
+
+		struct CountingAllocator;
+
+		// SAFETY: every call is forwarded unchanged to `System`, which upholds the
+		// `GlobalAlloc` contract; the counting only reads and writes thread-local
+		// `Cell`s.
+		unsafe impl GlobalAlloc for CountingAllocator {
+			unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+				note();
+				// SAFETY: forwarded under the caller's contract.
+				unsafe { System.alloc(layout) }
+			}
+
+			unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+				note();
+				// SAFETY: forwarded under the caller's contract.
+				unsafe { System.alloc_zeroed(layout) }
+			}
+
+			unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+				note();
+				// SAFETY: forwarded under the caller's contract.
+				unsafe { System.realloc(ptr, layout, new_size) }
+			}
+
+			unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+				// SAFETY: forwarded under the caller's contract.
+				unsafe { System.dealloc(ptr, layout) }
+			}
+		}
+
+		#[global_allocator]
+		static COUNTING: CountingAllocator = CountingAllocator;
+
+		/// Allocations made by this thread while `work` runs.
+		fn allocations_during(work: impl FnOnce()) -> usize {
+			ALLOCATIONS.with(|count| count.set(0));
+			ARMED.with(|armed| armed.set(true));
+			work();
+			ARMED.with(|armed| armed.set(false));
+			ALLOCATIONS.with(Cell::get)
+		}
+
+		#[test]
+		fn the_counter_counts_this_threads_allocations() {
+			assert!(allocations_during(|| drop(std::hint::black_box(vec![0_u8; 64]))) >= 1);
+			assert_eq!(allocations_during(|| {}), 0);
+		}
+
+		/// The first fragment of a block builds its cursor and the lazy DFA's
+		/// states, so it allocates; once the matcher has seen the states a stream
+		/// of prose visits, each further non-matching fragment advances in
+		/// place.
+		#[test]
+		fn non_matching_text_fragments_allocate_nothing_once_the_matcher_is_warm() {
+			let mut watch = make_watch("danger", &["text"], &[], None, StreamRuleContext::Discard);
+			let prose: &[u8] = b"plain prose that mentions a stranger and a manager but no hazard. ";
+			let cold = allocations_during(|| {
+				assert!(matches!(
+					watch.fragment(fragment(0, StreamSource::Text, prose)),
+					StreamVerdict::Pass
+				));
+			});
+			assert!(cold > 0, "the first fragment builds the cursor, so the counter must see it");
+			for _ in 0..3 {
+				let _ = watch.fragment(fragment(0, StreamSource::Text, prose));
+			}
+			let warm = allocations_during(|| {
+				for _ in 0..1_000 {
+					assert!(matches!(
+						watch.fragment(fragment(0, StreamSource::Text, prose)),
+						StreamVerdict::Pass
+					));
+				}
+			});
+			assert_eq!(warm, 0, "Pass-path fragments must not allocate once warm");
+		}
+	}
 }

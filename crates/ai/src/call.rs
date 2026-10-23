@@ -1726,9 +1726,11 @@ pub struct NativeRequest {
 #[cfg(test)]
 mod tests {
 	use bytes::Bytes;
-	use omp_core::SecretString;
+	use omp_core::{SecretString, Str};
 
-	use super::{AuthInput, RawJson};
+	use super::{
+		AuthInput, OpaqueJson, RawJson, ToolGrammar, ToolGrammarSyntax, ToolInputConstraint,
+	};
 
 	#[test]
 	fn auth_input_debug_never_exposes_secrets() {
@@ -1744,5 +1746,31 @@ mod tests {
 		let raw = RawJson::new(bytes.clone(), bytes.len() as u64).expect("valid JSON");
 		assert_eq!(raw.as_bytes(), bytes.as_ref());
 		assert!(RawJson::new(Bytes::from_static(b"{} trailing"), 64).is_err());
+	}
+
+	#[test]
+	fn every_grammar_dialect_degrades_to_its_non_strict_fallback_on_schema_only_transports() {
+		let fallback =
+			serde_json::json!({"type": "object", "properties": {"input": {"type": "string"}}});
+		for syntax in [ToolGrammarSyntax::Lark, ToolGrammarSyntax::Regex, ToolGrammarSyntax::Ebnf] {
+			let input = ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar { syntax, definition: Str::new("start: WORD") },
+				fallback: OpaqueJson::new(fallback.clone()),
+			};
+			assert_eq!(input.grammar().map(|grammar| grammar.syntax), Some(syntax));
+			let (schema, strict) = input.wire_schema();
+			assert_eq!(schema.as_value(), &fallback, "{syntax:?} must ship its fallback schema");
+			assert!(!strict, "{syntax:?} fallback must never claim strict decoding");
+		}
+
+		let declared = serde_json::json!({"type": "object", "required": ["path"]});
+		let structured = ToolInputConstraint::JsonSchema {
+			parameters: OpaqueJson::new(declared.clone()),
+			strict:     true,
+		};
+		assert!(structured.grammar().is_none());
+		let (schema, strict) = structured.wire_schema();
+		assert_eq!(schema.as_value(), &declared);
+		assert!(strict, "a structured input keeps its declared strictness");
 	}
 }

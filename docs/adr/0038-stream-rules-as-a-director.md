@@ -430,10 +430,28 @@ projection, tool culprit/sibling labels, interrupt during redirect, and request-
 condition siblings warn without hiding valid conditions, and agent-class filtering reaches only
 the child that admits a rule; P7
 (`chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit`) renders a project
-rule's redirect on a real PTY. Still unproven: byte-identical no-watcher journals, the
-JSON-string decoder, the allocation-free Pass path, rewind across a redirect, a failed response
-before the redirect transaction, non-interrupting reminder continuation, hidden/compaction turn
-gating, and the P2/P5/P6 rows of the test plan.
+rule's redirect on a real PTY. Added 2026-10-23: `Watch::fragment` allocates nothing once the
+matcher is warm (a thread-local counting allocator in `stream_rules.rs`: 1000 non-matching
+fragments, zero allocations); `crates/agent/tests/stream_rules_director.rs` drives the real
+Director over the loop for `once` and `after-gap` ages across a resume, a match on a response
+that fails before commit (neither marked nor published, so the retry fires), one observation per
+match (checked at the `HookGate` observation seam, not through the Python client), and rewind
+past a redirect (exclusion, injection, and mark removed together, with a control that the mark
+does keep the same text quiet before the rewind); e2e P5 (system bands and `tools` bytes
+unchanged; the resample thread is the interrupted thread plus exactly the injection, ahead of the
+volatile notice), P6 (a crash before the redirect patch resumes unmarked and fires again; after it
+the journal replays to the identical tree and stays quiet), and P2 (an interrupt while the
+resample streams keeps the one committed redirect and records no second assistant, end, or
+receipt). Each was run against a mutation of the loop that it must catch. Still unproven:
+byte-identical no-watcher journals, the JSON-string decoder (no code to test), non-interrupting
+reminder continuation, and hidden/compaction turn gating.
+
+Divergence from §4, found while writing P6: `assistant_end("interrupted")` and the
+`turn.receipt` are journaled before the `director.stream-interrupt` patch, not inside it. The
+patch carries the `interrupt` mark, the exclusion, the notice, the injection, and the fired
+marks. A crash between them resumes with an interrupted, receipted assistant that has no
+`interrupt` mark and no exclusion, and no fired rule, so the rule can fire again. Whether the
+resumed projection still sends that partial assistant to the provider is not checked.
 
 **Open implementation decisions (owner):** the matcher currently keeps one `StreamRuleSet` rather
 than the pooled per-key caches §5 describes; and redirect notices plus hook events omit the
@@ -581,8 +599,10 @@ and `AgentsArgs`/`AgentsAction` clap types are deleted.
   ever implemented beyond documentation. It is cited only as prior art. `docs/py/15-directors.md`
   still marks the `ttsr_triggered` emitter as **Unknown**; this record answers that (the Director,
   after commit), and step 5 updates the chapter.
-- Usage accounting for interrupted requests: today a cancelled inference writes no receipt, so the
-  tokens spent on an interrupted response are not recorded.
+- Usage accounting for interrupted requests: a plain cancelled inference writes no receipt (P2),
+  so its tokens are not recorded. A redirected response does: the loop journals a `turn.receipt`
+  for it before the redirect patch (observed in P2, 2026-10-23), so the older claim that the tokens
+  spent on an interrupted response are never recorded holds only for plain cancels.
 
 ### Open questions for the owner (resolved 2026-10-04)
 

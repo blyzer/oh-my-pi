@@ -923,6 +923,7 @@ fn provider_error(code: &'static str) -> Error {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::call::ToolInputConstraint;
 	fn decoder() -> OllamaDecoder {
 		OllamaDecoder {
 			request_id: sf!("fixture"),
@@ -1012,5 +1013,105 @@ mod tests {
 				.map(Str::as_str),
 			Some("qwen3")
 		);
+	}
+
+	fn encode_tool(input: ToolInputConstraint) -> Result<EncodedRequest, Error> {
+		use std::sync::Arc;
+
+		use omp_catalog::{Catalog, WireTarget, policy::WirePolicy};
+
+		use crate::{
+			call::{NegotiationPolicy, Sampling, ToolDefinition},
+			id::RequestId,
+		};
+		let catalog = Catalog::embedded();
+		let route = catalog
+			.routes()
+			.iter()
+			.find(|route| route.codec.as_str() == "ollama")
+			.expect("embedded Ollama route");
+		let target = WireTarget {
+			route:      route.id.clone(),
+			codec:      route.codec.clone(),
+			endpoint:   route.endpoint.clone(),
+			wire_model: WireModelId::new("qwen3:8b"),
+		};
+		let request_id = RequestId::new("ollama-tool-input");
+		let policy = WirePolicy::baseline();
+		let context = EncodeContext {
+			request_id: &request_id,
+			route,
+			target: Some(&target),
+			policy: &policy,
+			..EncodeContext::default()
+		};
+		let request = ChatRequest {
+			messages:          Arc::from([]),
+			tools:             Arc::from([ToolDefinition {
+				name: sf!("match_input"),
+				description: None,
+				input,
+			}]),
+			hosted_tools:      Arc::from([]),
+			tool_choice:       Setting::Unset,
+			output:            Setting::Unset,
+			reasoning:         Setting::Unset,
+			verbosity:         Setting::Unset,
+			cache_retention:   Setting::Unset,
+			service_tier:      Setting::Unset,
+			sampling:          Sampling::default(),
+			max_output_tokens: None,
+			top_logprobs:      None,
+			safety:            Arc::from([]),
+			negotiation:       NegotiationPolicy::default(),
+			forced_call:       None,
+		};
+		OllamaCodec.encode(&context, &OperationCall::Chat(Arc::new(request)))
+	}
+
+	fn rejection_reason(error: &Error) -> &str {
+		assert_eq!(error.kind, ErrorKind::CapabilityMismatch);
+		match error.detail_ref() {
+			Some(ErrorDetail::Protocol { reason }) => reason.0.as_str(),
+			other => panic!("expected a protocol reason, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn tool_grammars_of_every_dialect_are_rejected_before_the_wire() {
+		use crate::call::{OpaqueJson, ToolGrammar, ToolGrammarSyntax};
+		for syntax in [ToolGrammarSyntax::Lark, ToolGrammarSyntax::Regex, ToolGrammarSyntax::Ebnf] {
+			let error = encode_tool(ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar { syntax, definition: sf!("start: WORD") },
+				fallback: OpaqueJson::new(serde_json::json!({"type": "object"})),
+			})
+			.err()
+			.expect("Ollama has no grammar-constrained tool input");
+			assert_eq!(rejection_reason(&error), "ollama_tool_grammar_unsupported");
+		}
+	}
+
+	#[test]
+	fn strict_tool_schemas_are_rejected_and_loose_ones_encode() {
+		use crate::call::OpaqueJson;
+		let parameters = || OpaqueJson::new(serde_json::json!({"type": "object"}));
+		let error = encode_tool(ToolInputConstraint::JsonSchema {
+			parameters: parameters(),
+			strict:     true,
+		})
+		.err()
+		.expect("Ollama cannot enforce strict decoding");
+		assert_eq!(rejection_reason(&error), "ollama_strict_tool_schema_unsupported");
+
+		let encoded = encode_tool(ToolInputConstraint::JsonSchema {
+			parameters: parameters(),
+			strict:     false,
+		})
+		.expect("a non-strict schema tool encodes");
+		let BodySource::Bytes(body) = encoded.body else {
+			panic!("Ollama chat request is buffered JSON");
+		};
+		let body: serde_json::Value = serde_json::from_slice(&body).expect("request JSON");
+		assert_eq!(body.pointer("/tools/0/function/name"), Some(&serde_json::json!("match_input")));
 	}
 }

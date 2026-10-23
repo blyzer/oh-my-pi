@@ -606,3 +606,117 @@ fn p6_resume_preserves_open_stream_prefix_without_inventing_completion() {
 	assert!(!journal.contains("event: msg.assistant.end@1"));
 	assert!(!journal.contains("event: turn.receipt@1"));
 }
+
+/// ADR 0038: a crash around the redirect transaction. The journal is
+/// append-only, so a crash is a prefix of it.
+mod redirect_crash {
+	use std::{fs, path::Path, sync::Arc};
+
+	use omp_agent::{
+		DirectorStack, DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput,
+		directors::stream_rules::FAMILY,
+	};
+	use omp_con::Ctx;
+	use omp_core::Str;
+	use omp_e2e::support::{
+		ScriptedInference, create_session, guard_directors, journal_entries, reopen_session,
+		text_response,
+	};
+	use omp_journal::blob::BlobStore;
+	use omp_session::Session;
+	use omp_tool::Registry;
+
+	const REDIRECT_LABEL: &str = "director.stream-interrupt";
+
+	fn kernel(inference: ScriptedInference, directory: &Path) -> Kernel<ScriptedInference> {
+		Kernel::new(
+			inference,
+			Arc::new(Registry::new()),
+			DispatchPolicy::new(BlobStore::open(directory.join("blobs")).expect("blob store")),
+			StaticPrompt(Str::new_static("P6")),
+		)
+		.with_director_registry(guard_directors())
+		.with_con_context(Arc::new(Ctx::new()))
+	}
+
+	const fn turn(text: &'static str) -> TurnInput {
+		TurnInput { text: Str::new_static(text), attachments: Vec::new() }
+	}
+
+	/// How many requests a second turn makes when its first response matches
+	/// the rule: 2 when the rule fires and redirects, 1 when it stays quiet.
+	#[expect(
+		clippy::future_not_send,
+		reason = "the helper holds a Session, whose boxed Send-only stream is not Sync"
+	)]
+	async fn second_turn_requests(session: &mut Session, directory: &Path) -> usize {
+		let (inference, requests) =
+			ScriptedInference::new([text_response("danger again"), text_response("clean again")]);
+		kernel(inference, directory)
+			.run_turn(session, turn("second"), RunControl::default())
+			.await
+			.expect("the second turn completes");
+		requests.lock().len()
+	}
+
+	/// The journal text cut just before the redirect transaction's entry.
+	fn before_the_redirect(path: &Path) -> String {
+		let entries = journal_entries(path);
+		let redirect = entries
+			.iter()
+			.find(|entry| {
+				entry
+					.label
+					.as_ref()
+					.is_some_and(|label| label.as_str() == REDIRECT_LABEL)
+			})
+			.expect("the live run journaled one redirect transaction");
+		let text = fs::read_to_string(path).expect("journal text");
+		let at = text
+			.find(&format!("\nid: {}\n", redirect.id))
+			.expect("the redirect entry is in the journal text");
+		let start = text[..at].rfind("event: ").expect("entry start");
+		text[..start].to_owned()
+	}
+
+	#[tokio::test]
+	async fn p6_crash_around_a_redirect_resumes_unmarked_before_it_and_identically_after_it() {
+		let directory = tempfile::tempdir().expect("P6 scratch");
+		let live = directory.path().join("live.oms");
+		let (inference, requests) = ScriptedInference::new([
+			text_response("a danger answer"),
+			text_response("a clean answer"),
+		]);
+		let mut session = create_session(&live).expect("session");
+		DirectorStack::from_dom(session.dom(), &guard_directors())
+			.engage_registered(&mut session, FAMILY)
+			.expect("the director engages");
+		kernel(inference, directory.path())
+			.run_turn(&mut session, turn("first"), RunControl::default())
+			.await
+			.expect("the redirected turn completes");
+		assert_eq!(requests.lock().len(), 2, "the match redirects within the turn");
+		let expected = session.dom().snapshot();
+		drop(session);
+
+		// A crash after the transaction replays byte-identically, and the
+		// journaled mark keeps the rule quiet.
+		let mut after = reopen_session(&live).expect("resume after the redirect");
+		assert_eq!(after.dom().snapshot(), expected);
+		assert_eq!(second_turn_requests(&mut after, directory.path()).await, 1);
+
+		// A crash before it leaves the settled response but no injection, no
+		// interrupt mark and no fired rule: the rule can still fire.
+		let crashed = directory.path().join("crashed.oms");
+		fs::write(&crashed, before_the_redirect(&live)).expect("write the crashed prefix");
+		let mut before = reopen_session(&crashed).expect("resume before the redirect");
+		for selector in ["body turn developer", "body turn assistant[interrupt=stream-rules]"] {
+			assert_eq!(
+				before.dom().select(selector).expect("selector").count(),
+				0,
+				"`{selector}` is part of the redirect transaction"
+			);
+		}
+		assert_eq!(second_turn_requests(&mut before, directory.path()).await, 2);
+	}
+}
