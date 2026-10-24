@@ -853,7 +853,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		if expansion.is_unmatched_glob() && self.shell.options().fail_expansion_on_globs_without_match
 		{
 			let field_str = String::from(field);
-			return Err(error::ErrorKind::NoMatch(field_str).into());
+			return Err(error::ErrorKind::NoMatch { pattern: field_str }.into());
 		}
 
 		let paths = expansion.into_paths();
@@ -1592,7 +1592,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			Ok(Expansion::undefined())
 		} else {
 			let err: error::Error =
-				error::ErrorKind::ExpandingUnsetVariable(parameter.to_string()).into();
+				error::ErrorKind::ExpandingUnsetVariable { variable: parameter.to_string() }.into();
 			Err(err.into_fatal())
 		}
 	}
@@ -1658,7 +1658,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			Parameter::Special(s) => Ok(self.expand_special_parameter(s)),
 			Parameter::Named(n) => {
 				if !env::valid_variable_name(n.as_str()) {
-					Err(error::ErrorKind::BadSubstitution(n.clone()).into())
+					Err(error::ErrorKind::BadSubstitution { expr: n.clone() }.into())
 				} else if let Some((_, var)) = self.shell.env().get(n) {
 					if matches!(var.value(), ShellValue::Unset(_)) {
 						self.undefined_expansion(parameter, allow_unset_vars)

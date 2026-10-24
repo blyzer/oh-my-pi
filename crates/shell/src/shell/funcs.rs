@@ -105,7 +105,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		let func_registration = self
 			.funcs
 			.get(name)
-			.ok_or_else(|| error::ErrorKind::FunctionNotFound(name.to_owned()))?
+			.ok_or_else(|| error::ErrorKind::FunctionNotFound { name: name.to_owned() })?
 			.to_owned();
 
 		let context =

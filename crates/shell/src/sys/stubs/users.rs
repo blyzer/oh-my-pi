@@ -19,23 +19,25 @@ pub(crate) fn is_root() -> bool {
 }
 
 pub(crate) fn get_current_uid() -> Result<u32, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current uid").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "getting current uid" }.into())
 }
 
 pub(crate) fn get_current_gid() -> Result<u32, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current gid").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "getting current gid" }.into())
 }
 
 pub(crate) fn get_effective_uid() -> Result<u32, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("getting effective uid").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "getting effective uid" }.into())
 }
 
 pub(crate) fn get_effective_gid() -> Result<u32, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("getting effective gid").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "getting effective gid" }.into())
 }
 
 pub(crate) fn get_current_username() -> Result<String, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current username").into())
+	Err(
+		error::ErrorKind::NotSupportedOnThisPlatform { operation: "getting current username" }.into(),
+	)
 }
 
 pub(crate) fn get_user_group_ids() -> Result<Vec<u32>, error::Error> {

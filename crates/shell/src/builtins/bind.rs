@@ -98,12 +98,18 @@ pub(crate) struct BindCommand {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BindError {
 	/// Unknown function specified.
-	#[error("unknown function: {0}")]
-	UnknownFunction(String),
+	#[error("unknown function: {function}")]
+	UnknownFunction {
+		/// The unknown readline function name.
+		function: String,
+	},
 
 	/// Unknown key binding function.
-	#[error("unknown key binding function: {0}")]
-	UnknownKeyBindingFunction(String),
+	#[error("unknown key binding function: {function}")]
+	UnknownKeyBindingFunction {
+		/// The unknown key-binding function name.
+		function: String,
+	},
 
 	/// An I/O error occurred.
 	#[error("I/O error occurred")]
@@ -456,7 +462,7 @@ fn key_sequence_to_abstract_strokes(
 
 fn parse_readline_function(func_name: &str) -> Result<interfaces::InputFunction, BindError> {
 	interfaces::InputFunction::from_str(func_name)
-		.map_err(|_err| BindError::UnknownKeyBindingFunction(func_name.to_owned()))
+		.map_err(|_err| BindError::UnknownKeyBindingFunction { function: func_name.to_owned() })
 }
 
 const fn to_onoff(value: bool) -> &'static str {
@@ -528,7 +534,7 @@ fn find_key_seqs_bound_to_function(
 	func_str: &str,
 ) -> Result<Vec<interfaces::KeySequence>, BindError> {
 	let Ok(func_to_find) = InputFunction::from_str(func_str) else {
-		return Err(BindError::UnknownFunction(func_str.to_owned()));
+		return Err(BindError::UnknownFunction { function: func_str.to_owned() });
 	};
 
 	let mut found_seqs = vec![];

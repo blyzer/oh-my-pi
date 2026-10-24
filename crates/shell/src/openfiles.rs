@@ -219,12 +219,16 @@ impl io::Read for OpenFile {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match self {
 			Self::Stdin(f) => f.read(buf),
-			Self::Stdout(_) => Err(io::Error::other(error::ErrorKind::OpenFileNotReadable("stdout"))),
-			Self::Stderr(_) => Err(io::Error::other(error::ErrorKind::OpenFileNotReadable("stderr"))),
+			Self::Stdout(_) => {
+				Err(io::Error::other(error::ErrorKind::OpenFileNotReadable { file: "stdout" }))
+			},
+			Self::Stderr(_) => {
+				Err(io::Error::other(error::ErrorKind::OpenFileNotReadable { file: "stderr" }))
+			},
 			Self::File(f) => f.read(buf),
 			Self::PipeReader(reader) => reader.read(buf),
 			Self::PipeWriter(_) => {
-				Err(io::Error::other(error::ErrorKind::OpenFileNotReadable("pipe writer")))
+				Err(io::Error::other(error::ErrorKind::OpenFileNotReadable { file: "pipe writer" }))
 			},
 			Self::Stream(s) => s.read(buf),
 		}
@@ -234,12 +238,14 @@ impl io::Read for OpenFile {
 impl io::Write for OpenFile {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		match self {
-			Self::Stdin(_) => Err(io::Error::other(error::ErrorKind::OpenFileNotWritable("stdin"))),
+			Self::Stdin(_) => {
+				Err(io::Error::other(error::ErrorKind::OpenFileNotWritable { file: "stdin" }))
+			},
 			Self::Stdout(f) => f.write(buf),
 			Self::Stderr(f) => f.write(buf),
 			Self::File(f) => f.write(buf),
 			Self::PipeReader(_) => {
-				Err(io::Error::other(error::ErrorKind::OpenFileNotWritable("pipe reader")))
+				Err(io::Error::other(error::ErrorKind::OpenFileNotWritable { file: "pipe reader" }))
 			},
 			Self::PipeWriter(writer) => writer.write(buf),
 			Self::Stream(s) => s.write(buf),

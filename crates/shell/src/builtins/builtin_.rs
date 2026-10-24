@@ -45,7 +45,7 @@ impl builtins::Command for BuiltinCommand {
 			context.command_name = builtin_name;
 			execute_func(context, args).await
 		} else {
-			Err(ErrorKind::BuiltinNotFound(builtin_name).into())
+			Err(ErrorKind::BuiltinNotFound { name: builtin_name }.into())
 		}
 	}
 }

@@ -1023,7 +1023,7 @@ fn get_key_for_indexed_array(
 	if index_value < 0 {
 		index_value += values.len() as i64;
 		if index_value < 0 {
-			return Err(error::ErrorKind::ArrayIndexOutOfRange(index_str.to_owned()).into());
+			return Err(error::ErrorKind::ArrayIndexOutOfRange { index: index_str.to_owned() }.into());
 		}
 	}
 

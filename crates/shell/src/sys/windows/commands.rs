@@ -80,9 +80,9 @@ impl CommandFdInjectionExt for process::Command {
 	) -> Result<(), error::Error> {
 		if open_files.next().is_some() {
 			return Err(
-				error::ErrorKind::NotSupportedOnThisPlatform(
-					"fd redirections beyond stdin/stdout/stderr on Windows",
-				)
+				error::ErrorKind::NotSupportedOnThisPlatform {
+					operation: "fd redirections beyond stdin/stdout/stderr on Windows",
+				}
 				.into(),
 			);
 		}

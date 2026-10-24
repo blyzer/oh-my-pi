@@ -137,8 +137,11 @@ pub enum TokenizerError {
 	MissingHereTagForDocumentBody,
 
 	/// The indicated I/O here tag was missing.
-	#[error("missing here tag '{0}'")]
-	MissingHereTag(String),
+	#[error("missing here tag '{tag}'")]
+	MissingHereTag {
+		/// The expected here tag.
+		tag: String,
+	},
 
 	/// An unterminated here document sequence was encountered at the end of the
 	/// input stream.
@@ -358,7 +361,7 @@ impl TokenParseState {
 			},
 			HereState::CurrentTokenIsHereTag { remove_tabs, operator_token_result } => {
 				if self.is_newline() {
-					return Err(TokenizerError::MissingHereTag(self.current_token().to_owned()));
+					return Err(TokenizerError::MissingHereTag { tag: self.current_token().to_owned() });
 				}
 
 				cross_token_state.here_state = HereState::NextLineIsHereDoc;

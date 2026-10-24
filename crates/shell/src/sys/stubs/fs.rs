@@ -33,7 +33,7 @@ pub fn get_default_standard_utils_paths() -> Vec<PathBuf> {
 ///
 /// This is a stub implementation that returns an error.
 pub fn open_null_file() -> Result<fs::File, error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("opening null file").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "opening null file" }.into())
 }
 
 /// Gives the platform an opportunity to handle a special file path (e.g.

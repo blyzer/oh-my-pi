@@ -72,7 +72,9 @@ impl CommandFdInjectionExt for process::Command {
 		mut open_files: impl Iterator<Item = (ShellFd, OpenFile)>,
 	) -> Result<(), error::Error> {
 		if open_files.next().is_some() {
-			return Err(error::ErrorKind::NotSupportedOnThisPlatform("fd redirections").into());
+			return Err(
+				error::ErrorKind::NotSupportedOnThisPlatform { operation: "fd redirections" }.into(),
+			);
 		}
 
 		Ok(())

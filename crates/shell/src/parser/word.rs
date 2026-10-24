@@ -590,7 +590,7 @@ fn cacheable_parse(
 	let pieces = expansion_parser::unexpanded_word(word.as_str(), &options)
 		.map_err(|err| error::WordParseError::Word(word.clone(), err.into()))?;
 	validate_numeric_word_syntax(word.as_str(), &options, &pieces)
-		.map_err(error::WordParseError::NumericLiteralOutOfRange)?;
+		.map_err(|literal| error::WordParseError::NumericLiteralOutOfRange { literal })?;
 
 	Ok(pieces)
 }
@@ -635,7 +635,9 @@ pub fn parse_brace_expansions(
 ) -> Result<Option<Vec<BraceExpressionOrText>>, error::WordParseError> {
 	expansion_parser::brace_expansions(word, options)
 		.map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
-		.and_then(|result| result.map_err(error::WordParseError::NumericLiteralOutOfRange))
+		.and_then(|result| {
+			result.map_err(|literal| error::WordParseError::NumericLiteralOutOfRange { literal })
+		})
 }
 
 pub(crate) fn parse_assignment_word(
@@ -1435,14 +1437,14 @@ mod tests {
 			super::parse_brace_expansions("{999999999999999999999999999999999999..1}", &options);
 		assert!(matches!(
 			brace,
-			Err(error::WordParseError::NumericLiteralOutOfRange(BRACE_SEQUENCE_NUMBER))
+			Err(error::WordParseError::NumericLiteralOutOfRange { literal: BRACE_SEQUENCE_NUMBER })
 		));
 		for input in
 			["~+999999999999999999999999999999999999", "~-999999999999999999999999999999999999"]
 		{
 			assert!(matches!(
 				parse(input, &options),
-				Err(error::WordParseError::NumericLiteralOutOfRange(DIRECTORY_STACK_INDEX))
+				Err(error::WordParseError::NumericLiteralOutOfRange { literal: DIRECTORY_STACK_INDEX })
 			));
 		}
 
