@@ -1208,7 +1208,7 @@ impl Tool for MediaDevice {
 								match interrupt {
 									Ok(interrupt) => yield Ev::Aborted(Abort::Interrupted { reason: interrupt.reason }),
 									Err(omp_tool::InterruptWaitError::Closed) => yield Ev::Aborted(Abort::InputDropped),
-									Err(omp_tool::InterruptWaitError::Protocol(message)) => {
+									Err(omp_tool::InterruptWaitError::Protocol { violation: message }) => {
 										yield Ev::Args(protocol_issue(message));
 									},
 								}
@@ -1262,7 +1262,7 @@ impl Tool for MediaDevice {
 								match interrupt {
 									Ok(interrupt) => yield Ev::Aborted(Abort::Interrupted { reason: interrupt.reason }),
 									Err(omp_tool::InterruptWaitError::Closed) => yield Ev::Aborted(Abort::InputDropped),
-									Err(omp_tool::InterruptWaitError::Protocol(message)) => {
+									Err(omp_tool::InterruptWaitError::Protocol { violation: message }) => {
 										yield Ev::Args(protocol_issue(message));
 									},
 								}
@@ -1457,7 +1457,7 @@ fn map_param<U, P, F>(error: ParamError) -> Ev<U, P, F> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 fn map_commit<U, P, F>(error: CommitError) -> Ev<U, P, F> {
@@ -1466,7 +1466,7 @@ fn map_commit<U, P, F>(error: CommitError) -> Ev<U, P, F> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		CommitError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 fn protocol_issue(message: Str) -> ArgIssue {

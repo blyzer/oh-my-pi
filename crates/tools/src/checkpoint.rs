@@ -548,7 +548,7 @@ fn param_event<P>(error: ParamError) -> Ev<Update, P, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 fn commit_checkpoint(error: CommitError) -> Ev<Update, CheckpointPayload, Fault> {
@@ -563,7 +563,7 @@ fn commit_event<P>(error: CommitError) -> Ev<Update, P, Fault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		CommitError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 fn interrupted_event<P>(

@@ -2086,7 +2086,7 @@ impl Dispatcher {
 								};
 								admission.admit(name, &effects, confinement, &args, &locators)
 							},
-							Err(RegistryError::UnknownTool(_)) => {
+							Err(RegistryError::UnknownTool { name: _ }) => {
 								admission.admit(name, &Effects::unknown(), confinement, &args, &[])
 							},
 							Err(error) => {

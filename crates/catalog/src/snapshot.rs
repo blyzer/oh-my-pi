@@ -205,8 +205,11 @@ pub enum SnapshotError {
 	#[error("catalog postcard decoding failed: {0}")]
 	Postcard(#[from] postcard::Error),
 	/// A compiled record or lookup index violates a catalog invariant.
-	#[error("catalog snapshot invariant failed: {0}")]
-	Invariant(&'static str),
+	#[error("catalog snapshot invariant failed: {invariant}")]
+	Invariant {
+		/// The violated invariant.
+		invariant: &'static str,
+	},
 	/// An overlay stack failed precedence or trust validation.
 	#[error(transparent)]
 	Overlay(#[from] ResolveError),
@@ -429,12 +432,14 @@ impl Catalog {
 		let expected_provider_models = provider_model_index(&payload.catalog)?;
 		let expected_model_index = model_index(&payload.catalog)?;
 		if payload.model_index != expected_model_index {
-			return Err(SnapshotError::Invariant("model key index does not match catalog records"));
+			return Err(SnapshotError::Invariant {
+				invariant: "model key index does not match catalog records",
+			});
 		}
 		if payload.provider_models != expected_provider_models {
-			return Err(SnapshotError::Invariant(
-				"provider/model index does not match catalog records",
-			));
+			return Err(SnapshotError::Invariant {
+				invariant: "provider/model index does not match catalog records",
+			});
 		}
 		validate_policy_ids(&payload)?;
 		Ok(Self {
@@ -474,8 +479,9 @@ impl Catalog {
 		}
 		compiled.census.providers = compiled.providers.len();
 		compiled.census.logical_models = compiled.models.len();
-		let contribution = serde_json::to_vec(records)
-			.map_err(|_| SnapshotError::Invariant("runtime provider records do not serialize"))?;
+		let contribution = serde_json::to_vec(records).map_err(|_| SnapshotError::Invariant {
+			invariant: "runtime provider records do not serialize",
+		})?;
 		let digest = Sha256::digest(contribution);
 		let mut suffix = String::with_capacity(16);
 		for byte in &digest[..8] {
@@ -501,7 +507,9 @@ impl Catalog {
 			.into_boxed_slice();
 		let normalized_json = compiled
 			.normalized_json()
-			.map_err(|_| SnapshotError::Invariant("runtime catalog normalization failed"))?;
+			.map_err(|_| SnapshotError::Invariant {
+				invariant: "runtime catalog normalization failed",
+			})?;
 		Ok(Self {
 			compiled,
 			provider_models,
@@ -528,7 +536,7 @@ impl Catalog {
 		compiled.census.providers = compiled.providers.len();
 		compiled.census.logical_models = compiled.models.len();
 		let contribution = serde_json::to_vec(stack.overlays())
-			.map_err(|_| SnapshotError::Invariant("overlay stack does not serialize"))?;
+			.map_err(|_| SnapshotError::Invariant { invariant: "overlay stack does not serialize" })?;
 		let digest = Sha256::digest(contribution);
 		let mut suffix = String::with_capacity(16);
 		for byte in &digest[..8] {
@@ -554,7 +562,9 @@ impl Catalog {
 			.into_boxed_slice();
 		let normalized_json = compiled
 			.normalized_json()
-			.map_err(|_| SnapshotError::Invariant("overlay catalog normalization failed"))?;
+			.map_err(|_| SnapshotError::Invariant {
+				invariant: "overlay catalog normalization failed",
+			})?;
 		Ok(Self {
 			compiled,
 			provider_models,
@@ -785,7 +795,7 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 		return Err(SnapshotError::UnsupportedSchema(catalog.schema_version));
 	}
 	if catalog.revision.as_str().is_empty() {
-		return Err(SnapshotError::Invariant("catalog revision is empty"));
+		return Err(SnapshotError::Invariant { invariant: "catalog revision is empty" });
 	}
 	ensure_sorted_by(&catalog.providers, |record| &record.id, "providers are not uniquely sorted")?;
 	ensure_sorted_by(&catalog.routes, |record| &record.id, "routes are not uniquely sorted")?;
@@ -821,7 +831,9 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 				.iter()
 				.any(|alias| alias.alias.as_str() == default_model.as_str())
 		{
-			return Err(SnapshotError::Invariant("provider default references an unknown model"));
+			return Err(SnapshotError::Invariant {
+				invariant: "provider default references an unknown model",
+			});
 		}
 	}
 	for auth in &catalog.auth_specs {
@@ -831,7 +843,9 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 				.binary_search_by(|record| record.id.cmp(oauth))
 				.is_err()
 		{
-			return Err(SnapshotError::Invariant("auth spec references an unknown OAuth flow"));
+			return Err(SnapshotError::Invariant {
+				invariant: "auth spec references an unknown OAuth flow",
+			});
 		}
 	}
 	for route in &catalog.routes {
@@ -840,7 +854,9 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 			.binary_search_by(|record| record.id.cmp(&route.provider))
 			.is_err()
 		{
-			return Err(SnapshotError::Invariant("route references an unknown provider"));
+			return Err(SnapshotError::Invariant {
+				invariant: "route references an unknown provider",
+			});
 		}
 	}
 	for model in &catalog.models {
@@ -850,7 +866,9 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 				.binary_search_by(|record| record.id.cmp(route))
 				.is_err()
 			{
-				return Err(SnapshotError::Invariant("model references an unknown route"));
+				return Err(SnapshotError::Invariant {
+					invariant: "model references an unknown route",
+				});
 			}
 		}
 		for (route, _) in &model.wire_ids {
@@ -859,18 +877,20 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 				.binary_search_by(|record| record.id.cmp(route))
 				.is_err()
 			{
-				return Err(SnapshotError::Invariant("wire model id references an unknown route"));
+				return Err(SnapshotError::Invariant {
+					invariant: "wire model id references an unknown route",
+				});
 			}
 		}
 	}
 	for pair in catalog.aliases.windows(2) {
 		if pair[0].alias >= pair[1].alias {
-			return Err(SnapshotError::Invariant("aliases are not uniquely sorted"));
+			return Err(SnapshotError::Invariant { invariant: "aliases are not uniquely sorted" });
 		}
 	}
 	for alias in &catalog.aliases {
 		if !catalog.models.iter().any(|model| model.key == alias.target) {
-			return Err(SnapshotError::Invariant("alias references an unknown model"));
+			return Err(SnapshotError::Invariant { invariant: "alias references an unknown model" });
 		}
 	}
 	Ok(())
@@ -879,7 +899,8 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 fn model_index(catalog: &CompiledCatalog) -> Result<Box<[u32]>, SnapshotError> {
 	let mut index = (0..catalog.models.len())
 		.map(|index| {
-			u32::try_from(index).map_err(|_| SnapshotError::Invariant("model index exceeds u32"))
+			u32::try_from(index)
+				.map_err(|_| SnapshotError::Invariant { invariant: "model index exceeds u32" })
 		})
 		.collect::<Result<Vec<_>, _>>()?;
 	index.sort_unstable_by(|left, right| {
@@ -889,7 +910,7 @@ fn model_index(catalog: &CompiledCatalog) -> Result<Box<[u32]>, SnapshotError> {
 	});
 	for pair in index.windows(2) {
 		if catalog.models[pair[0] as usize].key == catalog.models[pair[1] as usize].key {
-			return Err(SnapshotError::Invariant("model keys are not unique"));
+			return Err(SnapshotError::Invariant { invariant: "model keys are not unique" });
 		}
 	}
 	Ok(index.into_boxed_slice())
@@ -902,16 +923,20 @@ fn provider_model_index(catalog: &CompiledCatalog) -> Result<Box<[(u32, u32)]>, 
 			let route_index = catalog
 				.routes
 				.binary_search_by(|route| route.id.cmp(route_id))
-				.map_err(|_| SnapshotError::Invariant("model references an unknown route"))?;
+				.map_err(|_| SnapshotError::Invariant {
+					invariant: "model references an unknown route",
+				})?;
 			let provider_index = catalog
 				.providers
 				.binary_search_by(|provider| provider.id.cmp(&catalog.routes[route_index].provider))
-				.map_err(|_| SnapshotError::Invariant("route references an unknown provider"))?;
+				.map_err(|_| SnapshotError::Invariant {
+					invariant: "route references an unknown provider",
+				})?;
 			pairs.push((
 				u32::try_from(provider_index)
-					.map_err(|_| SnapshotError::Invariant("provider index exceeds u32"))?,
+					.map_err(|_| SnapshotError::Invariant { invariant: "provider index exceeds u32" })?,
 				u32::try_from(model_index)
-					.map_err(|_| SnapshotError::Invariant("model index exceeds u32"))?,
+					.map_err(|_| SnapshotError::Invariant { invariant: "model index exceeds u32" })?,
 			));
 		}
 	}
@@ -924,7 +949,9 @@ fn validate_policy_ids(payload: &SnapshotPayload) -> Result<(), SnapshotError> {
 	if payload.wire_policy_ids.len() != payload.catalog.wire_policies.len()
 		|| payload.thinking_policy_ids.len() != payload.catalog.thinking_policies.len()
 	{
-		return Err(SnapshotError::Invariant("policy index length does not match policy table"));
+		return Err(SnapshotError::Invariant {
+			invariant: "policy index length does not match policy table",
+		});
 	}
 	ensure_strictly_sorted(&payload.wire_policy_ids, "wire policy ids are not uniquely sorted")?;
 	ensure_strictly_sorted(
@@ -939,7 +966,7 @@ fn ensure_sorted_by<T, K: Ord>(
 	message: &'static str,
 ) -> Result<(), SnapshotError> {
 	if values.windows(2).any(|pair| key(&pair[0]) >= key(&pair[1])) {
-		return Err(SnapshotError::Invariant(message));
+		return Err(SnapshotError::Invariant { invariant: message });
 	}
 	Ok(())
 }
@@ -949,7 +976,7 @@ fn ensure_strictly_sorted<T: Ord>(
 	message: &'static str,
 ) -> Result<(), SnapshotError> {
 	if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-		return Err(SnapshotError::Invariant(message));
+		return Err(SnapshotError::Invariant { invariant: message });
 	}
 	Ok(())
 }

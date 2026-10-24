@@ -1429,7 +1429,7 @@ fn param_event(error: ParamError) -> Ev<Update, Payload, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 
@@ -1439,7 +1439,7 @@ fn commit_event(error: CommitError) -> Ev<Update, Payload, Fault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		CommitError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 
@@ -1453,7 +1453,9 @@ fn interrupt_event(
 			sf!("invocation owner disappeared during write transaction")
 		},
 		Err(InterruptWaitError::Closed) => sf!("write resource owner disappeared"),
-		Err(InterruptWaitError::Protocol(message)) => return Ev::Args(protocol_issue(message)),
+		Err(InterruptWaitError::Protocol { violation: message }) => {
+			return Ev::Args(protocol_issue(message));
+		},
 	};
 	if effects_started {
 		Ev::Aborted(Abort::EffectsUnknown { reason })

@@ -514,8 +514,11 @@ pub enum LeafReplacementError {
 		actual:   u64,
 	},
 	/// An availability mutation named a leaf not owned by this live owner.
-	#[error("dynamic leaf availability named unknown leaf {0}")]
-	UnknownName(Str),
+	#[error("dynamic leaf availability named unknown leaf {name}")]
+	UnknownName {
+		/// The unowned canonical leaf name.
+		name: Str,
+	},
 	/// One availability batch repeated a canonical leaf name.
 	#[error("dynamic leaf availability contains a duplicate canonical name")]
 	DuplicateAvailability,
@@ -707,7 +710,7 @@ impl<T> LeafReplacementRegistry<T> {
 				.live
 				.contains_key(&(owner.clone(), delta.name.clone()))
 			{
-				return Err(LeafReplacementError::UnknownName(delta.name.clone()));
+				return Err(LeafReplacementError::UnknownName { name: delta.name.clone() });
 			}
 		}
 		let mut changed = false;
@@ -777,7 +780,7 @@ impl<T> LeafReplacementRegistry<T> {
 				.live
 				.contains_key(&(owner.clone(), delta.name.clone()))
 			{
-				return Err(LeafReplacementError::UnknownName(delta.name.clone()));
+				return Err(LeafReplacementError::UnknownName { name: delta.name.clone() });
 			}
 		}
 		let mut changed = false;
@@ -1143,8 +1146,11 @@ pub enum RegistryError {
 	#[error("too many registered tool revisions for the projection cache")]
 	ProjectionCacheIdLimit,
 	/// Tool name is not registered.
-	#[error("unknown tool: {0}")]
-	UnknownTool(Str),
+	#[error("unknown tool: {name}")]
+	UnknownTool {
+		/// The unregistered tool name.
+		name: Str,
+	},
 	/// A call's argument-scoped effects ([`Tool::invocation_effects`]) are not
 	/// a subset of its revision's declared maximum, so the call is refused.
 	#[error("tool {name}@{rev} judged a call's effects to exceed its declared maximum")]
@@ -2543,12 +2549,12 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		let entry = state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(name))
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		Ok(entry.tool.spec().effects.clone())
 	}
 
@@ -2581,7 +2587,7 @@ impl Registry {
 			.get(name)
 			.and_then(|claimant| state.rosters.get(claimant))
 			.and_then(|roster| roster.entries.get(name))
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		scoped_effects(entry.tool.as_ref(), arguments)
 	}
 
@@ -2631,12 +2637,12 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		let entry = state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(name))
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		Ok(entry.tool.route().clone())
 	}
 
@@ -2649,13 +2655,13 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(name))
 			.map(|entry| entry.locus)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })
 	}
 
 	/// Returns the presentation of a winning or claimant-qualified entry.
@@ -2667,13 +2673,13 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(name))
 			.map(|entry| entry.presentation)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })
 	}
 
 	/// Returns the batch scheduling constraint of the resolved live tool.
@@ -2685,13 +2691,13 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 		state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(name))
 			.map(|entry| entry.execution)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })
 	}
 
 	/// Resolves a typed device path without admitting it to the model slot
@@ -2918,15 +2924,15 @@ impl Registry {
 			let claimant = state
 				.live
 				.get(name)
-				.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+				.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 			let roster = state
 				.rosters
 				.get(claimant)
-				.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+				.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 			let entry = roster
 				.entries
 				.get(name)
-				.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+				.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(name) })?;
 			(Arc::clone(&roster.executor), entry.tool.spec().name.clone())
 		};
 		Ok(host_tool_stream(
@@ -2990,7 +2996,7 @@ impl Registry {
 	fn device_entry(&self, path: &DevicePath) -> Result<&RegistryEntry, RegistryError> {
 		let target = self
 			.resolve_device(path)
-			.map_err(|_| RegistryError::UnknownTool(Str::new(path.to_string())))?;
+			.map_err(|_| RegistryError::UnknownTool { name: Str::new(path.to_string()) })?;
 		Ok(self
 			.versions
 			.get(target.name)
@@ -3271,13 +3277,13 @@ impl Registry {
 		let claimant = state
 			.live
 			.get(&identity.name)
-			.ok_or_else(|| RegistryError::UnknownTool(identity.name.clone()))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: identity.name.clone() })?;
 		let entry = state
 			.rosters
 			.get(claimant)
 			.and_then(|roster| roster.entries.get(&identity.name))
 			.filter(|entry| entry.tool.spec().rev == identity.rev)
-			.ok_or_else(|| RegistryError::UnknownTool(identity.name.clone()))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: identity.name.clone() })?;
 		Ok(Arc::clone(&entry.tool))
 	}
 
@@ -3286,14 +3292,14 @@ impl Registry {
 		let claim = self
 			.live
 			.get(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(path)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(path) })?;
 		let rev = claim_revision(claim, claimant)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(path)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(path) })?;
 		self
 			.versions
 			.get(name)
 			.and_then(|versions| versions.get(rev))
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new(path)))
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new(path) })
 	}
 }
 
@@ -3521,7 +3527,7 @@ fn host_tool_stream(
 					.map_err(RegistryError::Serialize);
 				return;
 			},
-			Err(crate::ParamError::Protocol(message)) => {
+			Err(crate::ParamError::Protocol { violation: message }) => {
 				let verdict = CallOutcome::<Value, Value>::ArgsRejected(ArgIssue {
 					path: Vec::new(),
 					expected: sf!("one committed host-tool argument object"),
@@ -4253,7 +4259,7 @@ mod tests {
 		);
 		assert!(matches!(
 			registry.invocation_effects("absent", "{}"),
-			Err(RegistryError::UnknownTool(_))
+			Err(RegistryError::UnknownTool { name: _ })
 		));
 	}
 
@@ -4348,14 +4354,14 @@ mod tests {
 		let other = DevicePath::parse("scoped@other/claimant").expect("device path");
 		assert!(matches!(
 			registry.device_invocation_effects(&other, r#"{"level":"read"}"#),
-			Err(RegistryError::UnknownTool(_))
+			Err(RegistryError::UnknownTool { name: _ })
 		));
 		assert!(registry.device_fetch_locators(&other, url).is_empty());
 		let slot = scoped_registry::<true>();
 		let path = DevicePath::parse("scoped").expect("device path");
 		assert!(matches!(
 			slot.device_invocation_effects(&path, r#"{"level":"read"}"#),
-			Err(RegistryError::UnknownTool(_))
+			Err(RegistryError::UnknownTool { name: _ })
 		));
 		assert!(slot.device_fetch_locators(&path, url).is_empty());
 	}
@@ -4692,9 +4698,12 @@ mod tests {
 		assert_eq!(advertised, vec![sf!("beta"), sf!("lift")]);
 		assert!(restricted.resolved_identity("other").is_none());
 		assert!(restricted.resolved_identity("alpha").is_none());
-		assert!(matches!(restricted.live_spec("other"), Err(RegistryError::UnknownTool(_))));
+		assert!(matches!(restricted.live_spec("other"), Err(RegistryError::UnknownTool { name: _ })));
 		let (_feed, params) = IncomingParams::channel();
-		assert!(matches!(restricted.invoke("other", params), Err(RegistryError::UnknownTool(_))));
+		assert!(matches!(
+			restricted.invoke("other", params),
+			Err(RegistryError::UnknownTool { name: _ })
+		));
 		assert_eq!(restricted.host_tool_revision("rpc/client"), Some(1));
 		assert!(registry.resolved_identity("other").is_some(), "the source is untouched");
 	}

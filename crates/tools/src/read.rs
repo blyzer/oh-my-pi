@@ -841,14 +841,14 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> Tool for ReadTool<S, B,
 				Err(ParamError::Args(issue)) if issue.kind == ArgIssueKind::Aborted => { yield Ev::Aborted(Abort::InputDropped); return; },
 				Err(ParamError::Args(issue)) => { yield Ev::Args(*issue); return; },
 				Err(ParamError::Interrupted(interrupt)) => { yield Ev::Aborted(Abort::Interrupted { reason: interrupt.reason }); return; },
-				Err(ParamError::Protocol(reason)) => { yield Ev::Args(protocol_issue(reason)); return; },
+				Err(ParamError::Protocol { violation: reason }) => { yield Ev::Args(protocol_issue(reason)); return; },
 			};
 			let params: Params = if let Ok(value) = omp_tool::decode_params(&raw) { value } else { yield Ev::Args(args_issue()); return; };
 			match incoming.committed().await {
 				Ok(_) => {},
 				Err(CommitError::Aborted) => { yield Ev::Aborted(Abort::InputDropped); return; },
 				Err(CommitError::Interrupted(interrupt)) => { yield Ev::Aborted(Abort::Interrupted { reason: interrupt.reason }); return; },
-				Err(CommitError::Protocol(reason)) => { yield Ev::Args(protocol_issue(reason)); return; },
+				Err(CommitError::Protocol { violation: reason }) => { yield Ev::Args(protocol_issue(reason)); return; },
 			}
 			let path = params.path;
 			span.record("path", tracing::field::display(tracing_path_metadata(&path)));

@@ -88,7 +88,7 @@ impl<C: Inference> Kernel<C> {
 			.dispatcher
 			.registry()
 			.resolved_identity(name)
-			.ok_or_else(|| RegistryError::UnknownTool(Str::new_static(name)))?;
+			.ok_or_else(|| RegistryError::UnknownTool { name: Str::new_static(name) })?;
 		let args = run.args();
 		let turn_cancel = self.cancel.begin_turn();
 		session.begin_turn()?;
