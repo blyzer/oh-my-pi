@@ -42,7 +42,7 @@ omp_con::cmd! {
 	/// Opens the transcript viewer for one child agent: `transcript <id>`.
 	transcript(id: Str) = |ctx, args| {
 		let id = rest(args, 0)
-			.ok_or_else(|| ConError::Usage(Str::new_static("Usage: transcript <agent id>")))?;
+			.ok_or_else(|| ConError::Usage { usage: Str::new_static("Usage: transcript <agent id>") })?;
 		open(ctx, PanelOpener::new(move |cx| {
 			Ok(Box::new(TranscriptViewer::open(cx, id.as_str())?) as Box<_>)
 		}))

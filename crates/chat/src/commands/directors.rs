@@ -169,7 +169,7 @@ pub fn goal_op(words: Option<Str>) -> Result<GoalOp, ConError> {
 }
 
 fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 omp_con::cmd! {

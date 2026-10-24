@@ -48,13 +48,13 @@ fn compact_mode(word: &str) -> Option<CompactionStrategy> {
 
 /// Parses a journal entry id argument (`/fork 01J…`).
 fn entry_id(text: &str) -> Result<EntryId, ConError> {
-	text
-		.parse::<EntryId>()
-		.map_err(|_| ConError::Usage(Str::new(format!("`{text}` is not a journal entry id"))))
+	text.parse::<EntryId>().map_err(|_| ConError::Usage {
+		usage: Str::new(format!("`{text}` is not a journal entry id")),
+	})
 }
 
 fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 /// Splits `/compact [soft|remote|snapcompact] [focus]` into the pinned
@@ -87,10 +87,8 @@ pub fn shake_mode(words: Option<Str>) -> Result<ShakeMode, ConError> {
 		return Ok(ShakeMode::Elide);
 	};
 	let verb = words.as_str().trim().to_lowercase();
-	verb.parse::<ShakeMode>().map_err(|_| {
-		ConError::Usage(Str::new(format!(
-			"Unknown /shake mode \"{verb}\". Use elide, images, or thinking."
-		)))
+	verb.parse::<ShakeMode>().map_err(|_| ConError::Usage {
+		usage: Str::new(format!("Unknown /shake mode \"{verb}\". Use elide, images, or thinking.")),
 	})
 }
 
@@ -124,7 +122,9 @@ pub fn todo_op(words: Option<Str>) -> Result<TodoOp, ConError> {
 	let required = |what: &'static str| {
 		(!rest.is_empty())
 			.then(|| Str::new(rest))
-			.ok_or_else(|| ConError::Usage(Str::new(format!("Usage: /todo {verb} <{what}>"))))
+			.ok_or_else(|| ConError::Usage {
+				usage: Str::new(format!("Usage: /todo {verb} <{what}>")),
+			})
 	};
 	Ok(match verb {
 		"" => TodoOp::List,

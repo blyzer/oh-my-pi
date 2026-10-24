@@ -48,7 +48,7 @@ pub fn copy_op(words: Option<Str>) -> Result<CopyOp, ConError> {
 		"code" => CopyOp::Code,
 		"cmd" | "command" => CopyOp::Command,
 		"link" | "url" => CopyOp::Link,
-		_ => return Err(ConError::Usage(Str::new_static("Usage: /copy [code|cmd|link]"))),
+		_ => return Err(ConError::Usage { usage: Str::new_static("Usage: /copy [code|cmd|link]") }),
 	})
 }
 
@@ -57,9 +57,9 @@ pub fn open_op(words: Option<Str>) -> Result<(), ConError> {
 	let arg = words.unwrap_or_default();
 	match arg.as_str().trim().to_ascii_lowercase().as_str() {
 		"" | "link" | "url" => Ok(()),
-		_ => Err(ConError::Usage(Str::new_static(
-			"Usage: /open [link]  (pick a specific link: /copy, → blocks, o)",
-		))),
+		_ => Err(ConError::Usage {
+			usage: Str::new_static("Usage: /open [link]  (pick a specific link: /copy, → blocks, o)"),
+		}),
 	}
 }
 
