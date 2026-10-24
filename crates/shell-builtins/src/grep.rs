@@ -1157,11 +1157,12 @@ fn search_dir<M: Matcher, W: Write>(
 			}
 			Ok(any)
 		},
-		Err(omp_walker::WalkError::InvalidData { path, message }) => {
+		Err(omp_walker::WalkError::InvalidData { path, step, source }) => {
 			*had_error = true;
+			let detail = omp_walker::invalid_data_detail(step, source.as_ref());
 			if !opts.no_messages {
 				let display_path = display_path_for_operand(operand, resolved, &path);
-				let _ = writeln!(host.stderr, "grep: {}: {message}", display_path.to_string_lossy());
+				let _ = writeln!(host.stderr, "grep: {}: {detail}", display_path.to_string_lossy());
 			}
 			Ok(any)
 		},

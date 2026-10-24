@@ -4944,9 +4944,10 @@ fn process_dir_walk_request(
 			finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret_value);
 			ret_value
 		},
-		Err(omp_walker::WalkError::InvalidData { path, message }) => {
+		Err(omp_walker::WalkError::InvalidData { path, step, source }) => {
 			ret_value = 1;
-			let _ = writeln!(host.stderr, "Error: {}: {message}", path.display());
+			let detail = omp_walker::invalid_data_detail(step, source.as_ref());
+			let _ = writeln!(host.stderr, "Error: {}: {detail}", path.display());
 			finish_find_walk(deps, host, matcher, &mut current_dir, &mut ret_value);
 			ret_value
 		},
