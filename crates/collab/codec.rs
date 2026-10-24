@@ -200,17 +200,19 @@ fn frame_to_json(frame: &CollabFrame) -> Result<Value, CodecError> {
 			})),
 		}),
 		collab_frame::Payload::Event(_) => {
-			return Err(CodecError::UnsupportedPayload("event".into()));
+			return Err(CodecError::UnsupportedPayload { kind: "event".into() });
 		},
 	})
 }
 
 fn frame_from_json(value: &Value) -> Result<CollabFrame, CodecError> {
-	let object = value.as_object().ok_or(CodecError::JsonShape("frame"))?;
+	let object = value
+		.as_object()
+		.ok_or(CodecError::JsonShape { field: "frame" })?;
 	let tag = object
 		.get("t")
 		.and_then(Value::as_str)
-		.ok_or(CodecError::JsonShape("frame.t"))?;
+		.ok_or(CodecError::JsonShape { field: "frame.t" })?;
 	let payload = match tag {
 		"hello" => collab_frame::Payload::Hello(Hello {
 			protocol_revision: json_u32(object, "proto")?,
@@ -242,7 +244,7 @@ fn frame_from_json(value: &Value) -> Result<CollabFrame, CodecError> {
 		"entry" => collab_frame::Payload::JournalRecord(json_record(
 			object
 				.get("entry")
-				.ok_or(CodecError::JsonShape("entry.entry"))?,
+				.ok_or(CodecError::JsonShape { field: "entry.entry" })?,
 			0,
 		)?),
 		"state" => collab_frame::Payload::State(state_from_json(object)?),
@@ -271,7 +273,7 @@ fn frame_from_json(value: &Value) -> Result<CollabFrame, CodecError> {
 				"chat" => v1::agent_command::Command::Chat,
 				"kill" => v1::agent_command::Command::Kill,
 				"revive" => v1::agent_command::Command::Revive,
-				_ => return Err(CodecError::JsonShape("agent-cmd.cmd")),
+				_ => return Err(CodecError::JsonShape { field: "agent-cmd.cmd" }),
 			} as i32,
 			agent_id: json_str(object, "agentId")?.to_owned(),
 			text:     object
@@ -333,7 +335,7 @@ fn frame_from_json(value: &Value) -> Result<CollabFrame, CodecError> {
 						.to_owned(),
 				}),
 		}),
-		other => return Err(CodecError::UnsupportedPayload(other.to_owned())),
+		other => return Err(CodecError::UnsupportedPayload { kind: other.to_owned() }),
 	};
 	Ok(CollabFrame {
 		protocol_revision: PROTOCOL_REVISION,
@@ -346,11 +348,11 @@ fn welcome_json(value: &Welcome) -> Result<Value, CodecError> {
 	let header = value
 		.header
 		.as_ref()
-		.ok_or(CodecError::JsonShape("welcome.header"))?;
+		.ok_or(CodecError::JsonShape { field: "welcome.header" })?;
 	let state = value
 		.initial_state
 		.as_ref()
-		.ok_or(CodecError::JsonShape("welcome.state"))?;
+		.ok_or(CodecError::JsonShape { field: "welcome.state" })?;
 	let agents = value
 		.initial_agents
 		.as_ref()
@@ -373,7 +375,7 @@ fn welcome_from_json(object: &serde_json::Map<String, Value>) -> Result<Welcome,
 	let header = object
 		.get("header")
 		.and_then(Value::as_object)
-		.ok_or(CodecError::JsonShape("welcome.header"))?;
+		.ok_or(CodecError::JsonShape { field: "welcome.header" })?;
 	Ok(Welcome {
 		protocol_revision: json_u32(object, "proto")?,
 		header:            Some(v1::SessionHeader {
@@ -393,7 +395,7 @@ fn welcome_from_json(object: &serde_json::Map<String, Value>) -> Result<Welcome,
 		initial_state:     Some(state_from_value(
 			object
 				.get("state")
-				.ok_or(CodecError::JsonShape("welcome.state"))?,
+				.ok_or(CodecError::JsonShape { field: "welcome.state" })?,
 		)?),
 		initial_agents:    Some(v1::RegistrySnapshot {
 			agents: object
@@ -429,7 +431,11 @@ fn state_json(value: &v1::SessionStateUpdate) -> Value {
 }
 
 fn state_from_value(value: &Value) -> Result<v1::SessionStateUpdate, CodecError> {
-	state_from_json(value.as_object().ok_or(CodecError::JsonShape("state"))?)
+	state_from_json(
+		value
+			.as_object()
+			.ok_or(CodecError::JsonShape { field: "state" })?,
+	)
 }
 
 fn state_from_json(
@@ -471,7 +477,7 @@ fn state_from_json(
 			.map(|value| {
 				let item = value
 					.as_object()
-					.ok_or(CodecError::JsonShape("participant"))?;
+					.ok_or(CodecError::JsonShape { field: "participant" })?;
 				Ok(v1::Participant {
 					display_name: json_str(item, "name")?.to_owned(),
 					is_host:      json_str(item, "role")? == "host",
@@ -504,7 +510,9 @@ fn agent_json(value: &v1::AgentSummary) -> Value {
 }
 
 fn agent_from_json(value: &Value) -> Result<v1::AgentSummary, CodecError> {
-	let item = value.as_object().ok_or(CodecError::JsonShape("agent"))?;
+	let item = value
+		.as_object()
+		.ok_or(CodecError::JsonShape { field: "agent" })?;
 	Ok(v1::AgentSummary {
 		id:               json_str(item, "id")?.to_owned(),
 		display_name:     json_str(item, "displayName")?.to_owned(),
@@ -518,7 +526,7 @@ fn agent_from_json(value: &Value) -> Result<v1::AgentSummary, CodecError> {
 			"idle" => 1,
 			"parked" => 2,
 			"aborted" => 3,
-			_ => return Err(CodecError::JsonShape("agent.status")),
+			_ => return Err(CodecError::JsonShape { field: "agent.status" }),
 		},
 		has_session_file: item
 			.get("hasSessionFile")
@@ -561,7 +569,9 @@ fn ui_request_json(value: &v1::UiRequest) -> Value {
 }
 
 fn image_from_json(value: &Value) -> Result<ImageAttachment, CodecError> {
-	let image = value.as_object().ok_or(CodecError::JsonShape("image"))?;
+	let image = value
+		.as_object()
+		.ok_or(CodecError::JsonShape { field: "image" })?;
 	Ok(ImageAttachment {
 		data:      Bytes::from(decode_base64(json_str(image, "data")?)?),
 		mime_type: json_str(image, "mimeType")?.to_owned(),
@@ -571,7 +581,7 @@ fn image_from_json(value: &Value) -> Result<ImageAttachment, CodecError> {
 fn decode_base64(value: &str) -> Result<Vec<u8>, CodecError> {
 	base64_url::decode_raw(value.trim_end_matches('=').as_bytes())
 		.into_vec()
-		.map_err(|_| CodecError::JsonShape("base64"))
+		.map_err(|_| CodecError::JsonShape { field: "base64" })
 }
 
 fn record_value(record: &JournalRecord) -> Option<Value> {
@@ -585,7 +595,7 @@ fn record_value(record: &JournalRecord) -> Option<Value> {
 fn json_entries(value: Option<&Value>) -> Result<Vec<JournalRecord>, CodecError> {
 	value
 		.and_then(Value::as_array)
-		.ok_or(CodecError::JsonShape("entries"))?
+		.ok_or(CodecError::JsonShape { field: "entries" })?
 		.iter()
 		.enumerate()
 		.map(|(index, value)| json_record(value, index as u64 + 1))
@@ -607,18 +617,18 @@ fn json_str<'a>(
 	object
 		.get(key)
 		.and_then(Value::as_str)
-		.ok_or(CodecError::JsonShape(key))
+		.ok_or(CodecError::JsonShape { field: key })
 }
 
 fn json_u64(object: &serde_json::Map<String, Value>, key: &'static str) -> Result<u64, CodecError> {
 	object
 		.get(key)
 		.and_then(Value::as_u64)
-		.ok_or(CodecError::JsonShape(key))
+		.ok_or(CodecError::JsonShape { field: key })
 }
 
 fn json_u32(object: &serde_json::Map<String, Value>, key: &'static str) -> Result<u32, CodecError> {
-	u32::try_from(json_u64(object, key)?).map_err(|_| CodecError::JsonShape(key))
+	u32::try_from(json_u64(object, key)?).map_err(|_| CodecError::JsonShape { field: key })
 }
 
 /// Refuses a malformed or over-bounds encoded collaboration frame before prost
@@ -645,11 +655,17 @@ pub enum CodecError {
 	#[error("collaboration JSON decode failed")]
 	DecodeJson(#[source] serde_json::Error),
 	/// A required browser-wire field had the wrong shape.
-	#[error("collaboration JSON field has invalid shape: {0}")]
-	JsonShape(&'static str),
+	#[error("collaboration JSON field has invalid shape: {field}")]
+	JsonShape {
+		/// The invalid browser-wire field.
+		field: &'static str,
+	},
 	/// The protobuf payload has no browser-wire equivalent.
-	#[error("unsupported collaboration JSON payload: {0}")]
-	UnsupportedPayload(String),
+	#[error("unsupported collaboration JSON payload: {kind}")]
+	UnsupportedPayload {
+		/// The unsupported wire payload kind.
+		kind: String,
+	},
 	/// A collaboration frame omitted its payload.
 	#[error("collaboration frame has no payload")]
 	MissingPayload,

@@ -31,9 +31,7 @@ webview = 1
 [error-str-payload]
 agent = 1
 ai = 1
-cache = 2
 chat = 1
-collab = 2
 core = 1
 driver = 2
 edit = 3
