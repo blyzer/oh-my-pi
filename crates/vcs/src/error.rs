@@ -105,6 +105,17 @@ pub enum Error {
 		source:  std::io::Error,
 	},
 
+	/// The git binary is absent from the environment.
+	#[error("git is not installed")]
+	GitMissing,
+
+	/// The requested working directory does not exist.
+	#[error("working directory does not exist: {}", path.display())]
+	CwdMissing {
+		/// The missing working directory.
+		path: std::path::PathBuf,
+	},
+
 	/// Filesystem error outside any more specific failure mode.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
