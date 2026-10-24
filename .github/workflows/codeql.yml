@@ -28,6 +28,12 @@ on:
       - ".github/labeler.yml"
   workflow_dispatch:
 
+# A merge train stacks one 72-minute Rust analysis per push; only the last
+# tree's analysis matters, so cancel superseded runs.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
