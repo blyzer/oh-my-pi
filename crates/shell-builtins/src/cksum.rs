@@ -340,7 +340,7 @@ fn checksum_main(
 	let check_flag = |flag| match (check, matches.get_flag(flag)) {
 		(_, false) => Ok(false),
 		(true, true) => Ok(true),
-		(false, true) => Err(failure(ChecksumError::CheckOnlyFlag(flag.into()))),
+		(false, true) => Err(failure(ChecksumError::CheckOnlyFlag { flag: flag.into() })),
 	};
 	let ignore_missing = check_flag(options::IGNORE_MISSING)?;
 	let warn = check_flag(options::WARN)?;
@@ -484,13 +484,15 @@ fn sanitize_cksum_length(
 			let parsed = match len.parse::<usize>() {
 				Ok(parsed) => Some(parsed),
 				Err(error) if *error.kind() == num::IntErrorKind::PosOverflow => None,
-				Err(_) => return Err(failure(ChecksumError::InvalidLength(len.into()))),
+				Err(_) => return Err(failure(ChecksumError::InvalidLength { length: len.into() })),
 			};
 			match parsed {
 				Some(parsed @ (224 | 256 | 384 | 512)) => Ok(Some(parsed)),
 				_ => {
-					host.error(ChecksumError::InvalidLength(len.into()), 1);
-					Err(failure(ChecksumError::InvalidLengthForSha(algo.to_uppercase().into())))
+					host.error(ChecksumError::InvalidLength { length: len.into() }, 1);
+					Err(failure(ChecksumError::InvalidLengthForSha {
+						algorithm: algo.to_uppercase().into(),
+					}))
 				},
 			}
 		},
@@ -500,7 +502,7 @@ fn sanitize_cksum_length(
 		(Some(AlgoKind::Shake128 | AlgoKind::Shake256), Some(len)) => match len.parse::<usize>() {
 			Ok(0) => Ok(None),
 			Ok(parsed) => Ok(Some(parsed)),
-			Err(_) => Err(failure(ChecksumError::InvalidLength(len.into()))),
+			Err(_) => Err(failure(ChecksumError::InvalidLength { length: len.into() })),
 		},
 
 		// For BLAKE, if a length is provided, validate it.

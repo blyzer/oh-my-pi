@@ -400,11 +400,11 @@ impl AlgoKind {
 	pub(crate) fn from_cksum(value: impl AsRef<str>) -> Result<Self, ChecksumError> {
 		let value = value.as_ref();
 		if !SUPPORTED_ALGORITHMS.contains(&value) {
-			return Err(ChecksumError::UnknownAlgorithm(value.to_owned()));
+			return Err(ChecksumError::UnknownAlgorithm { algorithm: value.to_owned() });
 		}
 		value
 			.parse()
-			.map_err(|_| ChecksumError::UnknownAlgorithm(value.to_owned()))
+			.map_err(|_| ChecksumError::UnknownAlgorithm { algorithm: value.to_owned() })
 	}
 
 	/// Parses a standalone checksum utility name (`md5sum`, `b2sum`, ...) via
@@ -413,7 +413,7 @@ impl AlgoKind {
 		value
 			.as_ref()
 			.parse()
-			.map_err(|_| ChecksumError::UnknownAlgorithm(value.as_ref().to_owned()))
+			.map_err(|_| ChecksumError::UnknownAlgorithm { algorithm: value.as_ref().to_owned() })
 	}
 
 	/// Returns the conventional uppercase display name.
@@ -477,7 +477,7 @@ impl TryFrom<usize> for ShaLength {
 			256 => Ok(Self::Len256),
 			384 => Ok(Self::Len384),
 			512 => Ok(Self::Len512),
-			_ => Err(ChecksumError::InvalidLengthForSha(value.to_string())),
+			_ => Err(ChecksumError::InvalidLengthForSha { algorithm: value.to_string() }),
 		}
 	}
 }
@@ -534,7 +534,9 @@ impl SizedAlgoKind {
 			(A::Sha2, Some(value)) => Self::Sha2(value.try_into()?),
 			(A::Sha3, Some(value)) => Self::Sha3(value.try_into()?),
 			(algo @ (A::Sha2 | A::Sha3), None) => {
-				return Err(ChecksumError::LengthRequiredForSha(algo.to_lowercase().into()));
+				return Err(ChecksumError::LengthRequiredForSha {
+					algorithm: algo.to_lowercase().into(),
+				});
 			},
 			(A::Sha224, None) => Self::Sha2(ShaLength::Len224),
 			(A::Sha256, None) => Self::Sha2(ShaLength::Len256),
@@ -621,18 +623,33 @@ impl SizedAlgoKind {
 pub(crate) enum ChecksumError {
 	#[error("the --raw option is not supported with multiple files")]
 	RawMultipleFiles,
-	#[error("the --{0} option is meaningful only when verifying checksums")]
-	CheckOnlyFlag(String),
-	#[error("invalid length: '{0}'")]
-	InvalidLength(String),
-	#[error("maximum digest length for '{0}' is 512 bits")]
-	LengthTooBigForBlake(String),
+	#[error("the --{flag} option is meaningful only when verifying checksums")]
+	CheckOnlyFlag {
+		/// The misapplied verification-only flag.
+		flag: String,
+	},
+	#[error("invalid length: '{length}'")]
+	InvalidLength {
+		/// The rejected length argument.
+		length: String,
+	},
+	#[error("maximum digest length for '{algorithm}' is 512 bits")]
+	LengthTooBigForBlake {
+		/// The requested algorithm.
+		algorithm: String,
+	},
 	#[error("length is not a multiple of 8")]
 	LengthNotMultipleOf8,
-	#[error("digest length for '{0}' must be 224, 256, 384, or 512")]
-	InvalidLengthForSha(String),
-	#[error("--algorithm={0} requires specifying --length 224, 256, 384, or 512")]
-	LengthRequiredForSha(String),
+	#[error("digest length for '{algorithm}' must be 224, 256, 384, or 512")]
+	InvalidLengthForSha {
+		/// The requested algorithm.
+		algorithm: String,
+	},
+	#[error("--algorithm={algorithm} requires specifying --length 224, 256, 384, or 512")]
+	LengthRequiredForSha {
+		/// The requested algorithm.
+		algorithm: String,
+	},
 	#[error("--length is only supported with --algorithm blake2b, sha2, or sha3")]
 	LengthOnlyForBlake2bSha2Sha3,
 	#[error("the --binary and --text options are meaningless when verifying checksums")]
@@ -645,8 +662,11 @@ pub(crate) enum ChecksumError {
 	TextAfterTag,
 	#[error("--check is not supported with --algorithm={{bsd,sysv,crc,crc32b}}")]
 	AlgorithmNotSupportedWithCheck,
-	#[error("unknown algorithm: {0}: clap should have prevented this case")]
-	UnknownAlgorithm(String),
+	#[error("unknown algorithm: {algorithm}: clap should have prevented this case")]
+	UnknownAlgorithm {
+		/// The unrecognized algorithm name.
+		algorithm: String,
+	},
 	#[error("legacy output cannot be encoded")]
 	LegacyEncoding,
 	#[error(transparent)]
@@ -695,9 +715,9 @@ pub(crate) fn parse_blake_length(
 		BlakeLength::Int(value) => value,
 		BlakeLength::String(value) => value.parse::<usize>().map_err(|error| {
 			if *error.kind() == num::IntErrorKind::PosOverflow {
-				ChecksumError::LengthTooBigForBlake(kind.to_uppercase().into())
+				ChecksumError::LengthTooBigForBlake { algorithm: kind.to_uppercase().into() }
 			} else {
-				ChecksumError::InvalidLength(value.into())
+				ChecksumError::InvalidLength { length: value.into() }
 			}
 		})?,
 	};
@@ -709,7 +729,7 @@ pub(crate) fn parse_blake_length(
 		});
 	}
 	if kind == AlgoKind::Blake2b && bits > sum::Blake2b::DEFAULT_BIT_SIZE {
-		return Err(ChecksumError::LengthTooBigForBlake(kind.to_uppercase().into()));
+		return Err(ChecksumError::LengthTooBigForBlake { algorithm: kind.to_uppercase().into() });
 	}
 	if !bits.is_multiple_of(8) {
 		return Err(ChecksumError::LengthNotMultipleOf8);

@@ -954,11 +954,11 @@ mod error {
 		ParseError(String, ParseNumberError),
 
 		/// The increment argument was zero, which is not allowed.
-		///
-		/// The parameter is the increment argument as a [`String`] as read
-		/// from the command line.
-		#[error("invalid Zero increment value: {}", .0.quote())]
-		ZeroIncrement(String),
+		#[error("invalid Zero increment value: {}", .increment.quote())]
+		ZeroIncrement {
+			/// The zero increment argument.
+			increment: String,
+		},
 
 		/// No arguments were passed to this function, 1 or more is required
 		#[error("missing operand")]
@@ -1118,7 +1118,7 @@ fn seq_main(matches: &ArgMatches, host: &mut Host) -> Result<(), Box<dyn Error>>
 		PreciseNumber::one()
 	};
 	if increment.is_zero() {
-		return Err(SeqError::ZeroIncrement(numbers[1].to_owned()).into());
+		return Err(SeqError::ZeroIncrement { increment: numbers[1].to_owned() }.into());
 	}
 	let last: PreciseNumber = {
 		// We are guaranteed that `numbers.len()` is greater than zero

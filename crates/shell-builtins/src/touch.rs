@@ -84,15 +84,21 @@ impl Display for FileTime {
 
 #[derive(Debug, ThisError)]
 enum TouchError {
-	#[error("Unable to parse date: {0}")]
-	InvalidDateFormat(String),
+	#[error("Unable to parse date: {date}")]
+	InvalidDateFormat {
+		/// The unparseable date argument.
+		date: String,
+	},
 	#[error("Source has invalid access or modification time: {0}")]
 	InvalidFiletime(FileTime),
 	#[error("failed to get attributes of {}: {}", .0.quote(), io_error(.1))]
 	ReferenceFileInaccessible(PathBuf, io::Error),
 	#[cfg(windows)]
-	#[error("GetFinalPathNameByHandleW failed with code {0}")]
-	WindowsStdoutPathError(String),
+	#[error("GetFinalPathNameByHandleW failed with code {code}")]
+	WindowsStdoutPathError {
+		/// The Windows error code text.
+		code: String,
+	},
 	#[error("{0}")]
 	Message(String),
 }
@@ -921,7 +927,7 @@ fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTim
 		return Ok(timestamp_to_filetime(zoned.timestamp()));
 	}
 
-	Err(TouchError::InvalidDateFormat(s.to_owned()))
+	Err(TouchError::InvalidDateFormat { date: s.to_owned() })
 }
 
 /// Prepends 19 or 20 to the year if it is a 2 digit year
@@ -1040,21 +1046,23 @@ fn pathbuf_from_stdout() -> Result<PathBuf, TouchError> {
 		// stored here.
 		let buffer_size = match ret {
 			ERROR_PATH_NOT_FOUND | ERROR_NOT_ENOUGH_MEMORY | ERROR_INVALID_PARAMETER => {
-				return Err(TouchError::WindowsStdoutPathError(ret.to_string()));
+				return Err(TouchError::WindowsStdoutPathError { code: ret.to_string() });
 			},
 			0 => {
-				return Err(TouchError::WindowsStdoutPathError(format!(
-					"{}",
-					// SAFETY: GetLastError is thread-safe and has no documented memory unsafety.
-					unsafe { GetLastError() }
-				)));
+				return Err(TouchError::WindowsStdoutPathError {
+					code: format!(
+						"{}",
+						// SAFETY: GetLastError is thread-safe and has no documented memory unsafety.
+						unsafe { GetLastError() }
+					),
+				});
 			},
 			e => e as usize,
 		};
 
 		// Don't include the null terminator
 		Ok(String::from_utf16(&file_path_buffer[0..buffer_size])
-			.map_err(|e| TouchError::WindowsStdoutPathError(e.to_string()))?
+			.map_err(|e| TouchError::WindowsStdoutPathError { code: e.to_string() })?
 			.into())
 	}
 	#[cfg(target_os = "wasi")]
