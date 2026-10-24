@@ -625,16 +625,16 @@ fn archive_error(error: ArError, format: ArchiveFormat) -> ArchiveError {
 		ArError::ArchiveTooLarge { actual, limit } => {
 			ArchiveError::ArchiveTooLarge { size: format_bytes(actual), limit: format_bytes(limit) }
 		},
-		ArError::UnsafePath(_) => ArchiveError::UnsafePath,
-		ArError::NotFound(path) => ArchiveError::NotFound { path: path.to_string() },
-		ArError::IsDirectory(path) => ArchiveError::IsDirectory { path: path.to_string() },
-		ArError::NotDirectory(path) => ArchiveError::NotDirectory { path: path.to_string() },
+		ArError::UnsafePath { .. } => ArchiveError::UnsafePath,
+		ArError::NotFound { path } => ArchiveError::NotFound { path: path.to_string() },
+		ArError::IsDirectory { path } => ArchiveError::IsDirectory { path: path.to_string() },
+		ArError::NotDirectory { path } => ArchiveError::NotDirectory { path: path.to_string() },
 		ArError::MemberTooLarge { path, actual, limit } => ArchiveError::MemberTooLarge {
 			path:  path.to_string(),
 			size:  format_bytes(actual),
 			limit: format_bytes(limit),
 		},
-		ArError::SparseMember(path) => ArchiveError::SparseMember { path: path.to_string() },
+		ArError::SparseMember { path } => ArchiveError::SparseMember { path: path.to_string() },
 		ArError::UnreadableLink { path, target } => {
 			ArchiveError::UnreadableLink { path: path.to_string(), target: target.to_string() }
 		},

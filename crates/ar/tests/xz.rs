@@ -85,6 +85,6 @@ fn rejects_corruption_truncation_unsupported_filter_and_overflow() {
 	unsupported[header_end - 4..header_end].copy_from_slice(&crc.to_le_bytes());
 	assert!(matches!(
 		Archive::from_bytes_with_format(&unsupported, Format::Xz),
-		Err(Error::UnsupportedFeature(feature)) if feature.contains("terminal filter")
+		Err(Error::UnsupportedFeature { feature }) if feature.contains("terminal filter")
 	));
 }

@@ -28,7 +28,7 @@ impl<'a> BitReader<'a> {
 				let word = self
 					.bytes
 					.get(self.offset..self.offset + 2)
-					.ok_or(Error::InvalidArchive("truncated CAB LZX bitstream"))?;
+					.ok_or(Error::InvalidArchive { problem: "truncated CAB LZX bitstream" })?;
 				self.word = u16::from_le_bytes([word[0], word[1]]);
 				self.offset += 2;
 				self.remaining = 16;
@@ -48,12 +48,12 @@ impl<'a> BitReader<'a> {
 
 	fn read_byte(&mut self) -> Result<u8> {
 		if self.remaining != 0 {
-			return Err(Error::InvalidArchive("misaligned CAB LZX byte stream"));
+			return Err(Error::InvalidArchive { problem: "misaligned CAB LZX byte stream" });
 		}
 		let byte = *self
 			.bytes
 			.get(self.offset)
-			.ok_or(Error::InvalidArchive("truncated CAB LZX data"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated CAB LZX data" })?;
 		self.offset += 1;
 		Ok(byte)
 	}
@@ -82,7 +82,7 @@ impl HuffmanTable {
 		let mut symbol_count = 0_usize;
 		for &length in lengths {
 			if length > 16 {
-				return Err(Error::InvalidArchive("invalid CAB LZX Huffman code length"));
+				return Err(Error::InvalidArchive { problem: "invalid CAB LZX Huffman code length" });
 			}
 			if length != 0 {
 				counts[usize::from(length)] += 1;
@@ -91,7 +91,7 @@ impl HuffmanTable {
 		}
 		let empty = symbol_count == 0;
 		if empty && !allow_empty {
-			return Err(Error::InvalidArchive("empty CAB LZX Huffman tree"));
+			return Err(Error::InvalidArchive { problem: "empty CAB LZX Huffman tree" });
 		}
 
 		let mut first_codes = [0_u32; 17];
@@ -101,7 +101,7 @@ impl HuffmanTable {
 		for length in 1..=16 {
 			code = (code + counts[length - 1]) * 2;
 			if code + counts[length] > 1_u32 << length {
-				return Err(Error::InvalidArchive("oversubscribed CAB LZX Huffman tree"));
+				return Err(Error::InvalidArchive { problem: "oversubscribed CAB LZX Huffman tree" });
 			}
 			first_codes[length] = code;
 			first_symbols[length] = symbol_offset;
@@ -113,8 +113,9 @@ impl HuffmanTable {
 		for (symbol, &length) in lengths.iter().enumerate() {
 			if length != 0 {
 				let slot = &mut next[usize::from(length)];
-				symbols[*slot as usize] = u16::try_from(symbol)
-					.map_err(|_| Error::InvalidArchive("CAB LZX tree has too many symbols"))?;
+				symbols[*slot as usize] = u16::try_from(symbol).map_err(|_| Error::InvalidArchive {
+					problem: "CAB LZX tree has too many symbols",
+				})?;
 				*slot += 1;
 			}
 		}
@@ -123,7 +124,9 @@ impl HuffmanTable {
 
 	fn decode(&self, reader: &mut BitReader<'_>) -> Result<usize> {
 		if self.empty {
-			return Err(Error::InvalidArchive("CAB LZX stream uses an empty Huffman tree"));
+			return Err(Error::InvalidArchive {
+				problem: "CAB LZX stream uses an empty Huffman tree",
+			});
 		}
 		let mut code = 0_u32;
 		for length in 1..=16 {
@@ -138,7 +141,7 @@ impl HuffmanTable {
 				}
 			}
 		}
-		Err(Error::InvalidArchive("invalid CAB LZX Huffman symbol"))
+		Err(Error::InvalidArchive { problem: "invalid CAB LZX Huffman symbol" })
 	}
 }
 
@@ -160,7 +163,9 @@ fn read_code_lengths(
 			let (bits, base) = if symbol == 17 { (4, 4) } else { (5, 20) };
 			let run = reader.read_bits(bits)? as usize + base;
 			if index + run > last {
-				return Err(Error::InvalidArchive("CAB LZX code-length run exceeds its tree"));
+				return Err(Error::InvalidArchive {
+					problem: "CAB LZX code-length run exceeds its tree",
+				});
 			}
 			lengths[index..index + run].fill(0);
 			index += run;
@@ -169,7 +174,9 @@ fn read_code_lengths(
 		if symbol == 19 {
 			let run = reader.read_bits(1)? as usize + 4;
 			if index + run > last {
-				return Err(Error::InvalidArchive("CAB LZX code-length run exceeds its tree"));
+				return Err(Error::InvalidArchive {
+					problem: "CAB LZX code-length run exceeds its tree",
+				});
 			}
 			let delta = pretree.decode(reader)? as u8;
 			let length = (lengths[index] + 17 - delta) % 17;
@@ -253,7 +260,7 @@ impl Decoder {
 	pub(super) fn decompress_frame(&mut self, bytes: &[u8], output: &mut [u8]) -> Result<()> {
 		let output_size = output.len();
 		if output_size > FRAME_SIZE {
-			return Err(Error::InvalidArchive("CAB LZX frame exceeds 32768 bytes"));
+			return Err(Error::InvalidArchive { problem: "CAB LZX frame exceeds 32768 bytes" });
 		}
 		if output_size == 0 {
 			return Ok(());
@@ -276,7 +283,9 @@ impl Decoder {
 			let run = self.block_remaining.min(output_size - output_position);
 			let produced = self.decode_run(&mut reader, output, output_position, run)?;
 			if produced != run {
-				return Err(Error::InvalidArchive("CAB LZX block produced the wrong byte count"));
+				return Err(Error::InvalidArchive {
+					problem: "CAB LZX block produced the wrong byte count",
+				});
 			}
 			output_position += produced;
 			self.block_remaining -= produced;
@@ -299,7 +308,7 @@ impl Decoder {
 		self.block_type = reader.read_bits(3)? as u8;
 		self.block_length = reader.read_bits(16)? as usize * 256 + reader.read_bits(8)? as usize;
 		if self.block_length == 0 {
-			return Err(Error::InvalidArchive("zero-length CAB LZX block"));
+			return Err(Error::InvalidArchive { problem: "zero-length CAB LZX block" });
 		}
 		self.block_remaining = self.block_length;
 
@@ -329,12 +338,12 @@ impl Decoder {
 			self.r1 = reader.read_u32_le()? as usize;
 			self.r2 = reader.read_u32_le()? as usize;
 			if self.r0 == 0 || self.r1 == 0 || self.r2 == 0 {
-				return Err(Error::InvalidArchive("invalid CAB LZX repeated offset"));
+				return Err(Error::InvalidArchive { problem: "invalid CAB LZX repeated offset" });
 			}
 			self.uncompressed_padding = self.block_length & 1 != 0;
 			return Ok(());
 		}
-		Err(Error::InvalidArchive("unsupported CAB LZX block type"))
+		Err(Error::InvalidArchive { problem: "unsupported CAB LZX block type" })
 	}
 
 	fn decode_run(
@@ -352,7 +361,7 @@ impl Decoder {
 			return Ok(count);
 		}
 		if self.main_table.is_none() || self.length_table.is_none() {
-			return Err(Error::InvalidArchive("missing CAB LZX decode trees"));
+			return Err(Error::InvalidArchive { problem: "missing CAB LZX decode trees" });
 		}
 
 		let mut produced = 0;
@@ -379,7 +388,9 @@ impl Decoder {
 			}
 			match_length += MIN_MATCH;
 			if match_length > count - produced || match_length > self.block_remaining - produced {
-				return Err(Error::InvalidArchive("CAB LZX match crosses a frame or block boundary"));
+				return Err(Error::InvalidArchive {
+					problem: "CAB LZX match crosses a frame or block boundary",
+				});
 			}
 
 			let slot = match_element >> 3;
@@ -396,7 +407,7 @@ impl Decoder {
 					.position_base
 					.get(slot)
 					.zip(self.extra_bits.get(slot))
-					.ok_or(Error::InvalidArchive("CAB LZX position slot is out of range"))?;
+					.ok_or(Error::InvalidArchive { problem: "CAB LZX position slot is out of range" })?;
 				let mut offset = base as usize - 2;
 				if self.block_type == 2 && extra >= 3 {
 					if extra > 3 {
@@ -405,7 +416,7 @@ impl Decoder {
 					offset += self
 						.aligned_table
 						.as_ref()
-						.ok_or(Error::InvalidArchive("missing CAB LZX aligned tree"))?
+						.ok_or(Error::InvalidArchive { problem: "missing CAB LZX aligned tree" })?
 						.decode(reader)?;
 				} else if extra != 0 {
 					offset += reader.read_bits(extra)? as usize;
@@ -422,7 +433,9 @@ impl Decoder {
 						.unwrap_or(usize::MAX)
 						.min(self.window.len())
 			{
-				return Err(Error::InvalidArchive("CAB LZX match offset exceeds available history"));
+				return Err(Error::InvalidArchive {
+					problem: "CAB LZX match offset exceeds available history",
+				});
 			}
 			for index in 0..match_length {
 				let source =

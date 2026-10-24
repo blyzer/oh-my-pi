@@ -50,14 +50,14 @@ pub(crate) fn read_entries(
 		let header = parse_header(source, offset, file_size, limits)?;
 		metadata_size = metadata_size
 			.checked_add(header.data_start - offset)
-			.ok_or(Error::InvalidArchive("LZH index size overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "LZH index size overflow" })?;
 		check_index_size(metadata_size, limits)?;
 		parsed_count += 1;
 		if parsed_count > limits.max_entries() {
 			return Err(Error::TooManyEntries { actual: parsed_count, limit: limits.max_entries() });
 		}
 		if header.next_offset <= offset {
-			return Err(Error::InvalidArchive("LZH header did not advance"));
+			return Err(Error::InvalidArchive { problem: "LZH header did not advance" });
 		}
 		offset = header.next_offset;
 		let Some(path) = header.path else {
@@ -67,10 +67,10 @@ pub(crate) fn read_entries(
 		if header.method == METHOD_LHD {
 			if header.mode.is_some_and(|mode| mode & 0xf000 == 0xa000) {
 				let Some((link, target)) = path.split_once('|') else {
-					return Err(Error::InvalidArchive("invalid LZH symbolic link"));
+					return Err(Error::InvalidArchive { problem: "invalid LZH symbolic link" });
 				};
 				if link.is_empty() {
-					return Err(Error::InvalidArchive("invalid LZH symbolic link"));
+					return Err(Error::InvalidArchive { problem: "invalid LZH symbolic link" });
 				}
 				let (Some(link), Some(target)) = (normalize(link, false), normalize(target, false))
 				else {
@@ -114,7 +114,7 @@ pub(crate) fn read_entries(
 		});
 	}
 	if parsed_count == 0 {
-		return Err(Error::InvalidArchive("LZH archive has no members"));
+		return Err(Error::InvalidArchive { problem: "LZH archive has no members" });
 	}
 	Ok(entries)
 }
@@ -127,15 +127,17 @@ pub(crate) fn read_entry_to<W: Write>(
 ) -> Result<u64> {
 	let Storage::LegacyDos { data_offset, stored_size, format, method, checksum } = entry.storage
 	else {
-		return Err(Error::InvalidArchive("invalid LZH member storage"));
+		return Err(Error::InvalidArchive { problem: "invalid LZH member storage" });
 	};
 	if format != STORAGE_FORMAT {
-		return Err(Error::InvalidArchive("invalid LZH member storage format"));
+		return Err(Error::InvalidArchive { problem: "invalid LZH member storage format" });
 	}
-	let packed_len = usize::try_from(stored_size)
-		.map_err(|_| Error::InvalidArchive("LZH packed size does not fit this platform"))?;
-	let out_len = usize::try_from(entry.size)
-		.map_err(|_| Error::InvalidArchive("LZH member size does not fit this platform"))?;
+	let packed_len = usize::try_from(stored_size).map_err(|_| Error::InvalidArchive {
+		problem: "LZH packed size does not fit this platform",
+	})?;
+	let out_len = usize::try_from(entry.size).map_err(|_| Error::InvalidArchive {
+		problem: "LZH member size does not fit this platform",
+	})?;
 	let mut packed = vec![0_u8; packed_len];
 	source.seek(SeekFrom::Start(data_offset))?;
 	source.read_exact(&mut packed)?;
@@ -155,11 +157,17 @@ pub(crate) fn read_entry_to<W: Write>(
 		METHOD_LH6 => decompress_lh_static(&packed, out_len, 1 << 15, 5, 16)?,
 		METHOD_LH7 => decompress_lh_static(&packed, out_len, 1 << 16, 5, 17)?,
 		METHOD_LZS => decompress_lzs(&packed, out_len)?,
-		METHOD_LH1 => return Err(Error::UnsupportedFeature("LZH dynamic-Huffman method -lh1-")),
-		METHOD_LH2 => return Err(Error::UnsupportedFeature("LZH dynamic-Huffman method -lh2-")),
-		METHOD_LH3 => return Err(Error::UnsupportedFeature("LZH static-Huffman method -lh3-")),
-		METHOD_LZ5 => return Err(Error::UnsupportedFeature("LZH LArc method -lz5-")),
-		_ => return Err(Error::UnsupportedFeature("unknown LZH compression method")),
+		METHOD_LH1 => {
+			return Err(Error::UnsupportedFeature { feature: "LZH dynamic-Huffman method -lh1-" });
+		},
+		METHOD_LH2 => {
+			return Err(Error::UnsupportedFeature { feature: "LZH dynamic-Huffman method -lh2-" });
+		},
+		METHOD_LH3 => {
+			return Err(Error::UnsupportedFeature { feature: "LZH static-Huffman method -lh3-" });
+		},
+		METHOD_LZ5 => return Err(Error::UnsupportedFeature { feature: "LZH LArc method -lz5-" }),
+		_ => return Err(Error::UnsupportedFeature { feature: "unknown LZH compression method" }),
 	};
 	if bytes.len() != out_len {
 		return Err(Error::SizeMismatch {
@@ -211,9 +219,10 @@ fn parse_header(
 	let prefix = read_array::<22>(source, offset, file_size, "truncated LZH header")?;
 	let level = prefix[20];
 	if level > 2 {
-		return Err(Error::UnsupportedFeature("LZH header level 3"));
+		return Err(Error::UnsupportedFeature { feature: "LZH header level 3" });
 	}
-	let method = method_code(&prefix[2..7]).ok_or(Error::InvalidArchive("invalid LZH method"))?;
+	let method =
+		method_code(&prefix[2..7]).ok_or(Error::InvalidArchive { problem: "invalid LZH method" })?;
 	let mut packed_size = u64::from(u32_at(&prefix, 7));
 	let mut size = u64::from(u32_at(&prefix, 11));
 	let crc;
@@ -228,18 +237,18 @@ fn parse_header(
 		let header_length = usize::from(prefix[0]);
 		let minimum = if level == 0 { 22 } else { 25 };
 		if header_length < minimum {
-			return Err(Error::InvalidArchive("invalid LZH level-0/1 header size"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH level-0/1 header size" });
 		}
 		let base_size = header_length
 			.checked_add(2)
-			.ok_or(Error::InvalidArchive("LZH header size overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "LZH header size overflow" })?;
 		check_index_size(base_size as u64, limits)?;
 		header_bytes = read_vec(source, offset, base_size, file_size, "truncated LZH header")?;
 		let sum = header_bytes[2..]
 			.iter()
 			.fold(0_u8, |sum, byte| sum.wrapping_add(*byte));
 		if sum != header_bytes[1] {
-			return Err(Error::InvalidArchive("invalid LZH additive header checksum"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH additive header checksum" });
 		}
 		let name_length = usize::from(header_bytes[21]);
 		if 22_usize
@@ -247,14 +256,14 @@ fn parse_header(
 			.and_then(|end| end.checked_add(2))
 			.is_none_or(|end| end > base_size)
 		{
-			return Err(Error::InvalidArchive("invalid LZH filename length"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH filename length" });
 		}
 		if level == 1
 			&& 25_usize
 				.checked_add(name_length)
 				.is_none_or(|end| end > base_size)
 		{
-			return Err(Error::InvalidArchive("invalid LZH level-1 filename length"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH level-1 filename length" });
 		}
 		check_path_size(name_length as u64, limits)?;
 		legacy_filename = Some(decode_legacy(&header_bytes[22..22 + name_length]));
@@ -279,15 +288,15 @@ fn parse_header(
 			let mut extension_count = 0_u32;
 			while extension_size != 0 {
 				if extension_size < 3 {
-					return Err(Error::InvalidArchive("invalid LZH extended header size"));
+					return Err(Error::InvalidArchive { problem: "invalid LZH extended header size" });
 				}
 				total_extension_size = total_extension_size
 					.checked_add(extension_size as u64)
-					.ok_or(Error::InvalidArchive("LZH extended header size overflow"))?;
+					.ok_or(Error::InvalidArchive { problem: "LZH extended header size overflow" })?;
 				check_index_size(base_size as u64 + total_extension_size, limits)?;
 				extension_count += 1;
 				if extension_count > 65_535 {
-					return Err(Error::InvalidArchive("too many LZH extended headers"));
+					return Err(Error::InvalidArchive { problem: "too many LZH extended headers" });
 				}
 				let extension = read_vec(
 					source,
@@ -313,13 +322,13 @@ fn parse_header(
 				Some(value) => value,
 				None => packed_size
 					.checked_sub(total_extension_size)
-					.ok_or(Error::InvalidArchive("invalid LZH level-1 packed size"))?,
+					.ok_or(Error::InvalidArchive { problem: "invalid LZH level-1 packed size" })?,
 			};
 		}
 	} else {
 		let header_length = usize::from(u16_at(&prefix, 0));
 		if header_length < 26 {
-			return Err(Error::InvalidArchive("invalid LZH level-2 header size"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH level-2 header size" });
 		}
 		check_index_size(header_length as u64, limits)?;
 		header_bytes = read_vec(source, offset, header_length, file_size, "truncated LZH header")?;
@@ -335,11 +344,11 @@ fn parse_header(
 				break;
 			}
 			if extension_size < 3 || cursor + extension_size > header_length {
-				return Err(Error::InvalidArchive("invalid LZH extended header size"));
+				return Err(Error::InvalidArchive { problem: "invalid LZH extended header size" });
 			}
 			extension_count += 1;
 			if extension_count > 65_535 {
-				return Err(Error::InvalidArchive("too many LZH extended headers"));
+				return Err(Error::InvalidArchive { problem: "too many LZH extended headers" });
 			}
 			process_extended(
 				header_bytes[cursor + 2],
@@ -351,25 +360,27 @@ fn parse_header(
 			cursor += extension_size;
 		}
 		if cursor != header_length {
-			return Err(Error::InvalidArchive("invalid LZH level-2 extended header chain"));
+			return Err(Error::InvalidArchive {
+				problem: "invalid LZH level-2 extended header chain",
+			});
 		}
 		data_start = offset + header_length as u64;
 		packed_size = fields.packed_size.unwrap_or(packed_size);
 	}
 	if level == 1 && os_id == 0x20 && method == METHOD_LH7 {
-		return Err(Error::UnsupportedFeature("incompatible LHARK -lh7- variant"));
+		return Err(Error::UnsupportedFeature { feature: "incompatible LHARK -lh7- variant" });
 	}
 	size = fields.size.unwrap_or(size);
 	let modified = fields.modified.or(base_modified);
 	if let (Some(expected), Some(common_offset)) = (fields.common_crc, fields.common_crc_offset) {
 		let relative = usize::try_from(common_offset - offset)
-			.map_err(|_| Error::InvalidArchive("LZH common CRC offset overflow"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "LZH common CRC offset overflow" })?;
 		let end = relative
 			.checked_add(2)
-			.ok_or(Error::InvalidArchive("LZH common CRC range overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "LZH common CRC range overflow" })?;
 		if end > header_bytes.len() || crc16_with_zero_range(&header_bytes, relative, end) != expected
 		{
-			return Err(Error::InvalidArchive("invalid LZH common header CRC-16"));
+			return Err(Error::InvalidArchive { problem: "invalid LZH common header CRC-16" });
 		}
 	}
 	let filename = fields
@@ -402,9 +413,9 @@ fn parse_header(
 	}
 	let next_offset = data_start
 		.checked_add(packed_size)
-		.ok_or(Error::InvalidArchive("LZH member range overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "LZH member range overflow" })?;
 	if next_offset > file_size {
-		return Err(Error::InvalidArchive("truncated LZH member data"));
+		return Err(Error::InvalidArchive { problem: "truncated LZH member data" });
 	}
 	Ok(ParsedHeader {
 		method,
@@ -432,21 +443,23 @@ fn process_extended(
 	match kind {
 		0x00 => {
 			if data.len() < 2 {
-				return Err(Error::InvalidArchive("invalid LZH common extended header"));
+				return Err(Error::InvalidArchive { problem: "invalid LZH common extended header" });
 			}
 			fields.common_crc = Some(u16_at(data, 0));
 			fields.common_crc_offset = Some(absolute_data_offset);
 		},
 		0x01 => fields.filename = Some(decode_legacy(data)),
 		0x02 => fields.directory = Some(decode_legacy(data).replace('\u{ff}', "/")),
-		0x39 => return Err(Error::UnsupportedFeature("multi-volume LZH archives")),
+		0x39 => return Err(Error::UnsupportedFeature { feature: "multi-volume LZH archives" }),
 		0x41 if data.len() >= 16 => {
 			let ticks = u64::from(u32_at(data, 8)) | (u64::from(u32_at(data, 12)) << 32);
 			fields.modified = filetime_to_unix(ticks);
 		},
 		0x42 => {
 			if data.len() < 16 {
-				return Err(Error::InvalidArchive("invalid LZH 64-bit size extended header"));
+				return Err(Error::InvalidArchive {
+					problem: "invalid LZH 64-bit size extended header",
+				});
 			}
 			fields.packed_size = Some(u64_at(data, 0));
 			fields.size = Some(u64_at(data, 8));
@@ -455,13 +468,13 @@ fn process_extended(
 		0x45 => fields.unicode_directory = Some(decode_utf16(data)?.replace('\u{ff}', "/")),
 		0x50 => {
 			if data.len() < 2 {
-				return Err(Error::InvalidArchive("invalid LZH Unix permissions header"));
+				return Err(Error::InvalidArchive { problem: "invalid LZH Unix permissions header" });
 			}
 			fields.mode = Some(u32::from(u16_at(data, 0)));
 		},
 		0x54 => {
 			if data.len() < 4 {
-				return Err(Error::InvalidArchive("invalid LZH Unix timestamp header"));
+				return Err(Error::InvalidArchive { problem: "invalid LZH Unix timestamp header" });
 			}
 			fields.modified = Some(u64::from(u32_at(data, 0)));
 		},
@@ -505,7 +518,7 @@ pub(crate) fn decompress_lh_static(
 		if block_remaining == 0 {
 			block_remaining = reader.read(16)?;
 			if block_remaining == 0 {
-				return Err(Error::InvalidArchive("empty legacy Huffman block"));
+				return Err(Error::InvalidArchive { problem: "empty legacy Huffman block" });
 			}
 			let temporary = read_temporary_tree(&mut reader)?;
 			commands = read_command_tree(&mut reader, &temporary)?;
@@ -520,7 +533,9 @@ pub(crate) fn decompress_lh_static(
 		}
 		let length = symbol - 256 + 3;
 		if length > out_size - output_position {
-			return Err(Error::InvalidArchive("legacy Huffman match exceeds declared size"));
+			return Err(Error::InvalidArchive {
+				problem: "legacy Huffman match exceeds declared size",
+			});
 		}
 		let position_code = usize::from(positions.decode(&mut reader)?);
 		let distance = if position_code > 1 {
@@ -530,7 +545,9 @@ pub(crate) fn decompress_lh_static(
 			position_code
 		};
 		if distance >= dictionary_size || distance >= output_position {
-			return Err(Error::InvalidArchive("legacy Huffman history distance is out of range"));
+			return Err(Error::InvalidArchive {
+				problem: "legacy Huffman history distance is out of range",
+			});
 		}
 		let source_start = output_position - distance - 1;
 		for source_position in source_start..source_start + length {
@@ -539,7 +556,7 @@ pub(crate) fn decompress_lh_static(
 		}
 	}
 	if block_remaining != 0 {
-		return Err(Error::InvalidArchive("legacy Huffman block exceeds declared size"));
+		return Err(Error::InvalidArchive { problem: "legacy Huffman block exceeds declared size" });
 	}
 	reader.assert_zero_padding()?;
 	Ok(output)
@@ -562,7 +579,7 @@ fn decompress_lzs(packed: &[u8], out_size: usize) -> Result<Vec<u8>> {
 			let position = reader.read(11)? as usize;
 			let length = reader.read(4)? as usize + 2;
 			if length > out_size - output_position {
-				return Err(Error::InvalidArchive("LZH -lzs- match exceeds declared size"));
+				return Err(Error::InvalidArchive { problem: "LZH -lzs- match exceeds declared size" });
 			}
 			for index in 0..length {
 				let value = history[(position + index) & 2047];
@@ -590,7 +607,7 @@ impl<'a> MsbBitReader<'a> {
 	fn read(&mut self, count: u8) -> Result<u32> {
 		let count = usize::from(count);
 		if count > 24 || self.position + count > self.bytes.len() * 8 {
-			return Err(Error::InvalidArchive("truncated legacy compressed bitstream"));
+			return Err(Error::InvalidArchive { problem: "truncated legacy compressed bitstream" });
 		}
 		let mut value = 0_u32;
 		for _ in 0..count {
@@ -604,7 +621,7 @@ impl<'a> MsbBitReader<'a> {
 	fn assert_zero_padding(&mut self) -> Result<()> {
 		while self.position < self.bytes.len() * 8 {
 			if self.read(1)? != 0 {
-				return Err(Error::InvalidArchive("non-zero trailing compressed bits"));
+				return Err(Error::InvalidArchive { problem: "non-zero trailing compressed bits" });
 			}
 		}
 		Ok(())
@@ -622,7 +639,7 @@ struct Huffman {
 impl Huffman {
 	const fn single(symbol: usize, symbol_count: usize) -> Result<Self> {
 		if symbol >= symbol_count {
-			return Err(Error::InvalidArchive("legacy Huffman symbol is out of range"));
+			return Err(Error::InvalidArchive { problem: "legacy Huffman symbol is out of range" });
 		}
 		Ok(Self {
 			counts:        [0; 17],
@@ -638,10 +655,10 @@ impl Huffman {
 		let mut maximum = 0_usize;
 		for &length in lengths
 			.get(..symbol_count)
-			.ok_or(Error::InvalidArchive("short Huffman lengths"))?
+			.ok_or(Error::InvalidArchive { problem: "short Huffman lengths" })?
 		{
 			if length > 16 {
-				return Err(Error::InvalidArchive("legacy Huffman code is too long"));
+				return Err(Error::InvalidArchive { problem: "legacy Huffman code is too long" });
 			}
 			if length != 0 {
 				counts[usize::from(length)] += 1;
@@ -649,19 +666,19 @@ impl Huffman {
 			}
 		}
 		if maximum == 0 {
-			return Err(Error::InvalidArchive("legacy Huffman table has no symbols"));
+			return Err(Error::InvalidArchive { problem: "legacy Huffman table has no symbols" });
 		}
 		let mut first_codes = [0_u32; 17];
 		let mut code = 0_u32;
 		for length in 1..=16 {
 			code = (code + u32::from(counts[length - 1])) * 2;
 			if code + u32::from(counts[length]) > 1_u32 << length {
-				return Err(Error::InvalidArchive("oversubscribed legacy Huffman table"));
+				return Err(Error::InvalidArchive { problem: "oversubscribed legacy Huffman table" });
 			}
 			first_codes[length] = code;
 		}
 		if first_codes[maximum] + u32::from(counts[maximum]) != 1_u32 << maximum {
-			return Err(Error::InvalidArchive("incomplete legacy Huffman table"));
+			return Err(Error::InvalidArchive { problem: "incomplete legacy Huffman table" });
 		}
 		let mut first_symbols = [0_u16; 17];
 		let mut total = 0_u16;
@@ -695,10 +712,10 @@ impl Huffman {
 					.symbols
 					.get(index)
 					.copied()
-					.ok_or(Error::InvalidArchive("invalid legacy Huffman code"));
+					.ok_or(Error::InvalidArchive { problem: "invalid legacy Huffman code" });
 			}
 		}
-		Err(Error::InvalidArchive("invalid legacy Huffman code"))
+		Err(Error::InvalidArchive { problem: "invalid legacy Huffman code" })
 	}
 }
 
@@ -708,7 +725,7 @@ fn read_code_length(reader: &mut MsbBitReader<'_>) -> Result<u8> {
 		while reader.read(1)? != 0 {
 			length += 1;
 			if length > 16 {
-				return Err(Error::InvalidArchive("legacy Huffman code is too long"));
+				return Err(Error::InvalidArchive { problem: "legacy Huffman code is too long" });
 			}
 		}
 	}
@@ -722,7 +739,7 @@ fn read_temporary_tree(reader: &mut MsbBitReader<'_>) -> Result<Huffman> {
 		return Huffman::single(reader.read(5)? as usize, SYMBOLS);
 	}
 	if encoded > SYMBOLS {
-		return Err(Error::InvalidArchive("invalid temporary Huffman table size"));
+		return Err(Error::InvalidArchive { problem: "invalid temporary Huffman table size" });
 	}
 	let mut lengths = [0_u8; SYMBOLS];
 	let mut index = 0_usize;
@@ -732,7 +749,7 @@ fn read_temporary_tree(reader: &mut MsbBitReader<'_>) -> Result<Huffman> {
 		if index == 3 {
 			let skipped = reader.read(2)? as usize;
 			if index + skipped > encoded {
-				return Err(Error::InvalidArchive("invalid temporary Huffman table"));
+				return Err(Error::InvalidArchive { problem: "invalid temporary Huffman table" });
 			}
 			index += skipped;
 		}
@@ -747,7 +764,7 @@ fn read_command_tree(reader: &mut MsbBitReader<'_>, temporary: &Huffman) -> Resu
 		return Huffman::single(reader.read(9)? as usize, SYMBOLS);
 	}
 	if encoded > SYMBOLS {
-		return Err(Error::InvalidArchive("invalid command Huffman table size"));
+		return Err(Error::InvalidArchive { problem: "invalid command Huffman table size" });
 	}
 	let mut lengths = [0_u8; SYMBOLS];
 	let mut index = 0_usize;
@@ -760,7 +777,7 @@ fn read_command_tree(reader: &mut MsbBitReader<'_>, temporary: &Huffman) -> Resu
 				_ => reader.read(9)? as usize + 20,
 			};
 			if index + skipped > encoded {
-				return Err(Error::InvalidArchive("invalid command Huffman table"));
+				return Err(Error::InvalidArchive { problem: "invalid command Huffman table" });
 			}
 			index += skipped;
 		} else {
@@ -781,7 +798,7 @@ fn read_position_tree(
 		return Huffman::single(reader.read(position_bits)? as usize, symbol_count);
 	}
 	if encoded > symbol_count || symbol_count > 17 {
-		return Err(Error::InvalidArchive("invalid position Huffman table size"));
+		return Err(Error::InvalidArchive { problem: "invalid position Huffman table size" });
 	}
 	let mut lengths = [0_u8; 17];
 	for length in &mut lengths[..encoded] {
@@ -873,7 +890,7 @@ fn decode_legacy(bytes: &[u8]) -> String {
 
 fn decode_utf16(bytes: &[u8]) -> Result<String> {
 	if bytes.len() & 1 != 0 {
-		return Err(Error::InvalidArchive("odd LZH UTF-16 path length"));
+		return Err(Error::InvalidArchive { problem: "odd LZH UTF-16 path length" });
 	}
 	let mut end = bytes.len();
 	while end >= 2 && bytes[end - 2..end] == [0, 0] {
@@ -934,7 +951,7 @@ fn read_array<const N: usize>(
 		.checked_add(N as u64)
 		.is_none_or(|end| end > file_size)
 	{
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut bytes = [0_u8; N];
 	source.seek(SeekFrom::Start(offset))?;
@@ -953,7 +970,7 @@ fn read_vec(
 		.checked_add(length as u64)
 		.is_none_or(|end| end > file_size)
 	{
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut bytes = vec![0_u8; length];
 	source.seek(SeekFrom::Start(offset))?;

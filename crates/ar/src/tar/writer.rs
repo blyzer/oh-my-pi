@@ -34,7 +34,7 @@ impl<W: Write> Writer<W> {
 	/// Adds a regular file at `path` with the supplied bytes.
 	pub fn add_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
 		if is_directory_name(path) {
-			return Err(Error::UnsafePath(Str::new(path)));
+			return Err(Error::UnsafePath { path: Str::new(path) });
 		}
 		let path = normalize_bounded(path, Limits::DEFAULT)?;
 		self.add_entry(path, false, data)
@@ -55,7 +55,7 @@ impl<W: Write> Writer<W> {
 	/// refuses targets that cannot be resolved inside the archive.
 	pub fn add_symlink(&mut self, path: &str, target: &str) -> Result<()> {
 		if is_directory_name(path) {
-			return Err(Error::UnsafePath(Str::new(path)));
+			return Err(Error::UnsafePath { path: Str::new(path) });
 		}
 		let path = normalize_bounded(path, Limits::DEFAULT)?;
 		let target = portable_link_target(target)?;
@@ -65,7 +65,7 @@ impl<W: Write> Writer<W> {
 	/// Adds a hard-link entry targeting another archive-relative member path.
 	pub fn add_hard_link(&mut self, path: &str, target: &str) -> Result<()> {
 		if is_directory_name(path) {
-			return Err(Error::UnsafePath(Str::new(path)));
+			return Err(Error::UnsafePath { path: Str::new(path) });
 		}
 		let path = normalize_bounded(path, Limits::DEFAULT)?;
 		let target = normalize_bounded(target, Limits::DEFAULT)?;
@@ -81,7 +81,7 @@ impl<W: Write> Writer<W> {
 
 	fn add_entry(&mut self, path: Str, directory: bool, data: &[u8]) -> Result<()> {
 		if self.paths.contains(path.as_str()) {
-			return Err(Error::DuplicatePath(path));
+			return Err(Error::DuplicatePath { path });
 		}
 		let emitted_name = if directory {
 			let mut name = String::with_capacity(path.len() + 1);
@@ -91,7 +91,8 @@ impl<W: Write> Writer<W> {
 		} else {
 			Cow::Borrowed(path.as_str())
 		};
-		let size = u64::try_from(data.len()).map_err(|_| Error::TarFieldOverflow("size"))?;
+		let size =
+			u64::try_from(data.len()).map_err(|_| Error::TarFieldOverflow { field: "size" })?;
 		ensure_octal_fits(size, 12, "size")?;
 
 		let split = split_ustar_name(emitted_name.as_bytes());
@@ -109,7 +110,7 @@ impl<W: Write> Writer<W> {
 
 	fn add_link(&mut self, path: Str, target: &[u8], typeflag: u8) -> Result<()> {
 		if self.paths.contains(path.as_str()) {
-			return Err(Error::DuplicatePath(path));
+			return Err(Error::DuplicatePath { path });
 		}
 		let split = split_ustar_name(path.as_bytes());
 		if split.is_none() {
@@ -135,8 +136,9 @@ impl<W: Write> Writer<W> {
 		let payload_len = value
 			.len()
 			.checked_add(1)
-			.ok_or(Error::TarFieldOverflow(overflow_field))?;
-		let size = u64::try_from(payload_len).map_err(|_| Error::TarFieldOverflow(overflow_field))?;
+			.ok_or(Error::TarFieldOverflow { field: overflow_field })?;
+		let size = u64::try_from(payload_len)
+			.map_err(|_| Error::TarFieldOverflow { field: overflow_field })?;
 		ensure_octal_fits(size, 12, overflow_field)?;
 		let header = make_header(GNU_LONG_NAME.as_bytes(), &[], size, typeflag, &[])?;
 		self.inner.write_all(header.as_bytes())?;
@@ -204,10 +206,10 @@ fn make_header(
 	link_name: &[u8],
 ) -> Result<UstarHeader> {
 	if name.len() > 100 || prefix.len() > 155 {
-		return Err(Error::TarFieldOverflow("path"));
+		return Err(Error::TarFieldOverflow { field: "path" });
 	}
 	if link_name.len() > 100 {
-		return Err(Error::TarFieldOverflow("link name"));
+		return Err(Error::TarFieldOverflow { field: "link name" });
 	}
 	let mut header = UstarHeader {
 		name: [0; 100],
@@ -245,7 +247,7 @@ fn make_header(
 
 fn portable_link_target(target: &str) -> Result<Cow<'_, str>> {
 	if target.is_empty() || target.contains('\0') {
-		return Err(Error::UnsafePath(Str::new(target)));
+		return Err(Error::UnsafePath { path: Str::new(target) });
 	}
 	let limit = Limits::DEFAULT.max_path_size();
 	if target.len() as u64 > limit {
@@ -259,12 +261,14 @@ fn portable_link_target(target: &str) -> Result<Cow<'_, str>> {
 }
 
 fn ensure_octal_fits(value: u64, width: usize, field: &'static str) -> Result<()> {
-	let digits = width.checked_sub(1).ok_or(Error::TarFieldOverflow(field))?;
+	let digits = width
+		.checked_sub(1)
+		.ok_or(Error::TarFieldOverflow { field })?;
 	let bits = digits
 		.checked_mul(3)
-		.ok_or(Error::TarFieldOverflow(field))?;
+		.ok_or(Error::TarFieldOverflow { field })?;
 	if bits < 64 && value >= (1_u64 << bits) {
-		return Err(Error::TarFieldOverflow(field));
+		return Err(Error::TarFieldOverflow { field });
 	}
 	Ok(())
 }

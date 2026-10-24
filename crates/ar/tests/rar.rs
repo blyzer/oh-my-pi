@@ -122,7 +122,7 @@ fn encrypted_volume_recovery_ppmd_and_methods_fail_precisely() {
 		let bytes = fixture_bytes(name);
 		assert!(matches!(
 			Archive::from_bytes_with_format(&bytes, Format::Rar),
-			Err(Error::Encrypted(_))
+			Err(Error::Encrypted { .. })
 		));
 	}
 	for (name, feature) in [
@@ -134,7 +134,7 @@ fn encrypted_volume_recovery_ppmd_and_methods_fail_precisely() {
 		let bytes = fixture_bytes(name);
 		assert!(matches!(
 			Archive::from_bytes_with_format(&bytes, Format::Rar),
-			Err(Error::UnsupportedFeature(actual)) if actual == feature
+			Err(Error::UnsupportedFeature { feature: actual }) if actual == feature
 		));
 	}
 
@@ -142,13 +142,13 @@ fn encrypted_volume_recovery_ppmd_and_methods_fail_precisely() {
 	let mut archive = Archive::from_bytes_with_format(&bytes, Format::Rar).unwrap();
 	assert!(matches!(
 		archive.read("input/hello.txt"),
-		Err(Error::UnsupportedFeature("RAR5 compression method 6"))
+		Err(Error::UnsupportedFeature { feature: "RAR5 compression method 6" })
 	));
 	let bytes = fixture_bytes("rar4-ppm.rar");
 	let mut archive = Archive::from_bytes_with_format(&bytes, Format::Rar).unwrap();
 	assert!(matches!(
 		archive.read("input/ppm.txt"),
-		Err(Error::UnsupportedFeature("RAR4 PPMd compressed block"))
+		Err(Error::UnsupportedFeature { feature: "RAR4 PPMd compressed block" })
 	));
 }
 
@@ -165,7 +165,7 @@ fn traversal_corruption_checksums_and_limits_fail_safely() {
 	corrupt_header[20] ^= 1;
 	assert!(matches!(
 		Archive::from_bytes_with_format(&corrupt_header, Format::Rar),
-		Err(Error::InvalidArchive("RAR5 header CRC32 mismatch"))
+		Err(Error::InvalidArchive { problem: "RAR5 header CRC32 mismatch" })
 	));
 	let mut corrupt_payload = original.clone();
 	let payload = b"hello from rar\n";

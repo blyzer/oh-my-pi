@@ -57,7 +57,7 @@ impl<W: Write> Writer<W> {
 	/// Adds a file at `path` with the supplied uncompressed bytes.
 	pub fn add_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
 		if is_directory_name(path) {
-			return Err(Error::UnsafePath(Str::new(path)));
+			return Err(Error::UnsafePath { path: Str::new(path) });
 		}
 		let path = normalize_bounded(path, Limits::DEFAULT)?;
 		self.add_entry(path, false, data)
@@ -115,7 +115,7 @@ impl<W: Write> Writer<W> {
 
 	fn add_entry(&mut self, path: Str, directory: bool, data: &[u8]) -> Result<()> {
 		if self.paths.contains(path.as_str()) {
-			return Err(Error::DuplicatePath(path));
+			return Err(Error::DuplicatePath { path });
 		}
 		if self.entries.len() + 1 >= usize::from(U16_SENTINEL) || data.len() >= U32_SENTINEL as usize
 		{

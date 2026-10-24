@@ -20,7 +20,7 @@ const SIGNATURE: &[u8; 6] = b"7z\xbc\xaf'\x1c";
 const FILETIME_EPOCH_SECONDS: u64 = 11_644_473_600;
 
 const fn invalid(message: &'static str) -> Error {
-	Error::InvalidArchive(message)
+	Error::InvalidArchive { problem: message }
 }
 
 struct HeaderReader<'a> {
@@ -253,7 +253,9 @@ fn parse_folder(reader: &mut HeaderReader<'_>, limits: Limits) -> Result<Folder>
 	for _ in 0..coder_count {
 		let flags = reader.read_byte()?;
 		if flags & 0xc0 != 0 {
-			return Err(Error::UnsupportedFeature("7z coder alternatives or reserved flags"));
+			return Err(Error::UnsupportedFeature {
+				feature: "7z coder alternatives or reserved flags",
+			});
 		}
 		let id_size = usize::from(flags & 0x0f);
 		if id_size == 0 || id_size > 8 {
@@ -353,7 +355,9 @@ fn final_folder_output(folder: &Folder) -> Result<usize> {
 				continue;
 			}
 			if final_output.replace(output).is_some() {
-				return Err(Error::UnsupportedFeature("7z folder with multiple final output streams"));
+				return Err(Error::UnsupportedFeature {
+					feature: "7z folder with multiple final output streams",
+				});
 			}
 		}
 	}
@@ -409,7 +413,7 @@ fn parse_unpack_info(
 	check_entry_count(count, limits)?;
 	let count = usize::try_from(count).map_err(|_| invalid("7z folder count is too large"))?;
 	if reader.read_byte()? != 0 {
-		return Err(Error::UnsupportedFeature("external 7z folder definitions"));
+		return Err(Error::UnsupportedFeature { feature: "external 7z folder definitions" });
 	}
 	streams.folders.reserve(count);
 	for _ in 0..count {
@@ -577,7 +581,7 @@ fn parse_streams_info(
 			6 => parse_pack_info(reader, &mut streams, limits)?,
 			7 => parse_unpack_info(reader, &mut streams, limits)?,
 			8 => parse_substreams_info(reader, &mut streams, limits)?,
-			_ => return Err(Error::UnsupportedFeature("7z StreamsInfo property")),
+			_ => return Err(Error::UnsupportedFeature { feature: "7z StreamsInfo property" }),
 		}
 	}
 	if !streams.folders.is_empty() && streams.substreams.is_empty() {
@@ -605,20 +609,20 @@ fn read_range(source: &mut (impl Read + Seek), offset: u64, size: u64) -> Result
 
 const fn coder_error(id: u64) -> Error {
 	match id {
-		0x30401 => Error::UnsupportedFeature("7z coder PPMd"),
-		0x303011b => Error::UnsupportedFeature("7z coder BCJ2 (multi-input folder)"),
-		0x6f10701 => Error::UnsupportedFeature("encrypted 7z coder 7zAES"),
-		0x40108 => Error::UnsupportedFeature("7z coder Deflate"),
-		0x40109 => Error::UnsupportedFeature("7z coder Deflate64"),
-		0x40202 => Error::UnsupportedFeature("7z coder BZip2"),
-		0x3030205 => Error::UnsupportedFeature("7z coder BCJ PowerPC"),
-		0x3030401 => Error::UnsupportedFeature("7z coder BCJ IA64"),
-		0x3030501 => Error::UnsupportedFeature("7z coder BCJ ARM"),
-		0x3030701 => Error::UnsupportedFeature("7z coder BCJ ARM Thumb"),
-		0x3030805 => Error::UnsupportedFeature("7z coder BCJ SPARC"),
-		0xa => Error::UnsupportedFeature("7z coder BCJ ARM64"),
-		0xb => Error::UnsupportedFeature("7z coder BCJ RISC-V"),
-		_ => Error::UnsupportedFeature("unknown 7z coder method"),
+		0x30401 => Error::UnsupportedFeature { feature: "7z coder PPMd" },
+		0x303011b => Error::UnsupportedFeature { feature: "7z coder BCJ2 (multi-input folder)" },
+		0x6f10701 => Error::UnsupportedFeature { feature: "encrypted 7z coder 7zAES" },
+		0x40108 => Error::UnsupportedFeature { feature: "7z coder Deflate" },
+		0x40109 => Error::UnsupportedFeature { feature: "7z coder Deflate64" },
+		0x40202 => Error::UnsupportedFeature { feature: "7z coder BZip2" },
+		0x3030205 => Error::UnsupportedFeature { feature: "7z coder BCJ PowerPC" },
+		0x3030401 => Error::UnsupportedFeature { feature: "7z coder BCJ IA64" },
+		0x3030501 => Error::UnsupportedFeature { feature: "7z coder BCJ ARM" },
+		0x3030701 => Error::UnsupportedFeature { feature: "7z coder BCJ ARM Thumb" },
+		0x3030805 => Error::UnsupportedFeature { feature: "7z coder BCJ SPARC" },
+		0xa => Error::UnsupportedFeature { feature: "7z coder BCJ ARM64" },
+		0xb => Error::UnsupportedFeature { feature: "7z coder BCJ RISC-V" },
+		_ => Error::UnsupportedFeature { feature: "unknown 7z coder method" },
 	}
 }
 
@@ -634,7 +638,9 @@ fn decode_folder(
 		if folder.coders.iter().any(|coder| coder.id == 0x303011b) {
 			return Err(coder_error(0x303011b));
 		}
-		return Err(Error::UnsupportedFeature("7z folder graph with multiple packed input streams"));
+		return Err(Error::UnsupportedFeature {
+			feature: "7z folder graph with multiple packed input streams",
+		});
 	}
 	let mut bytes = read_range(source, folder.pack_offsets[0], folder.pack_sizes[0])?;
 	if folder.pack_crcs[0].is_some_and(|expected| crc32fast::hash(&bytes) != expected) {
@@ -717,7 +723,9 @@ fn decode_folder(
 		input_index = binding.input;
 	}
 	if visited.len() != folder.coders.len() {
-		return Err(Error::UnsupportedFeature("7z folder graph with disconnected coders"));
+		return Err(Error::UnsupportedFeature {
+			feature: "7z folder graph with disconnected coders",
+		});
 	}
 	if folder
 		.crc
@@ -972,7 +980,7 @@ fn parse_header(
 			},
 			4 => streams = Some(parse_streams_info(&mut reader, source_size, limits)?),
 			5 => files = Some(parse_files_info(&mut reader, &additional, limits)?),
-			_ => return Err(Error::UnsupportedFeature("7z header property")),
+			_ => return Err(Error::UnsupportedFeature { feature: "7z header property" }),
 		}
 	}
 	if reader.remaining() != 0 {
@@ -1162,7 +1170,7 @@ pub(crate) fn read_entries(
 		return Err(invalid("invalid 7z archive signature"));
 	}
 	if signature_header[6] != 0 {
-		return Err(Error::UnsupportedFeature("7z major version"));
+		return Err(Error::UnsupportedFeature { feature: "7z major version" });
 	}
 	if crc32fast::hash(&signature_header[12..32])
 		!= u32::from_le_bytes(signature_header[8..12].try_into().expect("slice length"))
@@ -1205,7 +1213,7 @@ pub(crate) fn read_entries(
 			return Err(invalid("invalid decoded 7z header marker"));
 		}
 	} else if first != 1 {
-		return Err(Error::UnsupportedFeature("7z next-header type"));
+		return Err(Error::UnsupportedFeature { feature: "7z next-header type" });
 	}
 	let (streams, files) = parse_header(source, &header, file_size, limits)?;
 	let folder_buffers = decode_data_folders(source, &streams, limits, decoded)?;

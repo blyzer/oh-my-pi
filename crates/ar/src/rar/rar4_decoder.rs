@@ -89,7 +89,7 @@ impl Huffman {
 	fn build(&mut self, lengths: &[u8], offset: usize, size: usize) -> Result<()> {
 		let source = lengths
 			.get(offset..offset + size)
-			.ok_or(Error::InvalidArchive("truncated RAR4 Huffman table"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated RAR4 Huffman table" })?;
 		self.counts.fill(0);
 		for &length in source {
 			let length = usize::from(length & 15);
@@ -188,7 +188,7 @@ impl Rar4Decoder {
 		version: u8,
 	) -> Result<Vec<u8>> {
 		if version < 29 {
-			return Err(Error::UnsupportedFeature("RAR 1.5/2.0 compressed stream"));
+			return Err(Error::UnsupportedFeature { feature: "RAR 1.5/2.0 compressed stream" });
 		}
 		if !solid {
 			self.reset();
@@ -199,7 +199,7 @@ impl Rar4Decoder {
 			.len()
 			.checked_add(unpacked_size)
 			.and_then(|size| size.checked_add(260))
-			.ok_or(Error::InvalidArchive("RAR4 output size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR4 output size overflows" })?;
 		let mut output = vec![0; capacity];
 		output[..prior.len()].copy_from_slice(prior);
 		let output_start = prior.len();
@@ -362,7 +362,7 @@ impl Rar4Decoder {
 	) -> Result<()> {
 		bits.align();
 		if bits.read(1)? != 0 {
-			return Err(Error::UnsupportedFeature("RAR4 PPMd compressed block"));
+			return Err(Error::UnsupportedFeature { feature: "RAR4 PPMd compressed block" });
 		}
 		let keep_previous = bits.read(1)? != 0;
 		self.previous_low_distance = 0;
@@ -423,11 +423,11 @@ impl Rar4Decoder {
 		if first_byte & 0x40 != 0 {
 			start = start
 				.checked_add(258)
-				.ok_or(Error::InvalidArchive("RAR4 filter start overflows"))?;
+				.ok_or(Error::InvalidArchive { problem: "RAR4 filter start overflows" })?;
 		}
 		start = start
 			.checked_add(output_position)
-			.ok_or(Error::InvalidArchive("RAR4 filter start overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR4 filter start overflows" })?;
 		let block_size = if first_byte & 0x20 != 0 {
 			vm.read_data()?
 		} else {
@@ -466,7 +466,7 @@ impl Rar4Decoder {
 			self.filter_types[filter_position]
 		};
 		if !matches!(kind, 1 | 2 | 6) {
-			return Err(Error::UnsupportedFeature("RAR4 custom RarVM filter program"));
+			return Err(Error::UnsupportedFeature { feature: "RAR4 custom RarVM filter program" });
 		}
 		if kind == 6 && registers[0] == 0 {
 			return invalid("invalid RarVM delta channel count");
@@ -695,5 +695,5 @@ fn write_i32(bytes: &mut [u8], offset: usize, value: i32) {
 }
 
 const fn invalid<T>(reason: &'static str) -> Result<T> {
-	Err(Error::InvalidArchive(reason))
+	Err(Error::InvalidArchive { problem: reason })
 }

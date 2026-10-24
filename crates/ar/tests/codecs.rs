@@ -62,14 +62,14 @@ fn bzip2_rejects_truncation_bad_crc_and_output_overflow() {
 	let truncated = &compressed[..compressed.len() - 1];
 	assert!(matches!(
 		archive_error(truncated, Format::Bz2, Limits::DEFAULT),
-		Error::InvalidArchive("truncated bzip2 stream")
+		Error::InvalidArchive { problem: "truncated bzip2 stream" }
 	));
 
 	let mut bad_crc = compressed.clone();
 	bad_crc[10] ^= 1;
 	assert!(matches!(
 		archive_error(&bad_crc, Format::Bz2, Limits::DEFAULT),
-		Error::InvalidArchive("bzip2 block CRC mismatch")
+		Error::InvalidArchive { problem: "bzip2 block CRC mismatch" }
 	));
 
 	assert!(matches!(
@@ -118,21 +118,21 @@ fn ncompress_resets_after_clear_code_group() {
 fn ncompress_rejects_invalid_headers_codes_padding_and_output_overflow() {
 	assert!(matches!(
 		archive_error(&[0x1f, 0x9d], Format::Z, Limits::DEFAULT),
-		Error::InvalidArchive("truncated compress (.Z) header")
+		Error::InvalidArchive { problem: "truncated compress (.Z) header" }
 	));
 	assert!(matches!(
 		archive_error(&[0x1f, 0x9d, 0xa9], Format::Z, Limits::DEFAULT),
-		Error::UnsupportedFeature("compress (.Z) reserved header flags")
+		Error::UnsupportedFeature { feature: "compress (.Z) reserved header flags" }
 	));
 	assert!(matches!(
 		archive_error(&[0x1f, 0x9d, 0x90, 0x01, 0x01], Format::Z, Limits::DEFAULT),
-		Error::InvalidArchive("corrupt compress (.Z) dictionary code")
+		Error::InvalidArchive { problem: "corrupt compress (.Z) dictionary code" }
 	));
 
 	let compressed = fixture_bytes("codecs/ncompress.bin.Z");
 	assert!(matches!(
 		archive_error(&compressed[..compressed.len() - 1], Format::Z, Limits::DEFAULT),
-		Error::InvalidArchive("non-zero compress (.Z) padding")
+		Error::InvalidArchive { problem: "non-zero compress (.Z) padding" }
 	));
 	assert!(matches!(
 		archive_error(&compressed, Format::Z, Limits::DEFAULT.with_max_archive_size(1_024),),

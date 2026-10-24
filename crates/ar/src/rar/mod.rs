@@ -121,14 +121,17 @@ pub(crate) fn read_entry_to<W: Write>(
 	let Storage::Rar { data_offset, packed_size, dictionary_size, crc32, format, method, version } =
 		&entry.storage
 	else {
-		return Err(Error::InvalidArchive("invalid RAR member storage"));
+		return Err(Error::InvalidArchive { problem: "invalid RAR member storage" });
 	};
-	let packed_len = usize::try_from(*packed_size)
-		.map_err(|_| Error::InvalidArchive("RAR packed size overflows platform limits"))?;
-	let unpacked_len = usize::try_from(entry.size)
-		.map_err(|_| Error::InvalidArchive("RAR unpacked size overflows platform limits"))?;
-	let dictionary_len = usize::try_from(*dictionary_size)
-		.map_err(|_| Error::InvalidArchive("RAR dictionary size overflows platform limits"))?;
+	let packed_len = usize::try_from(*packed_size).map_err(|_| Error::InvalidArchive {
+		problem: "RAR packed size overflows platform limits",
+	})?;
+	let unpacked_len = usize::try_from(entry.size).map_err(|_| Error::InvalidArchive {
+		problem: "RAR unpacked size overflows platform limits",
+	})?;
+	let dictionary_len = usize::try_from(*dictionary_size).map_err(|_| Error::InvalidArchive {
+		problem: "RAR dictionary size overflows platform limits",
+	})?;
 	let packed = read_at(source, *data_offset, packed_len)?;
 	let bytes = decode_member(
 		&packed,
@@ -159,7 +162,7 @@ fn scan_marker(
 			return Ok((version, offset as u64));
 		}
 		if end >= scan_limit {
-			return Err(Error::InvalidArchive("RAR signature not found"));
+			return Err(Error::InvalidArchive { problem: "RAR signature not found" });
 		}
 		let next_end = scan_limit.min((end.saturating_mul(2)).max(64 * 1024));
 		check_index_size(next_end, limits)?;
@@ -206,11 +209,11 @@ fn parse_rar5(
 		}
 		let total_size = (size_cursor as u64)
 			.checked_add(header_size)
-			.ok_or(Error::InvalidArchive("RAR5 header size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR5 header size overflows" })?;
 		let header_end = checked_end(offset, total_size, file_size, "RAR5 header")?;
 		metadata_size = metadata_size
 			.checked_add(total_size)
-			.ok_or(Error::InvalidArchive("RAR metadata size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR metadata size overflows" })?;
 		check_index_size(metadata_size, limits)?;
 		let header = read_at(source, offset, usize_from_u64(total_size, "RAR5 header")?)?;
 		let expected_crc = read_u32(&header, 0)?;
@@ -232,7 +235,7 @@ fn parse_rar5(
 			0
 		};
 		if flags & 0x18 != 0 {
-			return Err(Error::UnsupportedFeature("multi-volume RAR5 archive"));
+			return Err(Error::UnsupportedFeature { feature: "multi-volume RAR5 archive" });
 		}
 		let data_start = header_end;
 		let data_end = checked_end(data_start, data_size, file_size, "RAR5 data area")?;
@@ -242,14 +245,14 @@ fn parse_rar5(
 		let extra_start = header.len() - usize_from_u64(extra_size, "RAR5 extra area")?;
 
 		match kind {
-			4 => return Err(Error::Encrypted(Str::new("RAR5 headers"))),
+			4 => return Err(Error::Encrypted { data: Str::new("RAR5 headers") }),
 			1 => {
 				let archive_flags = read_vint(&header, &mut cursor, extra_start, "RAR5 archive flags")?;
 				if archive_flags & 1 != 0 {
-					return Err(Error::UnsupportedFeature("multi-volume RAR5 archive"));
+					return Err(Error::UnsupportedFeature { feature: "multi-volume RAR5 archive" });
 				}
 				if archive_flags & 8 != 0 {
-					return Err(Error::UnsupportedFeature("RAR5 recovery record"));
+					return Err(Error::UnsupportedFeature { feature: "RAR5 recovery record" });
 				}
 				if archive_flags & 2 != 0 {
 					read_vint(&header, &mut cursor, extra_start, "RAR5 volume number")?;
@@ -273,12 +276,12 @@ fn parse_rar5(
 			5 => {
 				let end_flags = read_vint(&header, &mut cursor, extra_start, "RAR5 end flags")?;
 				if end_flags & 1 != 0 {
-					return Err(Error::UnsupportedFeature("multi-volume RAR5 archive"));
+					return Err(Error::UnsupportedFeature { feature: "multi-volume RAR5 archive" });
 				}
 				break;
 			},
 			_ if flags & 4 != 0 => {},
-			_ => return Err(Error::UnsupportedFeature("RAR5 header type")),
+			_ => return Err(Error::UnsupportedFeature { feature: "RAR5 header type" }),
 		}
 		offset = data_end;
 	}
@@ -300,7 +303,7 @@ fn parse_rar5_file(
 	let file_flags = read_vint(header, cursor, extra_start, "RAR5 file flags")?;
 	let unpacked_size = read_vint(header, cursor, extra_start, "RAR5 unpacked size")?;
 	if file_flags & 8 != 0 {
-		return Err(Error::UnsupportedFeature("RAR5 member with unknown unpacked size"));
+		return Err(Error::UnsupportedFeature { feature: "RAR5 member with unknown unpacked size" });
 	}
 	let attributes = read_vint(header, cursor, extra_start, "RAR5 file attributes")?;
 	let mut mtime = if file_flags & 2 != 0 {
@@ -323,11 +326,11 @@ fn parse_rar5_file(
 	let dictionary_power = ((compression >> 10) & 0x1f) as u32;
 	let mut dictionary_size = (128u64 * 1024)
 		.checked_shl(dictionary_power)
-		.ok_or(Error::InvalidArchive("RAR5 dictionary size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR5 dictionary size overflows" })?;
 	if compression & 0x3f == 1 {
 		dictionary_size = dictionary_size
 			.checked_add(dictionary_size * ((compression >> 15) & 0x1f) / 32)
-			.ok_or(Error::InvalidArchive("RAR5 dictionary size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR5 dictionary size overflows" })?;
 	}
 	if dictionary_size > limits.in_memory_size {
 		return Err(Error::ArchiveTooLargeInMemory {
@@ -342,7 +345,7 @@ fn parse_rar5_file(
 	}
 	let name_end = checked_slice_end(*cursor, name_size, extra_start, "RAR5 file name")?;
 	let raw_path = str::from_utf8(&header[*cursor..name_end])
-		.map_err(|_| Error::InvalidArchive("invalid RAR5 UTF-8 member name"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "invalid RAR5 UTF-8 member name" })?;
 	*cursor = name_end;
 	let mut link_target = None;
 	let mut extra_cursor = extra_start;
@@ -353,7 +356,7 @@ fn parse_rar5_file(
 			checked_slice_end(extra_cursor, record_size, header.len(), "RAR5 extra record")?;
 		let extra_type = read_vint(header, &mut extra_cursor, record_end, "RAR5 extra record type")?;
 		if extra_type == 1 {
-			return Err(Error::Encrypted(Str::new(raw_path)));
+			return Err(Error::Encrypted { data: Str::new(raw_path) });
 		}
 		if extra_type == 3 {
 			let time_flags = read_vint(header, &mut extra_cursor, record_end, "RAR5 time flags")?;
@@ -371,9 +374,9 @@ fn parse_rar5_file(
 					let ticks =
 						u64::from_le_bytes(header[extra_cursor..end].try_into().expect("eight bytes"));
 					Some(
-						(ticks / 10_000_000)
-							.checked_sub(11_644_473_600)
-							.ok_or(Error::InvalidArchive("RAR5 FILETIME predates Unix epoch"))?,
+						(ticks / 10_000_000).checked_sub(11_644_473_600).ok_or(
+							Error::InvalidArchive { problem: "RAR5 FILETIME predates Unix epoch" },
+						)?,
 					)
 				};
 			}
@@ -386,19 +389,19 @@ fn parse_rar5_file(
 				return Err(Error::PathTooLong { actual: target_size, limit: limits.path_size });
 			}
 			if !(1..=5).contains(&redirect) {
-				return Err(Error::UnsupportedFeature("RAR5 redirection type"));
+				return Err(Error::UnsupportedFeature { feature: "RAR5 redirection type" });
 			}
 			let target_end =
 				checked_slice_end(extra_cursor, target_size, record_end, "RAR5 link target")?;
 			let target = str::from_utf8(&header[extra_cursor..target_end])
-				.map_err(|_| Error::InvalidArchive("invalid RAR5 UTF-8 link target"))?;
+				.map_err(|_| Error::InvalidArchive { problem: "invalid RAR5 UTF-8 link target" })?;
 			link_target = Some(target.to_owned());
 		}
 		extra_cursor = record_end;
 	}
 	if kind == 3 {
 		if raw_path == "RR" {
-			return Err(Error::UnsupportedFeature("RAR5 recovery record"));
+			return Err(Error::UnsupportedFeature { feature: "RAR5 recovery record" });
 		}
 		return Ok(None);
 	}
@@ -453,7 +456,7 @@ fn parse_rar4(
 		let header_end = checked_end(offset, header_size, file_size, "RAR4 header")?;
 		metadata_size = metadata_size
 			.checked_add(header_size)
-			.ok_or(Error::InvalidArchive("RAR metadata size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR metadata size overflows" })?;
 		check_index_size(metadata_size, limits)?;
 		let header = read_at(source, offset, usize_from_u64(header_size, "RAR4 header")?)?;
 		if (crc32fast::hash(&header[2..]) & 0xffff) != u32::from(expected_crc) {
@@ -470,13 +473,13 @@ fn parse_rar4(
 		match kind {
 			0x73 => {
 				if flags & 1 != 0 {
-					return Err(Error::UnsupportedFeature("multi-volume RAR4 archive"));
+					return Err(Error::UnsupportedFeature { feature: "multi-volume RAR4 archive" });
 				}
 				if flags & 0x40 != 0 {
-					return Err(Error::UnsupportedFeature("RAR4 recovery record"));
+					return Err(Error::UnsupportedFeature { feature: "RAR4 recovery record" });
 				}
 				if flags & 0x80 != 0 {
-					return Err(Error::Encrypted(Str::new("RAR4 headers")));
+					return Err(Error::Encrypted { data: Str::new("RAR4 headers") });
 				}
 				saw_main = true;
 			},
@@ -497,10 +500,10 @@ fn parse_rar4(
 					check_entry_count(records.len(), limits)?;
 				}
 			},
-			0x78 => return Err(Error::UnsupportedFeature("RAR4 recovery record")),
+			0x78 => return Err(Error::UnsupportedFeature { feature: "RAR4 recovery record" }),
 			0x7b => {
 				if flags & 1 != 0 {
-					return Err(Error::UnsupportedFeature("multi-volume RAR4 archive"));
+					return Err(Error::UnsupportedFeature { feature: "multi-volume RAR4 archive" });
 				}
 				break;
 			},
@@ -543,22 +546,22 @@ fn parse_rar4_file(
 			.checked_add(
 				u64::from(read_u32_at(header, cursor, header.len(), "RAR4 high packed size")?) << 32,
 			)
-			.ok_or(Error::InvalidArchive("RAR4 packed size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR4 packed size overflows" })?;
 		unpacked_size = unpacked_size
 			.checked_add(
 				u64::from(read_u32_at(header, cursor, header.len(), "RAR4 high unpacked size")?) << 32,
 			)
-			.ok_or(Error::InvalidArchive("RAR4 unpacked size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR4 unpacked size overflows" })?;
 	}
 	let data_end = checked_end(data_start, packed_size, file_size, "RAR4 file data")?;
 	if flags & 3 != 0 {
-		return Err(Error::UnsupportedFeature("multi-volume RAR4 member"));
+		return Err(Error::UnsupportedFeature { feature: "multi-volume RAR4 member" });
 	}
 	if flags & 4 != 0 {
-		return Err(Error::Encrypted(Str::new("RAR4 file data")));
+		return Err(Error::Encrypted { data: Str::new("RAR4 file data") });
 	}
 	if !(0x30..=0x35).contains(&method_byte) {
-		return Err(Error::UnsupportedFeature("RAR4 compression method 0x36"));
+		return Err(Error::UnsupportedFeature { feature: "RAR4 compression method 0x36" });
 	}
 	if name_size > limits.path_size {
 		return Err(Error::PathTooLong { actual: name_size, limit: limits.path_size });
@@ -615,7 +618,7 @@ fn parse_rar4_file(
 	let mode = (host_os == 3).then_some(attributes);
 	let link = if mode.is_some_and(|mode| mode & 0xf000 == 0xa000) {
 		if method_byte != 0x30 || packed_size != unpacked_size {
-			return Err(Error::UnsupportedFeature("compressed RAR4 symlink"));
+			return Err(Error::UnsupportedFeature { feature: "compressed RAR4 symlink" });
 		}
 		if packed_size > limits.path_size {
 			return Err(Error::PathTooLong { actual: packed_size, limit: limits.path_size });
@@ -664,7 +667,7 @@ fn decode_solid_chains(
 	let mut index = 0usize;
 	let mut retained = decoded.iter().try_fold(0u64, |sum, bytes| {
 		sum.checked_add(bytes.len() as u64)
-			.ok_or(Error::InvalidArchive("decoded buffer size overflows"))
+			.ok_or(Error::InvalidArchive { problem: "decoded buffer size overflows" })
 	})?;
 	while index < records.len() {
 		let starts_chain = records[index].solid
@@ -711,7 +714,7 @@ fn decode_solid_chains(
 			}
 			retained = retained
 				.checked_add(bytes.len() as u64)
-				.ok_or(Error::InvalidArchive("decoded buffer size overflows"))?;
+				.ok_or(Error::InvalidArchive { problem: "decoded buffer size overflows" })?;
 			if retained > limits.in_memory_size {
 				return Err(Error::ArchiveTooLargeInMemory {
 					actual: retained,
@@ -719,7 +722,7 @@ fn decode_solid_chains(
 				});
 			}
 			let buffer = u32::try_from(decoded.len())
-				.map_err(|_| Error::InvalidArchive("too many decoded RAR buffers"))?;
+				.map_err(|_| Error::InvalidArchive { problem: "too many decoded RAR buffers" })?;
 			decoded.push(bytes);
 			buffers[current] = Some(buffer);
 		}
@@ -754,11 +757,13 @@ fn decode_member(
 		return Ok(packed.to_vec());
 	}
 	if method > 5 {
-		return Err(Error::UnsupportedFeature(if format == 4 {
-			"RAR4 compression method"
-		} else {
-			"RAR5 compression method 6"
-		}));
+		return Err(Error::UnsupportedFeature {
+			feature: if format == 4 {
+				"RAR4 compression method"
+			} else {
+				"RAR5 compression method 6"
+			},
+		});
 	}
 	if format == 5 {
 		rar5.decode(packed, unpacked_size, dictionary_size, solid, version)
@@ -798,7 +803,7 @@ fn check_decode_memory(
 		.checked_add(unpacked.saturating_mul(2))
 		.and_then(|size| size.checked_add(dictionary.saturating_mul(2)))
 		.and_then(|size| size.checked_add(8192))
-		.ok_or(Error::InvalidArchive("RAR decode memory size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR decode memory size overflows" })?;
 	if actual > limits.in_memory_size {
 		return Err(Error::ArchiveTooLargeInMemory { actual, limit: limits.in_memory_size });
 	}
@@ -920,7 +925,7 @@ fn decode_rar4_unicode_name(bytes: &[u8]) -> Result<String> {
 		flag_bits -= 2;
 	}
 	xutf::to_string::<Utf16Le>(&output)
-		.map_err(|_| Error::InvalidArchive("invalid RAR4 Unicode member name"))
+		.map_err(|_| Error::InvalidArchive { problem: "invalid RAR4 Unicode member name" })
 }
 
 fn decode_latin1(bytes: &[u8]) -> String {
@@ -972,10 +977,10 @@ fn read_vint(bytes: &[u8], cursor: &mut usize, end: usize, _what: &'static str) 
 		*cursor += 1;
 		let part = u64::from(byte & 0x7f)
 			.checked_shl(shift)
-			.ok_or(Error::InvalidArchive("RAR vint is too large"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR vint is too large" })?;
 		value = value
 			.checked_add(part)
-			.ok_or(Error::InvalidArchive("RAR vint is too large"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR vint is too large" })?;
 		if byte & 0x80 == 0 {
 			return Ok(value);
 		}
@@ -994,20 +999,20 @@ fn read_at(source: &mut (impl Read + Seek), offset: u64, size: usize) -> Result<
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
 	let end = offset
 		.checked_add(2)
-		.ok_or(Error::InvalidArchive("RAR integer offset overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR integer offset overflows" })?;
 	let raw = bytes
 		.get(offset..end)
-		.ok_or(Error::InvalidArchive("truncated RAR integer"))?;
+		.ok_or(Error::InvalidArchive { problem: "truncated RAR integer" })?;
 	Ok(u16::from_le_bytes(raw.try_into().expect("two bytes")))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
 	let end = offset
 		.checked_add(4)
-		.ok_or(Error::InvalidArchive("RAR integer offset overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR integer offset overflows" })?;
 	let raw = bytes
 		.get(offset..end)
-		.ok_or(Error::InvalidArchive("truncated RAR integer"))?;
+		.ok_or(Error::InvalidArchive { problem: "truncated RAR integer" })?;
 	Ok(u32::from_le_bytes(raw.try_into().expect("four bytes")))
 }
 
@@ -1028,7 +1033,7 @@ fn read_u32_at(bytes: &[u8], cursor: &mut usize, end: usize, what: &'static str)
 fn checked_end(start: u64, size: u64, limit: u64, _what: &'static str) -> Result<u64> {
 	let end = start
 		.checked_add(size)
-		.ok_or(Error::InvalidArchive("RAR range overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR range overflows" })?;
 	if end > limit {
 		return invalid("truncated RAR data range");
 	}
@@ -1039,7 +1044,7 @@ fn checked_slice_end(start: usize, size: u64, limit: usize, what: &'static str) 
 	let size = usize_from_u64(size, what)?;
 	let end = start
 		.checked_add(size)
-		.ok_or(Error::InvalidArchive("RAR slice range overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RAR slice range overflows" })?;
 	if end > limit {
 		return invalid("truncated RAR header field");
 	}
@@ -1057,9 +1062,10 @@ fn need(start: usize, size: usize, end: usize, _what: &'static str) -> Result<()
 }
 
 fn usize_from_u64(value: u64, _what: &'static str) -> Result<usize> {
-	usize::try_from(value).map_err(|_| Error::InvalidArchive("RAR size overflows platform limits"))
+	usize::try_from(value)
+		.map_err(|_| Error::InvalidArchive { problem: "RAR size overflows platform limits" })
 }
 
 const fn invalid<T>(reason: &'static str) -> Result<T> {
-	Err(Error::InvalidArchive(reason))
+	Err(Error::InvalidArchive { problem: reason })
 }

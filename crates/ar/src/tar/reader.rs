@@ -112,12 +112,14 @@ pub fn read_entries<R: Read + Seek>(
 
 	while offset < file_size {
 		if file_size - offset < BLOCK_SIZE as u64 {
-			return Err(Error::InvalidArchive("not a valid TAR archive: truncated header"));
+			return Err(Error::InvalidArchive {
+				problem: "not a valid TAR archive: truncated header",
+			});
 		}
 		let block = read_block_at(source, offset)?;
 		if block.iter().all(|&byte| byte == 0) {
 			if long_name.is_some() || long_link.is_some() || local_pax.is_some() {
-				return Err(Error::InvalidArchive("orphaned TAR extended header"));
+				return Err(Error::InvalidArchive { problem: "orphaned TAR extended header" });
 			}
 			break;
 		}
@@ -142,7 +144,7 @@ pub fn read_entries<R: Read + Seek>(
 			if recognized && matches!(typeflag, b'L' | b'K' | b'N' | b'x' | b'X' | b'g') {
 				let end = padded_end(offset, header_size)?;
 				if end > file_size {
-					return Err(Error::InvalidArchive("truncated TAR member data"));
+					return Err(Error::InvalidArchive { problem: "truncated TAR member data" });
 				}
 				Some(end)
 			} else {
@@ -152,9 +154,9 @@ pub fn read_entries<R: Read + Seek>(
 		match typeflag {
 			b'L' if recognized => {
 				if long_name.is_some() {
-					return Err(Error::InvalidArchive(
-						"multiple GNU long-name records describe one TAR member",
-					));
+					return Err(Error::InvalidArchive {
+						problem: "multiple GNU long-name records describe one TAR member",
+					});
 				}
 				long_name = Some(read_long_text(source, offset, header_size, limits.path_size)?);
 				offset = metadata_end.expect("GNU long name is a metadata record");
@@ -162,9 +164,9 @@ pub fn read_entries<R: Read + Seek>(
 			},
 			b'K' if recognized => {
 				if long_link.is_some() {
-					return Err(Error::InvalidArchive(
-						"multiple GNU long-link records describe one TAR member",
-					));
+					return Err(Error::InvalidArchive {
+						problem: "multiple GNU long-link records describe one TAR member",
+					});
 				}
 				long_link = Some(read_long_text(source, offset, header_size, limits.path_size)?);
 				offset = metadata_end.expect("GNU long link is a metadata record");
@@ -186,9 +188,9 @@ pub fn read_entries<R: Read + Seek>(
 			},
 			b'x' | b'X' if recognized => {
 				if local_pax.is_some() {
-					return Err(Error::InvalidArchive(
-						"multiple local PAX records describe one TAR member",
-					));
+					return Err(Error::InvalidArchive {
+						problem: "multiple local PAX records describe one TAR member",
+					});
 				}
 				local_pax = Some(parse_pax(source, offset, header_size, limits)?);
 				offset = metadata_end.expect("PAX header is a metadata record");
@@ -264,7 +266,9 @@ pub fn read_entries<R: Read + Seek>(
 			.unwrap_or(false);
 		let sparse = if typeflag == b'S' {
 			if !gnu {
-				return Err(Error::InvalidArchive("GNU sparse member has a non-GNU TAR header"));
+				return Err(Error::InvalidArchive {
+					problem: "GNU sparse member has a non-GNU TAR header",
+				});
 			}
 			let (sparse, real_size) = parse_old_gnu_sparse(
 				source,
@@ -288,7 +292,7 @@ pub fn read_entries<R: Read + Seek>(
 		let data_offset = offset;
 		let data_end = padded_end(data_offset, stored_size)?;
 		if data_end > file_size {
-			return Err(Error::InvalidArchive("truncated TAR member data"));
+			return Err(Error::InvalidArchive { problem: "truncated TAR member data" });
 		}
 		offset = data_end;
 
@@ -354,7 +358,7 @@ pub fn read_entries<R: Read + Seek>(
 	}
 
 	if long_name.is_some() || long_link.is_some() || local_pax.is_some() {
-		return Err(Error::InvalidArchive("orphaned TAR extended header"));
+		return Err(Error::InvalidArchive { problem: "orphaned TAR extended header" });
 	}
 	resolve_pending_links(&mut entries, &entries_by_path, &pending, limits)?;
 	entries.retain(|entry| !entry.path.is_empty());
@@ -371,13 +375,13 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 		Storage::Tar { data_offset, stored_size, sparse } => match sparse {
 			TarSparse::None => {
 				if *stored_size < entry.size {
-					return Err(Error::InvalidArchive("truncated TAR member data"));
+					return Err(Error::InvalidArchive { problem: "truncated TAR member data" });
 				}
 				source.seek(SeekFrom::Start(*data_offset))?;
 				copy_exact(source, entry.size, output)?;
 				Ok(entry.size)
 			},
-			TarSparse::Unsupported => Err(Error::SparseMember(entry.path.clone())),
+			TarSparse::Unsupported => Err(Error::SparseMember { path: entry.path.clone() }),
 			TarSparse::OldGnu(extents) => {
 				source.seek(SeekFrom::Start(*data_offset))?;
 				let mut logical_offset = 0_u64;
@@ -390,7 +394,9 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 				}
 				write_zeroes(output, entry.size - logical_offset)?;
 				if stored_offset != *stored_size {
-					return Err(Error::InvalidArchive("GNU sparse stored size changed after indexing"));
+					return Err(Error::InvalidArchive {
+						problem: "GNU sparse stored size changed after indexing",
+					});
 				}
 				Ok(entry.size)
 			},
@@ -398,13 +404,13 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 		Storage::Link { target_path, .. } => {
 			Err(Error::UnreadableLink { path: entry.path.clone(), target: target_path.clone() })
 		},
-		_ => Err(Error::InvalidArchive("entry is not a TAR member")),
+		_ => Err(Error::InvalidArchive { problem: "entry is not a TAR member" }),
 	}
 }
 fn copy_exact<R: Read, W: Write>(source: &mut R, length: u64, output: &mut W) -> Result<()> {
 	let mut data = source.take(length);
 	if io::copy(&mut data, output)? != length {
-		return Err(Error::InvalidArchive("truncated TAR member data"));
+		return Err(Error::InvalidArchive { problem: "truncated TAR member data" });
 	}
 	Ok(())
 }
@@ -486,21 +492,21 @@ fn validate_checksum(block: &[u8; BLOCK_SIZE]) -> Result<()> {
 	if stored == unsigned || signed >= 0 && stored == signed as u64 {
 		Ok(())
 	} else {
-		Err(Error::InvalidArchive("invalid TAR header checksum"))
+		Err(Error::InvalidArchive { problem: "invalid TAR header checksum" })
 	}
 }
 
 fn parse_number(field: &[u8]) -> Result<u64> {
 	if field.first().is_some_and(|byte| byte & 0x80 != 0) {
 		if field[0] & 0x40 != 0 {
-			return Err(Error::InvalidArchive("negative TAR numeric field"));
+			return Err(Error::InvalidArchive { problem: "negative TAR numeric field" });
 		}
 		let mut value = u64::from(field[0] & 0x7f);
 		for &byte in &field[1..] {
 			value = value
 				.checked_mul(256)
 				.and_then(|value| value.checked_add(u64::from(byte)))
-				.ok_or(Error::InvalidArchive("TAR numeric field overflow"))?;
+				.ok_or(Error::InvalidArchive { problem: "TAR numeric field overflow" })?;
 		}
 		return Ok(value);
 	}
@@ -514,12 +520,12 @@ fn parse_number(field: &[u8]) -> Result<u64> {
 				value = value
 					.checked_mul(8)
 					.and_then(|value| value.checked_add(u64::from(byte - b'0')))
-					.ok_or(Error::InvalidArchive("TAR numeric field overflow"))?;
+					.ok_or(Error::InvalidArchive { problem: "TAR numeric field overflow" })?;
 				saw_digit = true;
 			},
 			0 if !saw_digit => terminated = true,
 			0 | b' ' => terminated |= saw_digit,
-			_ => return Err(Error::InvalidArchive("invalid TAR numeric field")),
+			_ => return Err(Error::InvalidArchive { problem: "invalid TAR numeric field" }),
 		}
 	}
 	Ok(value)
@@ -565,7 +571,7 @@ fn parse_old_gnu_sparse<R: Read + Seek>(
 	let mut extended = parse_sparse_flag(header.is_extended)?;
 	while extended {
 		if file_size.saturating_sub(*offset) < BLOCK_SIZE as u64 {
-			return Err(Error::InvalidArchive("truncated GNU sparse continuation"));
+			return Err(Error::InvalidArchive { problem: "truncated GNU sparse continuation" });
 		}
 		let bytes = read_block_at(source, *offset)?;
 		let continuation = GnuSparseContinuation::ref_from_bytes(&bytes)
@@ -585,10 +591,14 @@ fn parse_old_gnu_sparse<R: Read + Seek>(
 	}
 
 	if logical_end != real_size {
-		return Err(Error::InvalidArchive("GNU sparse extents do not cover the logical size"));
+		return Err(Error::InvalidArchive {
+			problem: "GNU sparse extents do not cover the logical size",
+		});
 	}
 	if stored_total != stored_size {
-		return Err(Error::InvalidArchive("GNU sparse extents do not match the stored size"));
+		return Err(Error::InvalidArchive {
+			problem: "GNU sparse extents do not match the stored size",
+		});
 	}
 	Ok((TarSparse::OldGnu(extents), real_size))
 }
@@ -607,15 +617,19 @@ fn push_sparse_extent(
 	let offset = parse_number(&raw.offset)?;
 	let length = parse_number(&raw.num_bytes)?;
 	if length != 0 && !(*stored_total).is_multiple_of(BLOCK_SIZE as u64) {
-		return Err(Error::InvalidArchive("GNU sparse stored extents are not block-aligned"));
+		return Err(Error::InvalidArchive {
+			problem: "GNU sparse stored extents are not block-aligned",
+		});
 	}
 	if offset < *logical_end {
-		return Err(Error::InvalidArchive("GNU sparse extents overlap or are out of order"));
+		return Err(Error::InvalidArchive {
+			problem: "GNU sparse extents overlap or are out of order",
+		});
 	}
 	let end = checked_add(offset, length, "GNU sparse extent overflow")?;
 	let total = checked_add(*stored_total, length, "GNU sparse stored size overflow")?;
 	if total > stored_size {
-		return Err(Error::InvalidArchive("GNU sparse extents exceed the stored size"));
+		return Err(Error::InvalidArchive { problem: "GNU sparse extents exceed the stored size" });
 	}
 	let actual_index_size = (extents.len() as u64 + 1)
 		.checked_mul(mem::size_of::<TarSparseExtent>() as u64)
@@ -633,7 +647,7 @@ const fn parse_sparse_flag(flag: u8) -> Result<bool> {
 	match flag {
 		0 => Ok(false),
 		1 => Ok(true),
-		_ => Err(Error::InvalidArchive("invalid GNU sparse continuation flag")),
+		_ => Err(Error::InvalidArchive { problem: "invalid GNU sparse continuation flag" }),
 	}
 }
 
@@ -669,7 +683,7 @@ fn decode_header_name(header: &UstarHeader, ustar: bool, limits: Limits) -> Resu
 	let length = prefix_end
 		.checked_add(separator)
 		.and_then(|length| length.checked_add(name_end))
-		.ok_or(Error::InvalidArchive("TAR path length overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "TAR path length overflow" })?;
 	check_path_size(length as u64, limits.path_size)?;
 
 	let mut bytes = [0_u8; 256];
@@ -700,7 +714,7 @@ fn apply_old_gnu_names<R: Read + Seek>(
 		.and_then(|length| length.checked_add(OLD_GNU_RENAME_PREFIX.len() as u64))
 		.and_then(|length| length.checked_add(OLD_GNU_RENAME_SEPARATOR.len() as u64 + 1))
 		.and_then(|length| usize::try_from(length).ok())
-		.ok_or(Error::InvalidArchive("old-GNU rename length overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "old-GNU rename length overflows" })?;
 	let mut line = Vec::with_capacity(max_line.min(1024));
 	let mut remaining = size;
 	let mut candidate = true;
@@ -709,7 +723,7 @@ fn apply_old_gnu_names<R: Read + Seek>(
 	while remaining != 0 && !terminated {
 		let available = input.fill_buf()?;
 		if available.is_empty() {
-			return Err(Error::InvalidArchive("truncated old-GNU name record"));
+			return Err(Error::InvalidArchive { problem: "truncated old-GNU name record" });
 		}
 		let count = available
 			.len()
@@ -736,7 +750,7 @@ fn apply_old_gnu_names<R: Read + Seek>(
 				continue;
 			}
 			if line.len() == max_line {
-				return Err(Error::InvalidArchive("old-GNU rename record is too long"));
+				return Err(Error::InvalidArchive { problem: "old-GNU rename record is too long" });
 			}
 			line.push(byte);
 		}
@@ -762,7 +776,7 @@ fn apply_old_gnu_name_line(
 	let separator = record
 		.windows(OLD_GNU_RENAME_SEPARATOR.len())
 		.position(|window| window == OLD_GNU_RENAME_SEPARATOR)
-		.ok_or(Error::InvalidArchive("malformed old-GNU rename record"))?;
+		.ok_or(Error::InvalidArchive { problem: "malformed old-GNU rename record" })?;
 	let source = normalize_old_gnu_name(&record[..separator], limits)?;
 	let mut target = &record[separator + OLD_GNU_RENAME_SEPARATOR.len()..];
 	if target.last() == Some(&b'/') {
@@ -832,10 +846,10 @@ fn normalize_old_gnu_name(raw: &[u8], limits: Limits) -> Result<Str> {
 	check_path_size(raw.len() as u64, limits.path_size)?;
 	let decoded = portable_path(decode_text(raw));
 	if decoded.starts_with('/') {
-		return Err(Error::InvalidArchive("invalid old-GNU rename path"));
+		return Err(Error::InvalidArchive { problem: "invalid old-GNU rename path" });
 	}
 	let path = normalize(decoded.as_str(), false)
-		.ok_or(Error::InvalidArchive("invalid old-GNU rename path"))?;
+		.ok_or(Error::InvalidArchive { problem: "invalid old-GNU rename path" })?;
 	validate(&path, limits)?;
 	Ok(path)
 }
@@ -897,7 +911,7 @@ fn join_renamed_path(prefix: &str, suffix: &str, limits: Limits) -> Result<Str> 
 	let length = prefix
 		.len()
 		.checked_add(suffix.len())
-		.ok_or(Error::InvalidArchive("old-GNU rename path overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "old-GNU rename path overflows" })?;
 	check_path_size(length as u64, limits.path_size)?;
 	let mut path = StrMut::with_capacity(length);
 	path.push_str(prefix);
@@ -930,7 +944,7 @@ fn read_long_text<R: Read + Seek>(
 	let effective_size = size.saturating_sub(1);
 	check_path_size(effective_size, path_limit)?;
 	let allocation = usize::try_from(size)
-		.map_err(|_| Error::InvalidArchive("TAR metadata length does not fit memory"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "TAR metadata length does not fit memory" })?;
 	let mut bytes = vec![0_u8; allocation];
 	source.seek(SeekFrom::Start(offset))?;
 	source.read_exact(&mut bytes)?;
@@ -963,17 +977,17 @@ fn parse_pax<R: Read + Seek>(
 				break;
 			}
 			if !byte.is_ascii_digit() || digits >= 20 {
-				return Err(Error::InvalidArchive("malformed PAX record length"));
+				return Err(Error::InvalidArchive { problem: "malformed PAX record length" });
 			}
 			record_len = record_len
 				.checked_mul(10)
 				.and_then(|value| value.checked_add(u64::from(byte - b'0')))
-				.ok_or(Error::InvalidArchive("PAX record length overflow"))?;
+				.ok_or(Error::InvalidArchive { problem: "PAX record length overflow" })?;
 			digits += 1;
 		}
 		let prefix_len = consumed - record_start;
 		if record_len <= prefix_len + 2 || record_len > size - record_start {
-			return Err(Error::InvalidArchive("malformed PAX record"));
+			return Err(Error::InvalidArchive { problem: "malformed PAX record" });
 		}
 
 		let mut remaining = record_len - prefix_len;
@@ -982,7 +996,7 @@ fn parse_pax<R: Read + Seek>(
 		let mut sparse_prefix = true;
 		loop {
 			if remaining <= 1 {
-				return Err(Error::InvalidArchive("malformed PAX key"));
+				return Err(Error::InvalidArchive { problem: "malformed PAX key" });
 			}
 			let byte = read_pax_byte(&mut input, &mut consumed)?;
 			remaining -= 1;
@@ -1031,10 +1045,10 @@ fn parse_pax<R: Read + Seek>(
 			_ => skip_exact(&mut input, value_len, &mut consumed)?,
 		}
 		if read_pax_byte(&mut input, &mut consumed)? != b'\n' {
-			return Err(Error::InvalidArchive("PAX record is not newline terminated"));
+			return Err(Error::InvalidArchive { problem: "PAX record is not newline terminated" });
 		}
 		if consumed != record_start + record_len {
-			return Err(Error::InvalidArchive("malformed PAX record length"));
+			return Err(Error::InvalidArchive { problem: "malformed PAX record length" });
 		}
 	}
 	Ok(state)
@@ -1048,7 +1062,7 @@ fn read_pax_text<R: Read>(
 ) -> Result<Str> {
 	check_path_size(length, path_limit)?;
 	let allocation = usize::try_from(length)
-		.map_err(|_| Error::InvalidArchive("PAX value length does not fit memory"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "PAX value length does not fit memory" })?;
 	let mut bytes = vec![0_u8; allocation];
 	input.read_exact(&mut bytes)?;
 	*consumed += length;
@@ -1060,18 +1074,18 @@ fn read_pax_decimal<R: Read>(input: &mut R, consumed: &mut u64, length: u64) -> 
 		return Ok(PaxNumber::Delete);
 	}
 	if length > 20 {
-		return Err(Error::InvalidArchive("PAX numeric value is too long"));
+		return Err(Error::InvalidArchive { problem: "PAX numeric value is too long" });
 	}
 	let mut value = 0_u64;
 	for _ in 0..length {
 		let byte = read_pax_byte(input, consumed)?;
 		if !byte.is_ascii_digit() {
-			return Err(Error::InvalidArchive("invalid PAX numeric value"));
+			return Err(Error::InvalidArchive { problem: "invalid PAX numeric value" });
 		}
 		value = value
 			.checked_mul(10)
 			.and_then(|value| value.checked_add(u64::from(byte - b'0')))
-			.ok_or(Error::InvalidArchive("PAX numeric value overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "PAX numeric value overflows" })?;
 	}
 	Ok(PaxNumber::Value(value))
 }
@@ -1080,7 +1094,7 @@ fn read_pax_byte<R: Read>(input: &mut R, consumed: &mut u64) -> Result<u8> {
 	let mut byte = [0_u8; 1];
 	input.read_exact(&mut byte).map_err(|error| {
 		if error.kind() == io::ErrorKind::UnexpectedEof {
-			Error::InvalidArchive("truncated PAX record")
+			Error::InvalidArchive { problem: "truncated PAX record" }
 		} else {
 			Error::Io(error)
 		}
@@ -1092,7 +1106,7 @@ fn read_pax_byte<R: Read>(input: &mut R, consumed: &mut u64) -> Result<u8> {
 fn skip_exact<R: Read>(input: &mut R, length: u64, consumed: &mut u64) -> Result<()> {
 	let copied = io::copy(&mut input.by_ref().take(length), &mut io::sink())?;
 	if copied != length {
-		return Err(Error::InvalidArchive("truncated PAX record"));
+		return Err(Error::InvalidArchive { problem: "truncated PAX record" });
 	}
 	*consumed += length;
 	Ok(())
@@ -1214,7 +1228,7 @@ fn normalize_symbolic_target(base: &str, target: &str, limits: Limits) -> Result
 		.map(|component| component.len())
 		.sum::<usize>()
 		.checked_add(components.len().saturating_sub(1))
-		.ok_or(Error::InvalidArchive("TAR link target length overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "TAR link target length overflows" })?;
 	check_path_size(length as u64, limits.path_size)?;
 	let mut normalized = StrMut::with_capacity(length);
 	for (index, component) in components.into_iter().enumerate() {
@@ -1461,7 +1475,7 @@ fn join_alias_target(target: &str, suffix: &str, limits: Limits) -> Result<Str> 
 		.len()
 		.checked_add(separator)
 		.and_then(|length| length.checked_add(suffix.len()))
-		.ok_or(Error::InvalidArchive("TAR alias path length overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "TAR alias path length overflow" })?;
 	check_path_size(length as u64, limits.path_size)?;
 	if target.is_empty() {
 		return Ok(Str::new(suffix));
@@ -1480,10 +1494,12 @@ fn padded_end(offset: u64, size: u64) -> Result<u64> {
 	let padded = size
 		.checked_add(BLOCK_SIZE as u64 - 1)
 		.map(|value| value / BLOCK_SIZE as u64 * BLOCK_SIZE as u64)
-		.ok_or(Error::InvalidArchive("TAR member size overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "TAR member size overflow" })?;
 	checked_add(offset, padded, "TAR offset overflow")
 }
 
 fn checked_add(left: u64, right: u64, reason: &'static str) -> Result<u64> {
-	left.checked_add(right).ok_or(Error::InvalidArchive(reason))
+	left
+		.checked_add(right)
+		.ok_or(Error::InvalidArchive { problem: reason })
 }

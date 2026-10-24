@@ -121,21 +121,21 @@ fn rejects_truncation_multicab_checksum_damage_and_bad_mszip_framing() {
 	truncated.pop();
 	assert!(matches!(
 		Archive::from_bytes_with_format(&truncated, Format::Cab),
-		Err(Error::InvalidArchive(_) | Error::Io(_))
+		Err(Error::InvalidArchive { .. } | Error::Io(_))
 	));
 
 	let mut multi = fixture_bytes("cab-none.cab");
 	multi[30] |= 1;
 	assert!(matches!(
 		Archive::from_bytes_with_format(&multi, Format::Cab),
-		Err(Error::UnsupportedFeature("multi-volume CAB archive"))
+		Err(Error::UnsupportedFeature { feature: "multi-volume CAB archive" })
 	));
 
 	let mut corrupt = fixture_bytes("cab-none.cab");
 	*corrupt.last_mut().unwrap() ^= 0xff;
 	assert!(matches!(
 		Archive::from_bytes_with_format(&corrupt, Format::Cab),
-		Err(Error::InvalidArchive("CAB CFDATA block checksum mismatch"))
+		Err(Error::InvalidArchive { problem: "CAB CFDATA block checksum mismatch" })
 	));
 
 	let mut mszip = fixture_bytes("cab-mszip.cab");
@@ -144,7 +144,7 @@ fn rejects_truncation_multicab_checksum_damage_and_bad_mszip_framing() {
 	mszip[data_start + 8] = 0;
 	assert!(matches!(
 		Archive::from_bytes_with_format(&mszip, Format::Cab),
-		Err(Error::InvalidArchive("CAB MSZIP block is missing its CK signature"))
+		Err(Error::InvalidArchive { problem: "CAB MSZIP block is missing its CK signature" })
 	));
 }
 

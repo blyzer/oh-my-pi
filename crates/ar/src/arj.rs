@@ -40,18 +40,18 @@ pub(crate) fn read_entries(
 ) -> Result<Vec<Entry>> {
 	let main = parse_block(source, 0, file_size, limits)?;
 	if main.is_end {
-		return Err(Error::InvalidArchive("ARJ archive is missing its main header"));
+		return Err(Error::InvalidArchive { problem: "ARJ archive is missing its main header" });
 	}
 	let first_header_size = usize::from(main.body[0]);
 	if first_header_size < 30 || first_header_size > main.body.len() || main.body[6] != 2 {
-		return Err(Error::InvalidArchive("invalid ARJ main header"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ main header" });
 	}
 	let main_flags = main.body[4];
 	if main_flags & 0x01 != 0 {
-		return Err(Error::UnsupportedFeature("encrypted ARJ archives"));
+		return Err(Error::UnsupportedFeature { feature: "encrypted ARJ archives" });
 	}
 	if main_flags & 0x04 != 0 {
-		return Err(Error::UnsupportedFeature("multi-volume ARJ archives"));
+		return Err(Error::UnsupportedFeature { feature: "multi-volume ARJ archives" });
 	}
 
 	let mut entries = Vec::new();
@@ -62,7 +62,7 @@ pub(crate) fn read_entries(
 		let block = parse_block(source, offset, file_size, limits)?;
 		metadata_size = metadata_size
 			.checked_add(block.metadata_size)
-			.ok_or(Error::InvalidArchive("ARJ index size overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "ARJ index size overflow" })?;
 		check_index_size(metadata_size, limits)?;
 		if block.is_end {
 			break;
@@ -73,17 +73,17 @@ pub(crate) fn read_entries(
 		}
 		let first_header_size = usize::from(block.body[0]);
 		if first_header_size < 30 || first_header_size > block.body.len() {
-			return Err(Error::InvalidArchive("invalid ARJ local header"));
+			return Err(Error::InvalidArchive { problem: "invalid ARJ local header" });
 		}
 		let host_os = block.body[3];
 		let flags = block.body[4];
 		let method = block.body[5];
 		let file_type = block.body[6];
 		if flags & 0x01 != 0 {
-			return Err(Error::UnsupportedFeature("encrypted ARJ members"));
+			return Err(Error::UnsupportedFeature { feature: "encrypted ARJ members" });
 		}
 		if flags & 0x0c != 0 {
-			return Err(Error::UnsupportedFeature("multi-volume ARJ members"));
+			return Err(Error::UnsupportedFeature { feature: "multi-volume ARJ members" });
 		}
 		let packed_size = u64::from(u32_at(&block.body, 12));
 		let size = u64::from(u32_at(&block.body, 16));
@@ -98,9 +98,9 @@ pub(crate) fn read_entries(
 		let data_start = block.next_offset;
 		let next_offset = data_start
 			.checked_add(packed_size)
-			.ok_or(Error::InvalidArchive("ARJ member range overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "ARJ member range overflow" })?;
 		if next_offset > file_size {
-			return Err(Error::InvalidArchive("truncated ARJ member data"));
+			return Err(Error::InvalidArchive { problem: "truncated ARJ member data" });
 		}
 		offset = next_offset;
 		let path = normalize(&raw_path, false);
@@ -149,7 +149,7 @@ pub(crate) fn read_entries(
 		});
 	}
 	if parsed_count == 0 {
-		return Err(Error::InvalidArchive("ARJ archive has no members"));
+		return Err(Error::InvalidArchive { problem: "ARJ archive has no members" });
 	}
 	Ok(entries)
 }
@@ -162,15 +162,17 @@ pub(crate) fn read_entry_to<W: Write>(
 ) -> Result<u64> {
 	let Storage::LegacyDos { data_offset, stored_size, format, method, checksum } = entry.storage
 	else {
-		return Err(Error::InvalidArchive("invalid ARJ member storage"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ member storage" });
 	};
 	if format != STORAGE_FORMAT {
-		return Err(Error::InvalidArchive("invalid ARJ member storage format"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ member storage format" });
 	}
-	let packed_len = usize::try_from(stored_size)
-		.map_err(|_| Error::InvalidArchive("ARJ packed size does not fit this platform"))?;
-	let out_len = usize::try_from(entry.size)
-		.map_err(|_| Error::InvalidArchive("ARJ member size does not fit this platform"))?;
+	let packed_len = usize::try_from(stored_size).map_err(|_| Error::InvalidArchive {
+		problem: "ARJ packed size does not fit this platform",
+	})?;
+	let out_len = usize::try_from(entry.size).map_err(|_| Error::InvalidArchive {
+		problem: "ARJ member size does not fit this platform",
+	})?;
 	let mut packed = vec![0_u8; packed_len];
 	source.seek(SeekFrom::Start(data_offset))?;
 	source.read_exact(&mut packed)?;
@@ -189,11 +191,11 @@ pub(crate) fn read_entry_to<W: Write>(
 		4 => decompress_method4(&packed, out_len)?,
 		8 | 9 => {
 			if out_len != 0 || packed_len != 0 {
-				return Err(Error::InvalidArchive("ARJ no-data method has non-zero sizes"));
+				return Err(Error::InvalidArchive { problem: "ARJ no-data method has non-zero sizes" });
 			}
 			Vec::new()
 		},
-		_ => return Err(Error::UnsupportedFeature(arj_method_error(method))),
+		_ => return Err(Error::UnsupportedFeature { feature: arj_method_error(method) }),
 	};
 	if bytes.len() != out_len {
 		return Err(Error::SizeMismatch {
@@ -241,7 +243,7 @@ fn parse_block(
 ) -> Result<Block> {
 	let framing = read_array::<4>(source, offset, file_size, "truncated ARJ header signature")?;
 	if framing[..2] != SIGNATURE {
-		return Err(Error::InvalidArchive("invalid ARJ header signature"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ header signature" });
 	}
 	let body_size = usize::from(u16_at(&framing, 2));
 	if body_size == 0 {
@@ -253,7 +255,7 @@ fn parse_block(
 		});
 	}
 	if !(30..=MAX_BASIC_HEADER).contains(&body_size) {
-		return Err(Error::InvalidArchive("invalid ARJ basic header size"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ basic header size" });
 	}
 	check_index_size(body_size as u64 + 8, limits)?;
 	let body_start = offset + 4;
@@ -265,7 +267,7 @@ fn parse_block(
 		"truncated ARJ basic header CRC",
 	)?;
 	if crc32fast::hash(&body) != u32::from_le_bytes(expected) {
-		return Err(Error::InvalidArchive("invalid ARJ basic header CRC-32"));
+		return Err(Error::InvalidArchive { problem: "invalid ARJ basic header CRC-32" });
 	}
 	let mut cursor = body_start + body_size as u64 + 4;
 	let mut extension_count = 0_u32;
@@ -279,12 +281,12 @@ fn parse_block(
 		}
 		extension_count += 1;
 		if extension_count > 65_535 {
-			return Err(Error::InvalidArchive("too many ARJ extended headers"));
+			return Err(Error::InvalidArchive { problem: "too many ARJ extended headers" });
 		}
 		let metadata_size = cursor
 			.checked_add(extension_size as u64 + 4)
 			.and_then(|end| end.checked_sub(offset))
-			.ok_or(Error::InvalidArchive("ARJ extended header range overflow"))?;
+			.ok_or(Error::InvalidArchive { problem: "ARJ extended header range overflow" })?;
 		check_index_size(metadata_size, limits)?;
 		let extension =
 			read_vec(source, cursor, extension_size, file_size, "truncated ARJ extended header")?;
@@ -295,7 +297,7 @@ fn parse_block(
 			"truncated ARJ extended header CRC",
 		)?;
 		if crc32fast::hash(&extension) != u32::from_le_bytes(expected) {
-			return Err(Error::InvalidArchive("invalid ARJ extended header CRC-32"));
+			return Err(Error::InvalidArchive { problem: "invalid ARJ extended header CRC-32" });
 		}
 		cursor += extension_size as u64 + 4;
 	}
@@ -326,7 +328,7 @@ fn decompress_method4(packed: &[u8], out_size: usize) -> Result<Vec<u8>> {
 		}
 		let length = length_code + 2;
 		if length > out_size - output_position {
-			return Err(Error::InvalidArchive("ARJ method-4 match exceeds declared size"));
+			return Err(Error::InvalidArchive { problem: "ARJ method-4 match exceeds declared size" });
 		}
 		let mut position_code = 0_usize;
 		let mut position_width = 9_u8;
@@ -339,7 +341,9 @@ fn decompress_method4(packed: &[u8], out_size: usize) -> Result<Vec<u8>> {
 		}
 		position_code += reader.read(position_width)? as usize;
 		if position_code >= 26_624 || position_code >= output_position {
-			return Err(Error::InvalidArchive("ARJ method-4 history distance is out of range"));
+			return Err(Error::InvalidArchive {
+				problem: "ARJ method-4 history distance is out of range",
+			});
 		}
 		let source_start = output_position - position_code - 1;
 		for (source_position, destination_position) in
@@ -366,7 +370,7 @@ impl<'a> BitReader<'a> {
 	fn read(&mut self, count: u8) -> Result<u32> {
 		let count = usize::from(count);
 		if count > 24 || self.position + count > self.bytes.len() * 8 {
-			return Err(Error::InvalidArchive("truncated ARJ method-4 bitstream"));
+			return Err(Error::InvalidArchive { problem: "truncated ARJ method-4 bitstream" });
 		}
 		let mut value = 0_u32;
 		for _ in 0..count {
@@ -380,7 +384,7 @@ impl<'a> BitReader<'a> {
 	fn assert_zero_padding(&mut self) -> Result<()> {
 		while self.position < self.bytes.len() * 8 {
 			if self.read(1)? != 0 {
-				return Err(Error::InvalidArchive("non-zero trailing ARJ method-4 bits"));
+				return Err(Error::InvalidArchive { problem: "non-zero trailing ARJ method-4 bits" });
 			}
 		}
 		Ok(())
@@ -395,14 +399,16 @@ fn read_c_string(
 ) -> Result<(String, usize)> {
 	let Some(relative) = bytes
 		.get(start..end)
-		.ok_or(Error::InvalidArchive("invalid ARJ string range"))?
+		.ok_or(Error::InvalidArchive { problem: "invalid ARJ string range" })?
 		.iter()
 		.position(|byte| *byte == 0)
 	else {
-		return Err(Error::InvalidArchive(match field {
-			"filename" => "ARJ filename is missing its terminator",
-			_ => "ARJ comment is missing its terminator",
-		}));
+		return Err(Error::InvalidArchive {
+			problem: match field {
+				"filename" => "ARJ filename is missing its terminator",
+				_ => "ARJ comment is missing its terminator",
+			},
+		});
 	};
 	let terminator = start + relative;
 	Ok((decode_legacy(&bytes[start..terminator]), terminator + 1))
@@ -498,7 +504,7 @@ fn read_array<const N: usize>(
 		.checked_add(N as u64)
 		.is_none_or(|end| end > file_size)
 	{
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut bytes = [0_u8; N];
 	source.seek(SeekFrom::Start(offset))?;
@@ -517,7 +523,7 @@ fn read_vec(
 		.checked_add(length as u64)
 		.is_none_or(|end| end > file_size)
 	{
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut bytes = vec![0_u8; length];
 	source.seek(SeekFrom::Start(offset))?;

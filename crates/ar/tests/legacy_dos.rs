@@ -107,7 +107,9 @@ fn lzh_drops_traversal_and_defers_precise_unsupported_error() {
 	let error = open("lzh-unsupported-lh1.lzh", Format::Lzh)
 		.read("unsupported.txt")
 		.expect_err("-lh1- is unsupported");
-	assert!(matches!(error, Error::UnsupportedFeature("LZH dynamic-Huffman method -lh1-")));
+	assert!(matches!(error, Error::UnsupportedFeature {
+		feature: "LZH dynamic-Huffman method -lh1-",
+	}));
 }
 
 #[test]
@@ -116,7 +118,7 @@ fn lzh_rejects_truncation_and_member_crc_corruption() {
 	let error = Archive::with_format(Cursor::new(original[..12].to_vec()), Format::Lzh)
 		.err()
 		.expect("truncated LZH fails");
-	assert!(matches!(error, Error::InvalidArchive(_)));
+	assert!(matches!(error, Error::InvalidArchive { .. }));
 
 	let mut corrupted = original;
 	let index = corrupted.len() - 2;
@@ -173,12 +175,14 @@ fn arj_rejects_encryption_and_multivolume_members() {
 		Archive::with_format(Cursor::new(fixture_bytes("arj-encrypted.arj")), Format::Arj)
 			.err()
 			.expect("encrypted member is rejected");
-	assert!(matches!(encrypted, Error::UnsupportedFeature("encrypted ARJ members")));
+	assert!(matches!(encrypted, Error::UnsupportedFeature { feature: "encrypted ARJ members" }));
 	let multivolume =
 		Archive::with_format(Cursor::new(fixture_bytes("arj-multivolume.arj")), Format::Arj)
 			.err()
 			.expect("multi-volume member is rejected");
-	assert!(matches!(multivolume, Error::UnsupportedFeature("multi-volume ARJ members")));
+	assert!(matches!(multivolume, Error::UnsupportedFeature {
+		feature: "multi-volume ARJ members",
+	}));
 }
 
 #[test]
@@ -186,7 +190,7 @@ fn arj_defers_unknown_method_error_and_drops_traversal() {
 	let error = open("arj-unsupported.arj", Format::Arj)
 		.read("hello.txt")
 		.expect_err("method 7 is unsupported");
-	assert!(matches!(error, Error::UnsupportedFeature("ARJ compression method 7")));
+	assert!(matches!(error, Error::UnsupportedFeature { feature: "ARJ compression method 7" }));
 
 	let traversal = open("arj-traversal.arj", Format::Arj);
 	assert!(traversal.entry("hello.txt").is_none());
@@ -200,14 +204,14 @@ fn arj_rejects_truncation_and_header_crc_corruption() {
 	let truncated = Archive::with_format(Cursor::new(original[..20].to_vec()), Format::Arj)
 		.err()
 		.expect("truncated ARJ fails");
-	assert!(matches!(truncated, Error::InvalidArchive(_)));
+	assert!(matches!(truncated, Error::InvalidArchive { .. }));
 
 	let mut corrupted = original;
 	corrupted[12] ^= 1;
 	let error = Archive::with_format(Cursor::new(corrupted), Format::Arj)
 		.err()
 		.expect("header CRC corruption fails");
-	assert!(matches!(error, Error::InvalidArchive(_)));
+	assert!(matches!(error, Error::InvalidArchive { .. }));
 }
 
 #[test]

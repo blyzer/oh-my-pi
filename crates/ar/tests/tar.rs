@@ -707,7 +707,7 @@ fn writer_rejects_mixed_kind_duplicates_and_emits_standard_gnu_long_link_records
 	writer.add_file("pkg/target.txt", b"first").unwrap();
 	assert!(matches!(
 		writer.add_symlink("./pkg\\target.txt", "elsewhere"),
-		Err(Error::DuplicatePath(path)) if path == "pkg/target.txt"
+		Err(Error::DuplicatePath { path }) if path == "pkg/target.txt"
 	));
 	writer
 		.add_hard_link("pkg/hard.txt", "pkg/target.txt")

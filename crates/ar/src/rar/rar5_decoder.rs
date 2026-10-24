@@ -113,7 +113,7 @@ impl Huffman {
 		self.counts.fill(0);
 		for &length in lengths
 			.get(offset..offset + self.size)
-			.ok_or(Error::InvalidArchive("truncated RAR5 Huffman table"))?
+			.ok_or(Error::InvalidArchive { problem: "truncated RAR5 Huffman table" })?
 		{
 			let length = usize::from(length);
 			if length > self.max_bits {
@@ -219,7 +219,7 @@ impl Rar5Decoder {
 		version: u8,
 	) -> Result<Vec<u8>> {
 		if version > 1 {
-			return Err(Error::UnsupportedFeature("RAR5 compression algorithm version"));
+			return Err(Error::UnsupportedFeature { feature: "RAR5 compression algorithm version" });
 		}
 		if !solid {
 			self.reset();
@@ -233,7 +233,7 @@ impl Rar5Decoder {
 			.len()
 			.checked_add(unpacked_size)
 			.and_then(|size| size.checked_add(MAX_MATCH))
-			.ok_or(Error::InvalidArchive("RAR5 output size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR5 output size overflows" })?;
 		let mut data = vec![0; capacity];
 		data[..prior.len()].copy_from_slice(prior);
 		let out_start = prior.len();
@@ -278,7 +278,7 @@ impl Rar5Decoder {
 				let kind = bits.read(3)? as u8;
 				let channels = if kind == 0 { bits.read(5)? + 1 } else { 0 };
 				if kind > 3 {
-					return Err(Error::UnsupportedFeature("RAR5 filter type"));
+					return Err(Error::UnsupportedFeature { feature: "RAR5 filter type" });
 				}
 				let filter_start = out_pos - out_start + start;
 				if size > MAX_FILTER_SIZE
@@ -396,7 +396,7 @@ impl Rar5Decoder {
 		bits.block_end = bits
 			.pos
 			.checked_add(block_size)
-			.ok_or(Error::InvalidArchive("RAR5 block size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "RAR5 block size overflows" })?;
 		if bits.block_end > bits.packed_len {
 			return invalid("truncated RAR5 compressed block");
 		}
@@ -538,5 +538,5 @@ fn write_i32(bytes: &mut [u8], offset: usize, value: i32) {
 }
 
 const fn invalid<T>(reason: &'static str) -> Result<T> {
-	Err(Error::InvalidArchive(reason))
+	Err(Error::InvalidArchive { problem: reason })
 }

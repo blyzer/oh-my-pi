@@ -72,7 +72,7 @@ fn reads_unpacked_members_from_the_adjacent_sibling_tree() {
 fn byte_backed_unpacked_members_fail_recoverably() {
 	let bytes = fixture(json!({"external.txt": {"size": 1, "unpacked": true}}), b"");
 	let mut archive = Archive::from_bytes_with_format(&bytes, Format::Asar).unwrap();
-	assert!(matches!(archive.read("external.txt"), Err(Error::InvalidArchive(_))));
+	assert!(matches!(archive.read("external.txt"), Err(Error::InvalidArchive { .. })));
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn rejects_unsafe_tree_names_and_link_targets() {
 		let bytes = fixture(files, b"");
 		assert!(matches!(
 			Archive::from_bytes_with_format(&bytes, Format::Asar),
-			Err(Error::UnsafePath(_))
+			Err(Error::UnsafePath { .. })
 		));
 	}
 }
@@ -113,7 +113,7 @@ fn malformed_pickle_and_json_headers_are_recoverable_errors() {
 	] {
 		assert!(matches!(
 			Archive::from_bytes_with_format(&bytes, Format::Asar),
-			Err(Error::InvalidArchive(_) | Error::Io(_))
+			Err(Error::InvalidArchive { .. } | Error::Io(_))
 		));
 	}
 }
@@ -123,7 +123,7 @@ fn rejects_out_of_bounds_and_oversized_members() {
 	let bytes = fixture(json!({"bad": {"size": 2, "offset": "0"}}), b"x");
 	assert!(matches!(
 		Archive::from_bytes_with_format(&bytes, Format::Asar),
-		Err(Error::InvalidArchive(_))
+		Err(Error::InvalidArchive { .. })
 	));
 
 	let bytes = fixture(json!({"large": {"size": 5, "offset": "0"}}), b"large");

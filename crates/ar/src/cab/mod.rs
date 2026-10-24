@@ -66,51 +66,53 @@ pub(crate) fn read_entries(
 	decoded: &mut Vec<Vec<u8>>,
 ) -> Result<Vec<Entry>> {
 	if file_size < FIXED_HEADER_SIZE {
-		return Err(Error::InvalidArchive("truncated CAB CFHEADER"));
+		return Err(Error::InvalidArchive { problem: "truncated CAB CFHEADER" });
 	}
 	let fixed = read_exact_range(source, 0, FIXED_HEADER_SIZE, file_size)?;
 	if !is_header(&fixed) {
-		return Err(Error::InvalidArchive("CAB signature is missing"));
+		return Err(Error::InvalidArchive { problem: "CAB signature is missing" });
 	}
 	if le_u32(&fixed, 4)? != 0 || le_u32(&fixed, 12)? != 0 || le_u32(&fixed, 20)? != 0 {
-		return Err(Error::InvalidArchive("reserved CAB CFHEADER fields are nonzero"));
+		return Err(Error::InvalidArchive { problem: "reserved CAB CFHEADER fields are nonzero" });
 	}
 	let cabinet_size = u64::from(le_u32(&fixed, 8)?);
 	if !(FIXED_HEADER_SIZE..=file_size).contains(&cabinet_size) {
-		return Err(Error::InvalidArchive("declared CAB cabinet size is out of bounds"));
+		return Err(Error::InvalidArchive { problem: "declared CAB cabinet size is out of bounds" });
 	}
 	let file_table_offset = u64::from(le_u32(&fixed, 16)?);
 	if !(FIXED_HEADER_SIZE..=cabinet_size).contains(&file_table_offset) {
-		return Err(Error::InvalidArchive("CAB CFFILE table offset is out of bounds"));
+		return Err(Error::InvalidArchive { problem: "CAB CFFILE table offset is out of bounds" });
 	}
 	if fixed[24] != 3 || fixed[25] != 1 {
-		return Err(Error::UnsupportedFeature("CAB format version other than 1.3"));
+		return Err(Error::UnsupportedFeature { feature: "CAB format version other than 1.3" });
 	}
 	let folder_count = u64::from(le_u16(&fixed, 26)?);
 	let file_count = u64::from(le_u16(&fixed, 28)?);
 	let flags = le_u16(&fixed, 30)?;
 	if flags & 0x0003 != 0 {
-		return Err(Error::UnsupportedFeature("multi-volume CAB archive"));
+		return Err(Error::UnsupportedFeature { feature: "multi-volume CAB archive" });
 	}
 	check_entry_count(folder_count + file_count, limits)?;
 	if folder_count == 0 && file_count != 0 {
-		return Err(Error::InvalidArchive("CAB files exist without a folder"));
+		return Err(Error::InvalidArchive { problem: "CAB files exist without a folder" });
 	}
 
 	let (folder_reserve_size, data_reserve_size, folder_table_offset) = if flags & 0x0004 != 0 {
 		let reserve_end = FIXED_HEADER_SIZE
 			.checked_add(4)
-			.ok_or(Error::InvalidArchive("CAB reserve header range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB reserve header range overflows" })?;
 		let reserve = read_exact_range(source, FIXED_HEADER_SIZE, reserve_end, cabinet_size)?;
 		let header_reserve_size = u64::from(le_u16(&reserve, 0)?);
 		let folder_reserve_size = u64::from(reserve[2]);
 		let data_reserve_size = usize::from(reserve[3]);
 		if header_reserve_size > 60_000 {
-			return Err(Error::InvalidArchive("CAB CFHEADER reserve area exceeds 60000 bytes"));
+			return Err(Error::InvalidArchive {
+				problem: "CAB CFHEADER reserve area exceeds 60000 bytes",
+			});
 		}
 		let folder_table_offset = reserve_end
 			.checked_add(header_reserve_size)
-			.ok_or(Error::InvalidArchive("CAB reserve area overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB reserve area overflows" })?;
 		(folder_reserve_size, data_reserve_size, folder_table_offset)
 	} else {
 		(0, 0, FIXED_HEADER_SIZE)
@@ -120,20 +122,23 @@ pub(crate) fn read_entries(
 		.checked_add(
 			folder_count
 				.checked_mul(folder_record_size)
-				.ok_or(Error::InvalidArchive("CAB CFFOLDER table size overflows"))?,
+				.ok_or(Error::InvalidArchive { problem: "CAB CFFOLDER table size overflows" })?,
 		)
-		.ok_or(Error::InvalidArchive("CAB CFFOLDER table range overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "CAB CFFOLDER table range overflows" })?;
 	if folder_table_end > cabinet_size || folder_table_end > file_table_offset {
-		return Err(Error::InvalidArchive("CAB CFFOLDER table is out of bounds"));
+		return Err(Error::InvalidArchive { problem: "CAB CFFOLDER table is out of bounds" });
 	}
 	check_index_size(folder_table_end, limits)?;
 	let header = read_exact_range(source, 0, folder_table_end, cabinet_size)?;
-	let folder_capacity = usize::try_from(folder_count)
-		.map_err(|_| Error::InvalidArchive("CAB folder count does not fit this platform"))?;
+	let folder_capacity = usize::try_from(folder_count).map_err(|_| Error::InvalidArchive {
+		problem: "CAB folder count does not fit this platform",
+	})?;
 	let mut folders = Vec::with_capacity(folder_capacity);
 	for index in 0..folder_capacity {
 		let offset = usize::try_from(folder_table_offset + index as u64 * folder_record_size)
-			.map_err(|_| Error::InvalidArchive("CAB CFFOLDER offset does not fit this platform"))?;
+			.map_err(|_| Error::InvalidArchive {
+				problem: "CAB CFFOLDER offset does not fit this platform",
+			})?;
 		let compression = le_u16(&header, offset + 6)?;
 		folders.push(FolderDescription {
 			data_start:    u64::from(le_u32(&header, offset)?),
@@ -146,7 +151,9 @@ pub(crate) fn read_entries(
 	}
 	for index in 0..folders.len() {
 		if folders[index].data_start < folder_table_end || folders[index].data_start > cabinet_size {
-			return Err(Error::InvalidArchive("CAB CFFOLDER data offset is out of bounds"));
+			return Err(Error::InvalidArchive {
+				problem: "CAB CFFOLDER data offset is out of bounds",
+			});
 		}
 		let start = folders[index].data_start;
 		folders[index].data_end = folders
@@ -162,25 +169,26 @@ pub(crate) fn read_entries(
 		.min()
 		.unwrap_or(cabinet_size);
 	if file_table_offset > first_data_offset {
-		return Err(Error::InvalidArchive("CAB CFFILE table overlaps folder data"));
+		return Err(Error::InvalidArchive { problem: "CAB CFFILE table overlaps folder data" });
 	}
 	let file_table_size = first_data_offset - file_table_offset;
 	let index_size = folder_table_end
 		.checked_add(file_table_size)
-		.ok_or(Error::InvalidArchive("CAB index size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "CAB index size overflows" })?;
 	check_index_size(index_size, limits)?;
 	let file_table = read_exact_range(source, file_table_offset, first_data_offset, cabinet_size)?;
 
-	let file_capacity = usize::try_from(file_count)
-		.map_err(|_| Error::InvalidArchive("CAB file count does not fit this platform"))?;
+	let file_capacity = usize::try_from(file_count).map_err(|_| Error::InvalidArchive {
+		problem: "CAB file count does not fit this platform",
+	})?;
 	let mut records = Vec::with_capacity(file_capacity);
 	let mut position = 0_usize;
 	for _ in 0..file_capacity {
 		let fixed_end = position
 			.checked_add(16)
-			.ok_or(Error::InvalidArchive("CAB CFFILE offset overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB CFFILE offset overflows" })?;
 		if fixed_end > file_table.len() {
-			return Err(Error::InvalidArchive("truncated CAB CFFILE entry"));
+			return Err(Error::InvalidArchive { problem: "truncated CAB CFFILE entry" });
 		}
 		let size = u64::from(le_u32(&file_table, position)?);
 		let folder_offset = u64::from(le_u32(&file_table, position + 4)?);
@@ -192,11 +200,11 @@ pub(crate) fn read_entries(
 		let relative_name_end = file_table[position..]
 			.iter()
 			.position(|&byte| byte == 0)
-			.ok_or(Error::InvalidArchive("unterminated CAB CFFILE name"))?;
+			.ok_or(Error::InvalidArchive { problem: "unterminated CAB CFFILE name" })?;
 		let name_end = position + relative_name_end;
 		let name_bytes = &file_table[position..name_end];
 		if name_bytes.len() > 256 {
-			return Err(Error::InvalidArchive("CAB CFFILE name exceeds 256 bytes"));
+			return Err(Error::InvalidArchive { problem: "CAB CFFILE name exceeds 256 bytes" });
 		}
 		if name_bytes.len() as u64 > limits.max_path_size() {
 			return Err(Error::PathTooLong {
@@ -206,10 +214,10 @@ pub(crate) fn read_entries(
 		}
 		position = name_end + 1;
 		if folder_index >= 0xfffd {
-			return Err(Error::UnsupportedFeature("multi-volume CAB continued file"));
+			return Err(Error::UnsupportedFeature { feature: "multi-volume CAB continued file" });
 		}
 		if folder_index >= folders.len() {
-			return Err(Error::InvalidArchive("CAB CFFILE references a missing folder"));
+			return Err(Error::InvalidArchive { problem: "CAB CFFILE references a missing folder" });
 		}
 		let raw_name = decode_name(name_bytes, attributes & ATTRIBUTE_UTF8_NAME != 0)?;
 		if size > limits.max_member_size() {
@@ -221,7 +229,7 @@ pub(crate) fn read_entries(
 		}
 		let end = folder_offset
 			.checked_add(size)
-			.ok_or(Error::InvalidArchive("CAB CFFILE range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB CFFILE range overflows" })?;
 		folders[folder_index].required_size = folders[folder_index].required_size.max(end);
 		let Some(normalized) = path::normalize(raw_name.as_str(), false) else {
 			continue;
@@ -272,8 +280,9 @@ pub(crate) fn read_entries(
 					limit:  limits.max_in_memory_size(),
 				})?;
 			check_in_memory_size(retained_size, limits)?;
-			let index = u32::try_from(decoded.len())
-				.map_err(|_| Error::InvalidArchive("too many retained CAB folder buffers"))?;
+			let index = u32::try_from(decoded.len()).map_err(|_| Error::InvalidArchive {
+				problem: "too many retained CAB folder buffers",
+			})?;
 			decoded.push(decoded_folder.bytes);
 			Some(index)
 		} else {
@@ -293,7 +302,8 @@ pub(crate) fn read_entries(
 				Storage::Raw { data_offset, stored_size }
 			} else {
 				Storage::Buffered {
-					buffer:      buffer.ok_or(Error::InvalidArchive("CAB folder buffer is missing"))?,
+					buffer:      buffer
+						.ok_or(Error::InvalidArchive { problem: "CAB folder buffer is missing" })?,
 					data_offset: record.folder_offset,
 					stored_size: record.size,
 				}
@@ -330,7 +340,7 @@ pub(crate) const fn read_entry_to<W: Write>(
 		Storage::CabUnsupported { method, parameter } => {
 			Err(Error::UnsupportedCabCompression { method, parameter })
 		},
-		_ => Err(Error::InvalidArchive("CAB entry has unexpected storage")),
+		_ => Err(Error::InvalidArchive { problem: "CAB entry has unexpected storage" }),
 	}
 }
 
@@ -343,7 +353,7 @@ fn decode_folder(
 	let compressed_size = description
 		.data_end
 		.checked_sub(description.data_start)
-		.ok_or(Error::InvalidArchive("CAB folder data range is reversed"))?;
+		.ok_or(Error::InvalidArchive { problem: "CAB folder data range is reversed" })?;
 	check_in_memory_size(compressed_size, limits)?;
 	let bytes =
 		read_exact_range(source, description.data_start, description.data_end, description.data_end)?;
@@ -353,30 +363,30 @@ fn decode_folder(
 	for _ in 0..usize::from(description.block_count) {
 		let payload_start = position
 			.checked_add(DATA_BLOCK_SIZE + data_reserve_size)
-			.ok_or(Error::InvalidArchive("CAB CFDATA header range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB CFDATA header range overflows" })?;
 		if payload_start > bytes.len() {
-			return Err(Error::InvalidArchive("truncated CAB CFDATA header"));
+			return Err(Error::InvalidArchive { problem: "truncated CAB CFDATA header" });
 		}
 		let compressed = usize::from(le_u16(&bytes, position + 4)?);
 		let uncompressed = usize::from(le_u16(&bytes, position + 6)?);
 		if uncompressed == 0 {
-			return Err(Error::UnsupportedFeature("multi-volume CAB split CFDATA block"));
+			return Err(Error::UnsupportedFeature { feature: "multi-volume CAB split CFDATA block" });
 		}
 		if uncompressed > MAX_DATA_OUTPUT {
-			return Err(Error::InvalidArchive("CAB CFDATA expands beyond 32768 bytes"));
+			return Err(Error::InvalidArchive { problem: "CAB CFDATA expands beyond 32768 bytes" });
 		}
 		let payload_end = payload_start
 			.checked_add(compressed)
-			.ok_or(Error::InvalidArchive("CAB CFDATA payload range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB CFDATA payload range overflows" })?;
 		if payload_end > bytes.len() {
-			return Err(Error::InvalidArchive("truncated CAB CFDATA payload"));
+			return Err(Error::InvalidArchive { problem: "truncated CAB CFDATA payload" });
 		}
 		let expected_checksum = le_u32(&bytes, position)?;
 		if expected_checksum != 0 {
 			let payload_checksum = cab_checksum(&bytes[payload_start..payload_end], 0);
 			let actual_checksum = cab_checksum(&bytes[position + 4..payload_start], payload_checksum);
 			if actual_checksum != expected_checksum {
-				return Err(Error::InvalidArchive("CAB CFDATA block checksum mismatch"));
+				return Err(Error::InvalidArchive { problem: "CAB CFDATA block checksum mismatch" });
 			}
 		}
 		if description.method == 0 {
@@ -388,12 +398,14 @@ fn decode_folder(
 		}
 		output_size = output_size
 			.checked_add(uncompressed)
-			.ok_or(Error::InvalidArchive("CAB folder output size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CAB folder output size overflows" })?;
 		check_in_memory_size(output_size as u64, limits)?;
 		position = payload_end;
 	}
 	if (output_size as u64) < description.required_size {
-		return Err(Error::InvalidArchive("CAB folder data is shorter than its file table declares"));
+		return Err(Error::InvalidArchive {
+			problem: "CAB folder data is shorter than its file table declares",
+		});
 	}
 
 	let mut output = vec![0_u8; output_size];
@@ -415,7 +427,9 @@ fn decode_folder(
 		match description.method {
 			0 => {
 				if compressed != uncompressed {
-					return Err(Error::InvalidArchive("uncompressed CAB CFDATA sizes do not match"));
+					return Err(Error::InvalidArchive {
+						problem: "uncompressed CAB CFDATA sizes do not match",
+					});
 				}
 				destination.copy_from_slice(payload);
 			},
@@ -424,7 +438,11 @@ fn decode_folder(
 				.as_mut()
 				.expect("LZX decoder exists for method 3")
 				.decompress_frame(payload, destination)?,
-			_ => return Err(Error::InvalidArchive("unsupported CAB folder reached decoder")),
+			_ => {
+				return Err(Error::InvalidArchive {
+					problem: "unsupported CAB folder reached decoder",
+				});
+			},
 		}
 		output_position += uncompressed;
 		position = payload_end;
@@ -434,20 +452,22 @@ fn decode_folder(
 
 fn decode_mszip(payload: &[u8], history: &[u8], output: &mut [u8]) -> Result<()> {
 	if !payload.starts_with(b"CK") {
-		return Err(Error::InvalidArchive("CAB MSZIP block is missing its CK signature"));
+		return Err(Error::InvalidArchive { problem: "CAB MSZIP block is missing its CK signature" });
 	}
 	let dictionary = &history[history.len().saturating_sub(MAX_DATA_OUTPUT)..];
 	let mut decompressor = Decompress::new(false);
 	if !dictionary.is_empty() {
 		decompressor
 			.set_dictionary(dictionary)
-			.map_err(|_| Error::InvalidArchive("CAB MSZIP dictionary setup failed"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "CAB MSZIP dictionary setup failed" })?;
 	}
 	let status = decompressor
 		.decompress(&payload[2..], output, FlushDecompress::Finish)
-		.map_err(|_| Error::InvalidArchive("CAB MSZIP decompression failed"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "CAB MSZIP decompression failed" })?;
 	if status != Status::StreamEnd || decompressor.total_out() != output.len() as u64 {
-		return Err(Error::InvalidArchive("CAB MSZIP block produced the wrong byte count"));
+		return Err(Error::InvalidArchive {
+			problem: "CAB MSZIP block produced the wrong byte count",
+		});
 	}
 	Ok(())
 }
@@ -468,10 +488,10 @@ fn read_exact_range(
 	cabinet_size: u64,
 ) -> Result<Vec<u8>> {
 	if end < start || end > cabinet_size {
-		return Err(Error::InvalidArchive("CAB metadata range is out of bounds"));
+		return Err(Error::InvalidArchive { problem: "CAB metadata range is out of bounds" });
 	}
 	let length = usize::try_from(end - start)
-		.map_err(|_| Error::InvalidArchive("CAB range does not fit this platform"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "CAB range does not fit this platform" })?;
 	let mut bytes = vec![0_u8; length];
 	source.seek(SeekFrom::Start(start))?;
 	source.read_exact(&mut bytes)?;
@@ -481,14 +501,14 @@ fn read_exact_range(
 fn le_u16(bytes: &[u8], offset: usize) -> Result<u16> {
 	let value = bytes
 		.get(offset..offset + 2)
-		.ok_or(Error::InvalidArchive("truncated CAB integer field"))?;
+		.ok_or(Error::InvalidArchive { problem: "truncated CAB integer field" })?;
 	Ok(u16::from_le_bytes([value[0], value[1]]))
 }
 
 fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
 	let value = bytes
 		.get(offset..offset + 4)
-		.ok_or(Error::InvalidArchive("truncated CAB integer field"))?;
+		.ok_or(Error::InvalidArchive { problem: "truncated CAB integer field" })?;
 	Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
@@ -512,7 +532,7 @@ fn decode_name(bytes: &[u8], utf8: bool) -> Result<Str> {
 	if utf8 {
 		return str::from_utf8(bytes)
 			.map(Str::new)
-			.map_err(|_| Error::InvalidArchive("CAB file name is not valid UTF-8"));
+			.map_err(|_| Error::InvalidArchive { problem: "CAB file name is not valid UTF-8" });
 	}
 	let mut output = String::with_capacity(bytes.len());
 	for &byte in bytes {
@@ -571,11 +591,11 @@ fn dos_timestamp(date: u16, time: u16) -> Result<Option<u64>> {
 		|| minute > 59
 		|| second > 59
 	{
-		return Err(Error::InvalidArchive("CAB file has an invalid DOS timestamp"));
+		return Err(Error::InvalidArchive { problem: "CAB file has an invalid DOS timestamp" });
 	}
 	let days = days_from_civil(year, month, day);
 	let seconds = u64::try_from(days)
-		.map_err(|_| Error::InvalidArchive("CAB DOS timestamp predates Unix time"))?
+		.map_err(|_| Error::InvalidArchive { problem: "CAB DOS timestamp predates Unix time" })?
 		* 86_400
 		+ hour * 3600
 		+ minute * 60
