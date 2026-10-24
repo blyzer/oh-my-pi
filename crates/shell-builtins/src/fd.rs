@@ -964,8 +964,9 @@ fn cancel_heartbeat(cancelled: &AtomicBool) -> impl Fn() -> io::Result<()> + Syn
 fn walker_error_to_io(err: omp_walker::WalkError<io::Error>) -> io::Error {
 	match err {
 		omp_walker::WalkError::Interrupted(err) => err,
-		omp_walker::WalkError::InvalidData { path, message } => {
-			io::Error::other(format!("{}: {message}", path.display()))
+		omp_walker::WalkError::InvalidData { path, step, source } => {
+			let detail = omp_walker::invalid_data_detail(step, source.as_ref());
+			io::Error::other(format!("{}: {detail}", path.display()))
 		},
 	}
 }
@@ -973,8 +974,9 @@ fn walker_error_to_io(err: omp_walker::WalkError<io::Error>) -> io::Error {
 fn walker_collect_error_to_io(err: omp_walker::WalkError<String>) -> io::Error {
 	match err {
 		omp_walker::WalkError::Interrupted(err) => io::Error::other(err),
-		omp_walker::WalkError::InvalidData { path, message } => {
-			io::Error::other(format!("{}: {message}", path.display()))
+		omp_walker::WalkError::InvalidData { path, step, source } => {
+			let detail = omp_walker::invalid_data_detail(step, source.as_ref());
+			io::Error::other(format!("{}: {detail}", path.display()))
 		},
 	}
 }

@@ -250,20 +250,23 @@ pub fn resolve_search_path(path: &str) -> Result<PathBuf, WalkError<String>> {
 	let root = if candidate.is_absolute() {
 		candidate
 	} else {
-		let cwd = env::current_dir().map_err(|err| WalkError::InvalidData {
-			path:    PathBuf::from(path),
-			message: format!("Failed to resolve cwd: {err}"),
+		let cwd = env::current_dir().map_err(|source| WalkError::InvalidData {
+			path:   PathBuf::from(path),
+			step:   Some("Failed to resolve cwd"),
+			source: Some(source),
 		})?;
 		cwd.join(candidate)
 	};
-	let metadata = fs::metadata(&root).map_err(|err| WalkError::InvalidData {
-		path:    root.clone(),
-		message: format!("Path not found: {err}"),
+	let metadata = fs::metadata(&root).map_err(|source| WalkError::InvalidData {
+		path:   root.clone(),
+		step:   Some("Path not found"),
+		source: Some(source),
 	})?;
 	if !metadata.is_dir() {
 		return Err(WalkError::InvalidData {
-			path:    root,
-			message: "Search path must be a directory".to_string(),
+			path:   root,
+			step:   Some("Search path must be a directory"),
+			source: None,
 		});
 	}
 	Ok(fs::canonicalize(&root).unwrap_or(root))

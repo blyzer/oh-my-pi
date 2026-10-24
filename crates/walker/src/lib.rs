@@ -2136,9 +2136,12 @@ pub enum WalkError<E> {
 	/// A platform directory API returned malformed data or an unskippable error.
 	InvalidData {
 		/// Directory whose scan failed.
-		path:    PathBuf,
-		/// Human-readable failure detail.
-		message: String,
+		path:   PathBuf,
+		/// Static description of the failed step, when the I/O error alone is
+		/// not self-describing.
+		step:   Option<&'static str>,
+		/// The underlying filesystem failure; absent for structural rejections.
+		source: Option<io::Error>,
 	},
 }
 
@@ -2146,12 +2149,31 @@ fn interrupted<E>(error: E) -> WalkError<E> {
 	WalkError::Interrupted(error)
 }
 
+/// Joins a [`WalkError::InvalidData`] step and source into the detail text
+/// consumers print after their own path prefix.
+#[must_use]
+pub fn invalid_data_detail(step: Option<&'static str>, source: Option<&io::Error>) -> String {
+	match (step, source) {
+		(Some(step), Some(source)) => format!("{step}: {source}"),
+		(Some(step), None) => step.to_owned(),
+		(None, Some(source)) => source.to_string(),
+		(None, None) => String::new(),
+	}
+}
+
 impl<E: Display> Display for WalkError<E> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Interrupted(err) => write!(f, "native directory scan interrupted: {err}"),
-			Self::InvalidData { path, message } => {
-				write!(f, "native directory scan failed for {}: {message}", path.display())
+			Self::InvalidData { path, step, source } => {
+				write!(f, "native directory scan failed for {}", path.display())?;
+				if let Some(step) = step {
+					write!(f, ": {step}")?;
+				}
+				if let Some(source) = source {
+					write!(f, ": {source}")?;
+				}
+				Ok(())
 			},
 		}
 	}
@@ -2164,7 +2186,9 @@ where
 	fn source(&self) -> Option<&(dyn error::Error + 'static)> {
 		match self {
 			Self::Interrupted(err) => Some(err),
-			Self::InvalidData { .. } => None,
+			Self::InvalidData { source, .. } => source
+				.as_ref()
+				.map(|source| source as &(dyn error::Error + 'static)),
 		}
 	}
 }
@@ -2340,21 +2364,24 @@ fn root_entry<E>(
 			Ok(metadata) => metadata,
 			Err(err) if is_missing_metadata_error(&err) => {
 				fs::symlink_metadata(root).map_err(|err| WalkError::InvalidData {
-					path:    root.to_path_buf(),
-					message: err.to_string(),
+					path:   root.to_path_buf(),
+					step:   None,
+					source: Some(err),
 				})?
 			},
 			Err(err) => {
 				return Err(WalkError::InvalidData {
-					path:    root.to_path_buf(),
-					message: err.to_string(),
+					path:   root.to_path_buf(),
+					step:   None,
+					source: Some(err),
 				});
 			},
 		}
 	} else {
 		fs::symlink_metadata(root).map_err(|err| WalkError::InvalidData {
-			path:    root.to_path_buf(),
-			message: err.to_string(),
+			path:   root.to_path_buf(),
+			step:   None,
+			source: Some(err),
 		})?
 	};
 	Ok(entry_from_metadata(&metadata, detail))
@@ -2764,8 +2791,9 @@ impl<H> WalkContext<'_, H> {
 						}
 					}
 					return Err(WalkError::InvalidData {
-						path:    self.absolute_path.clone(),
-						message: err.to_string(),
+						path:   self.absolute_path.clone(),
+						step:   None,
+						source: Some(err),
 					});
 				},
 			}
@@ -2839,8 +2867,9 @@ impl<H> WalkContext<'_, H> {
 							return Ok(false);
 						}
 						return Err(WalkError::InvalidData {
-							path:    self.absolute_path.clone(),
-							message: "filesystem loop detected".to_string(),
+							path:   self.absolute_path.clone(),
+							step:   Some("filesystem loop detected"),
+							source: None,
 						});
 					}
 				},
@@ -2865,8 +2894,9 @@ impl<H> WalkContext<'_, H> {
 						}
 					}
 					return Err(WalkError::InvalidData {
-						path:    self.absolute_path.clone(),
-						message: err.to_string(),
+						path:   self.absolute_path.clone(),
+						step:   None,
+						source: Some(err),
 					});
 				},
 			}
@@ -3355,7 +3385,7 @@ where
 			}
 		},
 		ReadDirError::Io(err) => {
-			Err(WalkError::InvalidData { path: dir.to_path_buf(), message: err.to_string() })
+			Err(WalkError::InvalidData { path: dir.to_path_buf(), step: None, source: Some(err) })
 		},
 	}
 }
