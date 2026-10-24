@@ -19,11 +19,17 @@ pub const MAX_BACKFILL_RECOVERY: usize = 32;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PlannerError {
 	/// The cron expression is not a supported five- or six-field expression.
-	#[error("invalid cron expression: {0}")]
-	InvalidCron(Str),
+	#[error("invalid cron expression: {expression}")]
+	InvalidCron {
+		/// The unsupported cron expression.
+		expression: Str,
+	},
 	/// The timezone cannot be resolved without an IANA timezone provider.
-	#[error("unsupported schedule timezone: {0}")]
-	UnsupportedTimezone(Str),
+	#[error("unsupported schedule timezone: {timezone}")]
+	UnsupportedTimezone {
+		/// The unresolvable timezone.
+		timezone: Str,
+	},
 	/// An interval cannot be represented in epoch milliseconds.
 	#[error("schedule duration exceeds epoch range")]
 	DurationOverflow,
@@ -172,12 +178,12 @@ impl Zone {
 			let (hours, minutes) = rest.split_once(':').unwrap_or((rest, "0"));
 			let hours = hours
 				.parse::<i32>()
-				.map_err(|_| PlannerError::UnsupportedTimezone(Str::from(timezone)))?;
+				.map_err(|_| PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) })?;
 			let minutes = minutes
 				.parse::<i32>()
-				.map_err(|_| PlannerError::UnsupportedTimezone(Str::from(timezone)))?;
+				.map_err(|_| PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) })?;
 			if hours > 23 || minutes > 59 {
-				return Err(PlannerError::UnsupportedTimezone(Str::from(timezone)));
+				return Err(PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) });
 			}
 			return Ok(Self::Fixed(sign * (hours * 3_600 + minutes * 60)));
 		}
@@ -187,13 +193,14 @@ impl Zone {
 				.split('/')
 				.any(|part| matches!(part, "" | "." | ".."))
 		{
-			return Err(PlannerError::UnsupportedTimezone(Str::from(timezone)));
+			return Err(PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) });
 		}
 		let bytes = ["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo"]
 			.into_iter()
 			.find_map(|root| fs::read(Path::new(root).join(timezone)).ok())
-			.ok_or_else(|| PlannerError::UnsupportedTimezone(Str::from(timezone)))?;
-		parse_tzif(&bytes).ok_or_else(|| PlannerError::UnsupportedTimezone(Str::from(timezone)))
+			.ok_or_else(|| PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) })?;
+		parse_tzif(&bytes)
+			.ok_or_else(|| PlannerError::UnsupportedTimezone { timezone: Str::from(timezone) })
 	}
 
 	fn offset_at(&self, epoch_seconds: u64) -> i32 {
@@ -314,7 +321,7 @@ impl Cron {
 		let (has_seconds, fields) = match fields.len() {
 			5 => (false, fields),
 			6 => (true, fields),
-			_ => return Err(PlannerError::InvalidCron(Str::from(expr))),
+			_ => return Err(PlannerError::InvalidCron { expression: Str::from(expr) }),
 		};
 		let at = |index: usize| fields[index];
 		let offset = usize::from(has_seconds);
@@ -369,7 +376,7 @@ impl Field {
 				.split_once('/')
 				.map_or((part, 1), |(range, step)| (range, step.parse::<u8>().unwrap_or(0)));
 			if step == 0 {
-				return Err(PlannerError::InvalidCron(Str::from(source)));
+				return Err(PlannerError::InvalidCron { expression: Str::from(source) });
 			}
 			let (start, end) = if range == "*" {
 				(minimum, maximum)
@@ -380,14 +387,14 @@ impl Field {
 				(value, value)
 			};
 			if start > end {
-				return Err(PlannerError::InvalidCron(Str::from(source)));
+				return Err(PlannerError::InvalidCron { expression: Str::from(source) });
 			}
 			for value in (start..=end).step_by(usize::from(step)) {
 				bits |= 1_u64 << value;
 			}
 		}
 		if bits == 0 {
-			return Err(PlannerError::InvalidCron(Str::from(source)));
+			return Err(PlannerError::InvalidCron { expression: Str::from(source) });
 		}
 		Ok(Self { bits, any: source.starts_with('*') })
 	}
@@ -400,9 +407,9 @@ impl Field {
 fn parse_field_value(source: &str, minimum: u8, maximum: u8) -> Result<u8, PlannerError> {
 	let value = source
 		.parse::<u8>()
-		.map_err(|_| PlannerError::InvalidCron(Str::from(source)))?;
+		.map_err(|_| PlannerError::InvalidCron { expression: Str::from(source) })?;
 	if value < minimum || value > maximum {
-		return Err(PlannerError::InvalidCron(Str::from(source)));
+		return Err(PlannerError::InvalidCron { expression: Str::from(source) });
 	}
 	Ok(value)
 }

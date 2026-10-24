@@ -111,8 +111,11 @@ pub enum WorkspaceOperationError {
 	#[error("invalid workspace generation: {0}")]
 	InvalidGeneration(Str),
 	/// The requested worktree does not exist.
-	#[error("worktree {0:?} was not found")]
-	WorktreeNotFound(Str),
+	#[error("worktree {name:?} was not found")]
+	WorktreeNotFound {
+		/// The missing worktree name.
+		name: Str,
+	},
 	/// A worktree name is empty or contains path separators.
 	#[error("invalid worktree name")]
 	InvalidWorktreeName,
@@ -743,7 +746,7 @@ impl WorkspaceOperations {
 			.lock()
 			.get(&key)
 			.cloned()
-			.ok_or_else(|| WorkspaceOperationError::WorktreeNotFound(key.clone()))?;
+			.ok_or_else(|| WorkspaceOperationError::WorktreeNotFound { name: key.clone() })?;
 		self.ensure_registered_root(&record.root)?;
 		if !request.force {
 			let current = self.snapshot_at(&record.root, &[], cancel)?;
@@ -784,7 +787,7 @@ impl WorkspaceOperations {
 			.lock()
 			.get(&key)
 			.cloned()
-			.ok_or_else(|| WorkspaceOperationError::WorktreeNotFound(key.clone()))?;
+			.ok_or_else(|| WorkspaceOperationError::WorktreeNotFound { name: key.clone() })?;
 		self.ensure_registered_root(&record.root)?;
 		let current_snapshot = self.snapshot_at(&record.root, &[], cancel)?;
 		let base = self.load_manifest(record.base.as_str())?;

@@ -185,8 +185,11 @@ pub enum DapAdapterError {
 	#[error("invalid DAP adapter: {0}")]
 	InvalidSpec(Str),
 	/// Another declaration already owns the name.
-	#[error("DAP adapter {0:?} is already installed")]
-	Duplicate(Str),
+	#[error("DAP adapter {name:?} is already installed")]
+	Duplicate {
+		/// The already-installed adapter name.
+		name: Str,
+	},
 }
 
 #[derive(Default)]
@@ -218,7 +221,7 @@ impl DapAdapterRegistry {
 	pub fn install(&self, spec: DapAdapterSpec) -> Result<DapAdapterId, DapAdapterError> {
 		let mut state = self.state.write();
 		if state.by_name.contains_key(&spec.name) {
-			return Err(DapAdapterError::Duplicate(spec.name));
+			return Err(DapAdapterError::Duplicate { name: spec.name });
 		}
 		state.next_id = state
 			.next_id

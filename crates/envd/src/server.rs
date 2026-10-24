@@ -368,8 +368,11 @@ pub enum EnvdError {
 	#[error("invalid edit dialect: {0}")]
 	EditDialect(Str),
 	/// Production assembly encountered a second live declaration for one name.
-	#[error("duplicate production tool name: {0}")]
-	DuplicateToolName(Str),
+	#[error("duplicate production tool name: {name}")]
+	DuplicateToolName {
+		/// The twice-declared tool name.
+		name: Str,
+	},
 	/// The environment client could not complete its protocol handshake.
 	#[error(transparent)]
 	Client(#[from] omp_env::ClientError),
@@ -2128,8 +2131,11 @@ async fn start_memory_runtime(
 
 #[derive(Debug, Error)]
 enum PrivilegedDispatchError {
-	#[error("{0}")]
-	Invalid(&'static str),
+	#[error("{violation}")]
+	Invalid {
+		/// The violated dispatch rule.
+		violation: &'static str,
+	},
 	#[error(transparent)]
 	Mutation(#[from] PrivilegedMutationFault),
 }
@@ -2256,9 +2262,9 @@ fn privileged_presence(value: i32) -> Result<bool, PrivilegedDispatchError> {
 	match pb::ExpectedPresence::try_from(value).ok() {
 		Some(pb::ExpectedPresence::Present) => Ok(true),
 		Some(pb::ExpectedPresence::Missing) => Ok(false),
-		_ => Err(PrivilegedDispatchError::Invalid(
-			"privileged mutation requires an explicit expected presence",
-		)),
+		_ => Err(PrivilegedDispatchError::Invalid {
+			violation: "privileged mutation requires an explicit expected presence",
+		}),
 	}
 }
 
@@ -2267,11 +2273,13 @@ fn privileged_revision_hash(
 ) -> Result<Option<[u8; 32]>, PrivilegedDispatchError> {
 	revision
 		.map(|revision| {
-			revision.content_hash.as_ref().try_into().map_err(|_| {
-				PrivilegedDispatchError::Invalid(
-					"privileged mutation revision hash must contain 32 bytes",
-				)
-			})
+			revision
+				.content_hash
+				.as_ref()
+				.try_into()
+				.map_err(|_| PrivilegedDispatchError::Invalid {
+					violation: "privileged mutation revision hash must contain 32 bytes",
+				})
 		})
 		.transpose()
 }
@@ -2309,7 +2317,7 @@ fn canonical_privileged_target(root: &Path, input: &str) -> Result<(String, Path
 
 fn privileged_dispatch_error(error: PrivilegedDispatchError) -> (pb::ProtocolErrorCode, String) {
 	match error {
-		PrivilegedDispatchError::Invalid(message) => {
+		PrivilegedDispatchError::Invalid { violation: message } => {
 			(pb::ProtocolErrorCode::InvalidArgument, message.to_owned())
 		},
 		PrivilegedDispatchError::Mutation(PrivilegedMutationFault::StaleRevision) => (
@@ -5836,7 +5844,7 @@ impl EnvServer {
 					},
 					Err(
 						error @ (SiteError::InvalidSiteKey
-						| SiteError::InvalidFilePath(_)
+						| SiteError::InvalidFilePath { path: _ }
 						| SiteError::InvalidBlobHash),
 					) => {
 						send_error(
@@ -11774,7 +11782,7 @@ async fn send_workspace_operation_error(
 		WorkspaceOperationError::Blob(error) => {
 			send_blob_error(responses, request_id, error).await;
 		},
-		WorkspaceOperationError::WorktreeNotFound(_) => {
+		WorkspaceOperationError::WorktreeNotFound { name: _ } => {
 			send_error(responses, request_id, pb::ProtocolErrorCode::NotFound, &error.to_string())
 				.await;
 		},
@@ -11942,12 +11950,12 @@ async fn send_exec_error(
 		ExecError::SessionNotFound
 		| ExecError::RunNotFound
 		| ExecError::FinalCwdNotFound
-		| ExecError::ProcessNotFound(_) => pb::ProtocolErrorCode::NotFound,
-		ExecError::ProcessExists(_) => pb::ProtocolErrorCode::AlreadyExists,
+		| ExecError::ProcessNotFound { name: _ } => pb::ProtocolErrorCode::NotFound,
+		ExecError::ProcessExists { name: _ } => pb::ProtocolErrorCode::AlreadyExists,
 		ExecError::StaleProcessGeneration { .. } | ExecError::StaleFinalCwdRevision => {
 			pb::ProtocolErrorCode::PreconditionFailed
 		},
-		ExecError::UnsupportedSignal(_) | ExecError::UnsupportedShellProfile { .. } => {
+		ExecError::UnsupportedSignal { signal: _ } | ExecError::UnsupportedShellProfile { .. } => {
 			pb::ProtocolErrorCode::Unsupported
 		},
 		ExecError::WireRevision

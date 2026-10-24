@@ -27,8 +27,11 @@ pub enum SiteError {
 	#[error("invalid site key")]
 	InvalidSiteKey,
 	/// A farm member path was not a safe relative path.
-	#[error("invalid site file path: {0}")]
-	InvalidFilePath(Str),
+	#[error("invalid site file path: {path}")]
+	InvalidFilePath {
+		/// The unsafe member path.
+		path: Str,
+	},
 	/// A requested blob hash was not a SHA-256 digest.
 	#[error("site file blob hash must be exactly 32 bytes")]
 	InvalidBlobHash,
@@ -179,7 +182,7 @@ impl OwnershipMap {
 				.rsplit_once('/')
 				.is_some_and(|(parent, name)| name == "RECORD" && parent.ends_with(".dist-info"));
 			if !is_record {
-				return Err(SiteError::InvalidFilePath(record_path));
+				return Err(SiteError::InvalidFilePath { path: record_path });
 			}
 			let record = str::from_utf8(&record).map_err(|_| SiteError::InvalidRecord)?;
 			for row in record.lines() {
@@ -399,11 +402,11 @@ fn canonical_files(files: Vec<pb::SiteFile>) -> Result<BTreeMap<Str, pb::SiteFil
 	let mut canonical = BTreeMap::new();
 	for file in files {
 		if !safe_relative_path(&file.path) || file.blob_hash.len() != 32 {
-			return Err(SiteError::InvalidFilePath(Str::from(file.path)));
+			return Err(SiteError::InvalidFilePath { path: Str::from(file.path) });
 		}
 		let path = Str::from(file.path.clone());
 		if canonical.insert(path.clone(), file).is_some() {
-			return Err(SiteError::InvalidFilePath(path));
+			return Err(SiteError::InvalidFilePath { path });
 		}
 	}
 	Ok(canonical)

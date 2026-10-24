@@ -606,8 +606,11 @@ pub enum PolicyControlFailure {
 	#[error("the policy authority belongs to a stale connection generation")]
 	StaleGeneration,
 	/// The caller lacks an exact manifest capability.
-	#[error("policy capability denied: {0}")]
-	Capability(&'static str),
+	#[error("policy capability denied: {capability}")]
+	Capability {
+		/// The missing manifest capability.
+		capability: &'static str,
+	},
 	/// The request is illegal in the current callback phase.
 	#[error("policy operation is illegal in the current invocation phase")]
 	Phase,
@@ -642,7 +645,7 @@ impl PolicyControlFailure {
 	fn protocol(&self) -> ControlProtocolError {
 		let code = match self {
 			Self::StaleGeneration => "StaleGeneration",
-			Self::Capability(_) => "PermissionDenied",
+			Self::Capability { .. } => "PermissionDenied",
 			Self::Phase => "InvalidPhase",
 			Self::Invalid(_) => "ProfileRejected",
 			Self::ProfileWidened => "ProfileWidened",
@@ -738,7 +741,7 @@ impl PolicyControlOwner {
 		if self.identity.capabilities.contains(capability) {
 			Ok(())
 		} else {
-			Err(PolicyControlFailure::Capability(capability))
+			Err(PolicyControlFailure::Capability { capability })
 		}
 	}
 
@@ -771,7 +774,7 @@ impl PolicyControlOwner {
 				.as_ref()
 				.is_none_or(|invocation| invocation.session.as_str() != session)
 			{
-				return Err(PolicyControlFailure::Capability("session scope"));
+				return Err(PolicyControlFailure::Capability { capability: "session scope" });
 			}
 			return Ok(session);
 		}
