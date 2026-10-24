@@ -1,0 +1,139 @@
+# CodeQL advanced setup, replacing the repository's default setup.
+#
+# Cost posture (the default setup ran every language on every PR push; the
+# Rust analysis alone took ~84 minutes per run):
+# - No pull_request trigger. CodeQL is not a required check, so PRs lose no
+#   gate; coverage comes from the weekly schedule plus pushes to omp2.
+# - Pushes ignore docs/baseline/label-only changes outright.
+# - Rust analysis is scoped to production sources. CodeQL Rust supports only
+#   build-mode `none` (a rust-analyzer-based extractor; there is no traced
+#   build to trim), so the trim is expressed as extraction paths: crates/**
+#   minus tests, benches, examples, the e2e harness, and repo tooling.
+# - Cargo registry/git downloads are cached. There is no target/ to cache:
+#   the extractor performs no cargo build, but it does run build scripts, so
+#   the embedded-Python inputs must exist before init (pyo3's build script
+#   reads vendor/python/pyo3-config.txt via .cargo/config.toml).
+name: CodeQL
+
+on:
+  schedule:
+    # One weekly run, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  push:
+    branches: [omp2]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "tools/lintx/baselines/**"
+      - ".github/labeler.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # The fast, extraction-only languages from the former default setup.
+        # Rust has its own job below because it needs the pyo3 build inputs.
+        language: [actions, javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@793b778da9c9275a0f276522b27cb5fc14bba279 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@793b778da9c9275a0f276522b27cb5fc14bba279 # v4
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  analyze-rust:
+    name: Analyze (rust)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Install native build tools
+        timeout-minutes: 10
+        run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache embedded Python
+        id: python-cache
+        # Restore-only: ci.yml's lint_linux is this key's single writer.
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        # The omp bin links omp-py; the extractor runs build scripts, and
+        # pyo3's needs vendor/python/pyo3-config.txt (wired through
+        # .cargo/config.toml) before Cargo resolves it.
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        run: |
+          test -f vendor/python/pyo3-config.txt
+          test -x vendor/python/install/bin/python3.14td
+
+      - name: Cache Cargo dependencies
+        # Registry and git sources only; build-mode none performs no cargo
+        # build, so there is no target/ to cache.
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: codeql-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            codeql-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@793b778da9c9275a0f276522b27cb5fc14bba279 # v4
+        with:
+          languages: rust
+          build-mode: none
+          config: |
+            paths:
+              - crates
+            paths-ignore:
+              - crates/*/tests
+              - crates/*/benches
+              - crates/*/examples
+              - crates/e2e
+              - tools
+              - fixtures
+              - scripts
+              - vendor
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@793b778da9c9275a0f276522b27cb5fc14bba279 # v4
+        with:
+          category: "/language:rust"
