@@ -92,7 +92,8 @@ pub async fn snapshot(
 		}),
 		Err(
 			omp_vcs::Error::Cli { exit_code: 127, .. }
-			| omp_vcs::Error::Backend { context: "git spawn", .. },
+			| omp_vcs::Error::GitMissing
+			| omp_vcs::Error::CwdMissing { .. },
 		) => Ok(RepositorySnapshot {
 			availability:  RepositoryAvailability::GitUnavailable,
 			worktree_root: Some(worktree_root),

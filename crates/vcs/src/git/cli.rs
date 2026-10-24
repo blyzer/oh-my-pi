@@ -253,12 +253,10 @@ fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
 	if err.kind() == std::io::ErrorKind::NotFound {
 		// A deleted cwd also surfaces as spawn ENOENT; only blame the binary
 		// when the working directory actually exists.
-		let message = if cwd.exists() {
-			"git is not installed.".to_owned()
-		} else {
-			format!("working directory does not exist: {}", cwd.display())
-		};
-		return Error::backend("git spawn", message);
+		if cwd.exists() {
+			return Error::GitMissing;
+		}
+		return Error::CwdMissing { path: cwd.to_path_buf() };
 	}
 	Error::Io(err)
 }
