@@ -38,14 +38,23 @@ pub struct DeviceDispatch {
 #[derive(Debug, Error)]
 pub enum BridgeError {
 	/// The incoming frame family or operation is not supported.
-	#[error("unsupported Cursor frame `{0}`")]
-	Unsupported(Str),
+	#[error("unsupported Cursor frame `{frame}`")]
+	Unsupported {
+		/// The unsupported frame name.
+		frame: Str,
+	},
 	/// A required argument was absent or malformed.
-	#[error("invalid Cursor arguments: {0}")]
-	Invalid(Str),
+	#[error("invalid Cursor arguments: {violation}")]
+	Invalid {
+		/// The violated argument rule.
+		violation: Str,
+	},
 	/// A write violated the configured filesystem policy.
-	#[error("Cursor write rejected: {0}")]
-	WriteRejected(Str),
+	#[error("Cursor write rejected: {violation}")]
+	WriteRejected {
+		/// The violated write-policy rule.
+		violation: Str,
+	},
 	/// A filesystem safety check failed.
 	#[error("Cursor filesystem check failed for {path}: {source}")]
 	Io {
@@ -60,7 +69,7 @@ pub enum BridgeError {
 pub fn translate(frame: &str, arguments: &Value) -> Result<DeviceDispatch, BridgeError> {
 	let args = arguments
 		.as_object()
-		.ok_or_else(|| BridgeError::Invalid(sf!("arguments must be an object")))?;
+		.ok_or_else(|| BridgeError::Invalid { violation: sf!("arguments must be an object") })?;
 	if let Some(replace) = cursor_replace_arguments(frame, args) {
 		return Ok(device_dispatch("edit", translate_edit(replace)?));
 	}
@@ -75,7 +84,7 @@ pub fn translate(frame: &str, arguments: &Value) -> Result<DeviceDispatch, Bridg
 		"piFind" => ("glob", translate_find(args)?),
 		"diagnostics" => ("diagnostics", Value::Object(args.clone())),
 		"mcp" | "piMcp" | "mcpResource" => ("mcp", Value::Object(args.clone())),
-		other => return Err(BridgeError::Unsupported(Str::from(other))),
+		other => return Err(BridgeError::Unsupported { frame: Str::from(other) }),
 	};
 	Ok(device_dispatch(device, translated))
 }
@@ -98,7 +107,7 @@ pub fn translate_checked(
 			.arguments
 			.get("path")
 			.and_then(Value::as_str)
-			.ok_or_else(|| BridgeError::Invalid(sf!("write has no path")))?;
+			.ok_or_else(|| BridgeError::Invalid { violation: sf!("write has no path") })?;
 		let safe = validate_write(root, Path::new(raw), policy)?;
 		call.arguments["path"] = Value::String(safe.to_string_lossy().into_owned());
 	}
@@ -271,7 +280,9 @@ fn string<'a>(args: &'a Map<String, Value>, names: &[&str]) -> Result<&'a str, B
 	names
 		.iter()
 		.find_map(|name| args.get(*name).and_then(Value::as_str))
-		.ok_or_else(|| BridgeError::Invalid(Str::from(format!("missing string `{}`", names[0]))))
+		.ok_or_else(|| BridgeError::Invalid {
+			violation: Str::from(format!("missing string `{}`", names[0])),
+		})
 }
 fn unsigned(args: &Map<String, Value>, names: &[&str]) -> Result<Option<u64>, BridgeError> {
 	for name in names {
@@ -279,7 +290,9 @@ fn unsigned(args: &Map<String, Value>, names: &[&str]) -> Result<Option<u64>, Br
 			return value
 				.as_u64()
 				.map(Some)
-				.ok_or_else(|| BridgeError::Invalid(Str::from(format!("`{name}` must be unsigned"))));
+				.ok_or_else(|| BridgeError::Invalid {
+					violation: Str::from(format!("`{name}` must be unsigned")),
+				});
 		}
 	}
 	Ok(None)
@@ -305,13 +318,13 @@ pub fn validate_write(
 	policy: WritePolicy,
 ) -> Result<PathBuf, BridgeError> {
 	if policy == WritePolicy::ReadOnly {
-		return Err(BridgeError::WriteRejected(sf!("workspace is read-only")));
+		return Err(BridgeError::WriteRejected { violation: sf!("workspace is read-only") });
 	}
 	if requested
 		.components()
 		.any(|part| matches!(part, Component::ParentDir))
 	{
-		return Err(BridgeError::WriteRejected(sf!("parent traversal is forbidden")));
+		return Err(BridgeError::WriteRejected { violation: sf!("parent traversal is forbidden") });
 	}
 	let root =
 		fs::canonicalize(root).map_err(|source| BridgeError::Io { path: root.to_owned(), source })?;
@@ -322,7 +335,7 @@ pub fn validate_write(
 	};
 	let relative = joined
 		.strip_prefix(&root)
-		.map_err(|_| BridgeError::WriteRejected(sf!("target escapes workspace")))?;
+		.map_err(|_| BridgeError::WriteRejected { violation: sf!("target escapes workspace") })?;
 	let mut cursor = root.clone();
 	let component_count = relative.components().count();
 	for (index, component) in relative.components().enumerate() {
@@ -333,45 +346,57 @@ pub fn validate_write(
 		let metadata = fs::symlink_metadata(&cursor)
 			.map_err(|source| BridgeError::Io { path: cursor.clone(), source })?;
 		if metadata.file_type().is_symlink() {
-			return Err(BridgeError::WriteRejected(sf!("symlink path components are forbidden",)));
+			return Err(BridgeError::WriteRejected {
+				violation: sf!("symlink path components are forbidden",),
+			});
 		}
 		if !metadata.is_dir() {
-			return Err(BridgeError::WriteRejected(sf!("write parent is not a directory",)));
+			return Err(BridgeError::WriteRejected {
+				violation: sf!("write parent is not a directory",),
+			});
 		}
 	}
 	let parent = joined
 		.parent()
-		.ok_or_else(|| BridgeError::WriteRejected(sf!("target has no parent")))?;
+		.ok_or_else(|| BridgeError::WriteRejected { violation: sf!("target has no parent") })?;
 	let parent = fs::canonicalize(parent)
 		.map_err(|source| BridgeError::Io { path: parent.to_owned(), source })?;
 	if !parent.starts_with(&root) {
-		return Err(BridgeError::WriteRejected(sf!("target escapes workspace")));
+		return Err(BridgeError::WriteRejected { violation: sf!("target escapes workspace") });
 	}
 	let target = parent.join(
 		joined
 			.file_name()
-			.ok_or_else(|| BridgeError::WriteRejected(sf!("target has no filename")))?,
+			.ok_or_else(|| BridgeError::WriteRejected { violation: sf!("target has no filename") })?,
 	);
 	match fs::symlink_metadata(&target) {
 		Ok(metadata) => {
 			if metadata.file_type().is_symlink() {
-				return Err(BridgeError::WriteRejected(sf!("symlink targets are forbidden",)));
+				return Err(BridgeError::WriteRejected {
+					violation: sf!("symlink targets are forbidden",),
+				});
 			}
 			if !metadata.file_type().is_file() {
-				return Err(BridgeError::WriteRejected(sf!("target is not a regular file",)));
+				return Err(BridgeError::WriteRejected {
+					violation: sf!("target is not a regular file",),
+				});
 			}
 			#[cfg(unix)]
 			{
 				use std::os::unix::fs::MetadataExt as _;
 				if metadata.nlink() != 1 {
-					return Err(BridgeError::WriteRejected(sf!("hard-linked targets are forbidden",)));
+					return Err(BridgeError::WriteRejected {
+						violation: sf!("hard-linked targets are forbidden",),
+					});
 				}
 			}
 		},
 		Err(error) if error.kind() == io::ErrorKind::NotFound && policy == WritePolicy::Workspace => {
 		},
 		Err(error) if error.kind() == io::ErrorKind::NotFound => {
-			return Err(BridgeError::WriteRejected(sf!("policy permits existing files only",)));
+			return Err(BridgeError::WriteRejected {
+				violation: sf!("policy permits existing files only",),
+			});
 		},
 		Err(source) => return Err(BridgeError::Io { path: target, source }),
 	}

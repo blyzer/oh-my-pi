@@ -50,8 +50,11 @@ pub enum BootstrapError {
 		source: de::Error,
 	},
 	/// A required extension value is absent.
-	#[error("extension CLI flag `--{0}` requires a value")]
-	MissingValue(Str),
+	#[error("extension CLI flag `--{flag}` requires a value")]
+	MissingValue {
+		/// The value-less flag name.
+		flag: Str,
+	},
 }
 
 #[derive(Deserialize)]
@@ -178,7 +181,7 @@ fn parse_contributed(
 					arguments
 						.get(index)
 						.and_then(|value| value.to_str())
-						.ok_or_else(|| BootstrapError::MissingValue(declaration.name.clone()))?
+						.ok_or_else(|| BootstrapError::MissingValue { flag: declaration.name.clone() })?
 				};
 				ContributedValue::String(Str::new(value))
 			},
