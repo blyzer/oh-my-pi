@@ -24,7 +24,7 @@ use crate::{
 	support::{ScriptedInference, scripted_stream},
 };
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const TOKEN: &str = "·";
 
 /// Full-loop throughput, in tokens per second, below which a recording is a
@@ -41,7 +41,18 @@ const TOKEN: &str = "·";
 /// while every delta paid its own `F_FULLFSYNC`.
 pub const LOOP_THROUGHPUT_FLOOR: f64 = 10_000.0;
 
-/// Recorded frame and agent-loop measurements for a baseline run.
+/// Replay throughput, in journal entries per second, below which a recording
+/// is a gross regression.
+///
+/// Absolute for the same reason as [`LOOP_THROUGHPUT_FLOOR`]: replay has to
+/// reopen real sessions promptly, not beat a synthetic sibling. It sits
+/// between the two sides it has to separate, both measured on the 30-rewind,
+/// 123-entry workload: the dev-profile replay recorded 3 516 entries/s on
+/// the self-hosted M1 Pro (2026-10-24), and the loaded-host pathology it
+/// exists to catch replayed the same shape in 1.974 s, 62 entries/s.
+pub const REPLAY_THROUGHPUT_FLOOR: f64 = 1_000.0;
+
+/// Recorded frame, agent-loop, and replay measurements for a baseline run.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BaselineMetrics {
 	/// Version of the serialized baseline schema.
@@ -50,6 +61,32 @@ pub struct BaselineMetrics {
 	pub frame:          FrameMetrics,
 	/// Journal-first kernel measurements.
 	pub r#loop:         LoopMetrics,
+	/// Journal replay measurements.
+	pub replay:         ReplayMetrics,
+}
+
+/// Replay measurements collected by reopening a rewind-dense journal.
+///
+/// The workload mirrors the `omp-session` replay law test: rewinds nested
+/// under one assistant, each followed by a non-root patch and a stream
+/// append, which is the densest rewind shape the law suite pins. Correctness
+/// of the replay is asserted by that suite; this records only its cost.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ReplayMetrics {
+	/// Nested rewinds in the journal.
+	pub rewind_depth:           usize,
+	/// Journal entries replayed by `Session::open`.
+	pub entry_count:            usize,
+	/// Wall time of the replaying `Session::open`, in nanoseconds.
+	pub replay_duration_ns:     u128,
+	/// Replay throughput in journal entries per second.
+	pub entries_per_second:     f64,
+	/// Floor the run was classified against
+	/// ([`REPLAY_THROUGHPUT_FLOOR`]).
+	pub min_entries_per_second: f64,
+	/// Whether replay throughput fell below
+	/// [`Self::min_entries_per_second`].
+	pub gross_regression:       bool,
 }
 
 /// Frame-time measurements collected during streaming text updates.
@@ -104,11 +141,12 @@ fn token_events(tokens: usize) -> Vec<ChatEvent> {
 	events
 }
 
-/// Measures retained-frame and end-to-end kernel performance.
+/// Measures retained-frame, end-to-end kernel, and replay performance.
 pub async fn measure(
 	frame_tokens: usize,
 	loop_tokens: usize,
 	samples: usize,
+	rewind_depth: usize,
 ) -> Result<BaselineMetrics> {
 	if frame_tokens < 100 || loop_tokens < 100 || samples == 0 {
 		return Err(error("baseline requires at least 100 frame and loop tokens and one sample"));
@@ -148,6 +186,7 @@ pub async fn measure(
 	let raw_rate = duration_rate(total_tokens, raw_duration)?;
 	let full_rate = duration_rate(total_tokens, full_duration)?;
 	let slowdown = slowdown_ratio(raw_rate, full_rate)?;
+	let replay = measure_replay(rewind_depth)?;
 	Ok(BaselineMetrics {
 		schema_version: SCHEMA_VERSION,
 		frame,
@@ -162,6 +201,7 @@ pub async fn measure(
 			min_tokens_per_second:  LOOP_THROUGHPUT_FLOOR,
 			gross_regression:       is_gross_regression(full_rate),
 		},
+		replay,
 	})
 }
 
@@ -210,6 +250,96 @@ async fn measure_raw(tokens: usize, samples: usize) -> Result<Duration> {
 	Ok(total)
 }
 
+fn measure_replay(rewind_depth: usize) -> Result<ReplayMetrics> {
+	use omp_dom::{KnownTag, NodeSpec, Op, PropId, Tag, Txn, Value};
+	if rewind_depth == 0 {
+		return Err(error("replay baseline requires at least one rewind"));
+	}
+	let scratch = tempfile::tempdir().context("create replay baseline scratch directory")?;
+	let path = scratch.path().join("replay.oms");
+	let mut session =
+		Session::create(&path, ComponentRegistry::standard()).context("create replay session")?;
+	session.begin_turn().context("replay turn starts")?;
+	session
+		.assistant_start("model", "provider", "route")
+		.context("replay assistant starts")?;
+	let jobs = session
+		.dom()
+		.children(session.dom().meta())
+		.iter()
+		.copied()
+		.find(|handle| {
+			session
+				.dom()
+				.get(*handle)
+				.is_some_and(|node| node.tag == Tag::Known(KnownTag::Jobs))
+		})
+		.context("jobs component exists")?;
+	let assistant = session
+		.dom()
+		.children(session.dom().body())
+		.last()
+		.copied()
+		.and_then(|turn| {
+			session
+				.dom()
+				.children(turn)
+				.iter()
+				.rev()
+				.copied()
+				.find(|handle| {
+					session
+						.dom()
+						.get(*handle)
+						.is_some_and(|node| node.tag == Tag::Known(KnownTag::Assistant))
+				})
+		})
+		.context("replay assistant handle")?;
+	for depth in 0..rewind_depth {
+		let target = session.head().context("nested rewind target")?;
+		session
+			.user(format!("abandoned-{depth}"), Vec::new())
+			.context("abandoned work")?;
+		session.rewind(target).context("nested rewind")?;
+		let cause = session.head().context("rewound head")?;
+		session
+			.patch(Txn {
+				cause,
+				label: None,
+				ops: vec![Op::Ins {
+					parent: jobs,
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Job)
+						.with_prop(PropId::Id, Value::Str(Str::new(format!("job-{depth}")))),
+				}],
+			})
+			.context("nested non-root patch")?;
+		let prop = omp_dom::PropKey::Custom(Str::new(format!("nested-{depth}")));
+		let sid = session
+			.stream_open(assistant, prop)
+			.context("stream opens")?;
+		session.stream_append(sid, "x").context("stream appends")?;
+	}
+	drop(session);
+	let entry_count = omp_journal::Journal::scan(&path)
+		.context("scan replay journal")?
+		.len();
+	let started = Instant::now();
+	let restored =
+		Session::open(&path, ComponentRegistry::standard()).context("replay journal opens")?;
+	let elapsed = started.elapsed();
+	drop(restored);
+	let rate = duration_rate(entry_count, elapsed)?;
+	Ok(ReplayMetrics {
+		rewind_depth,
+		entry_count,
+		replay_duration_ns: elapsed.as_nanos(),
+		entries_per_second: rate,
+		min_entries_per_second: REPLAY_THROUGHPUT_FLOOR,
+		gross_regression: is_replay_gross_regression(rate),
+	})
+}
+
 /// Computes token throughput from a nonzero duration and token count.
 pub fn duration_rate(tokens: usize, duration: Duration) -> Result<f64> {
 	if tokens == 0 {
@@ -238,6 +368,13 @@ pub fn slowdown_ratio(raw_rate: f64, full_rate: f64) -> Result<f64> {
 #[must_use]
 pub fn is_gross_regression(full_tokens_per_second: f64) -> bool {
 	full_tokens_per_second < LOOP_THROUGHPUT_FLOOR
+}
+
+/// Whether a replay throughput is a gross regression: below
+/// [`REPLAY_THROUGHPUT_FLOOR`]. A rate exactly at the floor is not.
+#[must_use]
+pub fn is_replay_gross_regression(entries_per_second: f64) -> bool {
+	entries_per_second < REPLAY_THROUGHPUT_FLOOR
 }
 
 /// Serializes measurements to the requested artifact path.

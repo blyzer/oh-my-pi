@@ -14,6 +14,7 @@ use omp_e2e::{
 const DEFAULT_FRAME_TOKENS: usize = 2_048;
 const DEFAULT_LOOP_TOKENS: usize = 8_192;
 const DEFAULT_SAMPLES: usize = 5;
+const DEFAULT_REWIND_DEPTH: usize = 30;
 
 fn artifact_argument() -> Result<PathBuf> {
 	let mut args = env::args_os().skip(1);
@@ -33,14 +34,25 @@ fn artifact_argument() -> Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
 	let artifact = artifact_argument()?;
-	let metrics =
-		Box::pin(measure(DEFAULT_FRAME_TOKENS, DEFAULT_LOOP_TOKENS, DEFAULT_SAMPLES)).await?;
+	let metrics = Box::pin(measure(
+		DEFAULT_FRAME_TOKENS,
+		DEFAULT_LOOP_TOKENS,
+		DEFAULT_SAMPLES,
+		DEFAULT_REWIND_DEPTH,
+	))
+	.await?;
 	write_metrics(&artifact, &metrics)?;
 	println!("{}", serde_json::to_string(&metrics)?);
 	if metrics.r#loop.gross_regression {
 		return Err(error(format!(
 			"full-loop throughput {:.0} tokens/s is below the {:.0} tokens/s floor",
 			metrics.r#loop.full_tokens_per_second, metrics.r#loop.min_tokens_per_second
+		)));
+	}
+	if metrics.replay.gross_regression {
+		return Err(error(format!(
+			"replay throughput {:.0} entries/s is below the {:.0} entries/s floor",
+			metrics.replay.entries_per_second, metrics.replay.min_entries_per_second
 		)));
 	}
 	Ok(())
