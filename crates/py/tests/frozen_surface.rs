@@ -2688,3 +2688,27 @@ assert registry_module.registry.arg_specs(
 		})
 		.expect("frozen omp surface contract");
 }
+
+/// `omp.limits.SCHEMA_REV` mirrors `omp_proto::SCHEMA_REV` for extension
+/// authors, but nothing at runtime compares them, so the copy drifted (it
+/// sat at 7 while the wire was at 29). A wire bump that forgets the Python
+/// surface now fails here instead of shipping a stale revision.
+#[test]
+fn schema_rev_matches_the_wire_revision() {
+	use omp_py::pyo3::prelude::PyAnyMethods as _;
+
+	let engine = Engine::builder().init().expect("embedded Python boots");
+	engine.attach(|py| {
+		let limits = py.import("omp.limits").expect("omp.limits imports");
+		let rev: u32 = limits
+			.getattr("SCHEMA_REV")
+			.expect("SCHEMA_REV is exported")
+			.extract()
+			.expect("SCHEMA_REV is an int");
+		assert_eq!(
+			rev,
+			omp_env::SCHEMA_REV,
+			"omp.limits.SCHEMA_REV must track omp_proto::SCHEMA_REV"
+		);
+	});
+}

@@ -36,8 +36,13 @@ PING_INTERVAL: Final[Duration] = Duration("15s")
 PYTHON_REV: Final[str] = "3.14t"
 """Python free-threaded ABI revision required by the host."""
 
-SCHEMA_REV: Final[int] = 7
-"""Wire schema revision shared with ``omp_proto::SCHEMA_REV``."""
+SCHEMA_REV: Final[int] = 29
+"""Wire schema revision shared with ``omp_proto::SCHEMA_REV``.
+
+A Rust test (``frozen_surface.rs``) compares this against the authoritative
+constant, so a wire bump that forgets this file fails the build instead of
+shipping a stale revision.
+"""
 
 CANCEL_GRACE: Final[Duration] = Duration("150ms")
 """Grace between cooperative task cancellation and thread interruption."""
