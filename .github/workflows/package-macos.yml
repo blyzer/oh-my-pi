@@ -38,6 +38,11 @@ jobs:
     # Apple-silicon runner; cancellation at the old limit produced no compiler
     # diagnostic and left the package job inconclusive.
     timeout-minutes: 240
+    env:
+      # The `secrets` context is not available in a step `if` (the run never
+      # even parsed: GitHub recorded a job-less failure on every push). The
+      # job env is where secrets may be read; steps test `env` instead.
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -61,25 +66,30 @@ jobs:
       # Limit concurrent Cargo units: the LTO CPython link is memory-heavy and
       # unrestricted parallelism can swap until the package timeout.
       - name: Install sccache
-        if: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
+        if: ${{ env.BUILDBUDDY_API_KEY != '' }}
         env:
           SCCACHE_VERSION: 0.10.0
           SCCACHE_SHA256: 5aba39252e2efa26bd76144f87ac59787d60fe567ab785e27e2a8c8190892eac
         run: |
           set -euo pipefail
+          # Self-hosted runners have no writable /usr/local/bin; a scratch
+          # directory on GITHUB_PATH works on hosted images too.
+          install_dir="$RUNNER_TEMP/sccache-bin"
+          mkdir -p "$install_dir"
           curl --fail --location --silent --show-error \
             "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin.tar.gz" \
             --output sccache.tar.gz
           printf '%s  %s\n' "$SCCACHE_SHA256" sccache.tar.gz | shasum -a 256 --check --status
-          tar -xz --strip-components=1 -C /usr/local/bin sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin/sccache < sccache.tar.gz
+          tar -xz --strip-components=1 -C "$install_dir" \
+            "sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin/sccache" < sccache.tar.gz
           rm sccache.tar.gz
-          sccache --version
+          "$install_dir/sccache" --version
+          echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Build release omp
         timeout-minutes: 220
         env:
           CARGO_BUILD_JOBS: "4"
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
         run: |
           echo '::group::cargo build (release, LTO, embedded Python)'
           if [ -n "${BUILDBUDDY_API_KEY-}" ] && command -v sccache >/dev/null 2>&1; then
