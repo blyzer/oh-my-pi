@@ -2794,8 +2794,7 @@ mod tests {
 	#[cfg(unix)]
 	fn process_exists(pid: u32) -> bool {
 		let pid = i32::try_from(pid).expect("test PID fits pid_t");
-		// SAFETY: signal zero performs existence/permission checking only.
-		unsafe { libc::kill(pid, 0) == 0 }
+		!crate::test_process::process_terminated(nix::unistd::Pid::from_raw(pid))
 	}
 
 	#[cfg(unix)]
