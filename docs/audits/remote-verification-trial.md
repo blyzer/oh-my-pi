@@ -167,6 +167,46 @@ These are one trace, not a repetition set.
 
 Not recorded: the remote runner's warm or cold state, and the `omp-envd` client numbers.
 
+### G1 through the omp REAPI backend, `omp-envd`, 2026-10-24
+
+First `omp-envd` run through the omp REAPI backend, with the cmake-fixed image. Image
+`ghcr.io/blyzer/omp-reapi@sha256:772594c52a49c67ba4545f8ce8a1de30a592300afd97e08a28975dc143ca0cc0`
+(tag `candidate`; built 2026-10-24 from `scripts/exec-image/Dockerfile`, its first build ever, on
+an Apple-silicon host via Apple's `container` CLI with `--arch amd64`). Workflow `g1`
+(`.omp/workflows/g1.toml`, one code phase, `just test-pkg omp-envd`),
+`omp adw run g1 --exec-policy remote-only --max-attempts 1`, `buildbuddy` profile,
+`sv_exec_remote_cache off`, two repetitions, client measured by `scripts/measure-recipe.py`.
+
+The cmake blocker is gone: `audiopus_sys` builds, the whole crate compiles remotely, and the
+suite executes. **The recipe does not pass remotely.** Both repetitions run 1240 tests, pass
+1237, and fail the same three, deterministically:
+
+- `eval::process::tests::parent_death_watchdog_terminates_kernel_and_descendants`
+- `tests::spawn_stops_a_daemon_reporting_another_policy`
+- `tests::spawn_kills_a_daemon_that_never_becomes_ready`
+
+All three assert process-tree lifecycle (parent-death watchdog, daemon stop/kill escalation).
+The failure messages are of the shape "startup timeout left a daemon descendant alive".
+[INFERENCE] the executor container's process semantics (reaping and process-group/pdeathsig
+behaviour under the BuildBuddy runner) differ from a real host; not diagnosed further here.
+
+| Metric | rep 1 | rep 2 |
+|---|---|---|
+| Client wall | 518.9 s | 442.7 s |
+| Client CPU (user+sys) | 5.2 s | 3.6 s |
+| Client peak memory (tree RSS) | 290.0 MiB | 215.4 MiB |
+| Remote nextest wall (suite only) | 37.9 s | 43.0 s |
+
+Against the 2026-10-20 local warm `omp-envd` arm (168.4 s wall, 100.3 s CPU, 2616.6 MiB) — a
+different day and not interleaved, so indicative only: wall 2.6-3.1x (misses the 1.5x
+criterion; both reps pay a cold remote build, cache off), client CPU 3.6-5.2% (passes < 5%),
+client peak memory 8.2-11.1% (misses < 5%).
+
+Operational notes: the first push of the image to ghcr failed at the final blob with a
+`BLOB_UPLOAD_UNKNOWN` 404 and succeeded on immediate retry; `omp adw run` refuses an untrusted
+workspace (`omp trust` granted it for the measurement worktree); the `--trust-workspace` flag
+did not satisfy the adw trust gate, only the durable grant did.
+
 ---
 
 ## ADR 0047 Gate 2 — Remote CI invocation proof

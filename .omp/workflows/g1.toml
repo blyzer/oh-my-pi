@@ -1,0 +1,9 @@
+name = "g1"
+
+# ADR 0040 §Measurement plan: the link-bound recipe the remote-execution
+# criteria are judged on. One code phase so `omp adw run g1` measures exactly
+# the recipe and nothing else.
+[[phase]]
+name = "test-envd"
+kind = "code"
+command = ["just", "test-pkg", "omp-envd"]

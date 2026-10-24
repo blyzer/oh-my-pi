@@ -70,12 +70,23 @@ omp adw run <workflow> --exec-policy remote-only --max-attempts 1
 Record wall time, client CPU and peak memory (`scripts/measure-recipe.py`) in
 `docs/audits/remote-verification-trial.md`.
 
+## Verified 2026-10-24
+
+- The Dockerfile builds. First build ever, on an Apple-silicon host with Apple's
+  `container` CLI (`container build --arch amd64 -f scripts/exec-image/Dockerfile
+  -t ghcr.io/blyzer/omp-reapi:candidate .`, 15.6 minutes), including
+  `fetch-python.sh` inside the build. Pushed as
+  `ghcr.io/blyzer/omp-reapi@sha256:772594c52a49c67ba4545f8ce8a1de30a592300afd97e08a28975dc143ca0cc0`
+  (tag `candidate`). The first push attempt failed at the last blob with a ghcr
+  `BLOB_UPLOAD_UNKNOWN` 404; an immediate retry succeeded.
+- The image unblocks the `omp-envd` recipe: `audiopus_sys` builds (cmake is
+  present) and the whole suite compiles and runs remotely through the omp REAPI
+  backend. The run record is in `docs/audits/remote-verification-trial.md`,
+  including the process-lifecycle tests that fail nondeterministically inside
+  the remote sandbox.
+
 ## Not verified
 
-- No image was built and no remote run was made when this was written. The Dockerfile has never
-  been built: every layer is unexecuted.
 - The previously published image (`2026-10-16-path`) already carried
   `/usr/local/rustup/toolchains/nightly-2026-08-08-x86_64-unknown-linux-gnu`, so it was built some
-  other way and that recipe is not in the repository. The toolchain layer here is new; only its
-  `rust-toolchain.toml` parsing was checked (channel and four `-c` component flags).
-- Whether `fetch-python.sh` succeeds inside `docker build` (needs Linux x86_64 and network).
+  other way and that recipe is not in the repository.
