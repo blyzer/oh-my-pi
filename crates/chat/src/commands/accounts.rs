@@ -39,7 +39,7 @@ const NOTHING_TO_LOG_OUT: &str =
 	"No stored provider credentials to log out. Remove env or config auth at its source.";
 
 fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 fn open(ctx: &omp_con::Ctx, opener: PanelOpener) -> omp_con::ConResult<()> {

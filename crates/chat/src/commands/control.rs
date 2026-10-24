@@ -67,7 +67,7 @@ const MCP_HELP: &str =
 	 — Show notification capabilities and subscriptions\n`/mcp help` — Show this message";
 
 const fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 fn call(ctx: &omp_con::Ctx, call: PanelCall) -> omp_con::ConResult<()> {
@@ -240,7 +240,9 @@ pub fn mcp_command(words: &[&str]) -> Result<McpCommand, ConError> {
 		"smithery-logout" => McpCommand::Run(McpOp::SmitheryLogout),
 		"smithery-connect" => McpCommand::Run(McpOp::SmitheryConnect(parse_smithery_connect(tail)?)),
 		_ => {
-			return Err(ConError::Usage(sf!("Unknown subcommand: {verb}. Type /mcp help for usage.")));
+			return Err(ConError::Usage {
+				usage: sf!("Unknown subcommand: {verb}. Type /mcp help for usage."),
+			});
 		},
 	})
 }
@@ -275,7 +277,7 @@ fn parse_smithery_search(words: &[&str]) -> Result<SmitherySearch, ConError> {
 			},
 			"--semantic" => semantic = true,
 			word if word.starts_with("--") => {
-				return Err(ConError::Usage(sf!("Unknown option: {word}")));
+				return Err(ConError::Usage { usage: sf!("Unknown option: {word}") });
 			},
 			word => keyword.push(word),
 		}

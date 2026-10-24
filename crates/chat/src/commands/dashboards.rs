@@ -46,7 +46,7 @@ const NO_TRACE: &str = "No session file yet — send a message first.";
 const NO_CHANGELOG: &str = "No changelog entries found.";
 
 fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 fn open(ctx: &Ctx, opener: PanelOpener) -> ConResult<()> {
@@ -184,7 +184,7 @@ mod tests {
 			usage_op(Some(sf!("Reset me@example.com"))).unwrap(),
 			UsageOp::Reset(sf!("me@example.com"))
 		);
-		assert!(matches!(usage_op(Some(sf!("show extra"))), Err(ConError::Usage(_))));
-		assert!(matches!(usage_op(Some(sf!("bogus"))), Err(ConError::Usage(_))));
+		assert!(matches!(usage_op(Some(sf!("show extra"))), Err(ConError::Usage { .. })));
+		assert!(matches!(usage_op(Some(sf!("bogus"))), Err(ConError::Usage { .. })));
 	}
 }

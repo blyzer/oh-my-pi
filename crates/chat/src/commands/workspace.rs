@@ -63,7 +63,7 @@ omp_con::var! {
 }
 
 const fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 fn call(ctx: &omp_con::Ctx, call: PanelCall) -> omp_con::ConResult<()> {

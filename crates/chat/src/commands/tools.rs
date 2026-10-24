@@ -120,7 +120,7 @@ pub enum MarketplaceOp {
 }
 
 fn usage(message: &'static str) -> ConError {
-	ConError::Usage(Str::new_static(message))
+	ConError::Usage { usage: Str::new_static(message) }
 }
 
 const APPROVE_USAGE: &str = "Usage: /plugins approve [<plugin> [<digest>|all]]";
@@ -142,8 +142,8 @@ fn approve_op(rest: &str) -> Result<ApproveOp, ConError> {
 				.strip_prefix("sha256:")
 				.unwrap_or(digest)
 				.parse::<Hash32>()
-				.map_err(|_| {
-					ConError::Usage(sf!("Invalid command digest {digest}. {APPROVE_USAGE}"))
+				.map_err(|_| ConError::Usage {
+					usage: sf!("Invalid command digest {digest}. {APPROVE_USAGE}"),
 				})?,
 		},
 	})
@@ -158,7 +158,7 @@ pub fn plugins_op(words: Option<Str>) -> Result<PluginsOp, ConError> {
 	let id = |enabled: bool| {
 		(!rest.is_empty())
 			.then(|| PluginsOp::SetEnabled { id: Str::new(rest), enabled })
-			.ok_or_else(|| ConError::Usage(sf!("Usage: /plugins {verb} <name@marketplace>")))
+			.ok_or_else(|| ConError::Usage { usage: sf!("Usage: /plugins {verb} <name@marketplace>") })
 	};
 	match verb {
 		"" | "list" => Ok(PluginsOp::List),
@@ -196,10 +196,12 @@ pub fn marketplace_op(words: Option<Str>) -> Result<MarketplaceOp, ConError> {
 		"upgrade" => MarketplaceOp::Upgrade(optional()),
 		"help" => MarketplaceOp::Help,
 		_ => {
-			return Err(ConError::Usage(sf!(
-				"Unknown /marketplace subcommand: {verb}. Use /marketplace help for available \
-				 commands."
-			)));
+			return Err(ConError::Usage {
+				usage: sf!(
+					"Unknown /marketplace subcommand: {verb}. Use /marketplace help for available \
+					 commands."
+				),
+			});
 		},
 	})
 }
