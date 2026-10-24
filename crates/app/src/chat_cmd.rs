@@ -1608,6 +1608,10 @@ mod tests {
 		fs::create_dir_all(dir.path().join("home/.o2/agent/prompts")).unwrap();
 		fs::write(dir.path().join("home/.o2/agent/prompts/discovered.md"), "Discovered $ARGUMENTS")
 			.unwrap();
+		// SAFETY: nextest isolates tests by process; no concurrent environment readers.
+		unsafe {
+			std::env::set_var("OMP_CONFIG_DIR", dir.path().join("home/.o2"));
+		}
 		args.prompt_template = vec![extra.clone()];
 		args.no_prompt_templates = true;
 		args.theme = vec![extra.clone()];
@@ -1862,6 +1866,10 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		fs::create_dir_all(dir.path().join("home/.o2/agent/prompts")).unwrap();
 		fs::write(dir.path().join("home/.o2/agent/prompts/fix.md"), "Fix $1 then run $2\n").unwrap();
+		// SAFETY: nextest isolates tests by process; no concurrent environment readers.
+		unsafe {
+			std::env::set_var("OMP_CONFIG_DIR", dir.path().join("home/.o2"));
+		}
 		fs::create_dir_all(dir.path().join(".omp/prompts")).unwrap();
 		fs::write(dir.path().join(".omp/prompts/plain.md"), "Plain body\n").unwrap();
 		let mut args = ChatArgs::default_interactive();
