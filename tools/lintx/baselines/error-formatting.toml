@@ -17,7 +17,6 @@ edit = 15
 env = 3
 envd = 309
 ext = 37
-macros = 1
 observability = 2
 rpc = 6
 serve = 12

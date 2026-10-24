@@ -361,7 +361,9 @@ impl Parser {
 				.cloned()
 				.collect::<TokenStream2>();
 			parse2::<Arm>(quote!(#prefix => (),)).map_err(|error| {
-				syn::Error::new(self.tokens[start].span(), format!("invalid match arm: {error}"))
+				let mut outer = syn::Error::new(self.tokens[start].span(), "invalid match arm");
+				outer.combine(error);
+				outer
 			})?;
 			self.at = arrow + 2;
 			let body = self.match_arm_body()?;
