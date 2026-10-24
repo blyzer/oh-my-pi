@@ -5654,7 +5654,7 @@ pub(super) fn python_engine() -> Result<Arc<omp_py::Engine>, EnvdError> {
 
 fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> {
 	if registry.live_identity(name).is_some() {
-		return Err(EnvdError::DuplicateToolName(Str::from(name)));
+		return Err(EnvdError::DuplicateToolName { name: Str::from(name) });
 	}
 	Ok(())
 }

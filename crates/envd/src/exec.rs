@@ -141,11 +141,17 @@ pub enum ExecError {
 	#[error("command-local environment delta is invalid")]
 	InvalidRunEnvironment,
 	/// The requested named process does not exist.
-	#[error("named process {0:?} was not found")]
-	ProcessNotFound(Str),
+	#[error("named process {name:?} was not found")]
+	ProcessNotFound {
+		/// The missing process name.
+		name: Str,
+	},
 	/// A process with this name is already registered.
-	#[error("named process {0:?} already exists")]
-	ProcessExists(Str),
+	#[error("named process {name:?} already exists")]
+	ProcessExists {
+		/// The already-registered process name.
+		name: Str,
+	},
 	/// A named-process request targeted a retired generation.
 	#[error(
 		"named process {name:?} generation {requested} is stale; current generation is {current}"
@@ -159,11 +165,17 @@ pub enum ExecError {
 		current:   u64,
 	},
 	/// A request contained an unsupported signal name.
-	#[error("unsupported signal {0:?}")]
-	UnsupportedSignal(Str),
+	#[error("unsupported signal {signal:?}")]
+	UnsupportedSignal {
+		/// The unsupported signal name.
+		signal: Str,
+	},
 	/// A URI could not be used as a local working directory.
-	#[error("invalid working-directory URI {0:?}")]
-	InvalidCwd(Str),
+	#[error("invalid working-directory URI {uri:?}")]
+	InvalidCwd {
+		/// The unusable working-directory URI.
+		uri: Str,
+	},
 	/// The shell engine rejected the requested operation.
 	#[error("shell execution failed: {0}")]
 	Shell(Str),
@@ -2274,7 +2286,7 @@ impl ExecHost {
 			.lock()
 			.get(&key)
 			.cloned()
-			.ok_or_else(|| ExecError::ProcessNotFound(key.clone()))?;
+			.ok_or_else(|| ExecError::ProcessNotFound { name: key.clone() })?;
 		if process.generation != generation {
 			return Err(ExecError::StaleProcessGeneration {
 				name:      key,
@@ -2306,7 +2318,7 @@ impl ExecHost {
 			return Err(ExecError::InvalidProcessName);
 		}
 		if !self.inner.starting.lock().insert(name.clone()) {
-			return Err(ExecError::ProcessExists(name));
+			return Err(ExecError::ProcessExists { name });
 		}
 		let retained_generation = self
 			.persisted_record(&name)
@@ -2314,7 +2326,7 @@ impl ExecHost {
 		let generation = if let Some(process) = self.inner.processes.lock().get(&name).cloned() {
 			if !process_state_is_terminal(process.stream.lock().info.state) {
 				self.inner.starting.lock().remove(&name);
-				return Err(ExecError::ProcessExists(name));
+				return Err(ExecError::ProcessExists { name });
 			}
 			process
 				.generation
@@ -2333,7 +2345,7 @@ impl ExecHost {
 	) -> Result<(ProcessReservation, Arc<NamedProcess>), ExecError> {
 		let name = Str::from(name);
 		if !self.inner.starting.lock().insert(name.clone()) {
-			return Err(ExecError::ProcessExists(name));
+			return Err(ExecError::ProcessExists { name });
 		}
 		let reservation =
 			ProcessReservation { host: Arc::downgrade(&self.inner), name: name.clone() };
@@ -2343,7 +2355,7 @@ impl ExecHost {
 			.lock()
 			.get(&name)
 			.cloned()
-			.ok_or_else(|| ExecError::ProcessNotFound(name.clone()))?;
+			.ok_or_else(|| ExecError::ProcessNotFound { name: name.clone() })?;
 		if process.generation != generation {
 			return Err(ExecError::StaleProcessGeneration {
 				name,
@@ -4315,11 +4327,11 @@ fn cwd_from_uri(uri: &str) -> Result<Option<PathBuf>, ExecError> {
 	if !uri.contains("://") {
 		return Ok(Some(PathBuf::from(uri)));
 	}
-	let parsed = Url::parse(uri).map_err(|_| ExecError::InvalidCwd(Str::from(uri)))?;
+	let parsed = Url::parse(uri).map_err(|_| ExecError::InvalidCwd { uri: Str::from(uri) })?;
 	parsed
 		.to_file_path()
 		.map(Some)
-		.map_err(|()| ExecError::InvalidCwd(Str::from(uri)))
+		.map_err(|()| ExecError::InvalidCwd { uri: Str::from(uri) })
 }
 
 fn parse_signal(name: &str) -> Result<ProcessSignal, ExecError> {
@@ -4336,7 +4348,7 @@ fn parse_signal(name: &str) -> Result<ProcessSignal, ExecError> {
 		"CONT" => Ok(ProcessSignal::Continue),
 		"STOP" => Ok(ProcessSignal::Stop),
 		"WINCH" => Ok(ProcessSignal::WindowChanged),
-		_ => Err(ExecError::UnsupportedSignal(Str::from(name))),
+		_ => Err(ExecError::UnsupportedSignal { signal: Str::from(name) }),
 	}
 }
 

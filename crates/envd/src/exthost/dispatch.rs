@@ -947,8 +947,11 @@ pub trait PromptContributionProvider: Send + Sync + 'static {
 #[derive(Debug, Error)]
 pub enum PromptDispatchError {
 	/// A declaration named an unknown catalog slot.
-	#[error("prompt declaration names unknown slot {0}")]
-	UnknownSlot(Str),
+	#[error("prompt declaration names unknown slot {slot}")]
+	UnknownSlot {
+		/// The unknown catalog slot.
+		slot: Str,
+	},
 	/// A declaration targeted a core-owned slot.
 	#[error("prompt declaration targets non-writable slot {0}")]
 	ReadOnlySlot(SlotId),
@@ -1000,7 +1003,7 @@ pub fn prompt_slot_binding(
 		.filter(|slot| !slot.is_empty())
 		.ok_or(PromptDispatchError::MalformedDeclaration)?;
 	let slot = SlotId::from_str(slot_name)
-		.map_err(|_| PromptDispatchError::UnknownSlot(Str::new(slot_name)))?;
+		.map_err(|_| PromptDispatchError::UnknownSlot { slot: Str::new(slot_name) })?;
 	if !prompt_slot_writable(slot) {
 		return Err(PromptDispatchError::ReadOnlySlot(slot));
 	}

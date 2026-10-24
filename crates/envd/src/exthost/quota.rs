@@ -118,20 +118,29 @@ pub enum ChargeOutcome {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum QuotaError {
 	/// Two specifications used the same stable quota name.
-	#[error("quota {0} is configured more than once")]
-	Duplicate(Str),
+	#[error("quota {quota} is configured more than once")]
+	Duplicate {
+		/// The duplicated quota name.
+		quota: Str,
+	},
 	/// Resource limits for one extension were registered more than once.
 	#[error("resource limits for {0:?} are already configured")]
 	DuplicateExtension(HostKey),
 	/// A charge named no configured quota.
-	#[error("quota {0} is not configured")]
-	Unknown(Str),
+	#[error("quota {quota} is not configured")]
+	Unknown {
+		/// The unconfigured quota name.
+		quota: Str,
+	},
 	/// A charge named an extension with no admitted resource limits.
 	#[error("resource limits for {0:?} are not configured")]
 	UnknownExtension(HostKey),
 	/// A duration could not be represented by the monotonic clock.
-	#[error("quota {0} has an invalid accounting window")]
-	InvalidWindow(Str),
+	#[error("quota {quota} has an invalid accounting window")]
+	InvalidWindow {
+		/// The quota with the bad window.
+		quota: Str,
+	},
 	/// A hard quota refused the operation.
 	#[error(transparent)]
 	Exceeded(#[from] QuotaExceeded),
@@ -200,7 +209,7 @@ impl ControlQuotaLedger {
 		for spec in specs {
 			let name = spec.name.clone();
 			if indexed.insert(name.clone(), spec).is_some() {
-				return Err(QuotaError::Duplicate(name));
+				return Err(QuotaError::Duplicate { quota: name });
 			}
 		}
 		for spec in indexed.values() {
@@ -240,13 +249,13 @@ impl ControlQuotaLedger {
 			.ok_or_else(|| QuotaError::UnknownExtension(extension.clone()))?
 			.get(quota)
 			.cloned()
-			.ok_or_else(|| QuotaError::Unknown(Str::from(quota)))?;
+			.ok_or_else(|| QuotaError::Unknown { quota: Str::from(quota) })?;
 		let session_limit = self.session_limits[spec.name.as_str()];
 		let window = spec
 			.window
 			.map(Duration::to_std)
 			.transpose()
-			.map_err(|_| QuotaError::InvalidWindow(spec.name.clone()))?;
+			.map_err(|_| QuotaError::InvalidWindow { quota: spec.name.clone() })?;
 
 		let session_usage = self.sessions.entry(session.clone()).or_default();
 		let aggregate = session_usage
@@ -316,7 +325,7 @@ impl ControlQuotaLedger {
 				.window
 				.map(Duration::to_std)
 				.transpose()
-				.map_err(|_| QuotaError::InvalidWindow(spec.name.clone()))?;
+				.map_err(|_| QuotaError::InvalidWindow { quota: spec.name.clone() })?;
 			let usage = extension_usage
 				.quotas
 				.entry(spec.name.clone())

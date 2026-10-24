@@ -94,7 +94,9 @@ impl McpClient {
 		let raw: InitializeResult =
 			serde_json::from_value(response.result).map_err(|_| ClientError::MalformedInitialize)?;
 		if !SUPPORTED_PROTOCOL_VERSIONS.contains(&raw.protocol_version.as_str()) {
-			return Err(ClientError::UnsupportedProtocol(Str::from(raw.protocol_version)));
+			return Err(ClientError::UnsupportedProtocol {
+				revision: Str::from(raw.protocol_version),
+			});
 		}
 		if raw.server_info.name.trim().is_empty() || !raw.capabilities.is_object() {
 			return Err(ClientError::MalformedInitialize);
@@ -305,8 +307,11 @@ pub enum ClientError {
 	#[error("MCP tool pagination exceeded its page limit")]
 	TooManyPages,
 	/// Server selected a revision outside the explicit compatibility set.
-	#[error("MCP server selected unsupported protocol revision {0}")]
-	UnsupportedProtocol(Str),
+	#[error("MCP server selected unsupported protocol revision {revision}")]
+	UnsupportedProtocol {
+		/// The unsupported protocol revision.
+		revision: Str,
+	},
 }
 #[cfg(test)]
 mod tests {
@@ -660,7 +665,7 @@ mod tests {
 		let client = McpClient::new(transport.clone(), Arc::from([]));
 		assert!(matches!(
 			client.initialize(CancellationToken::new()).await,
-			Err(ClientError::UnsupportedProtocol(_))
+			Err(ClientError::UnsupportedProtocol { revision: _ })
 		));
 		assert_eq!(transport.closes.load(Ordering::Acquire), 1);
 

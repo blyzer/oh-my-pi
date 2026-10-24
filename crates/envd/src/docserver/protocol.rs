@@ -3053,7 +3053,7 @@ impl Failure {
 
 	fn from_dap(error: DapSessionError) -> Self {
 		match error {
-			DapSessionError::NotFound(_) => Self::not_found(error.to_string()),
+			DapSessionError::NotFound { session: _ } => Self::not_found(error.to_string()),
 			DapSessionError::UnsupportedAction(_) | DapSessionError::InvalidReverseRequest => {
 				Self::invalid(error.to_string())
 			},

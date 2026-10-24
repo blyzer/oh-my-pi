@@ -253,8 +253,11 @@ pub enum DapSessionError {
 	#[error("debug session tree cannot contain a cycle")]
 	SessionTreeCycle,
 	/// Session identity is absent.
-	#[error("debug session {0:?} was not found")]
-	NotFound(Str),
+	#[error("debug session {session:?} was not found")]
+	NotFound {
+		/// The absent debug session id.
+		session: Str,
+	},
 	/// Adapter supplied an invalid reverse-request payload.
 	#[error("invalid DAP reverse request")]
 	InvalidReverseRequest,
@@ -1502,7 +1505,7 @@ impl DapSessionRegistry {
 			.read()
 			.get(id)
 			.cloned()
-			.ok_or_else(|| DapSessionError::NotFound(Str::new(id)))
+			.ok_or_else(|| DapSessionError::NotFound { session: Str::new(id) })
 	}
 
 	/// Lists sessions in stable identity order.

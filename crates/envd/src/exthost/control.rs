@@ -451,8 +451,11 @@ pub struct ContributedValueDelivery {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ContributedValueError {
 	/// A parsed value has no matching static owner/sink declaration.
-	#[error("extension CLI value `{0}` is not declared by its owning manifest")]
-	Undeclared(Str),
+	#[error("extension CLI value `{value}` is not declared by its owning manifest")]
+	Undeclared {
+		/// The undeclared CLI value name.
+		value: Str,
+	},
 	/// Activation belongs to a different child generation.
 	#[error("extension CLI activation generation {actual} does not match {expected}")]
 	StaleGeneration {
@@ -487,7 +490,7 @@ impl ContributedValueDelivery {
 			.filter(|value| value.owner.starts_with(&prefix))
 		{
 			if !declared.contains(&(value.owner.clone(), value.sink.clone())) {
-				return Err(ContributedValueError::Undeclared(value.owner.clone()));
+				return Err(ContributedValueError::Undeclared { value: value.owner.clone() });
 			}
 			owned.push(ActivationCliValue { sink: value.sink.clone(), value: value.value.clone() });
 		}
@@ -540,11 +543,17 @@ pub enum ControlError {
 	#[error("request id zero cannot identify an invocation")]
 	ZeroRequestId,
 	/// The environment invocation id is already live.
-	#[error("invocation {0} is already mapped")]
-	DuplicateInvocation(Str),
+	#[error("invocation {invocation} is already mapped")]
+	DuplicateInvocation {
+		/// The already-live invocation id.
+		invocation: Str,
+	},
 	/// A frame names no live invocation.
-	#[error("invocation {0} is not live")]
-	UnknownInvocation(Str),
+	#[error("invocation {invocation} is not live")]
+	UnknownInvocation {
+		/// The unknown invocation id.
+		invocation: Str,
+	},
 	/// A frame's request id is stale or unknown.
 	#[error("request id {0} is stale or unknown")]
 	StaleRequest(u64),
@@ -570,8 +579,11 @@ pub enum ControlError {
 	#[error("pull reply has no outstanding pull")]
 	NoOutstandingPull,
 	/// The received CONTROL body is known but unsupported in this state.
-	#[error("unsupported CONTROL frame: {0}")]
-	Unsupported(&'static str),
+	#[error("unsupported CONTROL frame: {frame}")]
+	Unsupported {
+		/// The unsupported frame kind.
+		frame: &'static str,
+	},
 }
 
 /// Single-actor invocation map for multiplexed extension-host CONTROL traffic.
@@ -613,7 +625,7 @@ impl HostRequestMap {
 		streams_args: bool,
 	) -> Result<InvocationCorrelation, ControlError> {
 		if self.by_invocation.contains_key(&invocation_id) {
-			return Err(ControlError::DuplicateInvocation(invocation_id));
+			return Err(ControlError::DuplicateInvocation { invocation: invocation_id });
 		}
 		let request_id = self.allocate_request_id();
 		let correlation = InvocationCorrelation {
@@ -772,7 +784,7 @@ impl HostRequestMap {
 		let request_id = self
 			.by_invocation
 			.get(invocation_id)
-			.ok_or_else(|| ControlError::UnknownInvocation(Str::from(invocation_id)))?;
+			.ok_or_else(|| ControlError::UnknownInvocation { invocation: Str::from(invocation_id) })?;
 		self
 			.by_request
 			.get(request_id)

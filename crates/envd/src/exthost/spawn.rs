@@ -404,8 +404,11 @@ pub enum SpawnError {
 	#[error(transparent)]
 	Sandbox(#[from] SandboxError),
 	/// The host trust tier does not have an explicit launch policy.
-	#[error("unsupported extension host trust tier: {0}")]
-	UnsupportedTier(Str),
+	#[error("unsupported extension host trust tier: {tier}")]
+	UnsupportedTier {
+		/// The policy-less trust tier.
+		tier: Str,
+	},
 	/// The child process could not be spawned.
 	#[error("extension host spawn failed: {0}")]
 	Spawn(io::Error),
@@ -565,7 +568,7 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 			})
 		},
 		"trusted" => None,
-		tier => return Err(SpawnError::UnsupportedTier(Str::from(tier))),
+		tier => return Err(SpawnError::UnsupportedTier { tier: Str::from(tier) }),
 	};
 	let mut command = if let Some(launch) = &sandbox_launch {
 		Command::from(launch.command()?)
@@ -818,6 +821,6 @@ mod tests {
 			declaration_modules: Box::new([]),
 		})
 		.await;
-		assert!(matches!(result, Err(SpawnError::UnsupportedTier(tier)) if tier == "unknown"));
+		assert!(matches!(result, Err(SpawnError::UnsupportedTier { tier }) if tier == "unknown"));
 	}
 }
