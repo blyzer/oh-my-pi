@@ -1248,7 +1248,8 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 		ClientError::TransportClosed | ClientError::Transport(_) => {
 			environment_exception(py, "Disconnected", &error.to_string())
 		},
-		ClientError::InvalidEnvPath(_)
+		ClientError::InvalidEnvPath { .. }
+		| ClientError::EnvPathRule { .. }
 		| ClientError::InvalidBlobDigest { .. }
 		| ClientError::BlobTooLarge { .. }
 		| ClientError::BlobResumeOffsetMismatch { .. }
