@@ -3,8 +3,8 @@
 use std::{fs, time::Duration};
 
 use omp_e2e::baseline::{
-	BaselineMetrics, LOOP_THROUGHPUT_FLOOR, duration_rate, is_gross_regression, measure,
-	slowdown_ratio, write_metrics,
+	BaselineMetrics, LOOP_THROUGHPUT_FLOOR, REPLAY_THROUGHPUT_FLOOR, duration_rate,
+	is_gross_regression, is_replay_gross_regression, measure, slowdown_ratio, write_metrics,
 };
 
 #[test]
@@ -28,12 +28,26 @@ fn gross_regression_is_throughput_below_the_absolute_floor() {
 	assert!(!is_gross_regression(121_984.22), "coalesced stream deltas");
 }
 
+#[test]
+fn replay_gross_regression_is_throughput_below_its_absolute_floor() {
+	assert_eq!(REPLAY_THROUGHPUT_FLOOR, 1_000.0);
+	assert!(!is_replay_gross_regression(REPLAY_THROUGHPUT_FLOOR), "a rate at the floor passes");
+	assert!(is_replay_gross_regression(REPLAY_THROUGHPUT_FLOOR - 1.0));
+	// The two sides the floor separates, both from the 30-rewind, 123-entry
+	// workload: the dev-profile replay recorded 3 516 entries/s on the
+	// self-hosted M1 Pro (2026-10-24), and the loaded-host pathology the
+	// floor exists to catch replayed the same shape in 1.974 s, which is
+	// 62 entries/s (the CI failure that ungated the replay-law test).
+	assert!(!is_replay_gross_regression(3_516.0), "the recorded healthy replay passes");
+	assert!(is_replay_gross_regression(62.0), "the loaded-host pathology is caught");
+}
+
 #[tokio::test]
 async fn artifact_schema_is_stable_and_frame_metric_is_record_only() {
-	let metrics = Box::pin(measure(128, 256, 2))
+	let metrics = Box::pin(measure(128, 256, 2, 8))
 		.await
 		.expect("bounded baseline measurement");
-	assert_eq!(metrics.schema_version, 2);
+	assert_eq!(metrics.schema_version, 3);
 	assert_eq!(metrics.frame.token_count, 128);
 	assert_eq!(metrics.frame.sample_count, 128);
 	assert!(metrics.frame.p95_frame_ns > 0);
@@ -51,7 +65,29 @@ async fn artifact_schema_is_stable_and_frame_metric_is_record_only() {
 	let encoded = fs::read_to_string(&artifact).expect("read metrics");
 	let value: serde_json::Value = serde_json::from_str(&encoded).expect("valid JSON");
 	let root = value.as_object().expect("metrics object");
-	assert_eq!(root.keys().collect::<Vec<_>>(), ["schema_version", "frame", "loop"]);
+	assert_eq!(root.keys().collect::<Vec<_>>(), ["schema_version", "frame", "loop", "replay"]);
+	assert_eq!(
+		root["replay"]
+			.as_object()
+			.unwrap()
+			.keys()
+			.collect::<Vec<_>>(),
+		[
+			"rewind_depth",
+			"entry_count",
+			"replay_duration_ns",
+			"entries_per_second",
+			"min_entries_per_second",
+			"gross_regression",
+		]
+	);
+	assert_eq!(metrics.replay.rewind_depth, 8);
+	assert!(metrics.replay.entry_count > 8, "each rewind journals more than one entry");
+	assert_eq!(metrics.replay.min_entries_per_second, REPLAY_THROUGHPUT_FLOOR);
+	assert_eq!(
+		metrics.replay.gross_regression,
+		is_replay_gross_regression(metrics.replay.entries_per_second)
+	);
 	assert_eq!(
 		root["frame"]
 			.as_object()
