@@ -223,11 +223,17 @@ pub struct Where {
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
 	/// The requested field has no index column or Rust evaluator.
-	#[error("unknown telemetry query field {0}")]
-	UnknownField(Str),
+	#[error("unknown telemetry query field {field}")]
+	UnknownField {
+		/// The unindexed field name.
+		field: Str,
+	},
 	/// A numeric predicate had an invalid value.
-	#[error("invalid numeric telemetry query value {0}")]
-	InvalidNumber(Str),
+	#[error("invalid numeric telemetry query value {value}")]
+	InvalidNumber {
+		/// The rejected scalar value.
+		value: Str,
+	},
 	/// A side-file operation failed.
 	#[error("telemetry side-file error: {0}")]
 	Io(#[from] io::Error),
@@ -260,10 +266,10 @@ impl Where {
 					.value
 					.as_str()
 					.parse::<u64>()
-					.map_err(|_| QueryError::InvalidNumber(self.value.clone()))?;
+					.map_err(|_| QueryError::InvalidNumber { value: self.value.clone() })?;
 				Ok(format!("{} {} ?", self.field, self.op.sql()))
 			},
-			_ => Err(QueryError::UnknownField(self.field.clone())),
+			_ => Err(QueryError::UnknownField { field: self.field.clone() }),
 		}
 	}
 
@@ -277,7 +283,7 @@ impl Where {
 			"kind" => Ok(compare_str(event.kind.as_str(), self.value.as_str(), self.op)),
 			"occurred_at_ms" => compare_u64(event.occurred_at_ms, &self.value, self.op),
 			"offset" => compare_u64(event.offset.0, &self.value, self.op),
-			_ => Err(QueryError::UnknownField(self.field.clone())),
+			_ => Err(QueryError::UnknownField { field: self.field.clone() }),
 		}
 	}
 }
@@ -297,7 +303,7 @@ fn compare_u64(left: u64, right: &Str, op: WhereOp) -> Result<bool, QueryError> 
 	let right = right
 		.as_str()
 		.parse::<u64>()
-		.map_err(|_| QueryError::InvalidNumber(right.clone()))?;
+		.map_err(|_| QueryError::InvalidNumber { value: right.clone() })?;
 	Ok(match op {
 		WhereOp::Eq => left == right,
 		WhereOp::Ne => left != right,
