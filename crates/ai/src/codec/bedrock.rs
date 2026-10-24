@@ -2666,6 +2666,41 @@ mod tests {
 		);
 	}
 
+	/// ADR 0021: Bedrock Converse has no grammar tool form, so a
+	/// grammar-constrained tool reaches `toolConfig` as its declared
+	/// non-strict fallback schema.
+	#[test]
+	fn a_grammar_tool_lowers_to_its_non_strict_fallback_schema() {
+		use crate::call::{ToolGrammar, ToolGrammarSyntax};
+		let fallback =
+			serde_json::json!({"type": "object", "properties": {"input": {"type": "string"}}});
+		let mut request = base_request(vec![text_message(Role::User, "Question.")]);
+		request.tools = Arc::from([ToolDefinition {
+			name:        sf!("match_input"),
+			description: None,
+			input:       ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar {
+					syntax:     ToolGrammarSyntax::Lark,
+					definition: Str::new("start: WORD"),
+				},
+				fallback: OpaqueJson::new(fallback.clone()),
+			},
+		}]);
+		let body: Value =
+			serde_json::from_slice(&encode_fixture(&request, &BedrockOptions::default()))
+				.expect("grammar request is JSON");
+		assert_eq!(
+			body["toolConfig"]["tools"],
+			serde_json::json!([{
+				"toolSpec": {
+					"name": "match_input",
+					"inputSchema": { "json": fallback },
+				}
+			}]),
+			"the grammar is dropped and the fallback schema is what ships"
+		);
+	}
+
 	#[test]
 	fn encodes_tools_and_adaptive_thinking_exactly() {
 		let mut request = base_request(vec![text_message(Role::User, "Calculate 2 + 2.")]);

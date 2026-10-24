@@ -3784,6 +3784,40 @@ mod tests {
 		.expect("policy request lowers")
 	}
 
+	/// ADR 0021: Anthropic Messages has no grammar tool form, so a
+	/// grammar-constrained tool reaches the wire as its declared non-strict
+	/// fallback schema, with `strict` never claimed.
+	#[test]
+	fn a_grammar_tool_lowers_to_its_non_strict_fallback_schema() {
+		use crate::call::{ToolGrammar, ToolGrammarSyntax};
+		let fallback =
+			serde_json::json!({"type": "object", "properties": {"input": {"type": "string"}}});
+		let mut request = canonical_chat(&[]);
+		request.tools = Arc::from([ToolDefinition {
+			name:        sf!("match_input"),
+			description: None,
+			input:       ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar {
+					syntax:     ToolGrammarSyntax::Lark,
+					definition: Str::new("start: WORD"),
+				},
+				fallback: OpaqueJson::new(fallback.clone()),
+			},
+		}]);
+		let lowered = lower_with_policy(&request, &WirePolicy::baseline(), None, None);
+		let [Tool::Client(tool)] = lowered.tools.as_slice() else {
+			panic!("exactly one client tool: {:?}", lowered.tools);
+		};
+		assert_eq!(tool.name.as_str(), "match_input");
+		// Anthropic normalizes every tool schema closed, so the fallback ships
+		// with `additionalProperties: false` added. It is the declared
+		// fallback otherwise, and the grammar is gone.
+		let mut closed = fallback;
+		closed["additionalProperties"] = serde_json::Value::Bool(false);
+		assert_eq!(tool.input_schema, closed, "the fallback schema is what ships, closed");
+		assert_eq!(tool.strict, None, "a fallback never claims strict decoding");
+	}
+
 	fn message(role: Role, parts: Vec<CanonicalContentPart>) -> CanonicalMessage {
 		CanonicalMessage { role, content: Arc::from(parts), name: None }
 	}

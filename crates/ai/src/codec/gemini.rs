@@ -4254,6 +4254,55 @@ mod tests {
 		);
 	}
 
+	/// ADR 0021: Gemini function declarations accept no grammar, so a
+	/// grammar-constrained tool is refused before the wire rather than
+	/// silently downgraded. The registry normally lowers it to the fallback
+	/// first; this is the codec's own guard.
+	#[test]
+	fn a_grammar_tool_is_refused_before_the_wire() {
+		use crate::call::{OpaqueJson, ToolDefinition, ToolGrammar, ToolGrammarSyntax};
+		let catalog = Catalog::embedded();
+		let route = catalog
+			.routes()
+			.iter()
+			.find(|route| route.codec.as_str() == "google-genai")
+			.expect("Google GenerateContent route");
+		let target = WireTarget {
+			route:      route.id.clone(),
+			codec:      route.codec.clone(),
+			endpoint:   route.endpoint.clone(),
+			wire_model: omp_catalog::WireModelId::new("gemini-2.5-flash"),
+		};
+		let request_id = RequestId::new("gemini-grammar-refusal");
+		let policy = policy::WirePolicy::baseline();
+		let context = EncodeContext {
+			request_id: &request_id,
+			route,
+			target: Some(&target),
+			policy: &policy,
+			..EncodeContext::default()
+		};
+		let mut request = empty_chat_request();
+		request.tools = Arc::from([ToolDefinition {
+			name:        sf!("match_input"),
+			description: None,
+			input:       crate::call::ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar {
+					syntax:     ToolGrammarSyntax::Lark,
+					definition: Str::new("start: WORD"),
+				},
+				fallback: OpaqueJson::new(serde_json::json!({"type": "object"})),
+			},
+		}]);
+		let error = GeminiCodec::generative_language(None)
+			.encode(&context, &OperationCall::Chat(Arc::new(request)))
+			.err()
+			.expect("a grammar tool is refused");
+		assert_eq!(error.kind, ErrorKind::CapabilityMismatch);
+		assert_eq!(error.phase, ErrorPhase::Encoding);
+		assert_eq!(error.action, RetryAction::Never, "no retry can make Gemini accept a grammar");
+	}
+
 	#[test]
 	fn encode_projection_uses_resolved_thinking_selection() {
 		let selection = ThinkingSelection {
