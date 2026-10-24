@@ -34,7 +34,7 @@ pub fn normalize(raw: &str, allow_empty: bool) -> Option<Str> {
 }
 /// Normalizes a writer path and enforces the configured archive path bounds.
 pub fn normalize_bounded(raw: &str, limits: Limits) -> Result<Str> {
-	let path = normalize(raw, false).ok_or_else(|| Error::UnsafePath(Str::new(raw)))?;
+	let path = normalize(raw, false).ok_or_else(|| Error::UnsafePath { path: Str::new(raw) })?;
 	validate(&path, limits)?;
 	Ok(path)
 }

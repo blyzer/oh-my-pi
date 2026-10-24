@@ -8,7 +8,7 @@ use crate::{Error, Limits, Result};
 const XZ_MAGIC: &[u8; 6] = b"\xfd7zXZ\0";
 
 const fn invalid(message: &'static str) -> Error {
-	Error::InvalidArchive(message)
+	Error::InvalidArchive { problem: message }
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
@@ -157,7 +157,7 @@ fn discover_streams(bytes: &[u8]) -> Result<Vec<Stream>> {
 		}
 		let check_id = flag1 & 0xf;
 		if check_size(check_id).is_none() {
-			return Err(Error::UnsupportedFeature("XZ integrity check"));
+			return Err(Error::UnsupportedFeature { feature: "XZ integrity check" });
 		}
 		let index_size = (u64::from(read_u32_le(bytes, footer + 4)?) + 1)
 			.checked_mul(4)
@@ -510,7 +510,7 @@ fn apply_filter(bytes: &mut [u8], filter: Filter<'_>) -> Result<()> {
 		9 => sparc_decode(bytes, start_offset)?,
 		10 => arm64_decode(bytes, start_offset)?,
 		11 => riscv_decode(bytes, start_offset)?,
-		_ => return Err(Error::UnsupportedFeature("XZ filter")),
+		_ => return Err(Error::UnsupportedFeature { feature: "XZ filter" }),
 	}
 	Ok(())
 }
@@ -554,7 +554,7 @@ fn verify_check(check_id: u8, output: &[u8], expected: &[u8]) -> Result<()> {
 		4 => Err(invalid("XZ block CRC64 mismatch")),
 		10 if expected == Sha256::digest(output).as_slice() => Ok(()),
 		10 => Err(invalid("XZ block SHA-256 mismatch")),
-		_ => Err(Error::UnsupportedFeature("XZ integrity check")),
+		_ => Err(Error::UnsupportedFeature { feature: "XZ integrity check" }),
 	}
 }
 
@@ -610,7 +610,7 @@ fn decode_block(bytes: &[u8], offset: usize, record: Record, check_id: u8) -> Re
 		return Err(invalid("non-zero XZ block header padding"));
 	}
 	let integrity_size =
-		check_size(check_id).ok_or(Error::UnsupportedFeature("XZ integrity check"))?;
+		check_size(check_id).ok_or(Error::UnsupportedFeature { feature: "XZ integrity check" })?;
 	let compressed_size = record
 		.unpadded_size
 		.checked_sub(header_size as u64 + integrity_size as u64)
@@ -643,9 +643,9 @@ fn decode_block(bytes: &[u8], offset: usize, record: Record, check_id: u8) -> Re
 		.ok_or_else(|| invalid("XZ block has no filters"))?;
 	if terminal.id != 0x21 {
 		return Err(if terminal.id == 0x22 {
-			Error::UnsupportedFeature("XZ terminal filter ID 0x22 (LZMA2 required)")
+			Error::UnsupportedFeature { feature: "XZ terminal filter ID 0x22 (LZMA2 required)" }
 		} else {
-			Error::UnsupportedFeature("XZ terminal filter (LZMA2 required)")
+			Error::UnsupportedFeature { feature: "XZ terminal filter (LZMA2 required)" }
 		});
 	}
 	if terminal.properties.len() != 1 {

@@ -75,21 +75,21 @@ fn rejects_truncated_malformed_and_missing_long_name_metadata() {
 	let original = fixture_bytes("unix-gnu.a");
 	assert!(matches!(
 		Archive::from_bytes_with_format(&original[..original.len() - 1], Format::Ar),
-		Err(Error::InvalidArchive(_) | Error::Io(_))
+		Err(Error::InvalidArchive { .. } | Error::Io(_))
 	));
 
 	let mut bad_header = original.clone();
 	bad_header[8 + 58] = 0;
 	assert!(matches!(
 		Archive::from_bytes_with_format(&bad_header, Format::Ar),
-		Err(Error::InvalidArchive(_))
+		Err(Error::InvalidArchive { .. })
 	));
 
 	let mut missing_table = original;
 	missing_table[8 + 60 + 4..8 + 60 + 4 + 9].copy_from_slice(b"not-table");
 	assert!(matches!(
 		Archive::from_bytes_with_format(&missing_table, Format::Ar),
-		Err(Error::InvalidArchive(_))
+		Err(Error::InvalidArchive { .. })
 	));
 }
 
@@ -154,6 +154,6 @@ fn deb_requires_the_version_member_first() {
 	assert_ne!(Format::sniff(&bytes), Some(Format::Deb));
 	assert!(matches!(
 		Archive::from_bytes_with_format(&bytes, Format::Deb),
-		Err(Error::InvalidArchive(_))
+		Err(Error::InvalidArchive { .. })
 	));
 }

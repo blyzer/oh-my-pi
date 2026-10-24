@@ -48,7 +48,7 @@ fn join_target(target: &str, suffix: &str, limits: Limits) -> Result<Str> {
 		.len()
 		.checked_add(separator)
 		.and_then(|length| length.checked_add(suffix.len()))
-		.ok_or(Error::InvalidArchive("link path length overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "link path length overflow" })?;
 	if length as u64 > limits.path_size {
 		return Err(Error::PathTooLong { actual: length as u64, limit: limits.path_size });
 	}

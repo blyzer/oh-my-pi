@@ -66,11 +66,11 @@ fn drops_traversal_and_reports_unsupported_coders_precisely() {
 	let Err(encrypted) = open("sevenzip-encrypted.7z") else {
 		panic!("encrypted 7z unexpectedly opened");
 	};
-	assert!(matches!(encrypted, Error::UnsupportedFeature(feature) if feature.contains("7zAES")));
+	assert!(matches!(encrypted, Error::UnsupportedFeature { feature } if feature.contains("7zAES")));
 	let Err(ppmd) = open("sevenzip-ppmd.7z") else {
 		panic!("PPMd 7z unexpectedly opened");
 	};
-	assert!(matches!(ppmd, Error::UnsupportedFeature(feature) if feature.contains("PPMd")));
+	assert!(matches!(ppmd, Error::UnsupportedFeature { feature } if feature.contains("PPMd")));
 }
 
 #[test]

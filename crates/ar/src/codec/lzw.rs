@@ -46,9 +46,9 @@ impl<'a> LsbCodeReader<'a> {
 		let aligned = self
 			.group_start
 			.checked_add(groups * group_bits)
-			.ok_or(Error::InvalidArchive("truncated compress (.Z) code group"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated compress (.Z) code group" })?;
 		if aligned > self.total_bits() {
-			return Err(Error::InvalidArchive("truncated compress (.Z) code group"));
+			return Err(Error::InvalidArchive { problem: "truncated compress (.Z) code group" });
 		}
 		self.bit_position = aligned;
 		self.group_start = aligned;
@@ -58,7 +58,7 @@ impl<'a> LsbCodeReader<'a> {
 	fn assert_final_padding(&self) -> Result<()> {
 		for position in self.bit_position..self.total_bits() {
 			if (self.bytes[position >> 3] >> (position & 7)) & 1 != 0 {
-				return Err(Error::InvalidArchive("non-zero compress (.Z) padding"));
+				return Err(Error::InvalidArchive { problem: "non-zero compress (.Z) padding" });
 			}
 		}
 		Ok(())
@@ -94,19 +94,19 @@ impl BoundedOutput {
 /// Decompresses one ncompress `.Z` stream bounded by `limits.archive_size`.
 pub fn lzw_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 	if bytes.len() < 3 {
-		return Err(Error::InvalidArchive("truncated compress (.Z) header"));
+		return Err(Error::InvalidArchive { problem: "truncated compress (.Z) header" });
 	}
 	if bytes[..2] != [0x1f, 0x9d] {
-		return Err(Error::InvalidArchive("invalid compress (.Z) header"));
+		return Err(Error::InvalidArchive { problem: "invalid compress (.Z) header" });
 	}
 
 	let flags = bytes[2];
 	if flags & 0x60 != 0 {
-		return Err(Error::UnsupportedFeature("compress (.Z) reserved header flags"));
+		return Err(Error::UnsupportedFeature { feature: "compress (.Z) reserved header flags" });
 	}
 	let max_bits = usize::from(flags & 0x1f);
 	if !(MIN_BITS..=MAX_BITS).contains(&max_bits) {
-		return Err(Error::InvalidArchive("invalid compress (.Z) maximum code width"));
+		return Err(Error::InvalidArchive { problem: "invalid compress (.Z) maximum code width" });
 	}
 	let block_mode = flags & 0x80 != 0;
 	let dictionary_limit = 1_usize << max_bits;
@@ -126,7 +126,7 @@ pub fn lzw_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 			return Ok(output.bytes);
 		};
 		if code >= dictionary_head {
-			return Err(Error::InvalidArchive("corrupt compress (.Z) dictionary code"));
+			return Err(Error::InvalidArchive { problem: "corrupt compress (.Z) dictionary code" });
 		}
 		if block_mode && code == CLEAR_CODE {
 			reader.align_code_group(width)?;
@@ -140,7 +140,9 @@ pub fn lzw_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 		let mut stack_length = 0;
 		while current >= 256 {
 			if current >= dictionary_head || stack_length >= stack.len() - 1 {
-				return Err(Error::InvalidArchive("corrupt compress (.Z) dictionary chain"));
+				return Err(Error::InvalidArchive {
+					problem: "corrupt compress (.Z) dictionary chain",
+				});
 			}
 			stack[stack_length] = suffixes[current];
 			stack_length += 1;

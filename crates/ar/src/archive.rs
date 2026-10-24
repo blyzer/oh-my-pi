@@ -536,19 +536,21 @@ impl<R: Read + Seek> Archive<R> {
 	/// Unlike [`Self::entry`], this follows symbolic directory aliases before
 	/// returning the indexed target.
 	pub fn resolve_entry(&self, path: &str) -> Result<&Entry> {
-		let normalized = normalize(path, false).ok_or_else(|| Error::UnsafePath(Str::new(path)))?;
+		let normalized =
+			normalize(path, false).ok_or_else(|| Error::UnsafePath { path: Str::new(path) })?;
 		let resolved = match self.entry_normalized(normalized.as_str()) {
 			Some(entry) if !entry.is_link() => normalized,
 			Some(_) | None => self.resolve_path(normalized)?,
 		};
 		self
 			.entry_normalized(resolved.as_str())
-			.ok_or_else(|| Error::NotFound(resolved.clone()))
+			.ok_or_else(|| Error::NotFound { path: resolved.clone() })
 	}
 
 	/// Lists the direct children of a directory in path order.
 	pub fn list(&self, path: &str) -> Result<Vec<&Entry>> {
-		let normalized = normalize(path, true).ok_or_else(|| Error::UnsafePath(Str::new(path)))?;
+		let normalized =
+			normalize(path, true).ok_or_else(|| Error::UnsafePath { path: Str::new(path) })?;
 		let resolved = match self.entry_normalized(normalized.as_str()) {
 			Some(entry) if !entry.is_link() => normalized,
 			Some(_) | None => self.resolve_path(normalized)?,
@@ -556,9 +558,9 @@ impl<R: Read + Seek> Archive<R> {
 		if !resolved.is_empty() {
 			let entry = self
 				.entry_normalized(resolved.as_str())
-				.ok_or_else(|| Error::NotFound(resolved.clone()))?;
+				.ok_or_else(|| Error::NotFound { path: resolved.clone() })?;
 			if !entry.is_directory() {
-				return Err(Error::NotDirectory(resolved));
+				return Err(Error::NotDirectory { path: resolved });
 			}
 		}
 		Ok(self
@@ -760,7 +762,7 @@ impl<R: Read + Seek> Archive<R> {
 	fn file_entry(&self, path: &str) -> Result<Entry> {
 		let entry = self.resolve_entry(path)?;
 		if entry.is_directory() {
-			return Err(Error::IsDirectory(Str::new(entry.path())));
+			return Err(Error::IsDirectory { path: Str::new(entry.path()) });
 		}
 		Ok(entry.clone())
 	}
@@ -786,16 +788,16 @@ impl<R: Read + Seek> Archive<R> {
 				let decoded = self
 					.decoded
 					.get(*buffer as usize)
-					.ok_or(Error::InvalidArchive("missing decoded archive buffer"))?;
+					.ok_or(Error::InvalidArchive { problem: "missing decoded archive buffer" })?;
 				let start = usize::try_from(*data_offset)
-					.map_err(|_| Error::InvalidArchive("decoded member offset overflows"))?;
+					.map_err(|_| Error::InvalidArchive { problem: "decoded member offset overflows" })?;
 				let end = usize::try_from(*stored_size)
 					.ok()
 					.and_then(|size| start.checked_add(size))
-					.ok_or(Error::InvalidArchive("decoded member range overflows"))?;
+					.ok_or(Error::InvalidArchive { problem: "decoded member range overflows" })?;
 				let slice = decoded
 					.get(start..end)
-					.ok_or(Error::InvalidArchive("decoded member range out of bounds"))?;
+					.ok_or(Error::InvalidArchive { problem: "decoded member range out of bounds" })?;
 				output.write_all(slice)?;
 				return Ok(slice.len() as u64);
 			},
@@ -818,7 +820,7 @@ impl<R: Read + Seek> Archive<R> {
 				let decoded = self
 					.decoded
 					.first()
-					.ok_or(Error::InvalidArchive("missing decoded archive buffer"))?;
+					.ok_or(Error::InvalidArchive { problem: "missing decoded archive buffer" })?;
 				tar::read_entry_to(&mut Cursor::new(decoded.as_slice()), entry, output)
 			},
 			Format::Asar => {
@@ -946,9 +948,9 @@ fn sniff_source(source: &mut (impl Read + Seek)) -> Result<Format> {
 		source.seek(SeekFrom::Start(tail_start))?;
 		let mut tail = vec![
 			0_u8;
-			usize::try_from(tail_len).map_err(|_| Error::InvalidArchive(
-				"ZIP sniff tail does not fit this platform"
-			))?
+			usize::try_from(tail_len).map_err(|_| Error::InvalidArchive {
+				problem: "ZIP sniff tail does not fit this platform",
+			})?
 		];
 		source.read_exact(&mut tail)?;
 		zip::has_eocd(&tail)
@@ -1031,7 +1033,9 @@ fn ensure_parent_directories(entries: &mut HashMap<Str, Entry>, limit: u64) -> R
 					slot.insert(Entry::synthetic_directory(parent));
 				},
 				MapEntry::Occupied(slot) if !slot.get().is_directory() && !slot.get().is_link() => {
-					return Err(Error::InvalidArchive("file entry is the parent of another member"));
+					return Err(Error::InvalidArchive {
+						problem: "file entry is the parent of another member",
+					});
 				},
 				MapEntry::Occupied(_) => {},
 			}
@@ -1059,7 +1063,7 @@ fn decode_compressed(
 		},
 		Format::TarZ | Format::Z => codec::lzw_decompress(&read_source(source, file_size)?, limits),
 		Format::Lzma => codec::lzma_alone_decompress(&read_source(source, file_size)?, limits),
-		_ => Err(Error::InvalidArchive("format is not a compressed stream")),
+		_ => Err(Error::InvalidArchive { problem: "format is not a compressed stream" }),
 	}
 }
 
@@ -1067,7 +1071,7 @@ fn decode_compressed(
 fn read_source(source: &mut (impl Read + Seek), file_size: u64) -> Result<Vec<u8>> {
 	source.seek(SeekFrom::Start(0))?;
 	let capacity = usize::try_from(file_size)
-		.map_err(|_| Error::InvalidArchive("archive does not fit this platform"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "archive does not fit this platform" })?;
 	let mut bytes = Vec::with_capacity(capacity);
 	source.read_to_end(&mut bytes)?;
 	Ok(bytes)
@@ -1118,7 +1122,7 @@ fn copy_source_range<W: Write>(
 	source.seek(SeekFrom::Start(data_offset))?;
 	let copied = io::copy(&mut source.take(stored_size), output)?;
 	if copied != stored_size {
-		return Err(Error::InvalidArchive("truncated member data"));
+		return Err(Error::InvalidArchive { problem: "truncated member data" });
 	}
 	Ok(copied)
 }

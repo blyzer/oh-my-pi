@@ -109,7 +109,7 @@ fn invalid_unicode_path_crc_is_ignored_and_truncated_extra_fields_are_rejected()
 
 	let malformed = fixture_with_central_extra(raw_name, b"plain", &[0x75, 0x70, 8, 0, 1]);
 	assert_error_kind(Archive::from_bytes(&malformed), |error| {
-		matches!(error, Error::InvalidArchive("malformed ZIP extra field"))
+		matches!(error, Error::InvalidArchive { problem: "malformed ZIP extra field" })
 	});
 }
 
@@ -122,7 +122,7 @@ fn malformed_zip64_locator_offsets_are_rejected_without_trusting_wrapped_ranges(
 		.unwrap();
 	bytes[locator + 8..locator + 16].copy_from_slice(&u64::MAX.to_le_bytes());
 	assert_error_kind(Archive::from_bytes(&bytes), |error| {
-		matches!(error, Error::InvalidArchive(_))
+		matches!(error, Error::InvalidArchive { .. })
 	});
 }
 

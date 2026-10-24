@@ -52,22 +52,22 @@ pub(crate) fn read_entries(
 	let probe_size = usize::try_from(
 		file_size.min((AR_SIGNATURE.len() + AR_HEADER_SIZE) as u64 + limits.path_size),
 	)
-	.map_err(|_| Error::InvalidArchive("deb probe does not fit this platform"))?;
+	.map_err(|_| Error::InvalidArchive { problem: "deb probe does not fit this platform" })?;
 	let mut probe = vec![0_u8; probe_size];
 	read_exact_at(source, 0, &mut probe, file_size, "truncated deb archive header")?;
 	if !is_header(&probe) {
-		return Err(Error::InvalidArchive("deb first member is not debian-binary"));
+		return Err(Error::InvalidArchive { problem: "deb first member is not debian-binary" });
 	}
 
 	let outer = unix_ar::read_entries(source, file_size, limits, &mut Vec::new())?;
 	if outer.first().map(Entry::path) != Some(DEBIAN_BINARY) {
-		return Err(Error::InvalidArchive("deb first member is not debian-binary"));
+		return Err(Error::InvalidArchive { problem: "deb first member is not debian-binary" });
 	}
 	let mut result = Vec::new();
 	for entry in outer {
 		let Some((kind, compression)) = classify_tar(entry.path()) else {
 			if entry.path().starts_with("control.tar.") || entry.path().starts_with("data.tar.") {
-				return Err(Error::UnsupportedFeature("deb tar compression"));
+				return Err(Error::UnsupportedFeature { feature: "deb tar compression" });
 			}
 			result.push(entry);
 			continue;
@@ -76,7 +76,7 @@ pub(crate) fn read_entries(
 		let tar_bytes = decompress_tar(compressed, compression, limits)?;
 		check_retained_size(decoded, tar_bytes.len() as u64, limits)?;
 		let buffer = u32::try_from(decoded.len())
-			.map_err(|_| Error::InvalidArchive("too many retained archive buffers"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "too many retained archive buffers" })?;
 		let mut inner =
 			tar::read_entries(&mut Cursor::new(tar_bytes.as_slice()), tar_bytes.len() as u64, limits)?;
 		for inner_entry in &mut inner {
@@ -116,13 +116,14 @@ fn read_outer_member(
 	file_size: u64,
 ) -> Result<Vec<u8>> {
 	let Storage::Raw { data_offset, stored_size } = entry.storage else {
-		return Err(Error::InvalidArchive("invalid deb outer member storage"));
+		return Err(Error::InvalidArchive { problem: "invalid deb outer member storage" });
 	};
 	if entry.directory || stored_size != entry.size {
-		return Err(Error::InvalidArchive("invalid deb outer member"));
+		return Err(Error::InvalidArchive { problem: "invalid deb outer member" });
 	}
-	let length = usize::try_from(stored_size)
-		.map_err(|_| Error::InvalidArchive("deb outer member does not fit this platform"))?;
+	let length = usize::try_from(stored_size).map_err(|_| Error::InvalidArchive {
+		problem: "deb outer member does not fit this platform",
+	})?;
 	let mut bytes = vec![0_u8; length];
 	read_exact_at(source, data_offset, &mut bytes, file_size, "truncated deb outer member")?;
 	Ok(bytes)
@@ -165,11 +166,11 @@ fn check_retained_size(decoded: &[Vec<u8>], additional: u64, limits: Limits) -> 
 	let retained = decoded.iter().try_fold(0_u64, |total, bytes| {
 		total
 			.checked_add(bytes.len() as u64)
-			.ok_or(Error::InvalidArchive("decoded buffer size overflows"))
+			.ok_or(Error::InvalidArchive { problem: "decoded buffer size overflows" })
 	})?;
 	let actual = retained
 		.checked_add(additional)
-		.ok_or(Error::InvalidArchive("decoded buffer size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "decoded buffer size overflows" })?;
 	if actual > limits.in_memory_size {
 		return Err(Error::ArchiveTooLargeInMemory { actual, limit: limits.in_memory_size });
 	}
@@ -180,13 +181,17 @@ fn map_inner_storage(entry: &mut Entry, buffer: u32) -> Result<()> {
 	let replacement = match &entry.storage {
 		Storage::Tar { data_offset, stored_size, sparse: TarSparse::None } => {
 			if *stored_size != entry.size {
-				return Err(Error::InvalidArchive("deb tar member has inconsistent stored size"));
+				return Err(Error::InvalidArchive {
+					problem: "deb tar member has inconsistent stored size",
+				});
 			}
 			Some(Storage::Buffered { buffer, data_offset: *data_offset, stored_size: *stored_size })
 		},
-		Storage::Tar { .. } => return Err(Error::UnsupportedFeature("sparse deb tar member")),
+		Storage::Tar { .. } => {
+			return Err(Error::UnsupportedFeature { feature: "sparse deb tar member" });
+		},
 		Storage::Synthetic | Storage::Link { .. } => None,
-		_ => return Err(Error::InvalidArchive("unexpected deb inner tar storage")),
+		_ => return Err(Error::InvalidArchive { problem: "unexpected deb inner tar storage" }),
 	};
 	if let Some(storage) = replacement {
 		entry.storage = storage;
@@ -257,14 +262,14 @@ fn read_exact_at(
 ) -> Result<()> {
 	let end = offset
 		.checked_add(bytes.len() as u64)
-		.ok_or(Error::InvalidArchive(message))?;
+		.ok_or(Error::InvalidArchive { problem: message })?;
 	if end > file_size {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	source.seek(SeekFrom::Start(offset))?;
 	source.read_exact(bytes).map_err(|error| {
 		if error.kind() == io::ErrorKind::UnexpectedEof {
-			Error::InvalidArchive(message)
+			Error::InvalidArchive { problem: message }
 		} else {
 			error.into()
 		}
@@ -277,5 +282,5 @@ pub(crate) const fn read_entry_to<W: Write>(
 	_entry: &Entry,
 	_output: &mut W,
 ) -> Result<u64> {
-	Err(Error::InvalidArchive("entry is not a deb member"))
+	Err(Error::InvalidArchive { problem: "entry is not a deb member" })
 }

@@ -110,7 +110,7 @@ fn read_entries_impl(
 		} else if &prefix == b"070707" {
 			ODC_HEADER_SIZE
 		} else {
-			return Err(Error::InvalidArchive("unsupported or corrupt CPIO magic"));
+			return Err(Error::InvalidArchive { problem: "unsupported or corrupt CPIO magic" });
 		};
 		let mut header_bytes = [0_u8; NEWC_HEADER_SIZE];
 		read_exact_at(
@@ -122,10 +122,12 @@ fn read_entries_impl(
 		)?;
 		let header = parse_header(&header_bytes[..header_size])?;
 		if header.mode > u16::MAX as u32 {
-			return Err(Error::InvalidArchive("CPIO mode exceeds 16 bits"));
+			return Err(Error::InvalidArchive { problem: "CPIO mode exceeds 16 bits" });
 		}
 		if header.name_size == 0 {
-			return Err(Error::InvalidArchive("CPIO name does not include a NUL terminator"));
+			return Err(Error::InvalidArchive {
+				problem: "CPIO name does not include a NUL terminator",
+			});
 		}
 		let path_bytes = u64::from(header.name_size - 1);
 		if path_bytes > limits.path_size {
@@ -142,31 +144,33 @@ fn read_entries_impl(
 
 		let name_start = offset
 			.checked_add(header.len as u64)
-			.ok_or(Error::InvalidArchive("CPIO name offset overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CPIO name offset overflows" })?;
 		let name_end = name_start
 			.checked_add(u64::from(header.name_size))
-			.ok_or(Error::InvalidArchive("CPIO name range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CPIO name range overflows" })?;
 		let data_offset = align(name_end, header.alignment)?;
 		let data_end = data_offset
 			.checked_add(member_size)
-			.ok_or(Error::InvalidArchive("CPIO member range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CPIO member range overflows" })?;
 		let next_offset = align(data_end, header.alignment)?;
 		if next_offset > file_size {
-			return Err(Error::InvalidArchive("truncated CPIO member data"));
+			return Err(Error::InvalidArchive { problem: "truncated CPIO member data" });
 		}
 
 		let name_len = usize::try_from(header.name_size)
-			.map_err(|_| Error::InvalidArchive("CPIO name does not fit this platform"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "CPIO name does not fit this platform" })?;
 		let mut name = vec![0_u8; name_len];
 		read_exact_at(source, name_start, &mut name, file_size, "truncated CPIO member name")?;
 		if name.last() != Some(&0) || name[..name.len() - 1].contains(&0) {
-			return Err(Error::InvalidArchive("invalid NUL termination in CPIO member name"));
+			return Err(Error::InvalidArchive {
+				problem: "invalid NUL termination in CPIO member name",
+			});
 		}
 		validate_zero_range(source, name_end, data_offset, file_size, "non-zero CPIO name padding")?;
 		validate_zero_range(source, data_end, next_offset, file_size, "non-zero CPIO data padding")?;
 		metadata_size = metadata_size
 			.checked_add(data_offset - offset)
-			.ok_or(Error::InvalidArchive("CPIO index size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "CPIO index size overflows" })?;
 		if metadata_size > limits.index_size {
 			return Err(Error::IndexTooLarge { actual: metadata_size, limit: limits.index_size });
 		}
@@ -174,7 +178,7 @@ fn read_entries_impl(
 		let raw_name = str::from_utf8(&name[..name.len() - 1]).ok();
 		if raw_name == Some(TRAILER_NAME) {
 			if member_size != 0 {
-				return Err(Error::InvalidArchive("CPIO TRAILER!!! has non-empty data"));
+				return Err(Error::InvalidArchive { problem: "CPIO TRAILER!!! has non-empty data" });
 			}
 			found_trailer = true;
 			offset = next_offset;
@@ -183,13 +187,17 @@ fn read_entries_impl(
 		if let Some(expected) = header.checksum {
 			let actual = checksum_range(source, data_offset, member_size)?;
 			if actual != expected {
-				return Err(Error::InvalidArchive("CPIO member has an invalid CRC checksum"));
+				return Err(Error::InvalidArchive {
+					problem: "CPIO member has an invalid CRC checksum",
+				});
 			}
 		}
 
 		let file_type = header.mode & FILE_TYPE_MASK;
 		if matches!(file_type, FILE_TYPE_DIRECTORY | FILE_TYPE_FIFO) && member_size != 0 {
-			return Err(Error::InvalidArchive("CPIO directory or FIFO has non-empty data"));
+			return Err(Error::InvalidArchive {
+				problem: "CPIO directory or FIFO has non-empty data",
+			});
 		}
 		if records.len() as u64 >= limits.entries {
 			return Err(Error::TooManyEntries {
@@ -215,7 +223,7 @@ fn read_entries_impl(
 		offset = next_offset;
 	}
 	if !found_trailer {
-		return Err(Error::InvalidArchive("missing CPIO TRAILER!!! terminator"));
+		return Err(Error::InvalidArchive { problem: "missing CPIO TRAILER!!! terminator" });
 	}
 	validate_zero_range(source, offset, file_size, file_size, "non-zero CPIO trailing padding")?;
 	materialize_records(source, records, limits, buffer)
@@ -345,8 +353,9 @@ fn read_link_target(
 	if record.file_size > limits.path_size {
 		return Err(Error::PathTooLong { actual: record.file_size, limit: limits.path_size });
 	}
-	let size = usize::try_from(record.file_size)
-		.map_err(|_| Error::InvalidArchive("CPIO symlink target does not fit this platform"))?;
+	let size = usize::try_from(record.file_size).map_err(|_| Error::InvalidArchive {
+		problem: "CPIO symlink target does not fit this platform",
+	})?;
 	let mut bytes = vec![0_u8; size];
 	read_exact_at(
 		source,
@@ -356,9 +365,9 @@ fn read_link_target(
 		"truncated CPIO symlink target",
 	)?;
 	let raw = str::from_utf8(&bytes)
-		.map_err(|_| Error::InvalidArchive("CPIO symlink target is not valid UTF-8"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "CPIO symlink target is not valid UTF-8" })?;
 	if raw.contains('\0') {
-		return Err(Error::InvalidArchive("CPIO symlink target contains NUL"));
+		return Err(Error::InvalidArchive { problem: "CPIO symlink target contains NUL" });
 	}
 	let portable = raw.replace('\\', "/");
 	if portable.starts_with('/') {
@@ -395,7 +404,7 @@ fn normalize_link_path(path: &str) -> Option<Str> {
 fn parse_header(bytes: &[u8]) -> Result<Header> {
 	if bytes.len() >= 2 && matches!(&bytes[..2], [0xc7, 0x71] | [0x71, 0xc7]) {
 		if bytes.len() < BINARY_HEADER_SIZE {
-			return Err(Error::InvalidArchive("truncated old-binary CPIO header"));
+			return Err(Error::InvalidArchive { problem: "truncated old-binary CPIO header" });
 		}
 		let little = bytes[0] == 0xc7;
 		let word = |offset: usize| -> u16 {
@@ -422,16 +431,16 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
 		});
 	}
 	if bytes.len() < 6 {
-		return Err(Error::InvalidArchive("truncated CPIO magic"));
+		return Err(Error::InvalidArchive { problem: "truncated CPIO magic" });
 	}
 	if &bytes[..6] == b"070701" || &bytes[..6] == b"070702" {
 		if bytes.len() < NEWC_HEADER_SIZE {
-			return Err(Error::InvalidArchive("truncated new-ASCII CPIO header"));
+			return Err(Error::InvalidArchive { problem: "truncated new-ASCII CPIO header" });
 		}
 		let field = |index: usize| parse_digits(&bytes[6 + index * 8..14 + index * 8], 16);
 		let checksum = field(12)?;
 		if &bytes[..6] == b"070701" && checksum != 0 {
-			return Err(Error::InvalidArchive("newc CPIO checksum field is non-zero"));
+			return Err(Error::InvalidArchive { problem: "newc CPIO checksum field is non-zero" });
 		}
 		return Ok(Header {
 			len:       NEWC_HEADER_SIZE,
@@ -449,7 +458,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
 	}
 	if &bytes[..6] == b"070707" {
 		if bytes.len() < ODC_HEADER_SIZE {
-			return Err(Error::InvalidArchive("truncated portable-ASCII CPIO header"));
+			return Err(Error::InvalidArchive { problem: "truncated portable-ASCII CPIO header" });
 		}
 		return Ok(Header {
 			len:       ODC_HEADER_SIZE,
@@ -465,7 +474,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
 			checksum:  None,
 		});
 	}
-	Err(Error::InvalidArchive("unsupported or corrupt CPIO magic"))
+	Err(Error::InvalidArchive { problem: "unsupported or corrupt CPIO magic" })
 }
 
 fn parse_digits(bytes: &[u8], radix: u32) -> Result<u32> {
@@ -475,15 +484,17 @@ fn parse_digits(bytes: &[u8], radix: u32) -> Result<u32> {
 			b'0'..=b'9' => u32::from(byte - b'0'),
 			b'a'..=b'f' if radix == 16 => u32::from(byte - b'a') + 10,
 			b'A'..=b'F' if radix == 16 => u32::from(byte - b'A') + 10,
-			_ => return Err(Error::InvalidArchive("invalid numeric field in CPIO header")),
+			_ => {
+				return Err(Error::InvalidArchive { problem: "invalid numeric field in CPIO header" });
+			},
 		};
 		if digit >= radix {
-			return Err(Error::InvalidArchive("invalid numeric field in CPIO header"));
+			return Err(Error::InvalidArchive { problem: "invalid numeric field in CPIO header" });
 		}
 		value = value
 			.checked_mul(radix)
 			.and_then(|value| value.checked_add(digit))
-			.ok_or(Error::InvalidArchive("numeric CPIO header field overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "numeric CPIO header field overflows" })?;
 	}
 	Ok(value)
 }
@@ -495,7 +506,7 @@ fn align(value: u64, alignment: u64) -> Result<u64> {
 	} else {
 		value
 			.checked_add(alignment - remainder)
-			.ok_or(Error::InvalidArchive("CPIO alignment overflows"))
+			.ok_or(Error::InvalidArchive { problem: "CPIO alignment overflows" })
 	}
 }
 
@@ -508,14 +519,14 @@ fn read_exact_at(
 ) -> Result<()> {
 	let end = offset
 		.checked_add(bytes.len() as u64)
-		.ok_or(Error::InvalidArchive(message))?;
+		.ok_or(Error::InvalidArchive { problem: message })?;
 	if end > file_size {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	source.seek(SeekFrom::Start(offset))?;
 	source.read_exact(bytes).map_err(|error| {
 		if error.kind() == io::ErrorKind::UnexpectedEof {
-			Error::InvalidArchive(message)
+			Error::InvalidArchive { problem: message }
 		} else {
 			error.into()
 		}
@@ -530,7 +541,7 @@ fn validate_zero_range(
 	message: &'static str,
 ) -> Result<()> {
 	if end < start || end > file_size {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut offset = start;
 	let mut buffer = [0_u8; 8192];
@@ -539,7 +550,7 @@ fn validate_zero_range(
 			.expect("zero-padding chunk is bounded by its fixed buffer");
 		read_exact_at(source, offset, &mut buffer[..count], file_size, message)?;
 		if buffer[..count].iter().any(|&byte| byte != 0) {
-			return Err(Error::InvalidArchive(message));
+			return Err(Error::InvalidArchive { problem: message });
 		}
 		offset += count as u64;
 	}
@@ -569,5 +580,5 @@ pub(crate) const fn read_entry_to<W: Write>(
 	_entry: &Entry,
 	_output: &mut W,
 ) -> Result<u64> {
-	Err(Error::InvalidArchive("entry is not a CPIO member"))
+	Err(Error::InvalidArchive { problem: "entry is not a CPIO member" })
 }

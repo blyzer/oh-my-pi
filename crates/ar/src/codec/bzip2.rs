@@ -84,7 +84,7 @@ impl<'a> BitReader<'a> {
 	fn read_bit(&mut self) -> Result<u32> {
 		let byte_index = self.bit_position >> 3;
 		let Some(&byte) = self.bytes.get(byte_index) else {
-			return Err(Error::InvalidArchive("truncated bzip2 stream"));
+			return Err(Error::InvalidArchive { problem: "truncated bzip2 stream" });
 		};
 		let bit = u32::from((byte >> (7 - (self.bit_position & 7))) & 1);
 		self.bit_position += 1;
@@ -114,7 +114,7 @@ impl<'a> BitReader<'a> {
 	fn align_to_byte(&mut self) -> Result<()> {
 		while self.bit_position & 7 != 0 {
 			if self.read_bit()? != 0 {
-				return Err(Error::InvalidArchive("non-zero bzip2 stream padding"));
+				return Err(Error::InvalidArchive { problem: "non-zero bzip2 stream padding" });
 			}
 		}
 		Ok(())
@@ -167,7 +167,7 @@ impl HuffmanTable {
 		let mut counts = [0_u16; MAX_HUFFMAN_LENGTH + 1];
 		for &length in lengths {
 			if !(1..=MAX_HUFFMAN_LENGTH as u8).contains(&length) {
-				return Err(Error::InvalidArchive("invalid bzip2 Huffman code length"));
+				return Err(Error::InvalidArchive { problem: "invalid bzip2 Huffman code length" });
 			}
 			counts[usize::from(length)] += 1;
 		}
@@ -179,7 +179,7 @@ impl HuffmanTable {
 		for length in 1..=MAX_HUFFMAN_LENGTH {
 			code = (code + u32::from(counts[length - 1])) * 2;
 			if code + u32::from(counts[length]) > 1_u32 << length {
-				return Err(Error::InvalidArchive("oversubscribed bzip2 Huffman table"));
+				return Err(Error::InvalidArchive { problem: "oversubscribed bzip2 Huffman table" });
 			}
 			first_codes[length] = code;
 			offsets[length] = offset;
@@ -209,17 +209,17 @@ impl HuffmanTable {
 				}
 			}
 		}
-		Err(Error::InvalidArchive("invalid bzip2 Huffman code"))
+		Err(Error::InvalidArchive { problem: "invalid bzip2 Huffman code" })
 	}
 }
 
 fn read_stream_header(reader: &mut BitReader<'_>) -> Result<usize> {
 	if reader.read_bits(8)? != 0x42 || reader.read_bits(8)? != 0x5a || reader.read_bits(8)? != 0x68 {
-		return Err(Error::InvalidArchive("invalid bzip2 stream header"));
+		return Err(Error::InvalidArchive { problem: "invalid bzip2 stream header" });
 	}
 	let level = reader.read_bits(8)?;
 	if !(0x31..=0x39).contains(&level) {
-		return Err(Error::InvalidArchive("invalid bzip2 block-size level"));
+		return Err(Error::InvalidArchive { problem: "invalid bzip2 block-size level" });
 	}
 	Ok((level as usize - 0x30) * 100_000)
 }
@@ -230,11 +230,11 @@ fn read_huffman_tables(
 ) -> Result<(Vec<u8>, Vec<HuffmanTable>)> {
 	let group_count = reader.read_bits(3)? as usize;
 	if !(2..=6).contains(&group_count) {
-		return Err(Error::InvalidArchive("invalid bzip2 Huffman group count"));
+		return Err(Error::InvalidArchive { problem: "invalid bzip2 Huffman group count" });
 	}
 	let selector_count = reader.read_bits(15)? as usize;
 	if !(1..=MAX_SELECTORS).contains(&selector_count) {
-		return Err(Error::InvalidArchive("invalid bzip2 selector count"));
+		return Err(Error::InvalidArchive { problem: "invalid bzip2 selector count" });
 	}
 
 	let mut selectors = Vec::with_capacity(selector_count);
@@ -247,7 +247,7 @@ fn read_huffman_tables(
 		while reader.read_bit()? != 0 {
 			position += 1;
 			if position >= group_count {
-				return Err(Error::InvalidArchive("invalid bzip2 selector MTF value"));
+				return Err(Error::InvalidArchive { problem: "invalid bzip2 selector MTF value" });
 			}
 		}
 		let selector = selector_mtf[position];
@@ -265,11 +265,11 @@ fn read_huffman_tables(
 			while reader.read_bit()? != 0 {
 				length += if reader.read_bit()? == 0 { 1 } else { -1 };
 				if !(1..=MAX_HUFFMAN_LENGTH as i32).contains(&length) {
-					return Err(Error::InvalidArchive("invalid bzip2 Huffman code length"));
+					return Err(Error::InvalidArchive { problem: "invalid bzip2 Huffman code length" });
 				}
 			}
 			if !(1..=MAX_HUFFMAN_LENGTH as i32).contains(&length) {
-				return Err(Error::InvalidArchive("invalid bzip2 Huffman code length"));
+				return Err(Error::InvalidArchive { problem: "invalid bzip2 Huffman code length" });
 			}
 			*value = length as u8;
 		}
@@ -288,7 +288,9 @@ fn next_symbol(
 ) -> Result<usize> {
 	if *group_remaining == 0 {
 		let Some(&selector) = selectors.get(*selector_index) else {
-			return Err(Error::InvalidArchive("bzip2 block exhausted its Huffman selectors"));
+			return Err(Error::InvalidArchive {
+				problem: "bzip2 block exhausted its Huffman selectors",
+			});
 		};
 		*table_index = usize::from(selector);
 		*selector_index += 1;
@@ -332,9 +334,9 @@ fn decode_block_data(
 					} else {
 						power.saturating_mul(2)
 					})
-					.ok_or(Error::InvalidArchive("invalid bzip2 RLE run length"))?;
+					.ok_or(Error::InvalidArchive { problem: "invalid bzip2 RLE run length" })?;
 				if run_length > block_size_limit || power > block_size_limit {
-					return Err(Error::InvalidArchive("invalid bzip2 RLE run length"));
+					return Err(Error::InvalidArchive { problem: "invalid bzip2 RLE run length" });
 				}
 				power = power.saturating_mul(2);
 				symbol = next_symbol(
@@ -352,9 +354,11 @@ fn decode_block_data(
 			let needed = block
 				.len()
 				.checked_add(run_length)
-				.ok_or(Error::InvalidArchive("bzip2 block exceeds its block-size level"))?;
+				.ok_or(Error::InvalidArchive { problem: "bzip2 block exceeds its block-size level" })?;
 			if needed > block_size_limit {
-				return Err(Error::InvalidArchive("bzip2 block exceeds its block-size level"));
+				return Err(Error::InvalidArchive {
+					problem: "bzip2 block exceeds its block-size level",
+				});
 			}
 			block.resize(needed, mtf[0]);
 			if symbol == end_symbol {
@@ -363,16 +367,16 @@ fn decode_block_data(
 		}
 
 		let Some(position) = symbol.checked_sub(1) else {
-			return Err(Error::InvalidArchive("invalid bzip2 MTF symbol"));
+			return Err(Error::InvalidArchive { problem: "invalid bzip2 MTF symbol" });
 		};
 		if position >= used_bytes.len() {
-			return Err(Error::InvalidArchive("invalid bzip2 MTF symbol"));
+			return Err(Error::InvalidArchive { problem: "invalid bzip2 MTF symbol" });
 		}
 		let byte = mtf[position];
 		mtf.copy_within(..position, 1);
 		mtf[0] = byte;
 		if block.len() == block_size_limit {
-			return Err(Error::InvalidArchive("bzip2 block exceeds its block-size level"));
+			return Err(Error::InvalidArchive { problem: "bzip2 block exceeds its block-size level" });
 		}
 		block.push(byte);
 		symbol = next_symbol(
@@ -389,7 +393,7 @@ fn decode_block_data(
 
 fn inverse_bwt(block: &[u8], original_pointer: usize) -> Result<Vec<u8>> {
 	if block.is_empty() || original_pointer >= block.len() {
-		return Err(Error::InvalidArchive("invalid bzip2 BWT origin pointer"));
+		return Err(Error::InvalidArchive { problem: "invalid bzip2 BWT origin pointer" });
 	}
 	let mut counts = [0_usize; 257];
 	for &byte in block {
@@ -455,7 +459,7 @@ fn append_rle1(decoded: &[u8], randomized: bool, output: &mut BoundedOutput) -> 
 		}
 	}
 	if repetitions == 4 {
-		return Err(Error::InvalidArchive("truncated bzip2 RLE run"));
+		return Err(Error::InvalidArchive { problem: "truncated bzip2 RLE run" });
 	}
 	Ok(crc ^ u32::MAX)
 }
@@ -473,13 +477,13 @@ pub fn bzip2_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 			if marker == STREAM_END_MAGIC {
 				let expected = reader.read_u32()?;
 				if combined_crc != expected {
-					return Err(Error::InvalidArchive("bzip2 stream CRC mismatch"));
+					return Err(Error::InvalidArchive { problem: "bzip2 stream CRC mismatch" });
 				}
 				reader.align_to_byte()?;
 				break;
 			}
 			if marker != BLOCK_MAGIC {
-				return Err(Error::InvalidArchive("invalid bzip2 block marker"));
+				return Err(Error::InvalidArchive { problem: "invalid bzip2 block marker" });
 			}
 
 			let expected_block_crc = reader.read_u32()?;
@@ -500,7 +504,7 @@ pub fn bzip2_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 				}
 			}
 			if used_count == 0 {
-				return Err(Error::InvalidArchive("bzip2 block has an empty symbol map"));
+				return Err(Error::InvalidArchive { problem: "bzip2 block has an empty symbol map" });
 			}
 			let used_bytes = &used[..used_count];
 			let (selectors, tables) = read_huffman_tables(&mut reader, used_bytes)?;
@@ -509,7 +513,7 @@ pub fn bzip2_decompress(bytes: &[u8], limits: Limits) -> Result<Vec<u8>> {
 			let decoded = inverse_bwt(&block, original_pointer)?;
 			let actual_block_crc = append_rle1(&decoded, randomized, &mut output)?;
 			if actual_block_crc != expected_block_crc {
-				return Err(Error::InvalidArchive("bzip2 block CRC mismatch"));
+				return Err(Error::InvalidArchive { problem: "bzip2 block CRC mismatch" });
 			}
 			combined_crc = combined_crc.rotate_left(1) ^ actual_block_crc;
 		}

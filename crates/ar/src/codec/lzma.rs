@@ -11,7 +11,7 @@ const NUM_POS_STATES_MAX: usize = 16;
 const MATCH_MIN_LEN: usize = 2;
 
 const fn invalid(message: &'static str) -> Error {
-	Error::InvalidArchive(message)
+	Error::InvalidArchive { problem: message }
 }
 
 struct RangeDecoder<'a> {

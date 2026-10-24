@@ -17,11 +17,17 @@ pub enum Error {
 	#[error("unsupported or unrecognized archive format")]
 	UnknownFormat,
 	/// A recognized container relies on a capability this build cannot decode.
-	#[error("{0} is not supported")]
-	UnsupportedFeature(&'static str),
+	#[error("{feature} is not supported")]
+	UnsupportedFeature {
+		/// The capability the archive requires.
+		feature: &'static str,
+	},
 	/// Container metadata is malformed, inconsistent, or truncated.
-	#[error("invalid archive: {0}")]
-	InvalidArchive(&'static str),
+	#[error("invalid archive: {problem}")]
+	InvalidArchive {
+		/// What is malformed or inconsistent.
+		problem: &'static str,
+	},
 	/// Indexed records plus synthesized directories exceed the configured limit.
 	#[error("archive has too many entries ({actual} > {limit})")]
 	TooManyEntries {
@@ -84,20 +90,35 @@ pub enum Error {
 		limit:  u64,
 	},
 	/// A caller-supplied member path is absolute, empty, or contains `..`.
-	#[error("unsafe archive member path: '{0}'")]
-	UnsafePath(Str),
+	#[error("unsafe archive member path: '{path}'")]
+	UnsafePath {
+		/// The rejected member path.
+		path: Str,
+	},
 	/// No indexed member has the requested path.
-	#[error("archive member '{0}' was not found")]
-	NotFound(Str),
+	#[error("archive member '{path}' was not found")]
+	NotFound {
+		/// The requested member path.
+		path: Str,
+	},
 	/// A file operation targeted a directory.
-	#[error("archive member '{0}' is a directory")]
-	IsDirectory(Str),
+	#[error("archive member '{path}' is a directory")]
+	IsDirectory {
+		/// The targeted member path.
+		path: Str,
+	},
 	/// A directory operation targeted a file.
-	#[error("archive member '{0}' is not a directory")]
-	NotDirectory(Str),
+	#[error("archive member '{path}' is not a directory")]
+	NotDirectory {
+		/// The targeted member path.
+		path: Str,
+	},
 	/// The requested archive member or protected header stream is encrypted.
-	#[error("encrypted archive data '{0}' is not supported")]
-	Encrypted(Str),
+	#[error("encrypted archive data '{data}' is not supported")]
+	Encrypted {
+		/// The encrypted member path or stream label.
+		data: Str,
+	},
 	/// The requested ZIP member uses an unsupported compression method.
 	#[error("unsupported ZIP compression method {method} for member '{path}'")]
 	UnsupportedCompression {
@@ -147,8 +168,11 @@ pub enum Error {
 		actual:   u32,
 	},
 	/// A sparse TAR member cannot be reconstructed by this reader.
-	#[error("archive member '{0}' is a sparse file and cannot be read")]
-	SparseMember(Str),
+	#[error("archive member '{path}' is a sparse file and cannot be read")]
+	SparseMember {
+		/// The sparse member path.
+		path: Str,
+	},
 	/// A TAR symbolic link has no readable in-archive target.
 	#[error("archive symlink '{path}' cannot be materialized from target '{target}'")]
 	UnreadableLink {
@@ -179,14 +203,20 @@ pub enum Error {
 		limit: u64,
 	},
 	/// A writer already contains the normalized member path.
-	#[error("duplicate archive member path: '{0}'")]
-	DuplicatePath(Str),
+	#[error("duplicate archive member path: '{path}'")]
+	DuplicatePath {
+		/// The duplicated member path.
+		path: Str,
+	},
 	/// A writer input exceeds an ordinary ZIP field and would require ZIP64.
 	#[error("ZIP64 output is required but is not supported")]
 	Zip64Required,
 	/// A TAR value cannot fit its on-wire numeric field.
-	#[error("TAR {0} value does not fit its header field")]
-	TarFieldOverflow(&'static str),
+	#[error("TAR {field} value does not fit its header field")]
+	TarFieldOverflow {
+		/// The overflowing TAR header field name.
+		field: &'static str,
+	},
 	/// Raw DEFLATE compression failed while preparing a ZIP member.
 	#[error("failed to compress ZIP member")]
 	Compression(#[source] flate2::CompressError),

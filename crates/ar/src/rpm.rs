@@ -51,7 +51,7 @@ pub(crate) fn read_entries(
 	decoded: &mut Vec<Vec<u8>>,
 ) -> Result<Vec<Entry>> {
 	if file_size < LEAD_SIZE + HEADER_INTRO_SIZE {
-		return Err(Error::InvalidArchive("truncated RPM lead and signature header"));
+		return Err(Error::InvalidArchive { problem: "truncated RPM lead and signature header" });
 	}
 	let initial = read_vec_at(
 		source,
@@ -61,41 +61,43 @@ pub(crate) fn read_entries(
 		"truncated RPM lead and signature header",
 	)?;
 	if !is_header(&initial) {
-		return Err(Error::InvalidArchive("bad RPM lead magic"));
+		return Err(Error::InvalidArchive { problem: "bad RPM lead magic" });
 	}
 	let major = initial[4];
 	let package_type = u16::from_be_bytes([initial[6], initial[7]]);
 	if major < 3 || package_type > 1 {
-		return Err(Error::UnsupportedFeature("RPM lead version or package type"));
+		return Err(Error::UnsupportedFeature { feature: "RPM lead version or package type" });
 	}
 	let signature_type = u16::from_be_bytes([initial[78], initial[79]]);
 	if signature_type != SIGNATURE_TYPE_HEADER {
-		return Err(Error::UnsupportedFeature("RPM non-header signature type"));
+		return Err(Error::UnsupportedFeature { feature: "RPM non-header signature type" });
 	}
 	let signature_intro = parse_intro(&initial[LEAD_SIZE as usize..], limits)?;
 	let signature_end = LEAD_SIZE
 		.checked_add(signature_intro.total_size)
-		.ok_or(Error::InvalidArchive("RPM signature header range overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RPM signature header range overflows" })?;
 	let main_offset = align(signature_end, 8)?;
 	let signature_tail_size = main_offset
 		.checked_sub(LEAD_SIZE + HEADER_INTRO_SIZE)
-		.ok_or(Error::InvalidArchive("invalid RPM signature header size"))?;
+		.ok_or(Error::InvalidArchive { problem: "invalid RPM signature header size" })?;
 	let signature_tail = read_vec_at(
 		source,
 		LEAD_SIZE + HEADER_INTRO_SIZE,
-		usize::try_from(signature_tail_size)
-			.map_err(|_| Error::InvalidArchive("RPM signature header does not fit this platform"))?,
+		usize::try_from(signature_tail_size).map_err(|_| Error::InvalidArchive {
+			problem: "RPM signature header does not fit this platform",
+		})?,
 		file_size,
 		"truncated RPM signature header",
 	)?;
-	let body_size = usize::try_from(signature_intro.body_size)
-		.map_err(|_| Error::InvalidArchive("RPM signature header does not fit this platform"))?;
+	let body_size = usize::try_from(signature_intro.body_size).map_err(|_| {
+		Error::InvalidArchive { problem: "RPM signature header does not fit this platform" }
+	})?;
 	if signature_tail.len() < body_size {
-		return Err(Error::InvalidArchive("truncated RPM signature header"));
+		return Err(Error::InvalidArchive { problem: "truncated RPM signature header" });
 	}
 	validate_header_body(&signature_tail[..body_size], signature_intro)?;
 	if signature_tail[body_size..].iter().any(|&byte| byte != 0) {
-		return Err(Error::InvalidArchive("non-zero RPM signature alignment padding"));
+		return Err(Error::InvalidArchive { problem: "non-zero RPM signature alignment padding" });
 	}
 
 	let main_intro_bytes = read_vec_at(
@@ -109,7 +111,7 @@ pub(crate) fn read_entries(
 	let combined_index = signature_intro
 		.total_size
 		.checked_add(main_intro.total_size)
-		.ok_or(Error::InvalidArchive("RPM header size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RPM header size overflows" })?;
 	if combined_index > limits.index_size {
 		return Err(Error::IndexTooLarge { actual: combined_index, limit: limits.index_size });
 	}
@@ -117,8 +119,9 @@ pub(crate) fn read_entries(
 	let main_body = read_vec_at(
 		source,
 		main_body_offset,
-		usize::try_from(main_intro.body_size)
-			.map_err(|_| Error::InvalidArchive("RPM main header does not fit this platform"))?,
+		usize::try_from(main_intro.body_size).map_err(|_| Error::InvalidArchive {
+			problem: "RPM main header does not fit this platform",
+		})?,
 		file_size,
 		"truncated RPM main header",
 	)?;
@@ -128,14 +131,14 @@ pub(crate) fn read_entries(
 		.as_deref()
 		.is_some_and(|format| !format.eq_ignore_ascii_case("cpio"))
 	{
-		return Err(Error::UnsupportedFeature("RPM non-cpio payload format"));
+		return Err(Error::UnsupportedFeature { feature: "RPM non-cpio payload format" });
 	}
 
 	let payload_offset = main_offset
 		.checked_add(main_intro.total_size)
-		.ok_or(Error::InvalidArchive("RPM payload offset overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RPM payload offset overflows" })?;
 	if payload_offset > file_size {
-		return Err(Error::InvalidArchive("truncated RPM payload"));
+		return Err(Error::InvalidArchive { problem: "truncated RPM payload" });
 	}
 	let payload_size = file_size - payload_offset;
 	if payload_size > limits.in_memory_size {
@@ -147,8 +150,9 @@ pub(crate) fn read_entries(
 	let payload = read_vec_at(
 		source,
 		payload_offset,
-		usize::try_from(payload_size)
-			.map_err(|_| Error::InvalidArchive("RPM payload does not fit this platform"))?,
+		usize::try_from(payload_size).map_err(|_| Error::InvalidArchive {
+			problem: "RPM payload does not fit this platform",
+		})?,
 		file_size,
 		"truncated RPM payload",
 	)?;
@@ -160,7 +164,7 @@ pub(crate) fn read_entries(
 		});
 	}
 	let buffer = u32::try_from(decoded.len())
-		.map_err(|_| Error::InvalidArchive("too many retained archive buffers"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "too many retained archive buffers" })?;
 	let entries = cpio::read_entries_from_buffer(&cpio_bytes, limits, buffer)?;
 	decoded.push(cpio_bytes);
 	Ok(entries)
@@ -168,10 +172,10 @@ pub(crate) fn read_entries(
 
 fn parse_intro(bytes: &[u8], limits: Limits) -> Result<HeaderIntro> {
 	if bytes.len() != HEADER_INTRO_SIZE as usize || read_u32(bytes, 0)? != HEADER_MAGIC {
-		return Err(Error::InvalidArchive("corrupt RPM header magic"));
+		return Err(Error::InvalidArchive { problem: "corrupt RPM header magic" });
 	}
 	if bytes[4..8].iter().any(|&byte| byte != 0) {
-		return Err(Error::InvalidArchive("corrupt RPM header reserved bytes"));
+		return Err(Error::InvalidArchive { problem: "corrupt RPM header reserved bytes" });
 	}
 	let index_count = read_u32(bytes, 8)?;
 	let data_size = read_u32(bytes, 12)?;
@@ -180,10 +184,10 @@ fn parse_intro(bytes: &[u8], limits: Limits) -> Result<HeaderIntro> {
 	}
 	let index_size = u64::from(index_count)
 		.checked_mul(INDEX_ENTRY_SIZE)
-		.ok_or(Error::InvalidArchive("RPM header index size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RPM header index size overflows" })?;
 	let body_size = index_size
 		.checked_add(u64::from(data_size))
-		.ok_or(Error::InvalidArchive("RPM header size overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "RPM header size overflows" })?;
 	let total_size = HEADER_INTRO_SIZE + body_size;
 	if total_size > limits.index_size {
 		return Err(Error::IndexTooLarge { actual: total_size, limit: limits.index_size });
@@ -193,7 +197,7 @@ fn parse_intro(bytes: &[u8], limits: Limits) -> Result<HeaderIntro> {
 
 fn validate_header_body(body: &[u8], intro: HeaderIntro) -> Result<()> {
 	if body.len() as u64 != intro.body_size {
-		return Err(Error::InvalidArchive("truncated RPM header"));
+		return Err(Error::InvalidArchive { problem: "truncated RPM header" });
 	}
 	let index_size = u64::from(intro.index_count) * INDEX_ENTRY_SIZE;
 	for index in 0..intro.index_count {
@@ -204,13 +208,13 @@ fn validate_header_body(body: &[u8], intro: HeaderIntro) -> Result<()> {
 		let offset = read_u32(body, record + 8)?;
 		let count = read_u32(body, record + 12)?;
 		if offset > intro.data_size {
-			return Err(Error::InvalidArchive("RPM tag points outside header data"));
+			return Err(Error::InvalidArchive { problem: "RPM tag points outside header data" });
 		}
 		let remaining = u64::from(intro.data_size - offset);
 		let element_size = match data_type {
 			0 => {
 				if count != 0 {
-					return Err(Error::InvalidArchive("RPM null tag contains values"));
+					return Err(Error::InvalidArchive { problem: "RPM null tag contains values" });
 				}
 				continue;
 			},
@@ -221,41 +225,46 @@ fn validate_header_body(body: &[u8], intro: HeaderIntro) -> Result<()> {
 			TYPE_STRING | 8 | 9 => {
 				let string_count = if data_type == TYPE_STRING {
 					if count != 1 {
-						return Err(Error::InvalidArchive("RPM string tag has an invalid count"));
+						return Err(Error::InvalidArchive {
+							problem: "RPM string tag has an invalid count",
+						});
 					}
 					1
 				} else {
 					count
 				};
 				if u64::from(string_count) > remaining {
-					return Err(Error::InvalidArchive("RPM string tag exceeds header data"));
+					return Err(Error::InvalidArchive { problem: "RPM string tag exceeds header data" });
 				}
 				let mut cursor = usize::try_from(index_size + u64::from(offset)).map_err(|_| {
-					Error::InvalidArchive("RPM string offset does not fit this platform")
+					Error::InvalidArchive { problem: "RPM string offset does not fit this platform" }
 				})?;
-				let limit = usize::try_from(index_size + u64::from(intro.data_size))
-					.map_err(|_| Error::InvalidArchive("RPM header data does not fit this platform"))?;
+				let limit = usize::try_from(index_size + u64::from(intro.data_size)).map_err(|_| {
+					Error::InvalidArchive { problem: "RPM header data does not fit this platform" }
+				})?;
 				for _ in 0..string_count {
 					while cursor < limit && body[cursor] != 0 {
 						cursor += 1;
 					}
 					if cursor == limit {
-						return Err(Error::InvalidArchive("RPM string tag is not NUL-terminated"));
+						return Err(Error::InvalidArchive {
+							problem: "RPM string tag is not NUL-terminated",
+						});
 					}
 					cursor += 1;
 				}
 				continue;
 			},
-			_ => return Err(Error::InvalidArchive("RPM tag uses an unknown data type")),
+			_ => return Err(Error::InvalidArchive { problem: "RPM tag uses an unknown data type" }),
 		};
 		if u64::from(offset) % element_size != 0 {
-			return Err(Error::InvalidArchive("RPM tag data is misaligned"));
+			return Err(Error::InvalidArchive { problem: "RPM tag data is misaligned" });
 		}
 		if u64::from(count)
 			.checked_mul(element_size)
 			.is_none_or(|size| size > remaining)
 		{
-			return Err(Error::InvalidArchive("RPM tag exceeds header data"));
+			return Err(Error::InvalidArchive { problem: "RPM tag exceeds header data" });
 		}
 		let _ = tag;
 	}
@@ -280,21 +289,23 @@ fn parse_main_header(body: &[u8], intro: HeaderIntro) -> Result<Metadata> {
 		let offset = read_u32(body, record + 8)?;
 		let count = read_u32(body, record + 12)?;
 		if data_type != TYPE_STRING || count != 1 {
-			return Err(Error::InvalidArchive("RPM metadata tag must contain one string"));
+			return Err(Error::InvalidArchive { problem: "RPM metadata tag must contain one string" });
 		}
-		let start = usize::try_from(index_size + u64::from(offset))
-			.map_err(|_| Error::InvalidArchive("RPM metadata offset does not fit this platform"))?;
-		let limit = usize::try_from(index_size + u64::from(intro.data_size))
-			.map_err(|_| Error::InvalidArchive("RPM metadata does not fit this platform"))?;
+		let start = usize::try_from(index_size + u64::from(offset)).map_err(|_| {
+			Error::InvalidArchive { problem: "RPM metadata offset does not fit this platform" }
+		})?;
+		let limit = usize::try_from(index_size + u64::from(intro.data_size)).map_err(|_| {
+			Error::InvalidArchive { problem: "RPM metadata does not fit this platform" }
+		})?;
 		let relative_end = body[start..limit]
 			.iter()
 			.position(|&byte| byte == 0)
-			.ok_or(Error::InvalidArchive("RPM metadata string is not NUL-terminated"))?;
+			.ok_or(Error::InvalidArchive { problem: "RPM metadata string is not NUL-terminated" })?;
 		if relative_end > 4096 {
-			return Err(Error::InvalidArchive("RPM metadata string is too large"));
+			return Err(Error::InvalidArchive { problem: "RPM metadata string is too large" });
 		}
 		let value = str::from_utf8(&body[start..start + relative_end])
-			.map_err(|_| Error::InvalidArchive("RPM metadata string is not valid UTF-8"))?
+			.map_err(|_| Error::InvalidArchive { problem: "RPM metadata string is not valid UTF-8" })?
 			.to_owned();
 		match tag {
 			TAG_NAME => metadata.name = Some(value),
@@ -343,17 +354,17 @@ fn decompress_payload(payload: &[u8], metadata: &Metadata, limits: Limits) -> Re
 		"zstd" | "zstdio" => codec::zstd_decompress(payload, codec_limits),
 		"lzma" => {
 			if !sniff_lzma_alone(payload) {
-				return Err(Error::InvalidArchive("malformed RPM LZMA payload"));
+				return Err(Error::InvalidArchive { problem: "malformed RPM LZMA payload" });
 			}
 			codec::lzma_alone_decompress(payload, codec_limits)
 		},
 		"none" => {
 			if !cpio::is_header(payload) {
-				return Err(Error::InvalidArchive("invalid uncompressed RPM CPIO payload"));
+				return Err(Error::InvalidArchive { problem: "invalid uncompressed RPM CPIO payload" });
 			}
 			Ok(payload.to_vec())
 		},
-		_ => Err(Error::UnsupportedFeature("RPM payload compressor")),
+		_ => Err(Error::UnsupportedFeature { feature: "RPM payload compressor" }),
 	}
 }
 
@@ -386,7 +397,7 @@ fn sniff_lzma_alone(bytes: &[u8]) -> bool {
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
 	let slice = bytes
 		.get(offset..offset + 4)
-		.ok_or(Error::InvalidArchive("truncated RPM header field"))?;
+		.ok_or(Error::InvalidArchive { problem: "truncated RPM header field" })?;
 	Ok(u32::from_be_bytes(slice.try_into().expect("four-byte RPM field")))
 }
 
@@ -397,7 +408,7 @@ fn align(value: u64, alignment: u64) -> Result<u64> {
 	} else {
 		value
 			.checked_add(alignment - remainder)
-			.ok_or(Error::InvalidArchive("RPM alignment offset overflows"))
+			.ok_or(Error::InvalidArchive { problem: "RPM alignment offset overflows" })
 	}
 }
 
@@ -410,15 +421,15 @@ fn read_vec_at(
 ) -> Result<Vec<u8>> {
 	let end = offset
 		.checked_add(length as u64)
-		.ok_or(Error::InvalidArchive(message))?;
+		.ok_or(Error::InvalidArchive { problem: message })?;
 	if end > file_size {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	let mut bytes = vec![0_u8; length];
 	source.seek(SeekFrom::Start(offset))?;
 	source.read_exact(&mut bytes).map_err(|error| {
 		if error.kind() == io::ErrorKind::UnexpectedEof {
-			Error::InvalidArchive(message)
+			Error::InvalidArchive { problem: message }
 		} else {
 			error.into()
 		}
@@ -432,5 +443,5 @@ pub(crate) const fn read_entry_to<W: Write>(
 	_entry: &Entry,
 	_output: &mut W,
 ) -> Result<u64> {
-	Err(Error::InvalidArchive("entry is not an RPM member"))
+	Err(Error::InvalidArchive { problem: "entry is not an RPM member" })
 }

@@ -59,7 +59,7 @@ pub fn read_entries<R: Read + Seek>(
 	limits: Limits,
 ) -> Result<Vec<Entry>> {
 	if file_size < EOCD_LEN as u64 {
-		return Err(Error::InvalidArchive("missing end of central directory"));
+		return Err(Error::InvalidArchive { problem: "missing end of central directory" });
 	}
 	let tail_len = cmp::min(file_size, (EOCD_LEN + MAX_COMMENT_LEN) as u64);
 	let tail_start = file_size - tail_len;
@@ -67,7 +67,7 @@ pub fn read_entries<R: Read + Seek>(
 	let last_offset = tail
 		.len()
 		.checked_sub(EOCD_LEN)
-		.ok_or(Error::InvalidArchive("missing end of central directory"))?;
+		.ok_or(Error::InvalidArchive { problem: "missing end of central directory" })?;
 	let mut best_error = None;
 
 	for eocd_index in (0..=last_offset).rev() {
@@ -88,9 +88,11 @@ pub fn read_entries<R: Read + Seek>(
 			let end = info
 				.offset
 				.checked_add(info.size)
-				.ok_or(Error::InvalidArchive("central-directory range overflows"))?;
+				.ok_or(Error::InvalidArchive { problem: "central-directory range overflows" })?;
 			if end > file_size {
-				return Err(Error::InvalidArchive("central directory exceeds archive size"));
+				return Err(Error::InvalidArchive {
+					problem: "central directory exceeds archive size",
+				});
 			}
 			let directory = read_vec_at(source, info.offset, info.size)?;
 			parse_directory(&directory, info.entries, info.archive_offset, limits)
@@ -101,7 +103,7 @@ pub fn read_entries<R: Read + Seek>(
 			Err(_) => {},
 		}
 	}
-	Err(best_error.unwrap_or(Error::InvalidArchive("missing end of central directory")))
+	Err(best_error.unwrap_or(Error::InvalidArchive { problem: "missing end of central directory" }))
 }
 
 pub fn read_entry_to<R: Read + Seek, W: Write>(
@@ -114,7 +116,7 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 		Storage::Zip { compressed_size, crc32, method, flags, local_header_offset } => {
 			(*compressed_size, *crc32, *method, *flags, *local_header_offset)
 		},
-		_ => return Err(Error::InvalidArchive("ZIP reader received a non-ZIP entry")),
+		_ => return Err(Error::InvalidArchive { problem: "ZIP reader received a non-ZIP entry" }),
 	};
 
 	let actual_size = cmp::max(entry.size, compressed_size);
@@ -126,7 +128,7 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 		});
 	}
 	if flags & ENCRYPTED_FLAG != 0 {
-		return Err(Error::Encrypted(entry.path.clone()));
+		return Err(Error::Encrypted { data: entry.path.clone() });
 	}
 	if let CompressionMethod::Unsupported(method) = method {
 		return Err(Error::UnsupportedCompression { path: entry.path.clone(), method });
@@ -136,20 +138,22 @@ pub fn read_entry_to<R: Read + Seek, W: Write>(
 	let header = LocalFileHeader::ref_from_bytes(&header_bytes)
 		.expect("fixed-size buffer matches local-file header");
 	if header.signature.get() != LOCAL_HEADER_SIGNATURE {
-		return Err(Error::InvalidArchive("malformed local file header"));
+		return Err(Error::InvalidArchive { problem: "malformed local file header" });
 	}
 	if header.flags.get() & ENCRYPTED_FLAG != 0 {
-		return Err(Error::Encrypted(entry.path.clone()));
+		return Err(Error::Encrypted { data: entry.path.clone() });
 	}
 	if header.method.get() != method.code() {
-		return Err(Error::InvalidArchive("local and central compression methods disagree"));
+		return Err(Error::InvalidArchive {
+			problem: "local and central compression methods disagree",
+		});
 	}
 
 	let data_offset = local_header_offset
 		.checked_add(LOCAL_HEADER_LEN as u64)
 		.and_then(|offset| offset.checked_add(u64::from(header.name_len.get())))
 		.and_then(|offset| offset.checked_add(u64::from(header.extra_len.get())))
-		.ok_or(Error::InvalidArchive("member data offset overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "member data offset overflows" })?;
 	source.seek(SeekFrom::Start(data_offset))?;
 
 	let mut crc = Hasher::new();
@@ -191,7 +195,7 @@ fn directory_info_for_eocd<R: Read + Seek>(
 	limits: Limits,
 ) -> Result<DirectoryInfo> {
 	if eocd.disk.get() != 0 || eocd.directory_disk.get() != 0 {
-		return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+		return Err(Error::InvalidArchive { problem: "multi-disk ZIP archives are not supported" });
 	}
 	let entries_on_disk = eocd.entries_on_disk.get();
 	let total_entries = eocd.entries.get();
@@ -199,7 +203,7 @@ fn directory_info_for_eocd<R: Read + Seek>(
 		&& total_entries != U16_SENTINEL
 		&& entries_on_disk != total_entries
 	{
-		return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+		return Err(Error::InvalidArchive { problem: "multi-disk ZIP archives are not supported" });
 	}
 
 	let legacy = DirectoryInfo {
@@ -222,7 +226,7 @@ fn directory_info_for_eocd<R: Read + Seek>(
 		return Ok(zip64);
 	}
 	if needs_zip64 {
-		return Err(Error::InvalidArchive("missing ZIP64 central-directory metadata"));
+		return Err(Error::InvalidArchive { problem: "missing ZIP64 central-directory metadata" });
 	}
 	if !needs_zip64 {
 		if legacy.entries > limits.entries {
@@ -246,13 +250,15 @@ fn directory_info_for_eocd<R: Read + Seek>(
 	};
 	let archive_offset = actual_offset
 		.checked_sub(legacy.offset)
-		.ok_or(Error::InvalidArchive("central-directory offset exceeds its actual position"))?;
+		.ok_or(Error::InvalidArchive {
+			problem: "central-directory offset exceeds its actual position",
+		})?;
 	Ok(DirectoryInfo { offset: actual_offset, archive_offset, ..legacy })
 }
 
 fn find_eocd(tail: &[u8]) -> Result<(usize, &EndOfCentralDirectory)> {
 	let Some(last_offset) = tail.len().checked_sub(EOCD_LEN) else {
-		return Err(Error::InvalidArchive("missing end of central directory"));
+		return Err(Error::InvalidArchive { problem: "missing end of central directory" });
 	};
 	for offset in (0..=last_offset).rev() {
 		let Ok((eocd, comment)) = EndOfCentralDirectory::ref_from_prefix(&tail[offset..]) else {
@@ -262,7 +268,7 @@ fn find_eocd(tail: &[u8]) -> Result<(usize, &EndOfCentralDirectory)> {
 			return Ok((offset, eocd));
 		}
 	}
-	Err(Error::InvalidArchive("missing end of central directory"))
+	Err(Error::InvalidArchive { problem: "missing end of central directory" })
 }
 
 fn valid_eocd(eocd: &EndOfCentralDirectory, comment: &[u8]) -> bool {
@@ -287,7 +293,7 @@ fn find_central_header<R: Read + Seek>(
 	search_limit: u64,
 ) -> Result<u64> {
 	if declared_offset >= eocd_offset {
-		return Err(Error::InvalidArchive("central-directory offset exceeds end record"));
+		return Err(Error::InvalidArchive { problem: "central-directory offset exceeds end record" });
 	}
 	if let Some(inferred_offset) = eocd_offset.checked_sub(directory_size)
 		&& inferred_offset >= declared_offset
@@ -332,7 +338,7 @@ fn find_central_header<R: Read + Seek>(
 			limit:  search_limit,
 		});
 	}
-	Err(Error::InvalidArchive("missing central-directory header"))
+	Err(Error::InvalidArchive { problem: "missing central-directory header" })
 }
 
 fn central_layout_at<R: Read + Seek>(
@@ -404,22 +410,22 @@ fn read_zip64_info<R: Read + Seek>(
 		return Ok(None);
 	}
 	if locator.record_disk.get() != 0 || locator.disks.get() != 1 {
-		return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+		return Err(Error::InvalidArchive { problem: "multi-disk ZIP archives are not supported" });
 	}
 
 	let declared_offset = locator.record_offset.get();
 	let Some((mut info, actual_record_offset)) =
 		find_zip64_record(source, locator_offset, declared_offset, search_limit)?
 	else {
-		return Err(Error::InvalidArchive("missing ZIP64 end of central directory"));
+		return Err(Error::InvalidArchive { problem: "missing ZIP64 end of central directory" });
 	};
 	let archive_offset = actual_record_offset
 		.checked_sub(declared_offset)
-		.ok_or(Error::InvalidArchive("ZIP64 record precedes its declared offset"))?;
+		.ok_or(Error::InvalidArchive { problem: "ZIP64 record precedes its declared offset" })?;
 	info.offset = info
 		.offset
 		.checked_add(archive_offset)
-		.ok_or(Error::InvalidArchive("ZIP64 central-directory offset overflows"))?;
+		.ok_or(Error::InvalidArchive { problem: "ZIP64 central-directory offset overflows" })?;
 	info.archive_offset = archive_offset;
 	Ok(Some(info))
 }
@@ -490,11 +496,11 @@ fn zip64_record_at<R: Read + Seek>(
 		return Ok(None);
 	}
 	if record.disk.get() != 0 || record.directory_disk.get() != 0 {
-		return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+		return Err(Error::InvalidArchive { problem: "multi-disk ZIP archives are not supported" });
 	}
 	let entries = record.entries.get();
 	if record.entries_on_disk.get() != entries {
-		return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+		return Err(Error::InvalidArchive { problem: "multi-disk ZIP archives are not supported" });
 	}
 	Ok(Some(DirectoryInfo {
 		entries,
@@ -511,18 +517,18 @@ fn parse_directory(
 	limits: Limits,
 ) -> Result<Vec<Entry>> {
 	if expected_entries > (directory.len() / CENTRAL_HEADER_LEN) as u64 {
-		return Err(Error::InvalidArchive("truncated central directory"));
+		return Err(Error::InvalidArchive { problem: "truncated central directory" });
 	}
 	let capacity = usize::try_from(expected_entries)
-		.map_err(|_| Error::InvalidArchive("entry count does not fit this platform"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "entry count does not fit this platform" })?;
 	let mut indexed = Vec::with_capacity(capacity);
 	let mut remaining = directory;
 
 	for _ in 0..expected_entries {
 		let (header, entry_data) = CentralDirectoryHeader::ref_from_prefix(remaining)
-			.map_err(|_| Error::InvalidArchive("truncated central directory"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "truncated central directory" })?;
 		if header.signature.get() != CENTRAL_HEADER_SIGNATURE {
-			return Err(Error::InvalidArchive("malformed central directory"));
+			return Err(Error::InvalidArchive { problem: "malformed central directory" });
 		}
 
 		let flags = header.flags.get();
@@ -532,13 +538,13 @@ fn parse_directory(
 		let local_offset_raw = header.local_header_offset.get();
 		let (raw_name, entry_data) = entry_data
 			.split_at_checked(usize::from(header.name_len.get()))
-			.ok_or(Error::InvalidArchive("truncated central-directory entry"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated central-directory entry" })?;
 		let (extra, entry_data) = entry_data
 			.split_at_checked(usize::from(header.extra_len.get()))
-			.ok_or(Error::InvalidArchive("truncated central-directory entry"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated central-directory entry" })?;
 		let (_, next) = entry_data
 			.split_at_checked(usize::from(header.comment_len.get()))
-			.ok_or(Error::InvalidArchive("truncated central-directory entry"))?;
+			.ok_or(Error::InvalidArchive { problem: "truncated central-directory entry" })?;
 
 		if raw_name.len() as u64 > limits.path_size {
 			return Err(Error::PathTooLong {
@@ -572,7 +578,9 @@ fn parse_directory(
 				},
 			)?;
 			if values.disk_start != 0 {
-				return Err(Error::InvalidArchive("multi-disk ZIP archives are not supported"));
+				return Err(Error::InvalidArchive {
+					problem: "multi-disk ZIP archives are not supported",
+				});
 			}
 			let directory_entry = raw_name
 				.last()
@@ -609,7 +617,7 @@ fn parse_directory(
 					local_header_offset: values
 						.local_header_offset
 						.checked_add(archive_offset)
-						.ok_or(Error::InvalidArchive("local-file header offset overflows"))?,
+						.ok_or(Error::InvalidArchive { problem: "local-file header offset overflows" })?,
 				},
 			});
 		}
@@ -629,17 +637,17 @@ fn decode_entry_metadata(raw_name: &[u8], extra: &[u8], utf8: bool) -> Result<(S
 		let id = u16::from_le_bytes([fields[0], fields[1]]);
 		if fields.len() < 4 {
 			if matches!(id, 0x0001 | 0x5455 | 0x7075) {
-				return Err(Error::InvalidArchive("truncated ZIP extra-field header"));
+				return Err(Error::InvalidArchive { problem: "truncated ZIP extra-field header" });
 			}
 			break;
 		}
 		let data_len = usize::from(u16::from_le_bytes([fields[2], fields[3]]));
 		let (data, next) = fields[4..]
 			.split_at_checked(data_len)
-			.ok_or(Error::InvalidArchive("malformed ZIP extra field"))?;
+			.ok_or(Error::InvalidArchive { problem: "malformed ZIP extra field" })?;
 		if id == 0x7075 {
 			if data.len() < 5 {
-				return Err(Error::InvalidArchive("Unicode path extra field is too small"));
+				return Err(Error::InvalidArchive { problem: "Unicode path extra field is too small" });
 			}
 			let expected_crc = u32::from_le_bytes(
 				data[1..5]
@@ -653,13 +661,13 @@ fn decode_entry_metadata(raw_name: &[u8], extra: &[u8], utf8: bool) -> Result<(S
 				unicode_name = Some(name);
 			}
 		} else if id == 0x5455 {
-			let (&timestamp_flags, timestamps) = data
-				.split_first()
-				.ok_or(Error::InvalidArchive("extended timestamp extra field is too small"))?;
+			let (&timestamp_flags, timestamps) = data.split_first().ok_or(Error::InvalidArchive {
+				problem: "extended timestamp extra field is too small",
+			})?;
 			if timestamp_flags & 1 != 0 {
-				let timestamp = timestamps
-					.get(..4)
-					.ok_or(Error::InvalidArchive("extended timestamp extra field is too small"))?;
+				let timestamp = timestamps.get(..4).ok_or(Error::InvalidArchive {
+					problem: "extended timestamp extra field is too small",
+				})?;
 				let signed = i64::from(i32::from_le_bytes(timestamp.try_into().expect("fixed length")));
 				modified_unix_seconds = u64::try_from(signed).ok();
 			}
@@ -686,7 +694,7 @@ fn read_zip64_values(
 	while let Ok((header, remaining)) = ExtraFieldHeader::ref_from_prefix(fields) {
 		let (data, next) = remaining
 			.split_at_checked(usize::from(header.data_len.get()))
-			.ok_or(Error::InvalidArchive("malformed ZIP extra field"))?;
+			.ok_or(Error::InvalidArchive { problem: "malformed ZIP extra field" })?;
 		if header.id.get() == 0x0001 {
 			let mut data = data;
 			let mut values = current;
@@ -706,19 +714,19 @@ fn read_zip64_values(
 		}
 		fields = next;
 	}
-	Err(Error::InvalidArchive("missing ZIP64 extra field"))
+	Err(Error::InvalidArchive { problem: "missing ZIP64 extra field" })
 }
 
 fn take_zip64_u64(bytes: &mut &[u8]) -> Result<u64> {
 	let (value, remaining) = U64::read_from_prefix(bytes)
-		.map_err(|_| Error::InvalidArchive("malformed ZIP64 extra field"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "malformed ZIP64 extra field" })?;
 	*bytes = remaining;
 	Ok(value.get())
 }
 
 fn take_zip64_u32(bytes: &mut &[u8]) -> Result<u32> {
 	let (value, remaining) = U32::read_from_prefix(bytes)
-		.map_err(|_| Error::InvalidArchive("malformed ZIP64 extra field"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "malformed ZIP64 extra field" })?;
 	*bytes = remaining;
 	Ok(value.get())
 }
@@ -736,7 +744,7 @@ fn copy_stored<R: Read, W: Write>(
 			usize::try_from(cmp::min(remaining, buffer.len() as u64)).unwrap_or(buffer.len());
 		let read = source.read(&mut buffer[..wanted])?;
 		if read == 0 {
-			return Err(Error::InvalidArchive("truncated ZIP member data"));
+			return Err(Error::InvalidArchive { problem: "truncated ZIP member data" });
 		}
 		output.write_all(&buffer[..read])?;
 		crc.update(&buffer[..read]);
@@ -765,7 +773,7 @@ fn inflate<R: Read, W: Write>(
 		if input_start == input_end && bounded.limit() != 0 {
 			let read = bounded.read(&mut input)?;
 			if read == 0 {
-				return Err(Error::InvalidArchive("truncated ZIP member data"));
+				return Err(Error::InvalidArchive { problem: "truncated ZIP member data" });
 			}
 			input_start = 0;
 			input_end = read;
@@ -785,9 +793,9 @@ fn inflate<R: Read, W: Write>(
 			.decompress(&input[input_start..input_end], &mut decoded[..output_len], flush)
 			.map_err(|source| Error::Decompression { path: path.clone(), source })?;
 		let consumed = usize::try_from(decoder.total_in() - before_in)
-			.map_err(|_| Error::InvalidArchive("DEFLATE input count overflows"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "DEFLATE input count overflows" })?;
 		let produced = usize::try_from(decoder.total_out() - before_out)
-			.map_err(|_| Error::InvalidArchive("DEFLATE output count overflows"))?;
+			.map_err(|_| Error::InvalidArchive { problem: "DEFLATE output count overflows" })?;
 		input_start += consumed;
 
 		let actual = total
@@ -808,19 +816,21 @@ fn inflate<R: Read, W: Write>(
 
 		if status == Status::StreamEnd {
 			if input_start != input_end || bounded.limit() != 0 {
-				return Err(Error::InvalidArchive("DEFLATE member has trailing compressed data"));
+				return Err(Error::InvalidArchive {
+					problem: "DEFLATE member has trailing compressed data",
+				});
 			}
 			return Ok(total);
 		}
 		if consumed == 0 && produced == 0 {
-			return Err(Error::InvalidArchive("truncated or stalled DEFLATE stream"));
+			return Err(Error::InvalidArchive { problem: "truncated or stalled DEFLATE stream" });
 		}
 	}
 }
 
 fn read_vec_at<R: Read + Seek>(source: &mut R, offset: u64, len: u64) -> Result<Vec<u8>> {
 	let len = usize::try_from(len)
-		.map_err(|_| Error::InvalidArchive("ZIP range does not fit this platform"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "ZIP range does not fit this platform" })?;
 	let mut bytes = vec![0_u8; len];
 	source.seek(SeekFrom::Start(offset))?;
 	read_exact_archive(source, &mut bytes)?;
@@ -838,7 +848,7 @@ fn read_exact_archive(reader: &mut impl Read, bytes: &mut [u8]) -> Result<()> {
 	match reader.read_exact(bytes) {
 		Ok(()) => Ok(()),
 		Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-			Err(Error::InvalidArchive("truncated ZIP archive"))
+			Err(Error::InvalidArchive { problem: "truncated ZIP archive" })
 		},
 		Err(error) => Err(Error::Io(error)),
 	}

@@ -53,7 +53,7 @@ fn encrypted_and_unsupported_members_are_indexed_but_rejected_on_read() {
 	let mut archive = Archive::from_bytes(&bytes).unwrap();
 	assert!(archive.entry("secret.txt").unwrap().is_encrypted());
 
-	assert_error_kind(archive.read("secret.txt"), |error| matches!(error, Error::Encrypted(_)));
+	assert_error_kind(archive.read("secret.txt"), |error| matches!(error, Error::Encrypted { .. }));
 	assert_error_kind(archive.read("legacy.bin"), |error| {
 		matches!(error, Error::UnsupportedCompression { method: 99, .. })
 	});

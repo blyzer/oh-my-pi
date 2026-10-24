@@ -43,13 +43,13 @@ pub(crate) fn read_entries(
 	limits: Limits,
 ) -> Result<Vec<Entry>> {
 	if file_size <= JSON_OFFSET {
-		return Err(Error::InvalidArchive("truncated ASAR Pickle header"));
+		return Err(Error::InvalidArchive { problem: "truncated ASAR Pickle header" });
 	}
 	source.seek(SeekFrom::Start(0))?;
 	let mut prefix = [0_u8; 17];
 	source.read_exact(&mut prefix)?;
 	if !is_header(&prefix) {
-		return Err(Error::InvalidArchive("invalid ASAR Pickle header"));
+		return Err(Error::InvalidArchive { problem: "invalid ASAR Pickle header" });
 	}
 
 	let inner_size = u64::from(u32::from_le_bytes(prefix[4..8].try_into().expect("four bytes")));
@@ -58,43 +58,44 @@ pub(crate) fn read_entries(
 	if inner_size
 		!= inner_payload
 			.checked_add(4)
-			.ok_or(Error::InvalidArchive("ASAR Pickle header size overflow"))?
+			.ok_or(Error::InvalidArchive { problem: "ASAR Pickle header size overflow" })?
 	{
-		return Err(Error::InvalidArchive("inconsistent ASAR Pickle header sizes"));
+		return Err(Error::InvalidArchive { problem: "inconsistent ASAR Pickle header sizes" });
 	}
 	if json_size > limits.index_size {
 		return Err(Error::IndexTooLarge { actual: json_size, limit: limits.index_size });
 	}
 	let data_offset = PICKLE_PREFIX_SIZE
 		.checked_add(inner_size)
-		.ok_or(Error::InvalidArchive("ASAR data offset overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "ASAR data offset overflow" })?;
 	if data_offset > file_size {
-		return Err(Error::InvalidArchive("ASAR Pickle header extends past the archive"));
+		return Err(Error::InvalidArchive { problem: "ASAR Pickle header extends past the archive" });
 	}
 	let json_end = JSON_OFFSET
 		.checked_add(json_size)
-		.ok_or(Error::InvalidArchive("ASAR JSON range overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "ASAR JSON range overflow" })?;
 	if json_end >= data_offset {
-		return Err(Error::InvalidArchive("ASAR JSON extends past its Pickle payload"));
+		return Err(Error::InvalidArchive { problem: "ASAR JSON extends past its Pickle payload" });
 	}
 	let terminator = read_byte_at(source, json_end)?;
 	if terminator != 0 {
-		return Err(Error::InvalidArchive("ASAR Pickle string is not NUL-terminated"));
+		return Err(Error::InvalidArchive { problem: "ASAR Pickle string is not NUL-terminated" });
 	}
 	validate_padding(source, json_end + 1, data_offset)?;
 
-	let json_len = usize::try_from(json_size)
-		.map_err(|_| Error::InvalidArchive("ASAR JSON size does not fit this platform"))?;
+	let json_len = usize::try_from(json_size).map_err(|_| Error::InvalidArchive {
+		problem: "ASAR JSON size does not fit this platform",
+	})?;
 	let mut json = vec![0_u8; json_len];
 	source.seek(SeekFrom::Start(JSON_OFFSET))?;
 	source.read_exact(&mut json)?;
 	let root: Value = serde_json::from_slice(&json)
-		.map_err(|_| Error::InvalidArchive("ASAR header contains invalid JSON"))?;
+		.map_err(|_| Error::InvalidArchive { problem: "ASAR header contains invalid JSON" })?;
 	let files = root
 		.as_object()
 		.and_then(|root| root.get("files"))
 		.and_then(Value::as_object)
-		.ok_or(Error::InvalidArchive("ASAR JSON root has no files object"))?;
+		.ok_or(Error::InvalidArchive { problem: "ASAR JSON root has no files object" })?;
 
 	let mut entries = Vec::new();
 	walk_files(files, "", data_offset, file_size, limits, &mut entries)?;
@@ -111,23 +112,23 @@ fn walk_files(
 ) -> Result<()> {
 	for (name, value) in files {
 		if !is_safe_name(name) {
-			return Err(Error::UnsafePath(Str::new(name)));
+			return Err(Error::UnsafePath { path: Str::new(name) });
 		}
 		let path = join_path(parent, name)?;
 		if normalize(path.as_str(), false).as_deref() != Some(path.as_str()) {
-			return Err(Error::UnsafePath(path));
+			return Err(Error::UnsafePath { path });
 		}
 		validate(&path, limits)?;
 		let object = value
 			.as_object()
-			.ok_or(Error::InvalidArchive("ASAR file-tree node is not an object"))?;
+			.ok_or(Error::InvalidArchive { problem: "ASAR file-tree node is not an object" })?;
 		if let Some(children) = object.get("files") {
 			if object.contains_key("link") || object.contains_key("size") {
-				return Err(Error::InvalidArchive("ambiguous ASAR file-tree node"));
+				return Err(Error::InvalidArchive { problem: "ambiguous ASAR file-tree node" });
 			}
-			let children = children
-				.as_object()
-				.ok_or(Error::InvalidArchive("ASAR directory files value is not an object"))?;
+			let children = children.as_object().ok_or(Error::InvalidArchive {
+				problem: "ASAR directory files value is not an object",
+			})?;
 			entries.push(Entry {
 				path:                  path.clone(),
 				directory:             true,
@@ -141,12 +142,12 @@ fn walk_files(
 		}
 		if let Some(target) = object.get("link") {
 			if object.contains_key("size") {
-				return Err(Error::InvalidArchive("ambiguous ASAR link node"));
+				return Err(Error::InvalidArchive { problem: "ambiguous ASAR link node" });
 			}
 			let target = target
 				.as_str()
 				.and_then(|target| normalize(target, false))
-				.ok_or_else(|| Error::UnsafePath(Str::new(target.as_str().unwrap_or(""))))?;
+				.ok_or_else(|| Error::UnsafePath { path: Str::new(target.as_str().unwrap_or("")) })?;
 			validate(&target, limits)?;
 			entries.push(Entry {
 				path,
@@ -162,16 +163,20 @@ fn walk_files(
 		let size = object
 			.get("size")
 			.and_then(Value::as_u64)
-			.ok_or(Error::InvalidArchive("ASAR file has no valid size"))?;
+			.ok_or(Error::InvalidArchive { problem: "ASAR file has no valid size" })?;
 		let unpacked = match object.get("unpacked") {
 			None | Some(Value::Bool(false)) => false,
 			Some(Value::Bool(true)) => true,
-			Some(_) => return Err(Error::InvalidArchive("ASAR unpacked flag is not boolean")),
+			Some(_) => {
+				return Err(Error::InvalidArchive { problem: "ASAR unpacked flag is not boolean" });
+			},
 		};
 		let executable = match object.get("executable") {
 			None | Some(Value::Bool(false)) => false,
 			Some(Value::Bool(true)) => true,
-			Some(_) => return Err(Error::InvalidArchive("ASAR executable flag is not boolean")),
+			Some(_) => {
+				return Err(Error::InvalidArchive { problem: "ASAR executable flag is not boolean" });
+			},
 		};
 		let member_offset = if unpacked {
 			0
@@ -179,17 +184,19 @@ fn walk_files(
 			let relative = object
 				.get("offset")
 				.and_then(Value::as_str)
-				.ok_or(Error::InvalidArchive("packed ASAR file has no offset"))?
+				.ok_or(Error::InvalidArchive { problem: "packed ASAR file has no offset" })?
 				.parse::<u64>()
-				.map_err(|_| Error::InvalidArchive("packed ASAR file has an invalid offset"))?;
+				.map_err(|_| Error::InvalidArchive {
+					problem: "packed ASAR file has an invalid offset",
+				})?;
 			let absolute = data_offset
 				.checked_add(relative)
-				.ok_or(Error::InvalidArchive("ASAR member offset overflow"))?;
+				.ok_or(Error::InvalidArchive { problem: "ASAR member offset overflow" })?;
 			let end = absolute
 				.checked_add(size)
-				.ok_or(Error::InvalidArchive("ASAR member range overflow"))?;
+				.ok_or(Error::InvalidArchive { problem: "ASAR member range overflow" })?;
 			if end > file_size {
-				return Err(Error::InvalidArchive("ASAR member extends past the archive"));
+				return Err(Error::InvalidArchive { problem: "ASAR member extends past the archive" });
 			}
 			absolute
 		};
@@ -217,9 +224,9 @@ pub(crate) fn read_entry_to<W: Write>(
 			copy_member(source, entry, output, false)
 		},
 		Storage::Asar { unpacked: true, .. } => {
-			let root = unpacked_root.ok_or(Error::InvalidArchive(
-				"unpacked ASAR member requires a filesystem archive source",
-			))?;
+			let root = unpacked_root.ok_or(Error::InvalidArchive {
+				problem: "unpacked ASAR member requires a filesystem archive source",
+			})?;
 			let directory = Dir::open_ambient_dir(root, ambient_authority())?;
 			let mut file = directory.open(Path::new(entry.path()))?;
 			copy_member(&mut file, entry, output, true)
@@ -227,7 +234,7 @@ pub(crate) fn read_entry_to<W: Write>(
 		Storage::Link { target_path, .. } => {
 			Err(Error::UnreadableLink { path: entry.path.clone(), target: target_path.clone() })
 		},
-		_ => Err(Error::InvalidArchive("non-ASAR storage in ASAR reader")),
+		_ => Err(Error::InvalidArchive { problem: "non-ASAR storage in ASAR reader" }),
 	}
 }
 
@@ -257,14 +264,14 @@ fn read_byte_at(source: &mut (impl Read + Seek), offset: u64) -> Result<u8> {
 
 fn validate_padding(source: &mut (impl Read + Seek), start: u64, end: u64) -> Result<()> {
 	if start > end || end - start > 3 {
-		return Err(Error::InvalidArchive("invalid ASAR Pickle string padding"));
+		return Err(Error::InvalidArchive { problem: "invalid ASAR Pickle string padding" });
 	}
 	source.seek(SeekFrom::Start(start))?;
 	for _ in start..end {
 		let mut byte = [0_u8; 1];
 		source.read_exact(&mut byte)?;
 		if byte[0] != 0 {
-			return Err(Error::InvalidArchive("non-zero ASAR Pickle string padding"));
+			return Err(Error::InvalidArchive { problem: "non-zero ASAR Pickle string padding" });
 		}
 	}
 	Ok(())
@@ -279,7 +286,7 @@ fn join_path(parent: &str, name: &str) -> Result<Str> {
 		.len()
 		.checked_add(usize::from(!parent.is_empty()))
 		.and_then(|length| length.checked_add(name.len()))
-		.ok_or(Error::InvalidArchive("ASAR member path length overflow"))?;
+		.ok_or(Error::InvalidArchive { problem: "ASAR member path length overflow" })?;
 	let mut path = StrMut::with_capacity(length);
 	path.push_str(parent);
 	if !parent.is_empty() {

@@ -49,12 +49,12 @@ pub(crate) fn read_entries(
 	_decoded: &mut Vec<Vec<u8>>,
 ) -> Result<Vec<Entry>> {
 	if file_size < SIGNATURE.len() as u64 {
-		return Err(Error::InvalidArchive("invalid ar archive signature"));
+		return Err(Error::InvalidArchive { problem: "invalid ar archive signature" });
 	}
 	let mut signature = [0_u8; SIGNATURE.len()];
 	read_exact_at(source, 0, &mut signature, file_size, "truncated ar archive signature")?;
 	if &signature != SIGNATURE {
-		return Err(Error::InvalidArchive("invalid ar archive signature"));
+		return Err(Error::InvalidArchive { problem: "invalid ar archive signature" });
 	}
 
 	let mut records = Vec::new();
@@ -67,16 +67,16 @@ pub(crate) fn read_entries(
 		let header = parse_header(&bytes)?;
 		metadata_size = metadata_size
 			.checked_add(HEADER_SIZE as u64)
-			.ok_or(Error::InvalidArchive("ar index size overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "ar index size overflows" })?;
 		check_index_size(metadata_size, limits)?;
 		let payload_offset = position
 			.checked_add(HEADER_SIZE as u64)
-			.ok_or(Error::InvalidArchive("ar member offset overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "ar member offset overflows" })?;
 		let payload_end = payload_offset
 			.checked_add(header.physical_size)
-			.ok_or(Error::InvalidArchive("ar member range overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "ar member range overflows" })?;
 		if payload_end > file_size {
-			return Err(Error::InvalidArchive("truncated ar member data"));
+			return Err(Error::InvalidArchive { problem: "truncated ar member data" });
 		}
 
 		let mut name = header.raw_name;
@@ -86,10 +86,11 @@ pub(crate) fn read_entries(
 		if let Some(length) = header.bsd_name_length {
 			metadata_size = metadata_size
 				.checked_add(length)
-				.ok_or(Error::InvalidArchive("ar index size overflows"))?;
+				.ok_or(Error::InvalidArchive { problem: "ar index size overflows" })?;
 			check_index_size(metadata_size, limits)?;
-			let length_usize = usize::try_from(length)
-				.map_err(|_| Error::InvalidArchive("BSD ar member name does not fit this platform"))?;
+			let length_usize = usize::try_from(length).map_err(|_| Error::InvalidArchive {
+				problem: "BSD ar member name does not fit this platform",
+			})?;
 			let mut encoded = vec![0_u8; length_usize];
 			read_exact_at(
 				source,
@@ -103,7 +104,7 @@ pub(crate) fn read_entries(
 				.position(|&byte| byte == 0)
 				.unwrap_or(encoded.len());
 			if name_end == 0 {
-				return Err(Error::InvalidArchive("empty BSD ar extended member name"));
+				return Err(Error::InvalidArchive { problem: "empty BSD ar extended member name" });
 			}
 			name = String::from_utf8_lossy(&encoded[..name_end]).into_owned();
 			name_bytes = name_end as u64;
@@ -112,10 +113,11 @@ pub(crate) fn read_entries(
 		} else if name == "//" {
 			metadata_size = metadata_size
 				.checked_add(header.physical_size)
-				.ok_or(Error::InvalidArchive("ar index size overflows"))?;
+				.ok_or(Error::InvalidArchive { problem: "ar index size overflows" })?;
 			check_index_size(metadata_size, limits)?;
-			let table_size = usize::try_from(header.physical_size)
-				.map_err(|_| Error::InvalidArchive("ar long-name table does not fit this platform"))?;
+			let table_size = usize::try_from(header.physical_size).map_err(|_| {
+				Error::InvalidArchive { problem: "ar long-name table does not fit this platform" }
+			})?;
 			let mut table = vec![0_u8; table_size];
 			read_exact_at(
 				source,
@@ -142,9 +144,9 @@ pub(crate) fn read_entries(
 		}
 		position = payload_end
 			.checked_add(header.physical_size & 1)
-			.ok_or(Error::InvalidArchive("ar alignment offset overflows"))?;
+			.ok_or(Error::InvalidArchive { problem: "ar alignment offset overflows" })?;
 		if position > file_size {
-			return Err(Error::InvalidArchive("missing ar alignment byte"));
+			return Err(Error::InvalidArchive { problem: "missing ar alignment byte" });
 		}
 	}
 	materialize(records, long_names.as_deref(), limits)
@@ -158,8 +160,9 @@ fn materialize(
 	let mut entries = Vec::with_capacity(records.len());
 	for mut record in records {
 		if is_long_name_reference(&record.name) {
-			let table = long_names
-				.ok_or(Error::InvalidArchive("ar member references a missing long-name table"))?;
+			let table = long_names.ok_or(Error::InvalidArchive {
+				problem: "ar member references a missing long-name table",
+			})?;
 			let (name, length) = resolve_long_name(&record.name, table, limits)?;
 			record.name = name;
 			record.name_bytes = length;
@@ -207,21 +210,23 @@ fn materialize(
 
 fn parse_header(bytes: &[u8; HEADER_SIZE]) -> Result<Header> {
 	if &bytes[58..60] != b"`\n" {
-		return Err(Error::InvalidArchive("invalid ar archive member header"));
+		return Err(Error::InvalidArchive { problem: "invalid ar archive member header" });
 	}
 	let raw_name = ascii_field(&bytes[..16])?.to_owned();
 	let mtime = optional_number(ascii_field(&bytes[16..28])?, 10, "invalid ar modification time")?;
 	optional_number(ascii_field(&bytes[28..34])?, 10, "invalid ar user id")?;
 	optional_number(ascii_field(&bytes[34..40])?, 10, "invalid ar group id")?;
 	let mode = optional_number(ascii_field(&bytes[40..48])?, 8, "invalid ar mode")?
-		.map(|value| u32::try_from(value).map_err(|_| Error::InvalidArchive("ar mode overflows")))
+		.map(|value| {
+			u32::try_from(value).map_err(|_| Error::InvalidArchive { problem: "ar mode overflows" })
+		})
 		.transpose()?;
 	let physical_size = optional_number(ascii_field(&bytes[48..58])?, 10, "invalid ar member size")?
-		.ok_or(Error::InvalidArchive("invalid ar member size"))?;
+		.ok_or(Error::InvalidArchive { problem: "invalid ar member size" })?;
 	let bsd_name_length = if let Some(encoded) = raw_name.strip_prefix("#1/") {
 		let length = required_decimal(encoded, "invalid BSD ar extended name length")?;
 		if length == 0 || length > physical_size {
-			return Err(Error::InvalidArchive("invalid BSD ar extended name length"));
+			return Err(Error::InvalidArchive { problem: "invalid BSD ar extended name length" });
 		}
 		Some(length)
 	} else {
@@ -239,10 +244,10 @@ fn ascii_field(bytes: &[u8]) -> Result<&str> {
 		.iter()
 		.any(|&byte| !(0x20..=0x7e).contains(&byte))
 	{
-		return Err(Error::InvalidArchive("invalid ar archive header field"));
+		return Err(Error::InvalidArchive { problem: "invalid ar archive header field" });
 	}
 	str::from_utf8(&bytes[..end])
-		.map_err(|_| Error::InvalidArchive("invalid ar archive header field"))
+		.map_err(|_| Error::InvalidArchive { problem: "invalid ar archive header field" })
 }
 
 fn optional_number(value: &str, radix: u32, message: &'static str) -> Result<Option<u64>> {
@@ -253,18 +258,20 @@ fn optional_number(value: &str, radix: u32, message: &'static str) -> Result<Opt
 		8 => !(b'0'..=b'7').contains(&byte),
 		_ => !byte.is_ascii_digit(),
 	}) {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	u64::from_str_radix(value, radix)
 		.map(Some)
-		.map_err(|_| Error::InvalidArchive(message))
+		.map_err(|_| Error::InvalidArchive { problem: message })
 }
 
 fn required_decimal(value: &str, message: &'static str) -> Result<u64> {
 	if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
-	value.parse().map_err(|_| Error::InvalidArchive(message))
+	value
+		.parse()
+		.map_err(|_| Error::InvalidArchive { problem: message })
 }
 
 fn is_long_name_reference(name: &str) -> bool {
@@ -278,21 +285,22 @@ fn resolve_long_name(reference: &str, table: &[u8], limits: Limits) -> Result<(S
 		reference.strip_prefix('/').unwrap_or_default(),
 		"invalid ar long-name reference",
 	)?;
-	let offset = usize::try_from(offset)
-		.map_err(|_| Error::InvalidArchive("ar long-name offset does not fit this platform"))?;
+	let offset = usize::try_from(offset).map_err(|_| Error::InvalidArchive {
+		problem: "ar long-name offset does not fit this platform",
+	})?;
 	if offset >= table.len() {
-		return Err(Error::InvalidArchive("ar long-name offset is outside its table"));
+		return Err(Error::InvalidArchive { problem: "ar long-name offset is outside its table" });
 	}
 	let relative_end = table[offset..]
 		.iter()
 		.position(|&byte| byte == 0 || byte == b'\n')
-		.ok_or(Error::InvalidArchive("unterminated ar long name"))?;
+		.ok_or(Error::InvalidArchive { problem: "unterminated ar long name" })?;
 	let mut end = offset + relative_end;
 	if table[end] == b'\n' && end > offset && table[end - 1] == b'/' {
 		end -= 1;
 	}
 	if end == offset {
-		return Err(Error::InvalidArchive("empty ar long name"));
+		return Err(Error::InvalidArchive { problem: "empty ar long name" });
 	}
 	let length = (end - offset) as u64;
 	if length > limits.path_size {
@@ -321,14 +329,14 @@ fn read_exact_at(
 ) -> Result<()> {
 	let end = offset
 		.checked_add(bytes.len() as u64)
-		.ok_or(Error::InvalidArchive(message))?;
+		.ok_or(Error::InvalidArchive { problem: message })?;
 	if end > file_size {
-		return Err(Error::InvalidArchive(message));
+		return Err(Error::InvalidArchive { problem: message });
 	}
 	source.seek(SeekFrom::Start(offset))?;
 	source.read_exact(bytes).map_err(|error| {
 		if error.kind() == io::ErrorKind::UnexpectedEof {
-			Error::InvalidArchive(message)
+			Error::InvalidArchive { problem: message }
 		} else {
 			error.into()
 		}
@@ -341,5 +349,5 @@ pub(crate) const fn read_entry_to<W: Write>(
 	_entry: &Entry,
 	_output: &mut W,
 ) -> Result<u64> {
-	Err(Error::InvalidArchive("entry is not an ar member"))
+	Err(Error::InvalidArchive { problem: "entry is not an ar member" })
 }
