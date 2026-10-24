@@ -2602,7 +2602,7 @@ mod tests {
 			.expect("numeric daemon descendant pid");
 		let child = Pid::from_raw(child_pid);
 		let reaped = time::timeout(Duration::from_secs(2), async {
-			while signal::kill(child, None).is_ok() {
+			while !crate::test_process::process_terminated(child) {
 				time::sleep(Duration::from_millis(10)).await;
 			}
 		})
@@ -2760,7 +2760,7 @@ mod tests {
 			.expect("numeric daemon descendant pid");
 		let child = Pid::from_raw(child_pid);
 		let reaped = time::timeout(Duration::from_secs(2), async {
-			while signal::kill(child, None).is_ok() {
+			while !crate::test_process::process_terminated(child) {
 				time::sleep(Duration::from_millis(10)).await;
 			}
 		})
