@@ -13,8 +13,11 @@ pub const METER_NAME: &str = "@omp/coding-agent";
 
 /// Error returned when a string is not part of a bounded telemetry vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("invalid {0} telemetry vocabulary value")]
-pub struct ParseSemconvError(&'static str);
+#[error("invalid {vocabulary} telemetry vocabulary value")]
+pub struct ParseSemconvError {
+	/// The vocabulary the string failed to parse into.
+	vocabulary: &'static str,
+}
 
 macro_rules! vocab {
 	(
@@ -49,7 +52,7 @@ macro_rules! vocab {
 			fn from_str(value: &str) -> Result<Self, Self::Err> {
 				match value {
 					$($wire => Ok(Self::$variant),)*
-					_ => Err(ParseSemconvError($label)),
+					_ => Err(ParseSemconvError { vocabulary: $label }),
 				}
 			}
 		}

@@ -100,14 +100,20 @@ pub mod authority {
 		#[error("telemetry request was cancelled")]
 		Cancelled,
 		/// A durable capability does not cover the requested resource.
-		#[error("telemetry capability `{0}` is not granted")]
-		Capability(Str),
+		#[error("telemetry capability `{capability}` is not granted")]
+		Capability {
+			/// The capability the request needed.
+			capability: Str,
+		},
 		/// The request is malformed.
 		#[error("invalid telemetry request: {0}")]
 		Invalid(Str),
 		/// The named host resource does not exist.
-		#[error("telemetry resource `{0}` does not exist")]
-		NotFound(Str),
+		#[error("telemetry resource `{resource}` does not exist")]
+		NotFound {
+			/// The missing resource identifier.
+			resource: Str,
+		},
 		/// The authoritative durable index or exporter rejected the operation.
 		#[error("telemetry owner failed: {0}")]
 		Owner(Str),
@@ -411,7 +417,7 @@ pub mod authority {
 			let subscription = state
 				.subscriptions
 				.get_mut(id)
-				.ok_or_else(|| TelemetryAuthorityError::NotFound(Str::new(id)))?;
+				.ok_or_else(|| TelemetryAuthorityError::NotFound { resource: Str::new(id) })?;
 			let count = limit.min(subscription.queue.len());
 			let events = subscription.queue.drain(..count).collect();
 			subscription.stats.queue_depth = subscription.queue.len();
@@ -451,7 +457,9 @@ pub mod authority {
 				.exporters
 				.get(&id)
 				.map(|slot| slot.exporter.stats())
-				.ok_or_else(|| TelemetryAuthorityError::NotFound(Str::new(format!("export:{id}"))))
+				.ok_or_else(|| TelemetryAuthorityError::NotFound {
+					resource: Str::new(format!("export:{id}")),
+				})
 		}
 
 		/// Idempotently stops an installed exporter after its final flush.
@@ -465,7 +473,7 @@ pub mod authority {
 				let mut state = self.state.lock();
 				loop {
 					let slot = state.exporters.get_mut(&id).ok_or_else(|| {
-						TelemetryAuthorityError::NotFound(Str::new(format!("export:{id}")))
+						TelemetryAuthorityError::NotFound { resource: Str::new(format!("export:{id}")) }
 					})?;
 					match slot.lifecycle {
 						ExportLifecycle::Stopped => return Ok(()),
@@ -624,7 +632,7 @@ pub mod authority {
 				.lock()
 				.spans
 				.remove(handle)
-				.ok_or_else(|| TelemetryAuthorityError::NotFound(Str::new(handle)))?;
+				.ok_or_else(|| TelemetryAuthorityError::NotFound { resource: Str::new(handle) })?;
 			for attribute in attributes {
 				open.span.set_attribute(attribute);
 			}

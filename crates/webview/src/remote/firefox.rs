@@ -224,7 +224,7 @@ async fn setup(
 	let endpoint = discover_endpoint(&port_file, &mut child).await?;
 	let mut link = timeout(Duration::from_secs(5), WsLink::connect(&endpoint))
 		.await
-		.map_err(|_| Error::Timeout("connecting to the firefox BiDi endpoint"))??;
+		.map_err(|_| Error::Timeout { phase: "connecting to the firefox BiDi endpoint" })??;
 
 	let mut driver = Driver {
 		events,
@@ -375,7 +375,7 @@ async fn discover_endpoint(port_file: &Path, child: &mut process::Child) -> Resu
 			return Err(Error::Protocol(sf!("firefox exited during startup: {status}")));
 		}
 		if Instant::now() >= deadline {
-			return Err(Error::Timeout("waiting for the firefox BiDi endpoint"));
+			return Err(Error::Timeout { phase: "waiting for the firefox BiDi endpoint" });
 		}
 		time::sleep(Duration::from_millis(100)).await;
 	}
@@ -422,7 +422,7 @@ impl Driver {
 		loop {
 			let mut msg = timeout(CALL_TIMEOUT, link.recv_json())
 				.await
-				.map_err(|_| Error::Timeout("awaiting a BiDi response"))??
+				.map_err(|_| Error::Timeout { phase: "awaiting a BiDi response" })??
 				.ok_or(Error::Closed)?;
 			if msg["type"].as_str() == Some("event") {
 				self.on_event(msg["method"].as_str().unwrap_or(""), &msg["params"]);
@@ -515,17 +515,20 @@ impl Driver {
 			Command::LoadHtml(html) => self.navigate(link, &data_url(&html)).await,
 			Command::Eval { js, reply } => self.eval(link, &js, reply).await,
 			Command::AccessibilityTree { reply } => {
-				let _ = reply
-					.send(Err(Error::Unsupported("native accessibility snapshots require Chromium")));
+				let _ = reply.send(Err(Error::Unsupported {
+					operation: "native accessibility snapshots require Chromium",
+				}));
 				Ok(())
 			},
 			Command::UploadFiles { reply, .. } => {
-				let _ = reply.send(Err(Error::Unsupported("file upload requires Chromium CDP")));
+				let _ = reply
+					.send(Err(Error::Unsupported { operation: "file upload requires Chromium CDP" }));
 				Ok(())
 			},
 			Command::Screenshot { reply, .. } => {
-				let _ =
-					reply.send(Err(Error::Unsupported("direct PNG screenshots require Chromium CDP")));
+				let _ = reply.send(Err(Error::Unsupported {
+					operation: "direct PNG screenshots require Chromium CDP",
+				}));
 				Ok(())
 			},
 			Command::Back => self.traverse(link, -1).await,

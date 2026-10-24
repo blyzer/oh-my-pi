@@ -148,12 +148,18 @@ pub enum Error {
 
 	/// The operation is not supported by this engine/surface combination.
 	/// See the capability matrix in the crate docs.
-	#[error("unsupported operation: {0}")]
-	Unsupported(&'static str),
+	#[error("unsupported operation: {operation}")]
+	Unsupported {
+		/// The unsupported operation's name.
+		operation: &'static str,
+	},
 
 	/// The engine did not reach the expected state in time.
-	#[error("timed out while {0}")]
-	Timeout(&'static str),
+	#[error("timed out while {phase}")]
+	Timeout {
+		/// What the driver was waiting for.
+		phase: &'static str,
+	},
 
 	/// A system-webview operation was invoked off the main thread.
 	#[error("system webview operations require the main thread")]
@@ -182,8 +188,8 @@ impl Error {
 			Self::PngEncode(_) => "png_encode",
 			Self::MalformedMessage(_) => "malformed_message",
 			Self::WebSocket(_) => "websocket",
-			Self::Unsupported(_) => "unsupported",
-			Self::Timeout(_) => "timeout",
+			Self::Unsupported { .. } => "unsupported",
+			Self::Timeout { .. } => "timeout",
 			Self::MainThread => "main_thread",
 			Self::WindowHandle => "window_handle",
 			Self::Io(_) => "io",

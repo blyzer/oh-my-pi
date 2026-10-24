@@ -286,7 +286,7 @@ impl<'view> TabHandle<'view> {
 				break;
 			}
 			if started.elapsed() >= timeout {
-				return Err(Error::Timeout("waiting for navigation"));
+				return Err(Error::Timeout { phase: "waiting for navigation" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}
@@ -316,7 +316,7 @@ impl<'view> TabHandle<'view> {
 		let started = Instant::now();
 		while self.view.url().is_empty() {
 			if started.elapsed() >= timeout {
-				return Err(Error::Timeout("waiting for navigation"));
+				return Err(Error::Timeout { phase: "waiting for navigation" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}
@@ -332,7 +332,7 @@ impl<'view> TabHandle<'view> {
 				return Ok(url);
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Timeout("waiting for URL"));
+				return Err(Error::Timeout { phase: "waiting for URL" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}
@@ -351,7 +351,7 @@ impl<'view> TabHandle<'view> {
 				return Ok(url.to_str());
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Timeout("waiting for response"));
+				return Err(Error::Timeout { phase: "waiting for response" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}
@@ -390,7 +390,7 @@ impl<'view> TabHandle<'view> {
 						error = "timeout",
 						"webview frame capture failed"
 					);
-					return Err(Error::Timeout("capturing browser frame"));
+					return Err(Error::Timeout { phase: "capturing browser frame" });
 				},
 			}
 		}
@@ -415,7 +415,9 @@ impl<'view> TabHandle<'view> {
 		};
 		let data = if matches!(self.view.engine(), EngineKind::Chromium) {
 			let Inner::Remote(remote) = &self.view.inner else {
-				return Err(Error::Unsupported("direct screenshot requires remote Chromium"));
+				return Err(Error::Unsupported {
+					operation: "direct screenshot requires remote Chromium",
+				});
 			};
 			let (tx, rx) = flume::bounded(1);
 			remote
@@ -430,7 +432,7 @@ impl<'view> TabHandle<'view> {
 				})?;
 			let result = rx
 				.recv_timeout(timeout)
-				.map_err(|_| Error::Timeout("capturing PNG screenshot"))
+				.map_err(|_| Error::Timeout { phase: "capturing PNG screenshot" })
 				.and_then(|result| result);
 			match result {
 				Ok(data) => data,
@@ -446,9 +448,9 @@ impl<'view> TabHandle<'view> {
 			}
 		} else {
 			if selector.is_some() || full_page {
-				return Err(Error::Unsupported(
-					"element and full-page screenshots require Chromium CDP",
-				));
+				return Err(Error::Unsupported {
+					operation: "element and full-page screenshots require Chromium CDP",
+				});
 			}
 			encode_frame_png(&self.capture(timeout)?)?
 		};
@@ -482,13 +484,15 @@ impl<'view> TabHandle<'view> {
 			return Ok(Value::String(self.document().aria_snapshot(None)?.to_string()));
 		}
 		let Inner::Remote(remote) = &self.view.inner else {
-			return Err(Error::Unsupported("native accessibility requires remote Chromium"));
+			return Err(Error::Unsupported {
+				operation: "native accessibility requires remote Chromium",
+			});
 		};
 		let (tx, rx) = flume::bounded(1);
 		remote.send(Command::AccessibilityTree { reply: tx })?;
 		let snapshot = rx
 			.recv_timeout(timeout)
-			.map_err(|_| Error::Timeout("capturing accessibility tree"))??;
+			.map_err(|_| Error::Timeout { phase: "capturing accessibility tree" })??;
 		if serde_json::to_vec(&snapshot)?.len() > MAX_AX_SNAPSHOT_BYTES {
 			return Err(Error::Protocol("accessibility snapshot exceeds byte limit".to_str()));
 		}
@@ -503,10 +507,10 @@ impl<'view> TabHandle<'view> {
 		timeout: Duration,
 	) -> Result<()> {
 		if !self.capabilities().file_upload {
-			return Err(Error::Unsupported("file upload requires Chromium CDP"));
+			return Err(Error::Unsupported { operation: "file upload requires Chromium CDP" });
 		}
 		let Inner::Remote(remote) = &self.view.inner else {
-			return Err(Error::Unsupported("file upload requires remote Chromium"));
+			return Err(Error::Unsupported { operation: "file upload requires remote Chromium" });
 		};
 		let spec = serde_json::to_string(&selector.wire())?;
 		let element = sf!("(() => {{ {HELPERS} return window.__ompResolve({spec}); }})()");
@@ -517,7 +521,7 @@ impl<'view> TabHandle<'view> {
 		let (tx, rx) = flume::bounded(1);
 		remote.send(Command::UploadFiles { element, paths, reply: tx })?;
 		rx.recv_timeout(timeout)
-			.map_err(|_| Error::Timeout("uploading browser files"))?
+			.map_err(|_| Error::Timeout { phase: "uploading browser files" })?
 	}
 
 	fn wait_for_ready(self, timeout: Duration) -> Result<()> {
@@ -532,7 +536,7 @@ impl<'view> TabHandle<'view> {
 				return Ok(());
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Timeout("waiting for document readiness"));
+				return Err(Error::Timeout { phase: "waiting for document readiness" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}
@@ -545,7 +549,7 @@ impl<'view> TabHandle<'view> {
 		})?;
 		let value = rx
 			.recv_timeout(timeout)
-			.map_err(|_| Error::Timeout("evaluating browser JavaScript"))?;
+			.map_err(|_| Error::Timeout { phase: "evaluating browser JavaScript" })?;
 		serde_json::from_str(&value).map_err(Error::from)
 	}
 }
@@ -630,7 +634,7 @@ impl<'view> DocumentHandle<'view> {
 			}
 			let now = Instant::now();
 			if now >= deadline || now >= zero_match {
-				return Err(Error::Timeout("waiting for selector"));
+				return Err(Error::Timeout { phase: "waiting for selector" });
 			}
 			thread::sleep(POLL_INTERVAL);
 		}

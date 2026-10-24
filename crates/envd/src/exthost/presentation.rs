@@ -779,9 +779,9 @@ fn telemetry_error(error: TelemetryAuthorityError) -> ControlProtocolError {
 	let code = match &error {
 		TelemetryAuthorityError::Identity => "StaleGeneration",
 		TelemetryAuthorityError::Cancelled => "Cancelled",
-		TelemetryAuthorityError::Capability(_) => "CapabilityDenied",
+		TelemetryAuthorityError::Capability { .. } => "CapabilityDenied",
 		TelemetryAuthorityError::Invalid(_) => "InvalidTelemetryRequest",
-		TelemetryAuthorityError::NotFound(_) => "TelemetryResourceNotFound",
+		TelemetryAuthorityError::NotFound { .. } => "TelemetryResourceNotFound",
 		TelemetryAuthorityError::Owner(_) => "TelemetryOwnerFailed",
 	};
 	protocol(code, error.to_string())

@@ -401,7 +401,7 @@ impl WebViewBuilder {
 			},
 			_ => {
 				let _ = parent;
-				Err(Error::Unsupported("child surfaces require the system engine"))
+				Err(Error::Unsupported { operation: "child surfaces require the system engine" })
 			},
 		}
 	}
@@ -574,7 +574,9 @@ impl WebViewBuilder {
 			},
 			#[cfg(target_os = "macos")]
 			Engine::System => {
-				return Err(Error::Unsupported("window surfaces require a remote engine"));
+				return Err(Error::Unsupported {
+					operation: "window surfaces require a remote engine",
+				});
 			},
 		};
 		Ok(WebView {
@@ -727,7 +729,7 @@ impl WebView {
 		match &self.inner {
 			#[cfg(target_os = "macos")]
 			Inner::Wk(view) => view.set_bounds(bounds),
-			_ => Err(Error::Unsupported("set_bounds applies to child surfaces")),
+			_ => Err(Error::Unsupported { operation: "set_bounds applies to child surfaces" }),
 		}
 	}
 
@@ -740,7 +742,7 @@ impl WebView {
 		match &self.inner {
 			#[cfg(target_os = "macos")]
 			Inner::Wk(view) => view.set_visible(visible),
-			_ => Err(Error::Unsupported("set_visible applies to child surfaces")),
+			_ => Err(Error::Unsupported { operation: "set_visible applies to child surfaces" }),
 		}
 	}
 
@@ -754,7 +756,7 @@ impl WebView {
 			(Inner::Remote(view), SurfaceKind::Frames) => view.send(Command::Resize { width, height }),
 			#[cfg(target_os = "macos")]
 			(Inner::WkFrames(view), _) => view.resize(width, height),
-			_ => Err(Error::Unsupported("resize applies to frames surfaces")),
+			_ => Err(Error::Unsupported { operation: "resize applies to frames surfaces" }),
 		}
 	}
 
@@ -768,7 +770,7 @@ impl WebView {
 			(Inner::Remote(view), SurfaceKind::Frames) => view.send(Command::Input(input)),
 			#[cfg(target_os = "macos")]
 			(Inner::WkFrames(view), _) => view.input(input),
-			_ => Err(Error::Unsupported("input applies to frames surfaces")),
+			_ => Err(Error::Unsupported { operation: "input applies to frames surfaces" }),
 		}
 	}
 
