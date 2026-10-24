@@ -821,7 +821,7 @@ mod tests {
 		assert_eq!(hub.key(Key::Space), PanelEvent::Command(HostCommand::Service(mutation.clone())));
 		let outcome = Outcome::Service(ServiceOutcome {
 			mutation,
-			result: Err(ServiceError::Unavailable("agent toggling")),
+			result: Err(ServiceError::Unavailable { feed: "agent toggling" }),
 		});
 		assert_eq!(hub.notify(PanelNote::Outcome(&outcome)), PanelEvent::Consumed);
 		assert!(hub.agents()[0].enabled);

@@ -521,7 +521,7 @@ impl HeaderPlacement {
 
 	fn validate(&self) -> Result<(), AuthSpecError> {
 		if self.name.is_empty() {
-			return Err(AuthSpecError::EmptyField("header name"));
+			return Err(AuthSpecError::EmptyField { field: "header name" });
 		}
 		if self
 			.prefix
@@ -561,7 +561,7 @@ pub enum OAuthRefreshSpec {
 impl QueryPlacement {
 	fn validate(&self) -> Result<(), AuthSpecError> {
 		if self.name.is_empty() {
-			Err(AuthSpecError::EmptyField("query parameter name"))
+			Err(AuthSpecError::EmptyField { field: "query parameter name" })
 		} else {
 			Ok(())
 		}
@@ -901,17 +901,26 @@ pub struct SessionTokenSpec {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthSpecError {
 	/// A required catalog field is empty.
-	#[error("authentication specification has an empty {0}")]
-	EmptyField(&'static str),
+	#[error("authentication specification has an empty {field}")]
+	EmptyField {
+		/// The empty specification field.
+		field: &'static str,
+	},
 	/// A catalog endpoint is not an absolute HTTP(S) URL.
-	#[error("authentication specification has an invalid {0}")]
-	InvalidUrl(&'static str),
+	#[error("authentication specification has an invalid {field}")]
+	InvalidUrl {
+		/// The invalid endpoint field.
+		field: &'static str,
+	},
 	/// A header prefix contains a line break.
 	#[error("authentication header prefix contains a line break")]
 	InvalidHeaderPrefix,
 	/// A bounded operation was configured with a zero limit.
-	#[error("authentication specification has a zero {0}")]
-	ZeroBound(&'static str),
+	#[error("authentication specification has a zero {field}")]
+	ZeroBound {
+		/// The zero-limit field.
+		field: &'static str,
+	},
 	/// Device polling intervals are zero or inverted.
 	#[error("device polling intervals are invalid")]
 	InvalidPollingInterval,
@@ -958,18 +967,18 @@ fn validate_sources(sources: &[CredentialSourceSpec]) -> Result<(), AuthSpecErro
 
 const fn non_empty(value: &str, field: &'static str) -> Result<(), AuthSpecError> {
 	if value.is_empty() {
-		Err(AuthSpecError::EmptyField(field))
+		Err(AuthSpecError::EmptyField { field })
 	} else {
 		Ok(())
 	}
 }
 
 fn valid_url(value: &str, field: &'static str) -> Result<(), AuthSpecError> {
-	let parsed = Url::parse(value).map_err(|_| AuthSpecError::InvalidUrl(field))?;
+	let parsed = Url::parse(value).map_err(|_| AuthSpecError::InvalidUrl { field })?;
 	if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() {
 		Ok(())
 	} else {
-		Err(AuthSpecError::InvalidUrl(field))
+		Err(AuthSpecError::InvalidUrl { field })
 	}
 }
 
@@ -1051,7 +1060,7 @@ mod tests {
 		assert_eq!(openrouter.validate(), Ok(()));
 		assert_eq!(
 			spec(OAuthExchangeKind::PerplexityEmailOtp).validate(),
-			Err(AuthSpecError::EmptyField("OAuth client id"))
+			Err(AuthSpecError::EmptyField { field: "OAuth client id" })
 		);
 	}
 

@@ -76,8 +76,11 @@ pub enum GalleryError {
 	#[error("gallery session fold failed")]
 	Session(#[from] omp_session::SessionError),
 	/// The folded call element or one of its mandatory children is absent.
-	#[error("gallery fixture did not materialize {0}")]
-	Missing(&'static str),
+	#[error("gallery fixture did not materialize {element}")]
+	Missing {
+		/// The absent element.
+		element: &'static str,
+	},
 }
 
 /// Returns gallery fixture names in stable reference order.
@@ -175,23 +178,23 @@ fn render_fixture(
 	}
 	let snapshot = session.dom().snapshot();
 	let tool = find_snapshot_call(&snapshot, call_id.as_str())
-		.ok_or(GalleryError::Missing("tool element"))?;
+		.ok_or(GalleryError::Missing { element: "tool element" })?;
 	let node = snapshot
 		.get(tool)
-		.ok_or(GalleryError::Missing("tool element"))?;
-	let input =
-		child(&snapshot, tool, KnownTag::Input).ok_or(GalleryError::Missing("input element"))?;
+		.ok_or(GalleryError::Missing { element: "tool element" })?;
+	let input = child(&snapshot, tool, KnownTag::Input)
+		.ok_or(GalleryError::Missing { element: "input element" })?;
 	let status = node
 		.prop(&PropId::Status.into())
 		.and_then(DomValue::as_str)
 		.map_or(CardStatus::InProgress, CardStatus::from_dom);
 	if status == CardStatus::Done {
-		let result =
-			child(&snapshot, tool, KnownTag::Result).ok_or(GalleryError::Missing("result element"))?;
+		let result = child(&snapshot, tool, KnownTag::Result)
+			.ok_or(GalleryError::Missing { element: "result element" })?;
 		if result.prop(&PropId::Outcome.into()).is_none()
 			|| result.prop(&PropId::Data.into()).is_none()
 		{
-			return Err(GalleryError::Missing("projected result truth"));
+			return Err(GalleryError::Missing { element: "projected result truth" });
 		}
 	}
 	let diagnostics = snapshot
@@ -208,9 +211,9 @@ fn render_fixture(
 			|| node.prop(&PropId::Fault.into()).is_some()
 	});
 	if status == CardStatus::Failed {
-		let diag = diag.ok_or(GalleryError::Missing("diag element"))?;
+		let diag = diag.ok_or(GalleryError::Missing { element: "diag element" })?;
 		if diag.prop(&PropId::Fault.into()).is_none() || diag.prop(&PropId::Data.into()).is_none() {
-			return Err(GalleryError::Missing("projected fault truth"));
+			return Err(GalleryError::Missing { element: "projected fault truth" });
 		}
 	}
 	let notices = diagnostics
@@ -282,7 +285,7 @@ fn stream_output(
 			dom.get(*child)
 				.is_some_and(|node| node.tag == Tag::Known(KnownTag::Result))
 		})
-		.ok_or(GalleryError::Missing("result element"))?;
+		.ok_or(GalleryError::Missing { element: "result element" })?;
 	let sid = session.stream_open(result, PropId::Text.into())?;
 	for frame in frames {
 		session.stream_append(sid, &frame.text)?;

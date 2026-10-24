@@ -1311,7 +1311,7 @@ mod tests {
 			if url == "local://auth-plan.md" {
 				Ok(self.0.clone())
 			} else {
-				Err(ServiceError::Unavailable("local artifacts"))
+				Err(ServiceError::Unavailable { feed: "local artifacts" })
 			}
 		}
 
@@ -1329,7 +1329,7 @@ mod tests {
 			if url == "local://PLAN.md" {
 				Ok(Str::new_static("# Legacy\n\nbody\n"))
 			} else {
-				Err(ServiceError::Unavailable("local artifacts"))
+				Err(ServiceError::Unavailable { feed: "local artifacts" })
 			}
 		}
 

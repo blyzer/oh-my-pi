@@ -21,8 +21,11 @@ use crate::history::HistoryEntry;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ServiceError {
 	/// The application did not wire this feed (a headless or test host).
-	#[error("{0} is unavailable in this host")]
-	Unavailable(&'static str),
+	#[error("{feed} is unavailable in this host")]
+	Unavailable {
+		/// The unwired feed name.
+		feed: &'static str,
+	},
 	/// The feed exists but the request failed.
 	#[error("{0}")]
 	Failed(Str),
@@ -1211,7 +1214,7 @@ pub struct NoMutations;
 
 impl Mutations for NoMutations {
 	fn apply(&self, _mutation: Mutation) -> ServiceResult<Pending<Str>> {
-		Err(ServiceError::Unavailable("mutations"))
+		Err(ServiceError::Unavailable { feed: "mutations" })
 	}
 }
 
@@ -1232,7 +1235,7 @@ pub trait Services: Send + Sync {
 	/// Provider quotas and local cost activity. Quota refreshes contact
 	/// every provider, so the report settles asynchronously.
 	fn usage(&self) -> ServiceResult<Pending<UsageReport>> {
-		Err(ServiceError::Unavailable("usage"))
+		Err(ServiceError::Unavailable { feed: "usage" })
 	}
 
 	/// Usage for the exact account serving `request`.
@@ -1244,43 +1247,43 @@ pub trait Services: Send + Sync {
 		&self,
 		_request: ActiveUsageRequest,
 	) -> ServiceResult<Pending<Option<ActiveAccountUsage>>> {
-		Err(ServiceError::Unavailable("active account usage"))
+		Err(ServiceError::Unavailable { feed: "active account usage" })
 	}
 
 	/// Accounts with saved Codex reset credits. The controller performs the
 	/// network refresh; the actor only receives immutable selector rows.
 	fn reset_accounts(&self) -> ServiceResult<Pending<Vec<ResetAccountRow>>> {
-		Err(ServiceError::Unavailable("saved reset accounts"))
+		Err(ServiceError::Unavailable { feed: "saved reset accounts" })
 	}
 
 	/// The kernel's registered tools.
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
-		Err(ServiceError::Unavailable("tool roster"))
+		Err(ServiceError::Unavailable { feed: "tool roster" })
 	}
 
 	/// The tool approval mode configured and in force.
 	fn approval_posture(&self) -> ServiceResult<ApprovalPostureRow> {
-		Err(ServiceError::Unavailable("approval posture"))
+		Err(ServiceError::Unavailable { feed: "approval posture" })
 	}
 
 	/// Extension and MCP server status.
 	fn extensions(&self) -> ServiceResult<Vec<ExtensionRow>> {
-		Err(ServiceError::Unavailable("extensions"))
+		Err(ServiceError::Unavailable { feed: "extensions" })
 	}
 
 	/// Stored provider accounts.
 	fn accounts(&self) -> ServiceResult<Vec<AccountRow>> {
-		Err(ServiceError::Unavailable("stored accounts"))
+		Err(ServiceError::Unavailable { feed: "stored accounts" })
 	}
 
 	/// Providers that can be signed in.
 	fn providers(&self) -> ServiceResult<Vec<ProviderRow>> {
-		Err(ServiceError::Unavailable("provider roster"))
+		Err(ServiceError::Unavailable { feed: "provider roster" })
 	}
 
 	/// Starts an interactive login for `provider`.
 	fn login(&self, _provider: &str) -> ServiceResult<LoginFlow> {
-		Err(ServiceError::Unavailable("login"))
+		Err(ServiceError::Unavailable { feed: "login" })
 	}
 
 	/// Exports the live session; `None` picks the default path beside the
@@ -1290,12 +1293,12 @@ pub trait Services: Send + Sync {
 		_dom: &omp_dom::Dom,
 		_path: Option<&std::path::Path>,
 	) -> ServiceResult<PathBuf> {
-		Err(ServiceError::Unavailable("export"))
+		Err(ServiceError::Unavailable { feed: "export" })
 	}
 
 	/// On-disk sessions in `scope`, newest first.
 	fn sessions(&self, _scope: SessionScope) -> ServiceResult<Vec<SessionRow>> {
-		Err(ServiceError::Unavailable("session index"))
+		Err(ServiceError::Unavailable { feed: "session index" })
 	}
 
 	/// Foreign transcripts available for one-shot import, newest first.
@@ -1305,7 +1308,7 @@ pub trait Services: Send + Sync {
 		&self,
 		_source: ForeignSessionSource,
 	) -> ServiceResult<Vec<ForeignSessionRow>> {
-		Err(ServiceError::Unavailable("foreign session index"))
+		Err(ServiceError::Unavailable { feed: "foreign session index" })
 	}
 
 	/// The transcript of agent `id` (a `<meta><jobs>` child): a live
@@ -1313,56 +1316,56 @@ pub trait Services: Send + Sync {
 	/// journal-derived snapshot. Settles asynchronously because a live
 	/// kernel services the subscription at its next safe point.
 	fn agent_view(&self, _id: &str) -> ServiceResult<Pending<AgentView>> {
-		Err(ServiceError::Unavailable("agent transcripts"))
+		Err(ServiceError::Unavailable { feed: "agent transcripts" })
 	}
 
 	/// Id (journal stem) of the live session, for `/pin` without an
 	/// argument. `Failed` when the session is in-memory only.
 	fn live_session_id(&self) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("live session id"))
+		Err(ServiceError::Unavailable { feed: "live session id" })
 	}
 
 	/// Durable prompts newest first, across projects and sessions.
 	fn history_recent(&self, _limit: usize) -> ServiceResult<Vec<HistoryEntry>> {
-		Err(ServiceError::Unavailable("prompt history"))
+		Err(ServiceError::Unavailable { feed: "prompt history" })
 	}
 
 	/// Durable prompts matching every query token, ranked by recency.
 	fn history_search(&self, _query: &str, _limit: usize) -> ServiceResult<Vec<HistoryEntry>> {
-		Err(ServiceError::Unavailable("prompt history"))
+		Err(ServiceError::Unavailable { feed: "prompt history" })
 	}
 
 	/// Session IDs whose latest prompt provenance matches `query`, newest first.
 	fn history_matching_session_ids(&self, _query: &str, _limit: usize) -> ServiceResult<Vec<Str>> {
-		Err(ServiceError::Unavailable("prompt history"))
+		Err(ServiceError::Unavailable { feed: "prompt history" })
 	}
 
 	/// Records an accepted composer submission with controller-owned project
 	/// and live-session provenance.
 	fn history_add(&self, _prompt: &str) -> ServiceResult<()> {
-		Err(ServiceError::Unavailable("prompt history"))
+		Err(ServiceError::Unavailable { feed: "prompt history" })
 	}
 
 	/// Current collaboration role, links, and presence.
 	fn collaboration(&self) -> ServiceResult<CollabState> {
-		Err(ServiceError::Unavailable("collaboration"))
+		Err(ServiceError::Unavailable { feed: "collaboration" })
 	}
 
 	/// Reads a session-local artifact (`local://PLAN.md`) as text.
 	fn read_local(&self, _url: &str) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("local artifacts"))
+		Err(ServiceError::Unavailable { feed: "local artifacts" })
 	}
 
 	/// Session-local artifact URLs matching a suffix (`-plan.md`, `.md`),
 	/// newest first.
 	fn list_local(&self, _suffix: &str) -> ServiceResult<Vec<Str>> {
-		Err(ServiceError::Unavailable("local artifacts"))
+		Err(ServiceError::Unavailable { feed: "local artifacts" })
 	}
 
 	/// Writes a session-local artifact `name` (`paste-1.md`, no directory
 	/// segments) and returns its `local://` URL.
 	fn write_local(&self, _name: &str, _content: &str) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("local artifacts"))
+		Err(ServiceError::Unavailable { feed: "local artifacts" })
 	}
 
 	/// Internal-URL completions for the composer: `input` is the whole token
@@ -1376,144 +1379,144 @@ pub trait Services: Send + Sync {
 		_input: &str,
 		_max_results: usize,
 	) -> ServiceResult<Vec<UrlCompletion>> {
-		Err(ServiceError::Unavailable("internal url completion"))
+		Err(ServiceError::Unavailable { feed: "internal url completion" })
 	}
 
 	/// The live session's journal as a branch DAG (`/tree`): every entry
 	/// with its parent link, so the tree selector can draw forks.
 	fn journal_tree(&self) -> ServiceResult<Vec<TreeEntry>> {
-		Err(ServiceError::Unavailable("journal tree"))
+		Err(ServiceError::Unavailable { feed: "journal tree" })
 	}
 
 	/// `/btw`: answers a side question on a tool-less child kernel seeded
 	/// with `context`, streaming text deltas then one terminal event.
 	fn btw(&self, _question: &str, _context: &str) -> ServiceResult<Receiver<SideEvent>> {
-		Err(ServiceError::Unavailable("side questions"))
+		Err(ServiceError::Unavailable { feed: "side questions" })
 	}
 
 	/// Agent definitions available to `task`.
 	fn agents(&self) -> ServiceResult<Vec<AgentRow>> {
-		Err(ServiceError::Unavailable("agent definitions"))
+		Err(ServiceError::Unavailable { feed: "agent definitions" })
 	}
 
 	/// Marketplace sources and plugins.
 	fn plugins(&self) -> ServiceResult<PluginsReport> {
-		Err(ServiceError::Unavailable("marketplace"))
+		Err(ServiceError::Unavailable { feed: "marketplace" })
 	}
 
 	/// Plugin commands the session did not start because the operator has
 	/// not approved them, read fresh (an approval made since drops out).
 	fn blocked_plugin_commands(&self) -> ServiceResult<Vec<BlockedCommandRow>> {
-		Err(ServiceError::Unavailable("plugin command approval"))
+		Err(ServiceError::Unavailable { feed: "plugin command approval" })
 	}
 
 	/// Adds a marketplace source.
 	fn add_marketplace(&self, _source: &str) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("marketplace sources"))
+		Err(ServiceError::Unavailable { feed: "marketplace sources" })
 	}
 
 	/// Removes a marketplace source.
 	fn remove_marketplace(&self, _name: &str) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("marketplace sources"))
+		Err(ServiceError::Unavailable { feed: "marketplace sources" })
 	}
 
 	/// `/marketplace update [name]`: re-fetches one or every catalog; the
 	/// receiver settles with a status line.
 	fn update_marketplace(&self, _name: Option<&str>) -> ServiceResult<Pending<Str>> {
-		Err(ServiceError::Unavailable("marketplace update"))
+		Err(ServiceError::Unavailable { feed: "marketplace update" })
 	}
 
 	/// `/marketplace upgrade [name@marketplace]`: upgrades one or every
 	/// outdated plugin; the receiver settles with a status line.
 	fn upgrade_plugins(&self, _spec: Option<&str>) -> ServiceResult<Pending<Str>> {
-		Err(ServiceError::Unavailable("plugin upgrade"))
+		Err(ServiceError::Unavailable { feed: "plugin upgrade" })
 	}
 
 	/// `/memory` operations; returns the text to show.
 	fn memory(&self, _op: MemoryOp) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("memory bank"))
+		Err(ServiceError::Unavailable { feed: "memory bank" })
 	}
 
 	/// Release notes shipped with the binary (markdown).
 	fn changelog(&self) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("changelog"))
+		Err(ServiceError::Unavailable { feed: "changelog" })
 	}
 
 	/// Configured SSH hosts.
 	fn ssh_hosts(&self) -> ServiceResult<Vec<SshHostRow>> {
-		Err(ServiceError::Unavailable("ssh hosts"))
+		Err(ServiceError::Unavailable { feed: "ssh hosts" })
 	}
 
 	/// Adds or replaces one SSH host declaration; returns the status line.
 	fn ssh_add(&self, _spec: &SshHostSpec) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("ssh hosts"))
+		Err(ServiceError::Unavailable { feed: "ssh hosts" })
 	}
 
 	/// Removes one SSH host declaration; returns the status line.
 	fn ssh_remove(&self, _alias: &str, _project: bool) -> ServiceResult<Str> {
-		Err(ServiceError::Unavailable("ssh hosts"))
+		Err(ServiceError::Unavailable { feed: "ssh hosts" })
 	}
 
 	/// Seals and uploads a share snapshot; settles with the viewer URL.
 	fn share(&self, _snapshot: serde_json::Value) -> ServiceResult<Pending<Str>> {
-		Err(ServiceError::Unavailable("share"))
+		Err(ServiceError::Unavailable { feed: "share" })
 	}
 
 	/// Starts a cleanse run over the project.
 	fn cleanse(&self, _request: CleanseRequest) -> ServiceResult<CleanseRun> {
-		Err(ServiceError::Unavailable("cleanse"))
+		Err(ServiceError::Unavailable { feed: "cleanse" })
 	}
 
 	/// The session's working directory (`/dirs`, `/add-dir`, `/move`
 	/// resolve relative paths against it).
 	fn project_dir(&self) -> ServiceResult<PathBuf> {
-		Err(ServiceError::Unavailable("project directory"))
+		Err(ServiceError::Unavailable { feed: "project directory" })
 	}
 
 	/// `/wt [branch]`: forks the checkout into a new linked worktree on
 	/// `branch`, carrying uncommitted changes along.
 	fn create_worktree(&self, _branch: &str) -> ServiceResult<WorktreeInfo> {
-		Err(ServiceError::Unavailable("worktrees"))
+		Err(ServiceError::Unavailable { feed: "worktrees" })
 	}
 
 	/// `/dump`: writes the next LLM request as JSON to a temp file and
 	/// returns its path.
 	fn dump_request(&self, _dom: &omp_dom::Dom) -> ServiceResult<PathBuf> {
-		Err(ServiceError::Unavailable("request dump"))
+		Err(ServiceError::Unavailable { feed: "request dump" })
 	}
 
 	/// `/restart`: marks the process for re-exec with its launch flags once
 	/// the host hands the terminal back.
 	fn request_restart(&self) -> ServiceResult<()> {
-		Err(ServiceError::Unavailable("restart"))
+		Err(ServiceError::Unavailable { feed: "restart" })
 	}
 
 	/// `/mcp …`: runs one MCP management operation; the run settles with
 	/// the report text.
 	fn mcp(&self, _op: McpOp) -> ServiceResult<McpRun> {
-		Err(ServiceError::Unavailable("mcp"))
+		Err(ServiceError::Unavailable { feed: "mcp" })
 	}
 
 	/// `/stats`: syncs the usage index from every stored journal and
 	/// settles with the aggregate report.
 	fn stats(&self) -> ServiceResult<Pending<StatsReport>> {
-		Err(ServiceError::Unavailable("usage statistics"))
+		Err(ServiceError::Unavailable { feed: "usage statistics" })
 	}
 
 	/// `/trace`: the kernel notifications recorded since launch, oldest
 	/// first (bounded by the application).
 	fn trace_events(&self) -> ServiceResult<Vec<TraceEvent>> {
-		Err(ServiceError::Unavailable("kernel trace"))
+		Err(ServiceError::Unavailable { feed: "kernel trace" })
 	}
 
 	/// Executes one native debug operation through the application owner.
 	fn debug(&self, _request: DebugRequest) -> ServiceResult<DebugOutput> {
-		Err(ServiceError::Unavailable("debug services"))
+		Err(ServiceError::Unavailable { feed: "debug services" })
 	}
 
 	/// Writes the current session's bounded redacted raw-SSE ring to a file.
 	fn dump_raw_sse(&self) -> ServiceResult<PathBuf> {
-		Err(ServiceError::Unavailable("raw SSE dump"))
+		Err(ServiceError::Unavailable { feed: "raw SSE dump" })
 	}
 }
 

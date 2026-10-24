@@ -282,7 +282,9 @@ impl QuotaWatch {
 		self.fetched_at = Some(now);
 		match services.usage() {
 			Ok(pending) => self.pending = Some(pending),
-			Err(crate::overlays::services::ServiceError::Unavailable(_)) => self.unavailable = true,
+			Err(crate::overlays::services::ServiceError::Unavailable { feed: _ }) => {
+				self.unavailable = true
+			},
 			Err(_) => {},
 		}
 		None

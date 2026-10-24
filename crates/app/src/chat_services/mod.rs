@@ -291,7 +291,7 @@ impl Services for AppServices {
 		self
 			.history
 			.as_ref()
-			.ok_or(ServiceError::Unavailable("prompt history"))?
+			.ok_or(ServiceError::Unavailable { feed: "prompt history" })?
 			.recent(limit)
 			.map_err(ServiceError::failed)
 	}
@@ -300,7 +300,7 @@ impl Services for AppServices {
 		self
 			.history
 			.as_ref()
-			.ok_or(ServiceError::Unavailable("prompt history"))?
+			.ok_or(ServiceError::Unavailable { feed: "prompt history" })?
 			.search(query, limit)
 			.map_err(ServiceError::failed)
 	}
@@ -309,7 +309,7 @@ impl Services for AppServices {
 		self
 			.history
 			.as_ref()
-			.ok_or(ServiceError::Unavailable("prompt history"))?
+			.ok_or(ServiceError::Unavailable { feed: "prompt history" })?
 			.matching_session_ids(query, limit)
 			.map_err(ServiceError::failed)
 	}
@@ -318,7 +318,7 @@ impl Services for AppServices {
 		let history = self
 			.history
 			.as_ref()
-			.ok_or(ServiceError::Unavailable("prompt history"))?;
+			.ok_or(ServiceError::Unavailable { feed: "prompt history" })?;
 		let session_id = self
 			.state
 			.live_journal
@@ -539,7 +539,7 @@ impl AppServices {
 			let result = match pending.recv_async().await {
 				Ok(Ok(())) => Ok(sf!("Logged out {label}")),
 				Ok(Err(error)) => Err(error),
-				Err(_) => Err(ServiceError::Unavailable("logout result")),
+				Err(_) => Err(ServiceError::Unavailable { feed: "logout result" }),
 			};
 			let _ = tx.send(result);
 		});

@@ -292,7 +292,7 @@ mod tests {
 
 	impl Services for UnreadableStore {
 		fn list_local(&self, _suffix: &str) -> ServiceResult<Vec<Str>> {
-			Err(ServiceError::Unavailable("local store"))
+			Err(ServiceError::Unavailable { feed: "local store" })
 		}
 	}
 
@@ -300,7 +300,7 @@ mod tests {
 	fn local_file_never_guesses_a_free_name_when_listing_fails() {
 		assert_eq!(
 			save_paste_file(&UnreadableStore, "replacement"),
-			Err(ServiceError::Unavailable("local store"))
+			Err(ServiceError::Unavailable { feed: "local store" })
 		);
 	}
 }

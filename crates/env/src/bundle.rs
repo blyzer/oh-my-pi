@@ -73,11 +73,17 @@ pub enum BundleError {
 	#[error(transparent)]
 	Client(#[from] ClientError),
 	/// The archive layout was not the fixed air-gap layout.
-	#[error("invalid air-gap bundle layout: {0}")]
-	Layout(Str),
+	#[error("invalid air-gap bundle layout: {violation}")]
+	Layout {
+		/// The violated layout rule.
+		violation: Str,
+	},
 	/// A bundle payload did not match its manifest's content address.
-	#[error("bundle integrity mismatch for {0}")]
-	Integrity(Str),
+	#[error("bundle integrity mismatch for {member}")]
+	Integrity {
+		/// The mismatched bundle member path.
+		member: Str,
+	},
 }
 
 /// Encodes a deterministic `.ompb` ZIP with the required `bundle.toml` index.
@@ -102,18 +108,20 @@ pub fn pack_bundle(
 	for file in &files {
 		validate_payload_path(&file.path)?;
 		if previous == Some(file.path.as_str()) {
-			return Err(BundleError::Layout(sf!("duplicate bundle member")));
+			return Err(BundleError::Layout { violation: sf!("duplicate bundle member") });
 		}
 		previous = Some(file.path.as_str());
 		let digest = Hash32::sum(&file.contents).to_hex();
 		if !payload_name_matches_digest(&file.path, digest.as_str()) {
-			return Err(BundleError::Layout(sf!("artifact pathname does not match its digest",)));
+			return Err(BundleError::Layout {
+				violation: sf!("artifact pathname does not match its digest",),
+			});
 		}
 		contents.push(BundleEntry {
 			path:   file.path.clone(),
 			sha256: Str::new(digest.as_str()),
 			size:   u64::try_from(file.contents.len())
-				.map_err(|_| BundleError::Layout(sf!("payload length exceeds u64")))?,
+				.map_err(|_| BundleError::Layout { violation: sf!("payload length exceeds u64") })?,
 		});
 	}
 	let manifest =
@@ -137,28 +145,28 @@ pub fn unpack_bundle(bytes: &[u8]) -> Result<AirgapBundle, BundleError> {
 	let mut files = archive.read_all()?;
 	let manifest = files
 		.remove("bundle.toml")
-		.ok_or_else(|| BundleError::Layout(sf!("bundle.toml is missing")))?;
+		.ok_or_else(|| BundleError::Layout { violation: sf!("bundle.toml is missing") })?;
 	let manifest = toml::from_str::<BundleManifest>(
 		str::from_utf8(&manifest)
-			.map_err(|_| BundleError::Layout(sf!("bundle.toml is not UTF-8")))?,
+			.map_err(|_| BundleError::Layout { violation: sf!("bundle.toml is not UTF-8") })?,
 	)?;
 	if manifest.format != BUNDLE_FORMAT {
-		return Err(BundleError::Layout(sf!("unsupported bundle format")));
+		return Err(BundleError::Layout { violation: sf!("unsupported bundle format") });
 	}
 	let mut decoded = Vec::with_capacity(manifest.contents.len());
 	for entry in &manifest.contents {
 		validate_payload_path(&entry.path)?;
 		let contents = files
 			.remove(entry.path.as_str())
-			.ok_or_else(|| BundleError::Integrity(entry.path.clone()))?;
+			.ok_or_else(|| BundleError::Integrity { member: entry.path.clone() })?;
 		verify_entry(entry, &contents)?;
 		if !payload_name_matches_digest(&entry.path, &entry.sha256) {
-			return Err(BundleError::Integrity(entry.path.clone()));
+			return Err(BundleError::Integrity { member: entry.path.clone() });
 		}
 		decoded.push(BundleFile { path: entry.path.clone(), contents: Bytes::from(contents) });
 	}
 	if !files.is_empty() {
-		return Err(BundleError::Layout(sf!("bundle contains an unindexed member")));
+		return Err(BundleError::Layout { violation: sf!("bundle contains an unindexed member") });
 	}
 	Ok(AirgapBundle { manifest, files: decoded })
 }
@@ -176,22 +184,24 @@ pub async fn push_bundle(client: &EnvClient, bundle: &AirgapBundle) -> Result<()
 	if bundle.manifest.format != BUNDLE_FORMAT
 		|| bundle.manifest.contents.len() != bundle.files.len()
 	{
-		return Err(BundleError::Layout(sf!("bundle manifest and payloads differ")));
+		return Err(BundleError::Layout { violation: sf!("bundle manifest and payloads differ") });
 	}
 	for (entry, file) in bundle.manifest.contents.iter().zip(&bundle.files) {
 		if entry.path != file.path {
-			return Err(BundleError::Layout(sf!("bundle payload order differs from manifest",)));
+			return Err(BundleError::Layout {
+				violation: sf!("bundle payload order differs from manifest",),
+			});
 		}
 		validate_payload_path(&entry.path)?;
 		if !payload_name_matches_digest(&entry.path, &entry.sha256) {
-			return Err(BundleError::Integrity(entry.path.clone()));
+			return Err(BundleError::Integrity { member: entry.path.clone() });
 		}
 		verify_entry(entry, &file.contents)?;
 		let hash = hash_bytes(&entry.sha256)?;
 		let stat = client.blob_stat(StatRequest { hash: hash.clone() }).await?;
 		if stat.present {
 			if stat.size != entry.size {
-				return Err(BundleError::Integrity(entry.path.clone()));
+				return Err(BundleError::Integrity { member: entry.path.clone() });
 			}
 			continue;
 		}
@@ -217,7 +227,7 @@ pub async fn push_bundle(client: &EnvClient, bundle: &AirgapBundle) -> Result<()
 		}
 		let stored = upload.commit().await?;
 		if stored.hash != hash || stored.size != entry.size {
-			return Err(BundleError::Integrity(entry.path.clone()));
+			return Err(BundleError::Integrity { member: entry.path.clone() });
 		}
 	}
 	Ok(())
@@ -233,13 +243,13 @@ pub async fn pull_bundle(
 	manifest: BundleManifest,
 ) -> Result<AirgapBundle, BundleError> {
 	if manifest.format != BUNDLE_FORMAT {
-		return Err(BundleError::Layout(sf!("unsupported bundle format")));
+		return Err(BundleError::Layout { violation: sf!("unsupported bundle format") });
 	}
 	let mut files = Vec::with_capacity(manifest.contents.len());
 	for entry in &manifest.contents {
 		validate_payload_path(&entry.path)?;
 		if !payload_name_matches_digest(&entry.path, &entry.sha256) {
-			return Err(BundleError::Integrity(entry.path.clone()));
+			return Err(BundleError::Integrity { member: entry.path.clone() });
 		}
 		let hash = hash_bytes(&entry.sha256)?;
 		let mut download = client
@@ -257,7 +267,7 @@ pub async fn pull_bundle(
 			}
 		}
 		if !complete {
-			return Err(BundleError::Integrity(entry.path.clone()));
+			return Err(BundleError::Integrity { member: entry.path.clone() });
 		}
 		verify_entry(entry, &contents)?;
 		files.push(BundleFile { path: entry.path.clone(), contents: Bytes::from(contents) });
@@ -281,7 +291,9 @@ fn validate_payload_path(path: &str) -> Result<(), BundleError> {
 			.split('/')
 			.any(|part| part.is_empty() || part == "." || part == "..")
 	{
-		return Err(BundleError::Layout(sf!("member path is outside the fixed bundle layout",)));
+		return Err(BundleError::Layout {
+			violation: sf!("member path is outside the fixed bundle layout",),
+		});
 	}
 	Ok(())
 }
@@ -291,11 +303,11 @@ fn is_sha256_hex(value: &str) -> bool {
 }
 
 fn verify_entry(entry: &BundleEntry, contents: &[u8]) -> Result<(), BundleError> {
-	let size =
-		u64::try_from(contents.len()).map_err(|_| BundleError::Integrity(entry.path.clone()))?;
+	let size = u64::try_from(contents.len())
+		.map_err(|_| BundleError::Integrity { member: entry.path.clone() })?;
 	let digest = Hash32::sum(contents).to_hex();
 	if size != entry.size || digest.as_str() != entry.sha256 {
-		return Err(BundleError::Integrity(entry.path.clone()));
+		return Err(BundleError::Integrity { member: entry.path.clone() });
 	}
 	Ok(())
 }
@@ -319,11 +331,13 @@ fn hash_bytes(value: &str) -> Result<Bytes, BundleError> {
 			.bytes()
 			.all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 	{
-		return Err(BundleError::Layout(sf!("bundle digest is not lowercase SHA-256 hex",)));
+		return Err(BundleError::Layout {
+			violation: sf!("bundle digest is not lowercase SHA-256 hex",),
+		});
 	}
 	let hash = hex::decode(value)
 		.into_array::<32>()
-		.map_err(|_| BundleError::Layout(sf!("bundle digest is not SHA-256")))?;
+		.map_err(|_| BundleError::Layout { violation: sf!("bundle digest is not SHA-256") })?;
 	Ok(Bytes::copy_from_slice(&hash))
 }
 

@@ -105,7 +105,7 @@ fn local_path(state: &ServiceState, url: &str) -> ServiceResult<PathBuf> {
 	}
 	local_root(state)
 		.map(|root| root.join(rest))
-		.ok_or(ServiceError::Unavailable("local artifacts"))
+		.ok_or(ServiceError::Unavailable { feed: "local artifacts" })
 }
 
 /// Reads one `local://` artifact of the live session.
@@ -123,7 +123,7 @@ pub(super) fn write_local(state: &ServiceState, name: &str, content: &str) -> Se
 	if name.is_empty() || name == ".." || name.contains(['/', '\\']) {
 		return Err(ServiceError::Failed(Str::new_static("invalid local:// name")));
 	}
-	let root = local_root(state).ok_or(ServiceError::Unavailable("local artifacts"))?;
+	let root = local_root(state).ok_or(ServiceError::Unavailable { feed: "local artifacts" })?;
 	fs::create_dir_all(&root).map_err(|error| io(&error))?;
 	let path = root.join(name);
 	// Write beside, then rename: a reader never sees a half-written paste.
@@ -141,7 +141,7 @@ pub(super) fn write_local(state: &ServiceState, name: &str, content: &str) -> Se
 /// Lists `local://` artifacts of the live session ending in `suffix`,
 /// newest first.
 pub(super) fn list_local(state: &ServiceState, suffix: &str) -> ServiceResult<Vec<Str>> {
-	let root = local_root(state).ok_or(ServiceError::Unavailable("local artifacts"))?;
+	let root = local_root(state).ok_or(ServiceError::Unavailable { feed: "local artifacts" })?;
 	let entries = match fs::read_dir(&root) {
 		Ok(entries) => entries,
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

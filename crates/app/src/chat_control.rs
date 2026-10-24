@@ -2175,7 +2175,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			let result = pending
 				.recv_async()
 				.await
-				.unwrap_or_else(|_| Err(ServiceError::Unavailable("mutation result")));
+				.unwrap_or_else(|_| Err(ServiceError::Unavailable { feed: "mutation result" }));
 			if let Some(mailbox) = ctx.user::<HostMailbox>() {
 				mailbox
 					.post(HostAction::Outcome(Outcome::Service(ServiceOutcome { mutation, result })));

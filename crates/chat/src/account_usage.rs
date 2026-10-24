@@ -130,7 +130,7 @@ impl AccountUsageCache {
 		}
 		match services.active_account_usage(request) {
 			Ok(pending) => self.pending = Some(pending),
-			Err(ServiceError::Unavailable(_)) => self.unavailable = true,
+			Err(ServiceError::Unavailable { feed: _ }) => self.unavailable = true,
 			Err(_) => self.fetched_at = Some(now),
 		}
 		changed

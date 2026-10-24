@@ -135,7 +135,7 @@ omp_con::cmd! {
 		open(ctx, PanelOpener::new(move |cx| {
 			let text = match cx.services.changelog() {
 				Ok(text) => text,
-				Err(ServiceError::Unavailable(_)) => return Err(Str::new_static(NO_CHANGELOG)),
+				Err(ServiceError::Unavailable { feed: _ }) => return Err(Str::new_static(NO_CHANGELOG)),
 				Err(error) => return Err(Str::new(error.to_string())),
 			};
 			let body = changelog_report(&text, full).ok_or_else(|| Str::new_static(NO_CHANGELOG))?;

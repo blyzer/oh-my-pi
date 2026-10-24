@@ -67,7 +67,7 @@ fn open_artifacts(state: &ServiceState) -> ServiceResult<DebugOutput> {
 		.read()
 		.parent()
 		.map(PathBuf::from)
-		.ok_or(ServiceError::Unavailable("session artifacts"))?;
+		.ok_or(ServiceError::Unavailable { feed: "session artifacts" })?;
 	let path = sessions.join("blobs");
 	fs::create_dir_all(&path).map_err(ServiceError::failed)?;
 	omp_core::open::open_path(path.to_string_lossy().as_ref());
@@ -292,7 +292,7 @@ fn clear_cache(state: &ServiceState) -> ServiceResult<DebugOutput> {
 		.read()
 		.parent()
 		.map(PathBuf::from)
-		.ok_or(ServiceError::Unavailable("session artifacts"))?;
+		.ok_or(ServiceError::Unavailable { feed: "session artifacts" })?;
 	let journals = project_journals(&sessions).map_err(ServiceError::failed)?;
 	let store = BlobStore::open(&sessions).map_err(ServiceError::failed)?;
 	let report =
