@@ -160,7 +160,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 		})
 		.await
 		.map_err(|_| WebError::render("image processing task failed"))?
-		.map_err(|error| WebError::render(error.to_string()))?
+		.map_err(|error| WebError::render(error))?
 	{
 		let content = processed.description.clone();
 		return Ok(WebRead {
