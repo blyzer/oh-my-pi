@@ -1545,7 +1545,7 @@ mod config {
 				Ok(x) => Ok(x),
 				Err(e) => match e.kind() {
 					IntErrorKind::PosOverflow => Ok(u16::MAX),
-					_ => Err(LsError::InvalidLineWidth(s.into())),
+					_ => Err(LsError::InvalidLineWidth { width: s.into() }),
 				},
 			}
 		};
@@ -1718,7 +1718,9 @@ mod config {
 						// only fail if invalid block size was specified with --block-size,
 						// ignore invalid block size from env vars
 						if let Some(invalid_block_size) = opt_block_size {
-							return Err(LsError::BlockSizeParseError(invalid_block_size.clone()));
+							return Err(LsError::BlockSizeParseError {
+								argument: invalid_block_size.clone(),
+							});
 						}
 						if is_env_var_blocksize {
 							(DEFAULT_FILE_SIZE_BLOCK_SIZE, DEFAULT_BLOCK_SIZE)
@@ -2035,10 +2037,10 @@ mod config {
 							let older = it.next();
 							match it.next() {
 								None => ok((recent, older)),
-								Some(_) => Err(LsError::TimeStyleParseError(String::from(field))),
+								Some(_) => Err(LsError::TimeStyleParseError { style: String::from(field) }),
 							}
 						},
-						_ => Err(LsError::TimeStyleParseError(String::from(field))),
+						_ => Err(LsError::TimeStyleParseError { style: String::from(field) }),
 					},
 				}
 			}
@@ -3920,8 +3922,11 @@ use display::{display_items, display_size, should_display, show_dir_name};
 
 #[derive(Error, Debug)]
 enum LsError {
-	#[error("invalid line width: '{0}'")]
-	InvalidLineWidth(String),
+	#[error("invalid line width: '{width}'")]
+	InvalidLineWidth {
+		/// The rejected width argument.
+		width: String,
+	},
 
 	#[error("general io error: {0}")]
 	IOError(#[from] io::Error),
@@ -3945,8 +3950,11 @@ enum LsError {
 	})]
 	IOErrorContext(PathBuf, io::Error, bool, bool),
 
-	#[error("invalid --block-size argument '{0}'")]
-	BlockSizeParseError(String),
+	#[error("invalid --block-size argument '{argument}'")]
+	BlockSizeParseError {
+		/// The rejected block-size argument.
+		argument: String,
+	},
 
 	#[error("--dired and --zero are incompatible")]
 	DiredAndZeroAreIncompatible,
@@ -3954,21 +3962,24 @@ enum LsError {
 	#[error("{}: not listing already-listed directory", .0.maybe_quote())]
 	AlreadyListedError(PathBuf),
 
-	#[error("invalid --time-style argument {}\nPossible values are:\n  - [posix-]full-iso\n  - [posix-]long-iso\n  - [posix-]iso\n  - [posix-]locale\n  - +FORMAT (e.g., +%H:%M) for a 'date'-style format\n\nFor more information try --help", .0.quote())]
-	TimeStyleParseError(String),
+	#[error("invalid --time-style argument {}\nPossible values are:\n  - [posix-]full-iso\n  - [posix-]long-iso\n  - [posix-]iso\n  - [posix-]locale\n  - +FORMAT (e.g., +%H:%M) for a 'date'-style format\n\nFor more information try --help", .style.quote())]
+	TimeStyleParseError {
+		/// The rejected time-style argument.
+		style: String,
+	},
 }
 
 impl LsError {
 	fn code(&self) -> i32 {
 		match self {
-			Self::InvalidLineWidth(_) => 2,
+			Self::InvalidLineWidth { width: _ } => 2,
 			Self::IOError(_) => 1,
 			Self::IOErrorContext(_, _, false, _) => 1,
 			Self::IOErrorContext(_, _, true, _) => 2,
-			Self::BlockSizeParseError(_) => 2,
+			Self::BlockSizeParseError { argument: _ } => 2,
 			Self::DiredAndZeroAreIncompatible => 2,
 			Self::AlreadyListedError(_) => 2,
-			Self::TimeStyleParseError(_) => 2,
+			Self::TimeStyleParseError { style: _ } => 2,
 		}
 	}
 }

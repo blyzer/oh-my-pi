@@ -57,17 +57,29 @@ enum MkTempError {
 	#[error("could not persist file {}", .0.quote())]
 	Persist(PathBuf),
 
-	#[error("with --suffix, template {} must end in X", .0.quote())]
-	MustEndInX(String),
+	#[error("with --suffix, template {} must end in X", .template.quote())]
+	MustEndInX {
+		/// The rejected template.
+		template: String,
+	},
 
-	#[error("too few X's in template {}", .0.quote())]
-	TooFewXs(String),
+	#[error("too few X's in template {}", .template.quote())]
+	TooFewXs {
+		/// The rejected template.
+		template: String,
+	},
 
-	#[error("invalid template, {}, contains directory separator", .0.quote())]
-	PrefixContainsDirSeparator(String),
+	#[error("invalid template, {}, contains directory separator", .template.quote())]
+	PrefixContainsDirSeparator {
+		/// The rejected template.
+		template: String,
+	},
 
-	#[error("invalid suffix {}, contains directory separator", .0.quote())]
-	SuffixContainsDirSeparator(String),
+	#[error("invalid suffix {}, contains directory separator", .suffix.quote())]
+	SuffixContainsDirSeparator {
+		/// The rejected suffix.
+		suffix: String,
+	},
 
 	#[error("invalid template, {}; with --tmpdir, it may not be absolute", .0.quote())]
 	InvalidTemplate(OsString),
@@ -186,7 +198,7 @@ impl Params {
 		};
 
 		if options.suffix.is_some() && !template_str.ends_with('X') {
-			return Err(MkTempError::MustEndInX(template_str));
+			return Err(MkTempError::MustEndInX { template: template_str });
 		}
 
 		let (i, j) = match find_last_contiguous_block_of_xs(&template_str) {
@@ -198,7 +210,7 @@ impl Params {
 				let j = template_str.len();
 				(j - 10, j)
 			},
-			None => return Err(MkTempError::TooFewXs(template_str)),
+			None => return Err(MkTempError::TooFewXs { template: template_str }),
 		};
 
 		// Combine the option directory and the template prefix, then split the
@@ -208,7 +220,7 @@ impl Params {
 		let prefix_from_template = &template_str[..i];
 		let prefix_path = Path::new(&prefix_from_option).join(prefix_from_template);
 		if options.treat_as_template && prefix_from_template.contains(MAIN_SEPARATOR) {
-			return Err(MkTempError::PrefixContainsDirSeparator(template_str));
+			return Err(MkTempError::PrefixContainsDirSeparator { template: template_str });
 		}
 		if tmpdir.is_some() && Path::new(prefix_from_template).is_absolute() {
 			return Err(MkTempError::InvalidTemplate(template_str.into()));
@@ -236,7 +248,7 @@ impl Params {
 		let suffix_from_template = &template_str[j..];
 		let suffix = format!("{suffix_from_template}{suffix_from_option}");
 		if suffix.contains(MAIN_SEPARATOR) {
-			return Err(MkTempError::SuffixContainsDirSeparator(suffix));
+			return Err(MkTempError::SuffixContainsDirSeparator { suffix });
 		}
 
 		Ok(Self { directory, prefix, num_rand_chars: j - i, suffix })

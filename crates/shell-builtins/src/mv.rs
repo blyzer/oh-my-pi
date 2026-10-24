@@ -55,24 +55,42 @@ use crate::{
 
 #[derive(Debug, Error)]
 enum MvError {
-	#[error("cannot stat {0}: No such file or directory")]
-	NoSuchFile(String),
-	#[error("cannot stat {0}: Not a directory")]
-	CannotStatNotADirectory(String),
+	#[error("cannot stat {path}: No such file or directory")]
+	NoSuchFile {
+		/// The missing source path.
+		path: String,
+	},
+	#[error("cannot stat {path}: Not a directory")]
+	CannotStatNotADirectory {
+		/// The non-directory path.
+		path: String,
+	},
 	#[error("{0} and {1} are the same file")]
 	SameFile(String, String),
 	#[error("cannot move {0} to a subdirectory of itself, {1}")]
 	SelfTargetSubdirectory(String, String),
-	#[error("cannot overwrite directory {0} with non-directory")]
-	DirectoryToNonDirectory(String),
+	#[error("cannot overwrite directory {path} with non-directory")]
+	DirectoryToNonDirectory {
+		/// The directory that would be overwritten.
+		path: String,
+	},
 	#[error("cannot overwrite non-directory {1} with directory {0}")]
 	NonDirectoryToDirectory(String, String),
-	#[error("target {0}: Not a directory")]
-	NotADirectory(String),
-	#[error("target directory {0}: Not a directory")]
-	TargetNotADirectory(String),
-	#[error("failed to access {0}: Not a directory")]
-	FailedToAccessNotADirectory(String),
+	#[error("target {target}: Not a directory")]
+	NotADirectory {
+		/// The non-directory target.
+		target: String,
+	},
+	#[error("target directory {target}: Not a directory")]
+	TargetNotADirectory {
+		/// The non-directory target directory.
+		target: String,
+	},
+	#[error("failed to access {path}: Not a directory")]
+	FailedToAccessNotADirectory {
+		/// The inaccessible path.
+		path: String,
+	},
 }
 
 #[derive(Debug, Error)]
@@ -394,7 +412,7 @@ fn run_matches(matches: &ArgMatches, host: &mut Host) -> MvResult<()> {
 	if let Some(maybe_dir) = &target_dir
 		&& !host.resolve(Path::new(maybe_dir)).is_dir()
 	{
-		return Err(MvError::TargetNotADirectory(maybe_dir.quote().to_string()).into());
+		return Err(MvError::TargetNotADirectory { target: maybe_dir.quote().to_string() }.into());
 	}
 
 	let context = if matches.get_flag(OPT_SELINUX) {
@@ -595,9 +613,9 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 
 	if source_fs.symlink_metadata().is_err() {
 		return Err(if path_ends_with_terminator(source) {
-			MvError::CannotStatNotADirectory(source.quote().to_string()).into()
+			MvError::CannotStatNotADirectory { path: source.quote().to_string() }.into()
 		} else {
-			MvError::NoSuchFile(source.quote().to_string()).into()
+			MvError::NoSuchFile { path: source.quote().to_string() }.into()
 		});
 	}
 
@@ -613,7 +631,7 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 		&& !opts.no_target_dir
 		&& opts.update != UpdateMode::IfOlder
 	{
-		return Err(MvError::FailedToAccessNotADirectory(target.quote().to_string()).into());
+		return Err(MvError::FailedToAccessNotADirectory { path: target.quote().to_string() }.into());
 	}
 
 	assert_not_same_file(host, source, target, target_is_dir, opts)?;
@@ -638,7 +656,7 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 					},
 				)
 			} else {
-				Err(MvError::DirectoryToNonDirectory(target.quote().to_string()).into())
+				Err(MvError::DirectoryToNonDirectory { path: target.quote().to_string() }.into())
 			}
 		} else {
 			move_files_into_dir(host, &[source.to_path_buf()], target, opts)
@@ -813,7 +831,7 @@ fn move_files_into_dir(
 	};
 
 	if !host.resolve(target_dir).is_dir() {
-		return Err(MvError::NotADirectory(target_dir.quote().to_string()).into());
+		return Err(MvError::NotADirectory { target: target_dir.quote().to_string() }.into());
 	}
 
 	let display_manager = progress_manager(host, options.progress_bar);
@@ -840,7 +858,7 @@ fn move_files_into_dir(
 
 	for sourcepath in files {
 		if host.resolve(sourcepath).symlink_metadata().is_err() {
-			show(host, &MvError::NoSuchFile(sourcepath.quote().to_string()));
+			show(host, &MvError::NoSuchFile { path: sourcepath.quote().to_string() });
 			continue;
 		}
 
@@ -852,7 +870,7 @@ fn move_files_into_dir(
 		let targetpath = if let Some(name) = sourcepath.file_name() {
 			target_dir.join(name)
 		} else {
-			show(host, &MvError::NoSuchFile(sourcepath.quote().to_string()));
+			show(host, &MvError::NoSuchFile { path: sourcepath.quote().to_string() });
 			continue;
 		};
 
