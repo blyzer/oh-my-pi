@@ -1114,7 +1114,7 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 						yield Ev::Aborted(match interrupted {
 							Ok(value) => Abort::EffectsUnknown { reason: value.reason },
 							Err(InterruptWaitError::Closed) => Abort::EffectsUnknown { reason: sf!("invocation owner disappeared during transaction") },
-							Err(InterruptWaitError::Protocol(reason)) => Abort::EffectsUnknown { reason },
+							Err(InterruptWaitError::Protocol { violation: reason }) => Abort::EffectsUnknown { reason },
 						});
 						None
 					},
@@ -1518,7 +1518,7 @@ fn param_event(error: ParamError) -> Ev<EditUpdate, Payload, Fault> {
 	match error {
 		ParamError::Args(issue) => Ev::Args(*issue),
 		ParamError::Interrupted(value) => Ev::Aborted(Abort::Interrupted { reason: value.reason }),
-		ParamError::Protocol(reason) => Ev::Aborted(Abort::Skipped { reason }),
+		ParamError::Protocol { violation: reason } => Ev::Aborted(Abort::Skipped { reason }),
 	}
 }
 
@@ -1526,7 +1526,7 @@ fn commit_event(error: CommitError) -> Ev<EditUpdate, Payload, Fault> {
 	match error {
 		CommitError::Aborted => Ev::Aborted(Abort::InputDropped),
 		CommitError::Interrupted(value) => Ev::Aborted(Abort::Interrupted { reason: value.reason }),
-		CommitError::Protocol(reason) => Ev::Aborted(Abort::Skipped { reason }),
+		CommitError::Protocol { violation: reason } => Ev::Aborted(Abort::Skipped { reason }),
 	}
 }
 

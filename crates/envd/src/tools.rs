@@ -995,7 +995,7 @@ fn device_catalog_error(error: LeafReplacementError) -> ControlProtocolError {
 				 {manager_generation}"
 			),
 		),
-		LeafReplacementError::UnknownName(name) => ControlProtocolError::new(
+		LeafReplacementError::UnknownName { name } => ControlProtocolError::new(
 			"DeviceUnavailable",
 			format!("dynamic device is not mounted: {name}"),
 		),

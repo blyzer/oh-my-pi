@@ -508,7 +508,7 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 					interrupted = interrupt => { yield Ev::Aborted(match interrupted {
 						Ok(value) => Abort::EffectsUnknown { reason: value.reason },
 						Err(InterruptWaitError::Closed) => Abort::EffectsUnknown { reason: sf!("invocation owner disappeared during transaction") },
-						Err(InterruptWaitError::Protocol(reason)) => Abort::EffectsUnknown { reason },
+						Err(InterruptWaitError::Protocol { violation: reason }) => Abort::EffectsUnknown { reason },
 					}); None },
 				}
 			};

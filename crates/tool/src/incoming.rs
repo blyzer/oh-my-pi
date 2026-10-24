@@ -307,8 +307,11 @@ pub enum ParamError {
 	#[error("argument pull interrupted")]
 	Interrupted(Interrupt),
 	/// Framing violated the one-stream commitment protocol.
-	#[error("invalid invocation framing: {0}")]
-	Protocol(Str),
+	#[error("invalid invocation framing: {violation}")]
+	Protocol {
+		/// The violated framing rule.
+		violation: Str,
+	},
 }
 
 /// Failure while waiting for the explicit effect gate.
@@ -321,8 +324,11 @@ pub enum CommitError {
 	#[error("argument commitment interrupted")]
 	Interrupted(Interrupt),
 	/// Framing violated the one-stream commitment protocol.
-	#[error("invalid invocation framing: {0}")]
-	Protocol(Str),
+	#[error("invalid invocation framing: {violation}")]
+	Protocol {
+		/// The violated framing rule.
+		violation: Str,
+	},
 }
 /// Failure while waiting for the next invocation interrupt.
 #[derive(Debug, Error)]
@@ -331,8 +337,11 @@ pub enum InterruptWaitError {
 	#[error("invocation event stream closed")]
 	Closed,
 	/// Framing violated the one-stream invocation protocol.
-	#[error("invalid invocation framing: {0}")]
-	Protocol(Str),
+	#[error("invalid invocation framing: {violation}")]
+	Protocol {
+		/// The violated framing rule.
+		violation: Str,
+	},
 }
 /// Immutable result of strict whole-structure argument finalization.
 #[derive(Clone, Debug, PartialEq)]
@@ -406,7 +415,7 @@ impl IncomingCursor<'_> {
 			.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
 			.is_err()
 		{
-			return Err(ParamError::Protocol(sf!("concurrent pull")));
+			return Err(ParamError::Protocol { violation: sf!("concurrent pull") });
 		}
 		let _slot = PullSlot(&self.state.active);
 		let declaration = self
@@ -416,8 +425,9 @@ impl IncomingCursor<'_> {
 		let slop_path = declared_pull_path(path, self.rev.zip(self.arg_specs));
 		let mode = match mode {
 			PullMode::Chunk(_) | PullMode::Line(_) => {
-				let (path_id, _) = declaration
-					.ok_or_else(|| ParamError::Protocol(sf!("chunk pull requires a declared path")))?;
+				let (path_id, _) = declaration.ok_or_else(|| ParamError::Protocol {
+					violation: sf!("chunk pull requires a declared path"),
+				})?;
 				let emitted = self
 					.state
 					.chunks
@@ -894,16 +904,21 @@ impl<'c> IncomingParams<'c> {
 	/// document. A second take is a protocol error.
 	pub fn cursor(&mut self) -> Result<IncomingCursor<'c>, ParamError> {
 		if self.direct.is_none() {
-			return Err(ParamError::Protocol(sf!("path cursor requires an InvocationFeed channel",)));
+			return Err(ParamError::Protocol {
+				violation: sf!("path cursor requires an InvocationFeed channel",),
+			});
 		}
-		self.sync_direct_problem().map_err(ParamError::Protocol)?;
+		self
+			.sync_direct_problem()
+			.map_err(|violation| ParamError::Protocol { violation })?;
 		if self.cursor_issued {
-			return Err(ParamError::Protocol(sf!("JSON cursor session was already consumed",)));
+			return Err(ParamError::Protocol {
+				violation: sf!("JSON cursor session was already consumed",),
+			});
 		}
-		let doc = self
-			.doc
-			.take()
-			.ok_or_else(|| ParamError::Protocol(sf!("JSON cursor session was already consumed")))?;
+		let doc = self.doc.take().ok_or_else(|| ParamError::Protocol {
+			violation: sf!("JSON cursor session was already consumed"),
+		})?;
 		self.cursor_issued = true;
 		let (rev, arg_specs) = self
 			.arg_specs
@@ -984,7 +999,10 @@ impl<'c> IncomingParams<'c> {
 		}
 		loop {
 			if let Ok(event) = self.events.recv_async().await {
-				if let Some(interrupt) = self.apply(event).map_err(InterruptWaitError::Protocol)? {
+				if let Some(interrupt) = self
+					.apply(event)
+					.map_err(|violation| InterruptWaitError::Protocol { violation })?
+				{
 					self.interrupts.pop_back();
 					return Ok(interrupt);
 				}
@@ -999,16 +1017,17 @@ impl<'c> IncomingParams<'c> {
 		&mut self,
 		observe: bool,
 	) -> Result<&FinalizedArgs, ParamError> {
-		self.sync_direct_problem().map_err(ParamError::Protocol)?;
+		self
+			.sync_direct_problem()
+			.map_err(|violation| ParamError::Protocol { violation })?;
 		if self.finalized.is_none() {
 			let raw = self
 				.drive_commit_raw(observe)
 				.await
 				.map_err(commit_param_error)?;
-			let cursor = self
-				.finalizer
-				.clone()
-				.ok_or_else(|| ParamError::Protocol(sf!("argument finalizer cursor is unavailable")))?;
+			let cursor = self.finalizer.clone().ok_or_else(|| ParamError::Protocol {
+				violation: sf!("argument finalizer cursor is unavailable"),
+			})?;
 			let observed_raw = cursor
 				.raw_document()
 				.await
@@ -1023,9 +1042,9 @@ impl<'c> IncomingParams<'c> {
 				feed.finish();
 				doc.cursor()
 			} else {
-				return Err(ParamError::Protocol(sf!(
-					"finalized arguments differ from streamed fragments",
-				)));
+				return Err(ParamError::Protocol {
+					violation: sf!("finalized arguments differ from streamed fragments",),
+				});
 			};
 			let pulled = cursor
 				.pull_at(&[], PullMode::Complete, "an argument object")
@@ -1078,17 +1097,18 @@ impl<'c> IncomingParams<'c> {
 		F: FnOnce(IncomingDoc) -> Fut,
 		Fut: Future<Output = Result<R, IncomingError>>,
 	{
-		self.sync_direct_problem().map_err(ParamError::Protocol)?;
+		self
+			.sync_direct_problem()
+			.map_err(|violation| ParamError::Protocol { violation })?;
 		if let Some(problem) = self.protocol.clone() {
-			return Err(ParamError::Protocol(problem));
+			return Err(ParamError::Protocol { violation: problem });
 		}
 		if observe && let Some(interrupt) = self.interrupts.pop_front() {
 			return Err(ParamError::Interrupted(interrupt));
 		}
-		let doc = self
-			.doc
-			.take()
-			.ok_or_else(|| ParamError::Protocol(sf!("JSON cursor session was already consumed")))?;
+		let doc = self.doc.take().ok_or_else(|| ParamError::Protocol {
+			violation: sf!("JSON cursor session was already consumed"),
+		})?;
 		let arg_specs = self.arg_specs;
 		let events = self.events.clone();
 		let pull = operation(doc).fuse();
@@ -1100,7 +1120,7 @@ impl<'c> IncomingParams<'c> {
 				result = pull => return result.map_err(|error| param_error(error, arg_specs)),
 				event = receive => match event {
 					Ok(event) => {
-						if let Some(interrupt) = self.apply(event).map_err(ParamError::Protocol)?
+						if let Some(interrupt) = self.apply(event).map_err(|violation| ParamError::Protocol { violation })?
 							&& observe
 						{
 							self.interrupts.pop_back();
@@ -1114,9 +1134,11 @@ impl<'c> IncomingParams<'c> {
 	}
 
 	async fn drive_commit_raw(&mut self, observe: bool) -> Result<Str, CommitError> {
-		self.sync_direct_problem().map_err(CommitError::Protocol)?;
+		self
+			.sync_direct_problem()
+			.map_err(|violation| CommitError::Protocol { violation })?;
 		if let Some(problem) = self.protocol.clone() {
-			return Err(CommitError::Protocol(problem));
+			return Err(CommitError::Protocol { violation: problem });
 		}
 		if let Some(raw) = self.committed.clone() {
 			return Ok(raw);
@@ -1126,13 +1148,17 @@ impl<'c> IncomingParams<'c> {
 		}
 		loop {
 			if let Ok(event) = self.events.recv_async().await {
-				if let Some(interrupt) = self.apply(event).map_err(CommitError::Protocol)?
+				if let Some(interrupt) = self
+					.apply(event)
+					.map_err(|violation| CommitError::Protocol { violation })?
 					&& observe
 				{
 					self.interrupts.pop_back();
 					return Err(CommitError::Interrupted(interrupt));
 				}
-				self.sync_direct_problem().map_err(CommitError::Protocol)?;
+				self
+					.sync_direct_problem()
+					.map_err(|violation| CommitError::Protocol { violation })?;
 				if let Some(raw) = self.committed.clone() {
 					return Ok(raw);
 				}
@@ -1254,18 +1280,18 @@ fn commit_param_error(error: CommitError) -> ParamError {
 			malformed_issue_with_kind("complete JSON arguments", ArgIssueKind::Aborted, None)
 		},
 		CommitError::Interrupted(interrupt) => ParamError::Interrupted(interrupt),
-		CommitError::Protocol(problem) => ParamError::Protocol(problem),
+		CommitError::Protocol { violation: problem } => ParamError::Protocol { violation: problem },
 	}
 }
 
 fn param_commit_error(error: ParamError) -> CommitError {
 	match error {
 		ParamError::Args(issue) if issue.kind == ArgIssueKind::Aborted => CommitError::Aborted,
-		ParamError::Args(_) => {
-			CommitError::Protocol(sf!("argument finalization failed before authorization"))
+		ParamError::Args(_) => CommitError::Protocol {
+			violation: sf!("argument finalization failed before authorization"),
 		},
 		ParamError::Interrupted(interrupt) => CommitError::Interrupted(interrupt),
-		ParamError::Protocol(problem) => CommitError::Protocol(problem),
+		ParamError::Protocol { violation: problem } => CommitError::Protocol { violation: problem },
 	}
 }
 
@@ -1509,7 +1535,7 @@ mod tests {
 		feed
 			.args_committed(sf!(r#"{{"command":"echo never"}}"#))
 			.expect("commit remains connected");
-		assert!(matches!(block_on(params.committed()), Err(CommitError::Protocol(_)),));
+		assert!(matches!(block_on(params.committed()), Err(CommitError::Protocol { violation: _ }),));
 	}
 
 	#[test]
@@ -1538,7 +1564,7 @@ mod tests {
 			.args_committed(sf!(r#"{{"path":"elsewhere"}}"#))
 			.expect("commit remains connected");
 		let error = block_on(params.committed()).expect_err("divergent values are rejected");
-		assert!(matches!(error, CommitError::Protocol(message)
+		assert!(matches!(error, CommitError::Protocol { violation: message }
 			if message.contains("committed arguments differ")));
 	}
 

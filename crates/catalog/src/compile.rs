@@ -1133,8 +1133,11 @@ pub enum CompileError {
 	#[error("computed pricing multiplier is not finite")]
 	InvalidPriceMultiplier,
 	/// Source data violated a catalog invariant.
-	#[error("catalog invariant failed: {0}")]
-	Invariant(Str),
+	#[error("catalog invariant failed: {invariant}")]
+	Invariant {
+		/// The violated invariant.
+		invariant: Str,
+	},
 }
 
 /// Parses the two checked-in oracle source formats into typed records.
@@ -3012,12 +3015,14 @@ fn compile_oauth_specs(
 					.callback_path
 					.as_ref()
 					.map_or("/callback", Str::as_str);
-				let port = source.callback_port.ok_or_else(|| {
-					CompileError::Invariant(Str::from(format!(
-						"OAuth PKCE flow `{}` has no callback port",
-						source.provider
-					)))
-				})?;
+				let port = source
+					.callback_port
+					.ok_or_else(|| CompileError::Invariant {
+						invariant: Str::from(format!(
+							"OAuth PKCE flow `{}` has no callback port",
+							source.provider
+						)),
+					})?;
 				OAuthFlowSpec::Pkce {
 					authorize_url: source.authorize_url.clone(),
 					redirect_uri: Str::from(format!("http://{host}:{port}{path}")),
@@ -3035,11 +3040,11 @@ fn compile_oauth_specs(
 			},
 			SourceOAuthKind::CustomExchange => OAuthFlowSpec::Custom {
 				authorize_url: source.authorize_url.clone(),
-				exchange:      source.exchange.ok_or_else(|| {
-					CompileError::Invariant(Str::from(format!(
+				exchange:      source.exchange.ok_or_else(|| CompileError::Invariant {
+					invariant: Str::from(format!(
 						"custom OAuth flow `{}` has no exchange engine",
 						source.provider
-					)))
+					)),
 				})?,
 				parameters:    custom_parameters,
 				polling:       None,
@@ -3062,10 +3067,9 @@ fn compile_oauth_specs(
 		))?;
 		let id = OAuthSpecId::new(content_id("oauth", &canonical));
 		if ids.insert(source.provider.clone(), id.clone()).is_some() {
-			return Err(CompileError::Invariant(Str::from(format!(
-				"duplicate OAuth flow `{}`",
-				source.provider
-			))));
+			return Err(CompileError::Invariant {
+				invariant: Str::from(format!("duplicate OAuth flow `{}`", source.provider)),
+			});
 		}
 		specs.push(OAuthSpec {
 			id,
@@ -3307,9 +3311,9 @@ fn compile_providers(
 			let base_url = canonical_provider_base(&provider_key, source.base_url.clone());
 			let route_id = RouteId::new(format!("{provider_key}/{}", codec.as_str()));
 			if owned_routes.contains(&route_id) {
-				return Err(CompileError::Invariant(sf!(
-					"provider `{provider_key}` declares duplicate route `{route_id}`"
-				)));
+				return Err(CompileError::Invariant {
+					invariant: sf!("provider `{provider_key}` declares duplicate route `{route_id}`"),
+				});
 			}
 			let origin = base_url
 				.as_str()
@@ -3432,19 +3436,21 @@ fn compile_model_routes(
 	let mut output = BTreeMap::new();
 	let mut route_by_shape: BTreeMap<Vec<u8>, RouteId> = BTreeMap::new();
 	for (provider, rows) in models {
-		let inherited = provider_routes.get(provider).ok_or_else(|| {
-			CompileError::Invariant(Str::from(format!(
-				"model provider `{provider}` has no curated route"
-			)))
-		})?;
-		let primary_id = inherited.first().ok_or_else(|| {
-			CompileError::Invariant(Str::from(format!("provider `{provider}` has no primary route")))
+		let inherited = provider_routes
+			.get(provider)
+			.ok_or_else(|| CompileError::Invariant {
+				invariant: Str::from(format!("model provider `{provider}` has no curated route")),
+			})?;
+		let primary_id = inherited.first().ok_or_else(|| CompileError::Invariant {
+			invariant: Str::from(format!("provider `{provider}` has no primary route")),
 		})?;
 		let primary = routes
 			.iter()
 			.find(|route| &route.id == primary_id)
 			.cloned()
-			.ok_or_else(|| CompileError::Invariant(sf!("provider primary route is missing")))?;
+			.ok_or_else(|| CompileError::Invariant {
+				invariant: sf!("provider primary route is missing"),
+			})?;
 		for (model, row) in rows {
 			let embedding_override = exact_capability_override(provider, model)
 				.is_some_and(|override_| override_.correction == CapabilityCorrection::Embedding);
@@ -3490,11 +3496,12 @@ fn compile_model_routes(
 				operations.insert_kind(OperationKind::Embed);
 			}
 			if !row.headers.is_empty() {
-				let profile = compile_headers(&row.headers).map_err(|error| {
-					CompileError::Invariant(Str::from(format!(
-						"source model `{provider}/{model}` has invalid headers: {error}"
-					)))
-				})?;
+				let profile =
+					compile_headers(&row.headers).map_err(|error| CompileError::Invariant {
+						invariant: Str::from(format!(
+							"source model `{provider}/{model}` has invalid headers: {error}"
+						)),
+					})?;
 				route.headers = profile.id.clone();
 				if !header_profiles
 					.iter()
@@ -3572,12 +3579,18 @@ fn compile_models(
 	let mut output = Vec::new();
 	let mut aliases = Vec::new();
 	for (provider, rows) in providers {
-		let provider_policy_id = provider_policies.get(&provider).ok_or_else(|| {
-			CompileError::Invariant(Str::from(format!("provider `{provider}` has no wire policy")))
-		})?;
-		let provider_policy = policies
-			.get(provider_policy_id)
-			.ok_or_else(|| CompileError::Invariant(sf!("provider wire policy was not interned",)))?;
+		let provider_policy_id =
+			provider_policies
+				.get(&provider)
+				.ok_or_else(|| CompileError::Invariant {
+					invariant: Str::from(format!("provider `{provider}` has no wire policy")),
+				})?;
+		let provider_policy =
+			policies
+				.get(provider_policy_id)
+				.ok_or_else(|| CompileError::Invariant {
+					invariant: sf!("provider wire policy was not interned",),
+				})?;
 		// The native forced-tool-choice penalty is a host-imposed contract
 		// declared once per provider; every model served by that host pays it
 		// unless a more specific rule declares otherwise (ADR 0019).
@@ -3586,10 +3599,13 @@ fn compile_models(
 			.get(&provider)
 			.map(Vec::as_slice)
 			.unwrap_or_default();
-		let provider_transport = provider_transports
-			.get(&provider)
-			.copied()
-			.ok_or_else(|| CompileError::Invariant(sf!("provider transport is missing")))?;
+		let provider_transport =
+			provider_transports
+				.get(&provider)
+				.copied()
+				.ok_or_else(|| CompileError::Invariant {
+					invariant: sf!("provider transport is missing"),
+				})?;
 		let identities: BTreeMap<Str, ModelClassification> = rows
 			.iter()
 			.map(|(model, row)| {
@@ -3695,10 +3711,8 @@ fn compile_models(
 			for (wire, row, _) in &members {
 				let member_routes = model_routes
 					.get(&(provider.clone(), wire.clone()))
-					.ok_or_else(|| {
-						CompileError::Invariant(Str::from(format!(
-							"source model `{provider}/{wire}` has no route"
-						)))
+					.ok_or_else(|| CompileError::Invariant {
+						invariant: Str::from(format!("source model `{provider}/{wire}` has no route")),
 					})?;
 				for route in member_routes {
 					routes.push(route.clone());
@@ -3843,12 +3857,13 @@ fn compile_models(
 				});
 			}
 			if let Some(kind) = first.1.apply_patch_tool_type.as_deref() {
-				wire_policy.tool.apply_patch =
-					Some(kind.parse::<ApplyPatchWireKind>().map_err(|_| {
-						CompileError::Invariant(Str::from(format!(
+				wire_policy.tool.apply_patch = Some(kind.parse::<ApplyPatchWireKind>().map_err(
+					|_| CompileError::Invariant {
+						invariant: Str::from(format!(
 							"unknown apply-patch wire kind `{kind}` for `{provider}/{logical_id}`"
-						)))
-					})?);
+						)),
+					},
+				)?);
 			}
 			if let Some(supported) = first.1.supports_computer_use {
 				wire_policy.tool.computer_use = Some(if supported {
@@ -3889,10 +3904,11 @@ fn compile_models(
 			if thinking.is_some()
 				&& let Some(mode) = first.1.reasoning_mode.as_deref()
 			{
-				thinking_routing.reasoning_mode =
-					Some(mode.parse::<ReasoningMode>().map_err(|_| {
-						CompileError::Invariant(Str::from(format!("unknown reasoning mode `{mode}`")))
-					})?);
+				thinking_routing.reasoning_mode = Some(mode.parse::<ReasoningMode>().map_err(
+					|_| CompileError::Invariant {
+						invariant: Str::from(format!("unknown reasoning mode `{mode}`")),
+					},
+				)?);
 			}
 			let key = ModelKey::provider_scoped(ProviderId::from_ref(&provider), &logical_id);
 			let thinking_id = thinking.as_ref().map(|profile| {
@@ -4078,10 +4094,12 @@ fn compile_models(
 		.windows(2)
 		.find(|pair| pair[0].alias == pair[1].alias)
 	{
-		return Err(CompileError::Invariant(Str::from(format!(
-			"variant alias has multiple logical targets: `{}` targets `{}` and `{}`",
-			pair[0].alias, pair[0].target, pair[1].target
-		))));
+		return Err(CompileError::Invariant {
+			invariant: Str::from(format!(
+				"variant alias has multiple logical targets: `{}` targets `{}` and `{}`",
+				pair[0].alias, pair[0].target, pair[1].target
+			)),
+		});
 	}
 	let attached = output
 		.iter()
@@ -4605,8 +4623,8 @@ where
 {
 	source
 		.map(|value| {
-			value.parse().map_err(|_| {
-				CompileError::Invariant(Str::from(format!("unknown policy value `{value}`")))
+			value.parse().map_err(|_| CompileError::Invariant {
+				invariant: Str::from(format!("unknown policy value `{value}`")),
 			})
 		})
 		.transpose()
@@ -4735,9 +4753,11 @@ fn compile_thinking(
 		profile.requires_effort = Some(true);
 	}
 	if let Some(profile) = &profile {
-		profile.validate().map_err(|error| {
-			CompileError::Invariant(Str::from(format!("invalid thinking profile: {error}")))
-		})?;
+		profile
+			.validate()
+			.map_err(|error| CompileError::Invariant {
+				invariant: Str::from(format!("invalid thinking profile: {error}")),
+			})?;
 	}
 	let mut routing = ThinkingRouting::default();
 	if !tier_collapsed && let Some(thinking) = source {
@@ -4854,14 +4874,18 @@ fn compile_thinking(
 		routing.effort_routing.retain(|effort, _| {
 			(*effort == ThinkingEffort::Off && provider != "cursor") || profile.supports(*effort)
 		});
-		routing.validate(profile).map_err(|error| {
-			CompileError::Invariant(Str::from(format!("invalid thinking routing: {error}")))
-		})?;
+		routing
+			.validate(profile)
+			.map_err(|error| CompileError::Invariant {
+				invariant: Str::from(format!("invalid thinking routing: {error}")),
+			})?;
 	} else if !routing.effort_map.is_empty() || !routing.effort_routing.is_empty() {
-		return Err(CompileError::Invariant(Str::from(format!(
-			"thinking routing exists without a thinking profile: {provider}/{}",
-			members.first().map_or("?", |(wire, ..)| wire.as_str())
-		))));
+		return Err(CompileError::Invariant {
+			invariant: Str::from(format!(
+				"thinking routing exists without a thinking profile: {provider}/{}",
+				members.first().map_or("?", |(wire, ..)| wire.as_str())
+			)),
+		});
 	}
 	Ok((profile, routing))
 }
@@ -5478,9 +5502,11 @@ fn compile_pricing(
 	let mut authored_long_context = authored_long_context
 		.map(|value| {
 			serde_json::from_value::<SourceLongContextCost>(value.clone()).map_err(|error| {
-				CompileError::Invariant(Str::from(format!(
-					"invalid authored long-context cost for `{provider}/{model}`: {error}"
-				)))
+				CompileError::Invariant {
+					invariant: Str::from(format!(
+						"invalid authored long-context cost for `{provider}/{model}`: {error}"
+					)),
+				}
 			})
 		})
 		.transpose()?;
@@ -5519,8 +5545,8 @@ fn compile_pricing(
 			.into_boxed_slice(),
 		});
 	}
-	Pricing::new(components, tiers).map_err(|error| {
-		CompileError::Invariant(Str::from(format!("invalid pricing schedule: {error}")))
+	Pricing::new(components, tiers).map_err(|error| CompileError::Invariant {
+		invariant: Str::from(format!("invalid pricing schedule: {error}")),
 	})
 }
 
@@ -5563,12 +5589,14 @@ fn decimal_millionths(number: &Number) -> Result<u64, CompileError> {
 }
 fn decimal_metric_millionths(number: &Number) -> Result<u32, CompileError> {
 	u32::try_from(decimal_millionths(number)?)
-		.map_err(|_| CompileError::Invariant(sf!("catalog metric is out of range")))
+		.map_err(|_| CompileError::Invariant { invariant: sf!("catalog metric is out of range") })
 }
 fn decimal_scaled(number: &Number, scale: usize) -> Result<u64, CompileError> {
 	let text = number.to_string();
 	if text.starts_with('-') {
-		return Err(CompileError::Invariant(Str::from(format!("negative decimal `{text}`"))));
+		return Err(CompileError::Invariant {
+			invariant: Str::from(format!("negative decimal `{text}`")),
+		});
 	}
 	let (mantissa, exponent) = text
 		.split_once(['e', 'E'])
@@ -5576,35 +5604,37 @@ fn decimal_scaled(number: &Number, scale: usize) -> Result<u64, CompileError> {
 			(mantissa, exponent.parse::<i32>().unwrap_or(i32::MIN))
 		});
 	if exponent == i32::MIN {
-		return Err(CompileError::Invariant(Str::from(format!("invalid decimal `{text}`"))));
+		return Err(CompileError::Invariant {
+			invariant: Str::from(format!("invalid decimal `{text}`")),
+		});
 	}
 	let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
 	let digits = format!("{whole}{fraction}");
 	let coefficient: u128 = digits
 		.parse()
-		.map_err(|_| CompileError::Invariant(sf!("decimal is out of range")))?;
+		.map_err(|_| CompileError::Invariant { invariant: sf!("decimal is out of range") })?;
 	let shift = exponent + i32::try_from(scale).expect("small fixed decimal scale")
 		- i32::try_from(fraction.len())
-			.map_err(|_| CompileError::Invariant(sf!("decimal is out of range")))?;
-	let scaled = if shift >= 0 {
-		coefficient
-			.checked_mul(
-				10_u128
-					.checked_pow(shift as u32)
-					.ok_or_else(|| CompileError::Invariant(sf!("decimal is out of range")))?,
-			)
-			.ok_or_else(|| CompileError::Invariant(sf!("decimal is out of range")))?
-	} else {
-		let divisor = 10_u128
-			.checked_pow((-shift) as u32)
-			.ok_or_else(|| CompileError::Invariant(sf!("decimal is out of range")))?;
-		let quotient = coefficient / divisor;
-		let remainder = coefficient % divisor;
-		quotient
-			.checked_add(u128::from(remainder >= divisor.div_ceil(2)))
-			.ok_or_else(|| CompileError::Invariant(sf!("decimal is out of range")))?
-	};
-	u64::try_from(scaled).map_err(|_| CompileError::Invariant(sf!("decimal is out of range")))
+			.map_err(|_| CompileError::Invariant { invariant: sf!("decimal is out of range") })?;
+	let scaled =
+		if shift >= 0 {
+			coefficient
+				.checked_mul(10_u128.checked_pow(shift as u32).ok_or_else(|| {
+					CompileError::Invariant { invariant: sf!("decimal is out of range") }
+				})?)
+				.ok_or_else(|| CompileError::Invariant { invariant: sf!("decimal is out of range") })?
+		} else {
+			let divisor = 10_u128
+				.checked_pow((-shift) as u32)
+				.ok_or_else(|| CompileError::Invariant { invariant: sf!("decimal is out of range") })?;
+			let quotient = coefficient / divisor;
+			let remainder = coefficient % divisor;
+			quotient
+				.checked_add(u128::from(remainder >= divisor.div_ceil(2)))
+				.ok_or_else(|| CompileError::Invariant { invariant: sf!("decimal is out of range") })?
+		};
+	u64::try_from(scaled)
+		.map_err(|_| CompileError::Invariant { invariant: sf!("decimal is out of range") })
 }
 fn zero_number() -> Number {
 	Number::from(0)
@@ -5782,9 +5812,12 @@ fn compile_auth(
 				)
 			},
 			SourceAuth::Oauth { flow } => {
-				let oauth = oauth_ids.get(flow).cloned().ok_or_else(|| {
-					CompileError::Invariant(Str::from(format!("unknown OAuth flow `{flow}`")))
-				})?;
+				let oauth = oauth_ids
+					.get(flow)
+					.cloned()
+					.ok_or_else(|| CompileError::Invariant {
+						invariant: Str::from(format!("unknown OAuth flow `{flow}`")),
+					})?;
 				credential_sources.push(CredentialSourceSpec::Oauth { flow: oauth.clone() });
 				credential_sources.push(CredentialSourceSpec::Stored);
 				(
@@ -5817,12 +5850,14 @@ fn compile_auth(
 
 fn canonical_env_names(names: &[Str]) -> Result<Box<[Str]>, CompileError> {
 	let Some(first) = names.first() else {
-		return Err(CompileError::Invariant(sf!("credential environment source must not be empty")));
+		return Err(CompileError::Invariant {
+			invariant: sf!("credential environment source must not be empty"),
+		});
 	};
 	if !first.starts_with("OMP_") {
-		return Err(CompileError::Invariant(sf!(
-			"credential environment source must lead with an OMP_* name"
-		)));
+		return Err(CompileError::Invariant {
+			invariant: sf!("credential environment source must lead with an OMP_* name"),
+		});
 	}
 	Ok(names.to_vec().into_boxed_slice())
 }
@@ -5831,8 +5866,8 @@ fn compile_headers(headers: &BTreeMap<Str, Str>) -> Result<HeaderProfile, Compil
 	let entries = headers
 		.iter()
 		.map(|(name, value)| StaticHeader { name: name.clone(), value: value.clone() });
-	HeaderProfile::try_new(entries).map_err(|error| {
-		CompileError::Invariant(Str::from(format!("invalid static header profile: {error}")))
+	HeaderProfile::try_new(entries).map_err(|error| CompileError::Invariant {
+		invariant: Str::from(format!("invalid static header profile: {error}")),
 	})
 }
 
@@ -5844,9 +5879,9 @@ fn compile_discovery(source: &SourceDiscovery) -> Result<DiscoverySpec, CompileE
 		"account-models" => DiscoveryKind::AccountModels,
 		"specialized" => DiscoveryKind::Specialized,
 		other => {
-			return Err(CompileError::Invariant(Str::from(format!(
-				"unknown discovery kind `{other}`"
-			))));
+			return Err(CompileError::Invariant {
+				invariant: Str::from(format!("unknown discovery kind `{other}`")),
+			});
 		},
 	};
 	let canonical = serde_json::to_vec(source)?;
@@ -5908,7 +5943,9 @@ fn validate_header_name(name: &str) -> Result<(), CompileError> {
 						| b'|' | b'~'
 				)
 		}) {
-		return Err(CompileError::Invariant(Str::from(format!("invalid header name `{name}`"))));
+		return Err(CompileError::Invariant {
+			invariant: Str::from(format!("invalid header name `{name}`")),
+		});
 	}
 	Ok(())
 }
@@ -5920,7 +5957,7 @@ fn validate_url(url: &str) -> Result<(), CompileError> {
 	{
 		Ok(())
 	} else {
-		Err(CompileError::Invariant(Str::from(format!("untrusted route URL `{url}`"))))
+		Err(CompileError::Invariant { invariant: Str::from(format!("untrusted route URL `{url}`")) })
 	}
 }
 fn humanize(value: &str) -> Str {

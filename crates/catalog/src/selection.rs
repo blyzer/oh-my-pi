@@ -56,7 +56,7 @@ impl ModelRole {
 	) -> Result<Self, SelectionError> {
 		let id = id.into();
 		if !valid_role_id(&id) {
-			return Err(SelectionError::Invalid(id));
+			return Err(SelectionError::Invalid { selector: id });
 		}
 		let selectors = selector
 			.split(',')
@@ -104,7 +104,7 @@ pub fn role_assignment_selector(
 		return Ok(Str::new(selector));
 	};
 	if !is_thinking_level(thinking) || parsed.route.is_some() {
-		return Err(SelectionError::Invalid(Str::new(selector)));
+		return Err(SelectionError::Invalid { selector: Str::new(selector) });
 	}
 	let mut formatted = String::with_capacity(
 		parsed.model.len()
@@ -139,11 +139,11 @@ fn role_reference(selector: &str) -> Result<Option<(&str, Option<&str>)>, Select
 	}
 	let (role, thinking) = match reference.rsplit_once(':') {
 		Some((role, thinking)) if is_thinking_level(thinking) => (role, Some(thinking)),
-		Some(_) => return Err(SelectionError::Invalid(Str::new(selector))),
+		Some(_) => return Err(SelectionError::Invalid { selector: Str::new(selector) }),
 		None => (reference, None),
 	};
 	if !valid_role_id(role) {
-		return Err(SelectionError::Invalid(Str::new(selector)));
+		return Err(SelectionError::Invalid { selector: Str::new(selector) });
 	}
 	Ok(Some((role, thinking)))
 }
@@ -249,7 +249,7 @@ impl ModelScope {
 				.case_insensitive(true)
 				.literal_separator(false)
 				.build()
-				.map_err(|_| SelectionError::Invalid(Str::new(pattern)))?;
+				.map_err(|_| SelectionError::Invalid { selector: Str::new(pattern) })?;
 			compiled.push((Str::new(base), glob.compile_matcher()));
 		}
 		Ok(Self { patterns: compiled.into_boxed_slice() })
@@ -339,17 +339,29 @@ pub enum SelectionError {
 	#[error("model selector is empty")]
 	Empty,
 	/// Annotation syntax is malformed or duplicated.
-	#[error("invalid model selector `{0}`")]
-	Invalid(Str),
+	#[error("invalid model selector `{selector}`")]
+	Invalid {
+		/// The malformed selector text.
+		selector: Str,
+	},
 	/// A role points back to itself through one or more configured roles.
-	#[error("model role cycle at @{0}")]
-	RoleCycle(Str),
+	#[error("model role cycle at @{role}")]
+	RoleCycle {
+		/// The role that closes the cycle.
+		role: Str,
+	},
 	/// No role with this id is configured or built in.
-	#[error("unknown model role @{0}")]
-	UnknownRole(Str),
+	#[error("unknown model role @{role}")]
+	UnknownRole {
+		/// The unconfigured role id.
+		role: Str,
+	},
 	/// No available model matches the requested selector.
-	#[error("unknown model `{0}`")]
-	NotFound(Str),
+	#[error("unknown model `{model}`")]
+	NotFound {
+		/// The requested model text.
+		model: Str,
+	},
 }
 
 /// Parses `:level`, `:route`, and `@upstream` annotations without looking up a
@@ -365,7 +377,7 @@ pub fn parse_selector(input: &str) -> Result<ParsedSelector, SelectionError> {
 		.rsplit_once(':')
 		.unwrap_or((before_upstream, ""));
 	if model.is_empty() || model.ends_with(':') {
-		return Err(SelectionError::Invalid(Str::new(input)));
+		return Err(SelectionError::Invalid { selector: Str::new(input) });
 	}
 	let mut parsed =
 		ParsedSelector { model: Str::new(model), upstream, thinking: None, route: None };
@@ -378,10 +390,10 @@ pub fn parse_selector(input: &str) -> Result<ParsedSelector, SelectionError> {
 		{
 			parsed.route = Some(RouteId::new(suffix));
 		} else {
-			return Err(SelectionError::Invalid(Str::new(input)));
+			return Err(SelectionError::Invalid { selector: Str::new(input) });
 		}
 	} else if before_upstream.ends_with(':') {
-		return Err(SelectionError::Invalid(Str::new(input)));
+		return Err(SelectionError::Invalid { selector: Str::new(input) });
 	}
 	Ok(parsed)
 }
@@ -390,9 +402,9 @@ fn split_upstream(input: &str) -> Result<(&str, Option<Str>), SelectionError> {
 	if let Some(rest) = input.strip_prefix('@') {
 		let (upstream, model) = rest
 			.split_once('/')
-			.ok_or_else(|| SelectionError::Invalid(Str::new(input)))?;
+			.ok_or_else(|| SelectionError::Invalid { selector: Str::new(input) })?;
 		if upstream.is_empty() || model.is_empty() || model.contains('@') {
-			return Err(SelectionError::Invalid(Str::new(input)));
+			return Err(SelectionError::Invalid { selector: Str::new(input) });
 		}
 		return Ok((model, Some(Str::new(upstream))));
 	}
@@ -403,7 +415,7 @@ fn split_upstream(input: &str) -> Result<(&str, Option<Str>), SelectionError> {
 		{
 			Ok((model, Some(Str::new(upstream))))
 		},
-		Some(_) => Err(SelectionError::Invalid(Str::new(input))),
+		Some(_) => Err(SelectionError::Invalid { selector: Str::new(input) }),
 	}
 }
 
@@ -437,12 +449,12 @@ fn select_inner(
 	}
 	if let Some((role, thinking)) = role_reference(selector)? {
 		if !visiting.insert(Str::new(role)) {
-			return Err(SelectionError::RoleCycle(Str::new(role)));
+			return Err(SelectionError::RoleCycle { role: Str::new(role) });
 		}
 		let found = roles
 			.iter()
 			.find(|candidate| candidate.id == role)
-			.ok_or_else(|| SelectionError::UnknownRole(Str::new(role)))?;
+			.ok_or_else(|| SelectionError::UnknownRole { role: Str::new(role) })?;
 		if found.selectors.is_empty() {
 			let selected = match role {
 				"tiny" | "memory" => ["commit", "smol"].into_iter().find_map(|fallback| {
@@ -461,7 +473,7 @@ fn select_inner(
 					}
 					selected
 				})
-				.ok_or_else(|| SelectionError::NotFound(Str::new(selector)));
+				.ok_or_else(|| SelectionError::NotFound { model: Str::new(selector) });
 		}
 		let preferred = found.provider_rank.iter().find_map(|provider| {
 			found.selectors.iter().find_map(|pattern| {
@@ -490,7 +502,7 @@ fn select_inner(
 				}
 				selected
 			})
-			.ok_or_else(|| SelectionError::NotFound(Str::new(selector)));
+			.ok_or_else(|| SelectionError::NotFound { model: Str::new(selector) });
 		visiting.remove(role);
 		return result;
 	}
@@ -518,7 +530,7 @@ fn select_inner(
 		.split_once('/')
 		.map_or((None, parsed.model.as_str()), |(provider, id)| (Some(provider), id));
 	if id.is_empty() {
-		return Err(SelectionError::Invalid(Str::new(selector)));
+		return Err(SelectionError::Invalid { selector: Str::new(selector) });
 	}
 	if let Ok(found) = choose_alias(models, routes, aliases, mru, &parsed, provider, selector) {
 		return Ok(found);
@@ -689,7 +701,7 @@ fn choose_candidates(
 		.into_iter()
 		.max_by(|left, right| rank(left, routes, mru).cmp(&rank(right, routes, mru)))
 	else {
-		return Err(SelectionError::NotFound(Str::new(original)));
+		return Err(SelectionError::NotFound { model: Str::new(original) });
 	};
 	Ok(SelectedModel {
 		provider,
@@ -752,7 +764,7 @@ pub fn select_initial(
 		Some(selector) => select_model(models, routes, aliases, roles, mru, selector).map(Some),
 		None => pick_default(models, routes, mru)
 			.map(Some)
-			.ok_or_else(|| SelectionError::NotFound(sf!("default"))),
+			.ok_or_else(|| SelectionError::NotFound { model: sf!("default") }),
 	}
 }
 
@@ -1056,7 +1068,7 @@ pub fn candidate_plan(
 				}
 			},
 			Ok(_) => {},
-			Err(SelectionError::NotFound(_))
+			Err(SelectionError::NotFound { model: _ })
 				if exact_declared_selector(selector)
 					&& scope.is_none_or(|scope| {
 						let (provider, model) = selector.split_once('/').expect("checked exact selector");
@@ -1073,12 +1085,12 @@ pub fn candidate_plan(
 		}
 	}
 	if plan.is_empty() {
-		return Err(SelectionError::NotFound(
-			selectors
+		return Err(SelectionError::NotFound {
+			model: selectors
 				.first()
 				.cloned()
 				.unwrap_or_else(|| Str::new_static("default")),
-		));
+		});
 	}
 	Ok(plan)
 }

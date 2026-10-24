@@ -892,14 +892,14 @@ fn param_event(error: ParamError) -> Ev<Update, Payload, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(issue(message)),
 	}
 }
 fn commit_event(error: CommitError) -> Ev<Update, Payload, Fault> {
 	match error {
 		CommitError::Aborted => Ev::Aborted(Abort::InputDropped),
 		CommitError::Interrupted(v) => Ev::Aborted(Abort::Interrupted { reason: v.reason }),
-		CommitError::Protocol(v) => Ev::Args(issue(v)),
+		CommitError::Protocol { violation: v } => Ev::Args(issue(v)),
 	}
 }
 fn interrupt_event(
@@ -910,7 +910,7 @@ fn interrupt_event(
 		Err(InterruptWaitError::Closed) => {
 			Ev::Aborted(Abort::Interrupted { reason: sf!("AST edit invocation owner disappeared") })
 		},
-		Err(InterruptWaitError::Protocol(message)) => Ev::Args(issue(message)),
+		Err(InterruptWaitError::Protocol { violation: message }) => Ev::Args(issue(message)),
 	}
 }
 

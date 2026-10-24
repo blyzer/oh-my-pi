@@ -835,7 +835,7 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 									class: sf!("closed"),
 									reason: sf!("invocation owner disappeared"),
 								},
-								Err(InterruptWaitError::Protocol(reason)) => Interrupt {
+								Err(InterruptWaitError::Protocol { violation: reason }) => Interrupt {
 									class: sf!("protocol"),
 									reason,
 								},
@@ -1094,7 +1094,7 @@ fn interrupt_reason(
 	match interrupt {
 		Ok(interrupt) => interrupt.reason,
 		Err(InterruptWaitError::Closed) => Str::new(closed_reason),
-		Err(InterruptWaitError::Protocol(reason)) => reason,
+		Err(InterruptWaitError::Protocol { violation: reason }) => reason,
 	}
 }
 
@@ -1268,7 +1268,7 @@ fn param_event<U, P>(error: ParamError) -> Ev<U, P, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Skipped { reason: interrupt.reason })
 		},
-		ParamError::Protocol(reason) => Ev::Args(protocol_issue(reason)),
+		ParamError::Protocol { violation: reason } => Ev::Args(protocol_issue(reason)),
 	}
 }
 
@@ -1278,7 +1278,7 @@ fn commit_event<U, P>(error: CommitError) -> Ev<U, P, Fault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Skipped { reason: interrupt.reason })
 		},
-		CommitError::Protocol(reason) => Ev::Args(protocol_issue(reason)),
+		CommitError::Protocol { violation: reason } => Ev::Args(protocol_issue(reason)),
 	}
 }
 

@@ -2160,7 +2160,7 @@ fn cursor_refuses_concurrent_pulls_and_keeps_lazy_chunk_offsets() {
 	assert!(first.as_mut().now_or_never().is_none());
 	assert!(matches!(
 		block_on(cursor.pull_at(&path, PullMode::Complete, "string")),
-		Err(ParamError::Protocol(problem)) if problem == "concurrent pull"
+		Err(ParamError::Protocol { violation: problem }) if problem == "concurrent pull"
 	));
 	drop(first);
 	feed.arg_text(sf!(r#"lo"}}"#)).unwrap();

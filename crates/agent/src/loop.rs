@@ -2464,7 +2464,7 @@ impl<C: Inference> Kernel<C> {
 			.identity(name.as_str())
 			.cloned()
 			.map(|identity| (identity, true))
-			.ok_or_else(|| RegistryError::UnknownTool(name.clone()).into())
+			.ok_or_else(|| RegistryError::UnknownTool { name: name.clone() }.into())
 	}
 
 	/// The refusal for a call named by `identity`, by name alone.

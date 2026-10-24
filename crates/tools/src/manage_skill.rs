@@ -255,7 +255,7 @@ fn param_event(error: ParamError) -> Ev<Update, MutationOutcome, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(omp_tool::Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 
@@ -265,7 +265,7 @@ fn commit_event(error: CommitError) -> Ev<Update, MutationOutcome, Fault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(omp_tool::Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		CommitError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 

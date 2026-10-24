@@ -495,7 +495,7 @@ fn param_event(error: ParamError) -> Ev<Ack, Ack, ToolFault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		ParamError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 
@@ -505,7 +505,7 @@ fn commit_event(error: CommitError) -> Ev<Ack, Ack, ToolFault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(message) => Ev::Args(protocol_issue(message)),
+		CommitError::Protocol { violation: message } => Ev::Args(protocol_issue(message)),
 	}
 }
 

@@ -1164,17 +1164,29 @@ impl<'table> IntoIterator for &'table WirePolicyTable {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum HeaderPolicyError {
 	/// A name is empty or is not an HTTP token.
-	#[error("invalid static header name `{0}`")]
-	InvalidName(Str),
+	#[error("invalid static header name `{name}`")]
+	InvalidName {
+		/// The rejected header name.
+		name: Str,
+	},
 	/// A value contains forbidden HTTP control bytes.
-	#[error("invalid static header value for `{0}`")]
-	InvalidValue(Str),
+	#[error("invalid static header value for `{name}`")]
+	InvalidValue {
+		/// The header whose value is forbidden.
+		name: Str,
+	},
 	/// A credential-bearing, routing, or framing header was supplied.
-	#[error("unsafe credential, routing, or framing header `{0}`")]
-	UnsafeName(Str),
+	#[error("unsafe credential, routing, or framing header `{name}`")]
+	UnsafeName {
+		/// The unsafe header name.
+		name: Str,
+	},
 	/// The profile contains the same case-insensitive name more than once.
-	#[error("duplicate static header name `{0}`")]
-	DuplicateName(Str),
+	#[error("duplicate static header name `{name}`")]
+	DuplicateName {
+		/// The duplicated header name.
+		name: Str,
+	},
 }
 
 impl HeaderProfile {
@@ -1184,7 +1196,7 @@ impl HeaderProfile {
 	) -> Result<Self, HeaderPolicyError> {
 		let headers = canonicalize_headers(headers)?;
 		let bytes = serde_json::to_vec(&headers)
-			.map_err(|_| HeaderPolicyError::InvalidValue(sf!("<serialization>")))?;
+			.map_err(|_| HeaderPolicyError::InvalidValue { name: sf!("<serialization>") })?;
 		Ok(Self {
 			id:      HeaderProfileId::from(content_id("headers", &bytes)),
 			headers: headers.into_iter().collect(),
@@ -1195,7 +1207,7 @@ impl HeaderProfile {
 	pub fn canonical_bytes(&self) -> Result<Vec<u8>, HeaderPolicyError> {
 		let headers = canonicalize_headers(self.headers.iter().cloned())?;
 		serde_json::to_vec(&headers)
-			.map_err(|_| HeaderPolicyError::InvalidValue(sf!("<serialization>")))
+			.map_err(|_| HeaderPolicyError::InvalidValue { name: sf!("<serialization>") })
 	}
 
 	/// Returns the stable content-derived header profile identifier.
@@ -1215,7 +1227,7 @@ fn canonicalize_headers(
 	headers.sort_unstable_by(|left, right| left.name.cmp(&right.name));
 	for pair in headers.windows(2) {
 		if pair[0].name == pair[1].name {
-			return Err(HeaderPolicyError::DuplicateName(pair[0].name.clone()));
+			return Err(HeaderPolicyError::DuplicateName { name: pair[0].name.clone() });
 		}
 	}
 	Ok(headers)
@@ -1224,11 +1236,11 @@ fn canonicalize_headers(
 fn validate_header(header: &StaticHeader) -> Result<(), HeaderPolicyError> {
 	let name = header.name.as_str();
 	if name.is_empty() || !name.bytes().all(is_header_name_byte) {
-		return Err(HeaderPolicyError::InvalidName(header.name.clone()));
+		return Err(HeaderPolicyError::InvalidName { name: header.name.clone() });
 	}
 	let lowercase = name.to_ascii_lowercase();
 	if is_unsafe_header(&lowercase) {
-		return Err(HeaderPolicyError::UnsafeName(header.name.clone()));
+		return Err(HeaderPolicyError::UnsafeName { name: header.name.clone() });
 	}
 	if header.value.as_bytes().iter().any(|byte| {
 		*byte == 0
@@ -1237,7 +1249,7 @@ fn validate_header(header: &StaticHeader) -> Result<(), HeaderPolicyError> {
 			|| (*byte < 0x20 && *byte != b'\t')
 			|| *byte == 0x7f
 	}) {
-		return Err(HeaderPolicyError::InvalidValue(header.name.clone()));
+		return Err(HeaderPolicyError::InvalidValue { name: header.name.clone() });
 	}
 	Ok(())
 }

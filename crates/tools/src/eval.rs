@@ -1530,7 +1530,7 @@ impl<E: EvalExec> Tool for PyEvalTool<E> {
 								Ok(interrupt) => interrupt.reason,
 								Err(InterruptWaitError::Closed) =>
 									sf!("invocation owner disappeared"),
-								Err(InterruptWaitError::Protocol(reason)) => reason,
+								Err(InterruptWaitError::Protocol { violation: reason }) => reason,
 							};
 							if run.cancel().await.is_err() {
 								let _ = self.exec.dispose_session(&session).await;
@@ -1742,7 +1742,7 @@ impl<E: EvalExec> Tool for EvalTool<E> {
 									class: sf!("closed"),
 									reason: sf!("invocation owner disappeared"),
 								},
-								Err(InterruptWaitError::Protocol(reason)) => Interrupt {
+								Err(InterruptWaitError::Protocol { violation: reason }) => Interrupt {
 									class: sf!("protocol"),
 									reason,
 								},
@@ -1979,7 +1979,7 @@ fn py_eval_param_event(error: ParamError) -> Ev<PyEvalUpdate, PyEvalPayload, PyE
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(reason) => Ev::Args(ArgIssue {
+		ParamError::Protocol { violation: reason } => Ev::Args(ArgIssue {
 			path:     Vec::new(),
 			expected: sf!("one complete py_eval@1 expression object"),
 			kind:     ArgIssueKind::Protocol,
@@ -1995,7 +1995,7 @@ fn py_eval_commit_event(error: CommitError) -> Ev<PyEvalUpdate, PyEvalPayload, P
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(reason) => Ev::Args(ArgIssue {
+		CommitError::Protocol { violation: reason } => Ev::Args(ArgIssue {
 			path:     Vec::new(),
 			expected: sf!("one complete py_eval@1 expression object"),
 			kind:     ArgIssueKind::Protocol,
@@ -2011,7 +2011,7 @@ fn param_event<U, P>(error: ParamError) -> Ev<U, P, Fault> {
 		ParamError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		ParamError::Protocol(reason) => Ev::Args(protocol_issue(reason)),
+		ParamError::Protocol { violation: reason } => Ev::Args(protocol_issue(reason)),
 	}
 }
 
@@ -2021,7 +2021,7 @@ fn commit_event<U, P>(error: CommitError) -> Ev<U, P, Fault> {
 		CommitError::Interrupted(interrupt) => {
 			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
 		},
-		CommitError::Protocol(reason) => Ev::Args(protocol_issue(reason)),
+		CommitError::Protocol { violation: reason } => Ev::Args(protocol_issue(reason)),
 	}
 }
 
