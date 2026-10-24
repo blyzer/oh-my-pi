@@ -4885,6 +4885,43 @@ mod tests {
 		request
 	}
 
+	/// ADR 0021: Chat Completions has no grammar tool form, so a
+	/// grammar-constrained tool must reach the wire as its declared non-strict
+	/// fallback schema and nothing else.
+	#[test]
+	fn a_grammar_tool_lowers_to_its_non_strict_fallback_schema() {
+		use crate::call::{ToolGrammar, ToolGrammarSyntax};
+		let fallback =
+			serde_json::json!({"type": "object", "properties": {"input": {"type": "string"}}});
+		let mut request = request(Arc::from([text_message("hello")]));
+		request.tools = Arc::from([ToolDefinition {
+			name:        omp_core::sf!("match_input"),
+			description: None,
+			input:       ToolInputConstraint::Grammar {
+				grammar:  ToolGrammar {
+					syntax:     ToolGrammarSyntax::Lark,
+					definition: omp_core::Str::new("start: WORD"),
+				},
+				fallback: OpaqueJson::new(fallback.clone()),
+			},
+		}]);
+		let wire = encode_embedded(
+			&policy::WirePolicy::baseline(),
+			None,
+			request,
+			&CallAffinity::none(),
+			Some(OpenAiChatAdapterOptions::OpenAi(OpenAiOptions::default())),
+		);
+		assert_eq!(
+			wire["tools"],
+			serde_json::json!([{
+				"type": "function",
+				"function": { "name": "match_input", "parameters": fallback },
+			}]),
+			"the grammar is dropped, the fallback is sent, and strict is never claimed"
+		);
+	}
+
 	#[test]
 	fn call_cache_affinity_lowers_prompt_cache_key_without_a_bound_conversation() {
 		// Headless calls carry no provider conversation; the invocation key
