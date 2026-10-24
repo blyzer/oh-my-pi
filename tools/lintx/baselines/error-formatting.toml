@@ -31,18 +31,18 @@ webview = 1
 
 [error-str-payload]
 agent = 1
-ai = 4
+ai = 1
 app = 14
 ar = 10
 cache = 2
 catalog = 10
-chat = 3
+chat = 1
 collab = 2
 con = 1
 core = 1
 driver = 2
 edit = 3
-env = 3
+env = 1
 envd = 78
 ext = 2
 observability = 5

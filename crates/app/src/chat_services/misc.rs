@@ -143,7 +143,7 @@ fn pretty<T: serde::Serialize>(value: &T) -> ServiceResult<Str> {
 
 /// No `CHANGELOG.md` ships with the binary.
 pub fn changelog() -> ServiceResult<Str> {
-	Err(ServiceError::Unavailable("changelog (the tree ships no CHANGELOG.md)"))
+	Err(ServiceError::Unavailable { feed: "changelog (the tree ships no CHANGELOG.md)" })
 }
 
 /// Project `.omp/hosts.toml` over the user configuration root (`~/.o2`).
@@ -253,7 +253,9 @@ pub fn secrets_files(project: &Path) -> Result<[PathBuf; 2], omp_core::dirs::Dat
 /// URL.
 pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult<Pending<Str>> {
 	let Some(stack) = state.stack.as_ref() else {
-		return Err(ServiceError::Unavailable("share (credentials live on the remote gateway host)"));
+		return Err(ServiceError::Unavailable {
+			feed: "share (credentials live on the remote gateway host)",
+		});
 	};
 	let settings = omp_driver::settings::Settings::from_con(&state.con);
 	let [user_secrets, project_secrets] = secrets_files(&state.project).map_err(failed)?;

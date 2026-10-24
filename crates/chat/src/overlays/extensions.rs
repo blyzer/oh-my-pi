@@ -971,7 +971,7 @@ mod tests {
 				id:      Str::new_static("mcp:github"),
 				enabled: false,
 			},
-			result:   Err(crate::overlays::services::ServiceError::Unavailable("extensions")),
+			result:   Err(crate::overlays::services::ServiceError::Unavailable { feed: "extensions" }),
 		});
 		assert!(matches!(
 			panel.notify(PanelNote::Outcome(&failed)),

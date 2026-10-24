@@ -1070,7 +1070,8 @@ mod tests {
 		let ctx = UiContext::default();
 		let (tx, rx) = flume::bounded::<ServiceResult<UsageReport>>(1);
 		let mut panel = UsageDashboard::with_state(State::Loading(rx), &ctx, 80, NOW_MS);
-		tx.send(Err(ServiceError::Unavailable("usage"))).unwrap();
+		tx.send(Err(ServiceError::Unavailable { feed: "usage" }))
+			.unwrap();
 		assert!(panel.tick(Duration::ZERO));
 		let text = omp_tui::frame_text(panel.frame(Size { width: 80, height: 20 }));
 		assert!(text.contains("usage is unavailable in this host"), "error missing:\n{text}");

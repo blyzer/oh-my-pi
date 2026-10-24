@@ -31,7 +31,7 @@ fn stack(state: &ServiceState) -> ServiceResult<&StackHandles> {
 	state
 		.stack
 		.as_ref()
-		.ok_or(ServiceError::Unavailable(GATEWAY))
+		.ok_or(ServiceError::Unavailable { feed: GATEWAY })
 }
 
 fn provider_name(state: &ServiceState, provider: &ProviderId<str>) -> Str {
@@ -91,7 +91,7 @@ pub fn providers(state: &ServiceState) -> ServiceResult<Vec<ProviderRow>> {
 	let catalog = state
 		.catalog
 		.as_ref()
-		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?
+		.ok_or(ServiceError::Unavailable { feed: "provider catalog (remote gateway)" })?
 		.load();
 	let accounts = control.accounts(None);
 	Ok(catalog
@@ -210,7 +210,7 @@ pub fn pin(state: &ServiceState, account: &AccountRow, pinned: bool) -> ServiceR
 	let digest = handles
 		.auth
 		.affinity_digest(&record)
-		.ok_or(ServiceError::Unavailable("credential affinity key"))?;
+		.ok_or(ServiceError::Unavailable { feed: "credential affinity key" })?;
 	AI_ACCOUNT_PINS
 		.set(&state.con, with_pin(&recorded, &provider, &digest))
 		.map_err(ServiceError::failed)?;

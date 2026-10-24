@@ -150,7 +150,7 @@ fn url_completer(services: &Arc<dyn Services>, agents: &AgentRoster) -> UrlCompl
 						.collect(),
 				);
 			},
-			Err(crate::overlays::services::ServiceError::Unavailable(_)) => {},
+			Err(crate::overlays::services::ServiceError::Unavailable { feed: _ }) => {},
 			Err(crate::overlays::services::ServiceError::Failed(_)) => return None,
 		}
 		match scheme {

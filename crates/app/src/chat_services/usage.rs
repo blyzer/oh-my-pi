@@ -66,11 +66,11 @@ pub fn active_account(
 	let stack = state
 		.stack
 		.as_ref()
-		.ok_or(ServiceError::Unavailable("active account usage (remote gateway)"))?;
+		.ok_or(ServiceError::Unavailable { feed: "active account usage (remote gateway)" })?;
 	let catalog = state
 		.catalog
 		.as_ref()
-		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?
+		.ok_or(ServiceError::Unavailable { feed: "provider catalog (remote gateway)" })?
 		.load();
 	let provider = ProviderId::from(request.provider.as_str());
 	let Some(route) = active_route(&catalog, &provider, request.model.as_str()) else {
