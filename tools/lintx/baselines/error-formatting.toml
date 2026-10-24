@@ -24,7 +24,7 @@ shell-builtins = 184
 tools = 79
 tui = 4
 vcs = 2
-walker = 9
+walker = 2
 webview = 1
 
 [error-str-payload]
