@@ -95,6 +95,16 @@ pub enum Error {
 		command: String,
 	},
 
+	/// A CLI-backed operation could not spawn its git process.
+	#[error("failed to spawn {command}")]
+	Spawn {
+		/// Rendered command line.
+		command: String,
+		/// Process spawn failure.
+		#[source]
+		source:  std::io::Error,
+	},
+
 	/// Filesystem error outside any more specific failure mode.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),

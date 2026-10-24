@@ -564,12 +564,7 @@ fn run_commit_hook(
 		.env("GIT_TERMINAL_PROMPT", "0")
 		.stdin(Stdio::null())
 		.output()
-		.map_err(|err| Error::Cli {
-			command:   format!("git commit ({name} hook)"),
-			exit_code: 1,
-			stdout:    String::new(),
-			stderr:    err.to_string(),
-		})?;
+		.map_err(|source| Error::Spawn { command: format!("git commit ({name} hook)"), source })?;
 	if output.status.success() {
 		return Ok(());
 	}

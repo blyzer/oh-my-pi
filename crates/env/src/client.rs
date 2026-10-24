@@ -93,9 +93,22 @@ pub enum ClientError {
 	/// A UDS connection or framed transport could not be established.
 	#[error("environment transport error: {0}")]
 	Transport(#[from] io::Error),
-	/// A typed environment path could not be resolved to a valid file URI.
-	#[error("invalid environment path URI: {0}")]
-	InvalidEnvPath(Str),
+	/// A typed environment path or workspace root could not be parsed as a
+	/// file URI.
+	#[error("invalid environment path URI `{uri}`")]
+	InvalidEnvPath {
+		/// The path or root text that failed to parse.
+		uri:    Str,
+		/// The underlying URL parse failure.
+		#[source]
+		source: url::ParseError,
+	},
+	/// A typed environment path violated a resolution rule.
+	#[error("{violation}")]
+	EnvPathRule {
+		/// The violated resolution rule.
+		violation: &'static str,
+	},
 	/// A durable invocation principal omitted its session or agent identity.
 	#[error("invalid invocation principal: session_id and agent_id must both be nonempty")]
 	InvalidInvocationPrincipal,
@@ -2494,17 +2507,17 @@ impl EnvClient {
 		let path = path.as_str();
 		if path.starts_with("file://") {
 			let url = Url::parse(path)
-				.map_err(|error| ClientError::InvalidEnvPath(Str::from(error.to_string())))?;
+				.map_err(|source| ClientError::InvalidEnvPath { uri: Str::new(path), source })?;
 			if url.scheme() != "file" {
-				return Err(ClientError::InvalidEnvPath(sf!(
-					"environment paths must use the file scheme",
-				)));
+				return Err(ClientError::EnvPathRule {
+					violation: "environment paths must use the file scheme",
+				});
 			}
 			return Ok(url.to_string());
 		}
 		let mut url = if path.starts_with('/') {
 			Url::parse("file:///")
-				.map_err(|error| ClientError::InvalidEnvPath(Str::from(error.to_string())))?
+				.map_err(|source| ClientError::InvalidEnvPath { uri: sf!("file:///"), source })?
 		} else {
 			let info = self.inner.info.lock();
 			let root = info
@@ -2514,23 +2527,25 @@ impl EnvClient {
 				.ok_or(ClientError::UnexpectedResponse {
 					expected: "ServerHello root_uri before resolving a relative EnvPath",
 				})?;
-			Url::parse(root)
-				.map_err(|error| ClientError::InvalidEnvPath(Str::from(error.to_string())))?
+			let root = Str::new(root);
+			Url::parse(&root).map_err(|source| ClientError::InvalidEnvPath { uri: root, source })?
 		};
 		if path.starts_with('/') {
 			url.set_path(path);
 		} else {
 			let mut segments = url
 				.path_segments_mut()
-				.map_err(|()| ClientError::InvalidEnvPath(sf!("workspace root is not hierarchical")))?;
+				.map_err(|()| ClientError::EnvPathRule {
+					violation: "workspace root is not hierarchical",
+				})?;
 			segments.pop_if_empty();
 			for component in path.split('/') {
 				match component {
 					"" | "." => {},
 					".." => {
-						return Err(ClientError::InvalidEnvPath(sf!(
-							"relative environment paths cannot escape the workspace root",
-						)));
+						return Err(ClientError::EnvPathRule {
+							violation: "relative environment paths cannot escape the workspace root",
+						});
 					},
 					component => {
 						segments.push(component);

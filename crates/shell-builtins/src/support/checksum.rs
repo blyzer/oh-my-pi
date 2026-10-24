@@ -477,7 +477,7 @@ impl TryFrom<usize> for ShaLength {
 			256 => Ok(Self::Len256),
 			384 => Ok(Self::Len384),
 			512 => Ok(Self::Len512),
-			_ => Err(ChecksumError::InvalidLengthForSha { algorithm: value.to_string() }),
+			_ => Err(ChecksumError::InvalidLength { length: value.to_string() }),
 		}
 	}
 }
@@ -531,8 +531,14 @@ impl SizedAlgoKind {
 			(A::Blake3, value) => Self::Blake3(value.unwrap_or(sum::Blake3::DEFAULT_BYTE_SIZE)),
 			(A::Shake128, value) => Self::Shake128(value),
 			(A::Shake256, value) => Self::Shake256(value),
-			(A::Sha2, Some(value)) => Self::Sha2(value.try_into()?),
-			(A::Sha3, Some(value)) => Self::Sha3(value.try_into()?),
+			(A::Sha2, Some(value)) => Self::Sha2(
+				ShaLength::try_from(value)
+					.map_err(|_| ChecksumError::InvalidLengthForSha { algorithm: "sha2".to_owned() })?,
+			),
+			(A::Sha3, Some(value)) => Self::Sha3(
+				ShaLength::try_from(value)
+					.map_err(|_| ChecksumError::InvalidLengthForSha { algorithm: "sha3".to_owned() })?,
+			),
 			(algo @ (A::Sha2 | A::Sha3), None) => {
 				return Err(ChecksumError::LengthRequiredForSha {
 					algorithm: algo.to_lowercase().into(),
