@@ -25,8 +25,11 @@ pub struct ProfileBootstrap {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ProfileBootstrapError {
 	/// A global flag lacked a value.
-	#[error("{0} requires a non-empty value")]
-	MissingValue(&'static str),
+	#[error("{flag} requires a non-empty value")]
+	MissingValue {
+		/// The value-less flag.
+		flag: &'static str,
+	},
 	/// A profile name could escape its profile directory or is not portable.
 	#[error(
 		"Invalid OMP profile \"{profile}\". Profile names must start with a lowercase letter or \
@@ -81,7 +84,7 @@ pub fn extract(
 				.get(index + 1)
 				.and_then(|value| value.to_str())
 				.filter(|value| !value.is_empty() && !value.starts_with('-'))
-				.ok_or(ProfileBootstrapError::MissingValue(flag))?;
+				.ok_or(ProfileBootstrapError::MissingValue { flag })?;
 			if needs_boundary(&output) {
 				output.push(OsString::from(PROFILE_BOUNDARY));
 			}
@@ -96,7 +99,7 @@ pub fn extract(
 		}
 		if let Some(value) = text.strip_prefix("--profile=") {
 			if value.is_empty() {
-				return Err(ProfileBootstrapError::MissingValue("--profile"));
+				return Err(ProfileBootstrapError::MissingValue { flag: "--profile" });
 			}
 			profile = normalize_profile_name(value)?;
 			profile_set = true;
@@ -108,7 +111,7 @@ pub fn extract(
 		}
 		if let Some(value) = text.strip_prefix("--alias=") {
 			if value.is_empty() {
-				return Err(ProfileBootstrapError::MissingValue("--alias"));
+				return Err(ProfileBootstrapError::MissingValue { flag: "--alias" });
 			}
 			alias = Some(Str::new(value));
 			if needs_boundary(&output) {

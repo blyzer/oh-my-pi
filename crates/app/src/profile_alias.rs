@@ -47,14 +47,23 @@ pub enum AliasError {
 	#[error("unsupported shell; expected bash, zsh, fish, or PowerShell")]
 	UnsupportedShell,
 	/// A name is syntactically unsafe or reserved.
-	#[error("invalid profile alias name `{0}`")]
-	InvalidName(Str),
+	#[error("invalid profile alias name `{name}`")]
+	InvalidName {
+		/// The rejected alias name.
+		name: Str,
+	},
 	/// A profile name is syntactically unsafe.
-	#[error("invalid profile name `{0}`")]
-	InvalidProfile(Str),
+	#[error("invalid profile name `{profile}`")]
+	InvalidProfile {
+		/// The rejected profile name.
+		profile: Str,
+	},
 	/// A managed block has no closing marker.
-	#[error("managed profile alias block for `{0}` is malformed")]
-	MalformedBlock(Str),
+	#[error("managed profile alias block for `{alias}` is malformed")]
+	MalformedBlock {
+		/// The alias whose block is unterminated.
+		alias: Str,
+	},
 	/// Atomic profile update failed with path and operation attribution.
 	#[error(transparent)]
 	Config(#[from] omp_con::ConError),
@@ -131,7 +140,7 @@ fn config_path(shell: ProfileShell, home: &Path) -> PathBuf {
 fn normalize_profile(value: &str) -> Result<Str, AliasError> {
 	match omp_core::dirs::normalize_profile_name(value) {
 		Ok(Some(profile)) => Ok(profile),
-		Ok(None) | Err(_) => Err(AliasError::InvalidProfile(Str::new(value))),
+		Ok(None) | Err(_) => Err(AliasError::InvalidProfile { profile: Str::new(value) }),
 	}
 }
 
@@ -144,10 +153,10 @@ fn validate_name(value: &str, shell: ProfileShell) -> Result<(), AliasError> {
 		|| value.eq_ignore_ascii_case("omp")
 		|| RESERVED.iter().any(|word| word.eq_ignore_ascii_case(value))
 	{
-		return Err(AliasError::InvalidName(Str::new(value)));
+		return Err(AliasError::InvalidName { name: Str::new(value) });
 	}
 	if shell == ProfileShell::PowerShell && value.contains('-') {
-		return Err(AliasError::InvalidName(Str::new(value)));
+		return Err(AliasError::InvalidName { name: Str::new(value) });
 	}
 	Ok(())
 }
@@ -183,7 +192,7 @@ fn upsert(current: &str, name: &str, block: &str) -> Result<String, AliasError> 
 	if let Some(begin) = current.find(&start) {
 		let relative_end = current[begin + start.len()..]
 			.find(&end)
-			.ok_or_else(|| AliasError::MalformedBlock(Str::new(name)))?;
+			.ok_or_else(|| AliasError::MalformedBlock { alias: Str::new(name) })?;
 		let after = begin + start.len() + relative_end + end.len();
 		let prefix = current[..begin].trim_end();
 		let suffix = current[after..].trim_start_matches(['\r', '\n']);

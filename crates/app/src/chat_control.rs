@@ -2705,7 +2705,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				let kind = args
 					.first()
 					.map(Str::as_str)
-					.ok_or(DirectorFailure::MissingArgument("limit kind"))?;
+					.ok_or(DirectorFailure::MissingArgument { argument: "limit kind" })?;
 				match kind {
 					"unbounded" => {
 						Box::new(LoopMode::unbounded(args.get(1).cloned().unwrap_or_default()))
@@ -2713,7 +2713,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					"iterations" => {
 						let limit = args
 							.get(1)
-							.ok_or(DirectorFailure::MissingArgument("iteration limit"))?
+							.ok_or(DirectorFailure::MissingArgument { argument: "iteration limit" })?
 							.parse::<u32>()
 							.ok()
 							.filter(|value| *value > 0)
@@ -2726,7 +2726,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					"duration_ms" => {
 						let duration = args
 							.get(1)
-							.ok_or(DirectorFailure::MissingArgument("duration"))?
+							.ok_or(DirectorFailure::MissingArgument { argument: "duration" })?
 							.parse::<u64>()
 							.ok()
 							.filter(|value| *value > 0)
@@ -2748,18 +2748,18 @@ impl<C: omp_agent::Inference> Controller<C> {
 				let tool = args
 					.first()
 					.cloned()
-					.ok_or(DirectorFailure::MissingArgument("tool"))?;
+					.ok_or(DirectorFailure::MissingArgument { argument: "tool" })?;
 				if self
 					.kernel
 					.tool_registry()
 					.live_spec(tool.as_str())
 					.is_err()
 				{
-					return Err(DirectorFailure::UnknownTool(tool));
+					return Err(DirectorFailure::UnknownTool { tool });
 				}
 				Box::new(ForceTool::new(tool.clone(), omp_agent::ForceUntil::ToolCalled(tool), None, 3))
 			},
-			_ => return Err(DirectorFailure::UnknownDirector(Str::new(id))),
+			_ => return Err(DirectorFailure::UnknownDirector { director: Str::new(id) }),
 		};
 		if active {
 			return Ok(());
@@ -3167,7 +3167,10 @@ impl<C: omp_agent::Inference> Controller<C> {
 			},
 			TodoOp::Start(text) => {
 				let found = matches(&text);
-				let first = found.first().copied().ok_or(TodoFailure::NoMatch(text))?;
+				let first = found
+					.first()
+					.copied()
+					.ok_or(TodoFailure::NoMatch { query: text })?;
 				("todo.start", set_status(&[first], "in_progress"), "Started".to_owned())
 			},
 			TodoOp::Done(text) => {
@@ -3176,7 +3179,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					matches,
 				);
 				if found.is_empty() {
-					return Err(TodoFailure::NoMatch(text.unwrap_or_default()));
+					return Err(TodoFailure::NoMatch { query: text.unwrap_or_default() });
 				}
 				("todo.done", set_status(&found, "completed"), "Completed".to_owned())
 			},
@@ -3186,7 +3189,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					matches,
 				);
 				if found.is_empty() {
-					return Err(TodoFailure::NoMatch(text.unwrap_or_default()));
+					return Err(TodoFailure::NoMatch { query: text.unwrap_or_default() });
 				}
 				("todo.drop", set_status(&found, "abandoned"), "Dropped".to_owned())
 			},
@@ -3196,15 +3199,14 @@ impl<C: omp_agent::Inference> Controller<C> {
 					matches,
 				);
 				if found.is_empty() {
-					return Err(TodoFailure::NoMatch(text.unwrap_or_default()));
+					return Err(TodoFailure::NoMatch { query: text.unwrap_or_default() });
 				}
 				("todo.rm", found.iter().map(|handle| Op::Rm(*handle)).collect(), "Removed".to_owned())
 			},
 			TodoOp::Import(path) => {
 				let path =
 					path.map_or_else(|| PathBuf::from("TODO.md"), |path| PathBuf::from(path.as_str()));
-				let text =
-					fs::read_to_string(&path).map_err(|error| TodoFailure::Io(error.to_string()))?;
+				let text = fs::read_to_string(&path).map_err(TodoFailure::Io)?;
 				let mut ops = items
 					.iter()
 					.map(|(handle, ..)| Op::Rm(*handle))
@@ -3250,7 +3252,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		self
 			.session
 			.patch(Txn { cause, label: Some(Str::new_static(label)), ops })
-			.map_err(|error| TodoFailure::Session(error.to_string()))?;
+			.map_err(TodoFailure::Session)?;
 		self.reply(Severity::Info, message);
 		Ok(())
 	}
@@ -3534,14 +3536,23 @@ enum DirectorFailure {
 	NotActive,
 	#[error("no paused engagement to resume")]
 	NotPaused,
-	#[error("missing argument `{0}`")]
-	MissingArgument(&'static str),
+	#[error("missing argument `{argument}`")]
+	MissingArgument {
+		/// The absent argument name.
+		argument: &'static str,
+	},
 	#[error("invalid {name}: `{value}`")]
 	InvalidArgument { name: &'static str, value: Str },
-	#[error("Tool \"{0}\" is not currently active.")]
-	UnknownTool(Str),
-	#[error("unknown Director `{0}`")]
-	UnknownDirector(Str),
+	#[error("Tool \"{tool}\" is not currently active.")]
+	UnknownTool {
+		/// The inactive tool name.
+		tool: Str,
+	},
+	#[error("unknown Director `{director}`")]
+	UnknownDirector {
+		/// The unrecognized Director name.
+		director: Str,
+	},
 	#[error(transparent)]
 	Director(#[from] omp_agent::DirectorError),
 	#[error(transparent)]
@@ -3555,12 +3566,15 @@ enum TodoFailure {
 	NoComponent,
 	#[error("session has no journal head")]
 	NoHead,
-	#[error("no todo matches \"{0}\"")]
-	NoMatch(Str),
-	#[error("{0}")]
-	Io(String),
-	#[error("{0}")]
-	Session(String),
+	#[error("no todo matches \"{query}\"")]
+	NoMatch {
+		/// The unmatched todo query text.
+		query: Str,
+	},
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
+	#[error(transparent)]
+	Session(#[from] SessionError),
 }
 
 #[cfg(test)]
