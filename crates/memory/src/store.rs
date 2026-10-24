@@ -5,12 +5,16 @@ use std::{
 	fs, io,
 	path::{Path, PathBuf},
 	result,
-	sync::atomic::{AtomicU64, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	time,
 	time::{SystemTime, UNIX_EPOCH},
 };
 
 use omp_core::{Hash32, Str};
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
@@ -163,9 +167,11 @@ pub struct RankedCandidate {
 	pub score:  f64,
 }
 
-/// Lightweight bank ownership handle. Connections are opened per operation so
-/// handles are thread-safe and independent processes coordinate through SQLite
-/// WAL and busy timeout.
+/// Lightweight bank ownership handle.
+///
+/// One connection is opened per store and shared by every operation, so
+/// handles stay thread-safe while independent processes coordinate through
+/// SQLite WAL and the busy timeout.
 #[derive(Clone, Debug)]
 pub struct BankStore {
 	path:              PathBuf,
@@ -173,6 +179,13 @@ pub struct BankStore {
 	identity_root:     PathBuf,
 	working_limit:     usize,
 	working_ttl_hours: u64,
+	/// The one connection every operation borrows. A connection per operation
+	/// unlinked the write-ahead log and its shared-memory file on every drop,
+	/// so each read cost two unlinks.
+	connection:        Arc<Mutex<Connection>>,
+	/// How many connections this store has opened; the observable a
+	/// regression test asserts on instead of wall-clock time.
+	opens:             Arc<AtomicU64>,
 }
 
 impl BankStore {
@@ -182,18 +195,24 @@ impl BankStore {
 		bank: BankId,
 		identity_root: impl Into<PathBuf>,
 	) -> Result<Self> {
+		let path = path.into();
+		if let Some(parent) = path.parent() {
+			fs::create_dir_all(parent)?;
+		}
+		let connection = open_connection(&path)?;
 		let store = Self {
-			path: path.into(),
+			path,
 			bank,
 			identity_root: identity_root.into(),
 			working_limit: 1000,
 			working_ttl_hours: 24,
+			connection: Arc::new(Mutex::new(connection)),
+			opens: Arc::new(AtomicU64::new(1)),
 		};
-		if let Some(parent) = store.path.parent() {
-			fs::create_dir_all(parent)?;
+		{
+			let mut connection = store.connection();
+			store.migrate(&mut connection)?;
 		}
-		let mut connection = store.connection()?;
-		store.migrate(&mut connection)?;
 		Ok(store)
 	}
 
@@ -217,7 +236,7 @@ impl BankStore {
 
 	/// Returns authoritative and derived index generations.
 	pub fn generations(&self) -> Result<IndexGeneration> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection
 			.query_row(
 				"SELECT durable_generation, vector_generation, graph_generation FROM \
@@ -257,7 +276,7 @@ impl BankStore {
 			}
 		}
 		let timestamp = utc_timestamp();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let mut ids = Vec::with_capacity(inputs.len());
 		let mut changed_sessions = HashSet::new();
@@ -354,7 +373,7 @@ impl BankStore {
 		if content == Some("") || importance.is_some_and(|value| !value.is_finite()) {
 			return Err(Error::InvalidIdentifier);
 		}
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if transaction
 			.query_row("SELECT 1 FROM facts WHERE fact_id = ?1", [id], |_| Ok(()))
@@ -394,7 +413,7 @@ impl BankStore {
 		if !valid_memory_id(id) {
 			return Err(Error::InvalidIdentifier);
 		}
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if transaction
 			.query_row("SELECT 1 FROM facts WHERE fact_id = ?1", [id], |_| Ok(()))
@@ -432,7 +451,7 @@ impl BankStore {
 		{
 			return Err(Error::InvalidIdentifier);
 		}
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if transaction
 			.query_row("SELECT 1 FROM facts WHERE fact_id = ?1", [id], |_| Ok(()))
@@ -477,7 +496,7 @@ impl BankStore {
 		let id = new_memory_id(self.bank.as_str(), window.session_id, &stable_material);
 		let timestamp = utc_timestamp();
 		let metadata = serde_json::to_string(window.metadata)?;
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let cursor = transaction
 			.query_row(
@@ -536,7 +555,7 @@ impl BankStore {
 
 	/// Restores the highest durably retained user-turn cursor.
 	pub fn retention_cursor(&self, session_id: &str) -> Result<u64> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		Ok(connection
 			.query_row(
 				"SELECT retained_user_turn FROM retention_cursors WHERE session_id = ?1",
@@ -554,7 +573,7 @@ impl BankStore {
 		if max_jobs == 0 {
 			return Ok(Vec::new());
 		}
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT input, session_id, source_memory_id FROM extraction_jobs ORDER BY rowid LIMIT ?1",
 		)?;
@@ -581,7 +600,7 @@ impl BankStore {
 
 	/// Counts durable extraction jobs for bounded worker drain decisions.
 	pub fn pending_extraction_count(&self) -> Result<usize> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection
 			.query_row("SELECT COUNT(*) FROM extraction_jobs", [], |row| row.get(0))
 			.map_err(Into::into)
@@ -590,7 +609,7 @@ impl BankStore {
 	/// Promotes unconsolidated working rows to episodic memory in one
 	/// crash-consistent transaction.
 	pub fn consolidate(&self, session_id: Option<&str>) -> Result<usize> {
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let predicate = if session_id.is_some() {
 			"WHERE session_id = ?1"
@@ -628,7 +647,7 @@ impl BankStore {
 		model: &str,
 		entries: &[VectorEntry<'_>],
 	) -> Result<()> {
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if durable_generation(&transaction)? != expected {
 			return Err(Error::StaleGeneration);
@@ -663,7 +682,7 @@ impl BankStore {
 		if generations.vector != generations.durable {
 			return Ok(Vec::new());
 		}
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT memory_id, vector_blob, dimensions FROM memory_embeddings WHERE generation = ?1 \
 			 LIMIT 50000",
@@ -707,7 +726,7 @@ impl BankStore {
 		facts: &[NewFact<'_>],
 		completed_source: Option<&str>,
 	) -> Result<usize> {
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let mut inserted = 0usize;
 		{
@@ -747,7 +766,7 @@ impl BankStore {
 		triples: &[GraphTriple<'_>],
 		links: &[MemoryLink<'_>],
 	) -> Result<()> {
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if durable_generation(&transaction)? != expected {
 			return Err(Error::StaleGeneration);
@@ -808,7 +827,7 @@ impl BankStore {
 		let Some(fts_query) = lexical_query(query) else {
 			return Ok(Vec::new());
 		};
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT f.fact_id, trim(f.subject || ' ' || f.predicate || ' ' || f.object), \
 			 'mnemopi-extraction', f.session_id, COALESCE(f.timestamp, ''), f.confidence, \
@@ -832,7 +851,7 @@ impl BankStore {
 
 	/// Recent working-memory candidates used when the query is temporal.
 	pub fn recent_working(&self, limit: usize) -> Result<Vec<RankedCandidate>> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT id, content, source, session_id, timestamp, importance, veracity, memory_type, \
 			 metadata_json, superseded_by\nFROM working_memory WHERE superseded_by IS NULL ORDER BY \
@@ -855,39 +874,47 @@ impl BankStore {
 		if generations.graph != generations.durable || terms.is_empty() {
 			return Ok(Vec::new());
 		}
-		let connection = self.connection()?;
-		let mut scores = HashMap::<Str, f64>::new();
-		let mut triple_query = connection.prepare(
-			"SELECT source_memory_id, confidence FROM triples\nWHERE generation = ?1 AND \
-			 (lower(subject) LIKE ?2 OR lower(predicate) LIKE ?2 OR lower(object) LIKE ?2)\nLIMIT 256",
-		)?;
-		for term in terms {
-			let pattern = format!("%{}%", term.as_str());
-			let rows = triple_query.query_map(params![generations.graph, pattern], |row| {
-				Ok((Str::new(row.get::<_, String>(0)?), row.get::<_, f64>(1)?))
-			})?;
-			for row in rows {
-				let (id, score) = row?;
-				scores
-					.entry(id)
-					.and_modify(|current| *current = current.max(score))
-					.or_insert(score);
+		// The scoring queries release the connection before the loop below
+		// takes it again through `get`.
+		let scores = {
+			let connection = self.connection();
+			let mut scores = HashMap::<Str, f64>::new();
+			let mut triple_query = connection.prepare(
+				"SELECT source_memory_id, confidence FROM triples\nWHERE generation = ?1 AND \
+				 (lower(subject) LIKE ?2 OR lower(predicate) LIKE ?2 OR lower(object) LIKE ?2)\nLIMIT \
+				 256",
+			)?;
+			for term in terms {
+				let pattern = format!("%{}%", term.as_str());
+				let rows = triple_query.query_map(params![generations.graph, pattern], |row| {
+					Ok((Str::new(row.get::<_, String>(0)?), row.get::<_, f64>(1)?))
+				})?;
+				for row in rows {
+					let (id, score) = row?;
+					scores
+						.entry(id)
+						.and_modify(|current| *current = current.max(score))
+						.or_insert(score);
+				}
 			}
-		}
-		let seeds = scores.keys().cloned().collect::<Vec<_>>();
-		let mut link_query = connection.prepare(
-			"SELECT target_memory_id, weight FROM memory_links WHERE generation = ?1 AND \
-			 source_memory_id = ?2 LIMIT 64",
-		)?;
-		for seed in seeds {
-			let rows = link_query.query_map(params![generations.graph, seed.as_str()], |row| {
-				Ok((Str::new(row.get::<_, String>(0)?), row.get::<_, f64>(1)?))
-			})?;
-			for row in rows {
-				let (id, weight) = row?;
-				scores.entry(id).or_insert(weight * 0.5);
+			let seeds = scores.keys().cloned().collect::<Vec<_>>();
+			let mut link_query = connection.prepare(
+				"SELECT target_memory_id, weight FROM memory_links WHERE generation = ?1 AND \
+				 source_memory_id = ?2 LIMIT 64",
+			)?;
+			for seed in seeds {
+				let rows = link_query.query_map(params![generations.graph, seed.as_str()], |row| {
+					Ok((Str::new(row.get::<_, String>(0)?), row.get::<_, f64>(1)?))
+				})?;
+				for row in rows {
+					let (id, weight) = row?;
+					scores.entry(id).or_insert(weight * 0.5);
+				}
 			}
-		}
+			drop(triple_query);
+			drop(link_query);
+			scores
+		};
 		let mut output = Vec::new();
 		for (id, score) in scores {
 			if let Some(record) = self.get(id.as_str())? {
@@ -910,7 +937,7 @@ impl BankStore {
 		if !valid_memory_id(id) {
 			return Err(Error::InvalidIdentifier);
 		}
-		let connection = self.connection()?;
+		let connection = self.connection();
 		for (table, tier) in
 			[("working_memory", MemoryTier::Working), ("episodic_memory", MemoryTier::Episodic)]
 		{
@@ -951,7 +978,7 @@ impl BankStore {
 	) -> Result<(Vec<MemoryRecord>, bool)> {
 		let limit = limit.clamp(1, 1000);
 		let max_bytes = max_bytes.clamp(1, 4 * 1024 * 1024);
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT id, content, source, session_id, timestamp, importance, veracity, memory_type, \
 			 metadata_json, superseded_by, tier_name, length(content) FROM (\nSELECT id, content, \
@@ -990,7 +1017,7 @@ impl BankStore {
 	/// Loads one deterministic page without imposing the resolver's 1000-row
 	/// display ceiling.
 	pub(crate) fn list_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryRecord>> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT id, content, source, session_id, timestamp, importance, veracity, memory_type, \
 			 metadata_json, superseded_by, tier_name FROM (\nSELECT id, content, source, session_id, \
@@ -1018,7 +1045,7 @@ impl BankStore {
 	/// Loads one deterministic page of unsuperseded rows for a complete vector
 	/// generation rebuild.
 	pub(crate) fn list_live_page(&self, offset: usize, limit: usize) -> Result<Vec<MemoryRecord>> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT id, content, source, session_id, timestamp, importance, veracity, memory_type, \
 			 metadata_json, superseded_by, tier_name FROM (\nSELECT id, content, source, session_id, \
@@ -1045,7 +1072,7 @@ impl BankStore {
 
 	/// Counts durable rows and graph triples.
 	pub fn counts(&self) -> Result<StoreCounts> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection
 			.query_row(
 				"SELECT (SELECT COUNT(*) FROM working_memory), (SELECT COUNT(*) FROM \
@@ -1065,10 +1092,11 @@ impl BankStore {
 
 	/// Runs SQLite integrity and FTS/vector generation health checks.
 	pub fn integrity(&self) -> Result<IntegrityReport> {
-		let connection = self.connection()?;
+		// `generations` takes the connection, so it must run before this one.
+		let generations = self.generations()?;
+		let connection = self.connection();
 		let integrity =
 			connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?;
-		let generations = self.generations()?;
 		let vector_rows =
 			connection.query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| row.get(0))?;
 		let graph_rows =
@@ -1086,7 +1114,7 @@ impl BankStore {
 	/// Deletes all bank data inside one exclusive transaction and advances
 	/// generations atomically.
 	pub fn clear(&self) -> Result<()> {
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
 		for table in [
 			"working_memory",
@@ -1114,7 +1142,7 @@ impl BankStore {
 
 	/// Persists a safely adopted legacy bank for this exact canonical identity.
 	pub fn persist_adoption(&self, bank: &BankId) -> Result<()> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection.execute(
 			"INSERT OR IGNORE INTO scope_adoptions(identity_root, bank) VALUES (?1, ?2)",
 			params![self.identity_root.to_string_lossy(), bank.as_str()],
@@ -1124,7 +1152,7 @@ impl BankStore {
 
 	/// Loads prior legacy-bank adoptions for this canonical identity.
 	pub fn adopted_banks(&self) -> Result<Vec<BankId>> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT bank FROM scope_adoptions WHERE identity_root = ?1 ORDER BY bank LIMIT 64",
 		)?;
@@ -1151,7 +1179,7 @@ impl BankStore {
 		let Some(fts_query) = lexical_query(query) else {
 			return Ok(Vec::new());
 		};
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let sql = format!(
 			"SELECT m.id, m.content, m.source, m.session_id, m.timestamp, m.importance, m.veracity, \
 			 m.memory_type, m.metadata_json, m.superseded_by, bm25({fts})\nFROM {fts} JOIN {table} m \
@@ -1173,16 +1201,14 @@ impl BankStore {
 			.map_err(Into::into)
 	}
 
-	fn connection(&self) -> Result<Connection> {
-		let flags = OpenFlags::SQLITE_OPEN_CREATE
-			| OpenFlags::SQLITE_OPEN_READ_WRITE
-			| OpenFlags::SQLITE_OPEN_NO_MUTEX;
-		let connection = Connection::open_with_flags(&self.path, flags)?;
-		connection.busy_timeout(time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
-		connection.execute_batch(
-			"PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
-		)?;
-		Ok(connection)
+	fn connection(&self) -> MutexGuard<'_, Connection> {
+		self.connection.lock()
+	}
+
+	/// How many SQLite connections this store has opened. Opening one costs a
+	/// WAL teardown when it is dropped.
+	pub fn connection_opens(&self) -> u64 {
+		self.opens.load(Ordering::Relaxed)
 	}
 
 	fn migrate(&self, connection: &mut Connection) -> Result<()> {
@@ -1215,6 +1241,19 @@ impl BankStore {
 		transaction.commit()?;
 		Ok(())
 	}
+}
+
+/// Opens one connection with the pragmas every operation relies on.
+fn open_connection(path: &Path) -> Result<Connection> {
+	let flags = OpenFlags::SQLITE_OPEN_CREATE
+		| OpenFlags::SQLITE_OPEN_READ_WRITE
+		| OpenFlags::SQLITE_OPEN_NO_MUTEX;
+	let connection = Connection::open_with_flags(path, flags)?;
+	connection.busy_timeout(time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
+	connection.execute_batch(
+		"PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
+	)?;
+	Ok(connection)
 }
 
 fn migrate_authoritative_tables(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -1795,6 +1834,30 @@ mod tests {
 			.expect("save memory");
 	}
 
+	/// The store holds one connection for its lifetime. A connection per
+	/// operation made every read and write delete the write-ahead log and its
+	/// shared-memory file, so a host with slow file deletes paid two unlinks
+	/// per call. The assertion is on connections opened, not elapsed time.
+	#[test]
+	fn every_operation_reuses_the_one_connection() {
+		let store = store(1000, 24);
+		assert_eq!(store.connection_opens(), 1, "opening the store opens one connection");
+		for index in 0..32 {
+			save(&store, &format!("memory-{index}"));
+		}
+		for index in 0..32 {
+			store
+				.get(&format!("memory-{index}"))
+				.expect("lookup")
+				.expect("saved memory");
+		}
+		store.generations().expect("generations");
+		store.counts().expect("counts");
+		store.integrity().expect("integrity");
+		store.recent_working(10).expect("recent");
+		assert_eq!(store.connection_opens(), 1, "no operation may open a connection of its own");
+	}
+
 	#[test]
 	fn working_memory_count_eviction_is_session_scoped() {
 		let store = store(2, 24);
@@ -1833,7 +1896,6 @@ mod tests {
 			.expect("save linked vector");
 		store
 			.connection()
-			.expect("connection")
 			.execute("UPDATE working_memory SET timestamp = '0' WHERE id = 'stale'", [])
 			.expect("age memory");
 
@@ -1861,7 +1923,6 @@ mod tests {
 			.expect("retain window");
 		store
 			.connection()
-			.expect("connection")
 			.execute(
 				"UPDATE working_memory SET timestamp = '0' WHERE source = 'coding-agent-transcript'",
 				[],
@@ -2025,7 +2086,6 @@ mod tests {
 		assert_eq!(
 			store
 				.connection()
-				.expect("connection")
 				.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
 				.expect("version"),
 			SCHEMA_VERSION
