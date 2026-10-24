@@ -6,13 +6,16 @@ use std::{
 	fmt,
 	path::{Path, PathBuf},
 	str::FromStr,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
@@ -126,8 +129,16 @@ impl From<rusqlite::Error> for AccountStateStoreError {
 /// Clone-cheap SQLite store for metadata that must outlive credential material.
 #[derive(Clone)]
 pub struct AccountStateStore {
-	path:   PathBuf,
-	writes: Arc<Mutex<()>>,
+	path:       PathBuf,
+	/// The one connection every operation borrows.
+	///
+	/// A connection per operation deleted the WAL and shared-memory files on
+	/// every drop, so each read cost two unlinks; one connection creates them
+	/// once. The mutex serializes reads as well as writes, which is strictly
+	/// stronger than the write lock it replaces, and the operations here are
+	/// small metadata reads and writes rather than long scans.
+	connection: Arc<Mutex<Connection>>,
+	opens:      Arc<AtomicU64>,
 }
 
 impl fmt::Debug for AccountStateStore {
@@ -143,10 +154,11 @@ impl AccountStateStore {
 	/// Opens the application database and creates namespaced account-state
 	/// tables.
 	pub fn open(path: impl Into<PathBuf>) -> Result<Self, AccountStateStoreError> {
-		let store = Self { path: path.into(), writes: Arc::new(Mutex::new(())) };
-		let mut connection = store.connection()?;
+		let path = path.into();
+		let opens = Arc::new(AtomicU64::new(1));
+		let mut connection = open_connection(&path)?;
 		migrate(&mut connection)?;
-		Ok(store)
+		Ok(Self { path, connection: Arc::new(Mutex::new(connection)), opens })
 	}
 
 	/// Returns the backing application database path for constructor wiring.
@@ -160,8 +172,7 @@ impl AccountStateStore {
 	/// Returns the persisted generation, which never regresses when stale
 	/// discovery metadata is replayed.
 	pub fn upsert_account(&self, record: &AccountRecord) -> Result<u64, AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let existing = transaction
 			.query_row(
@@ -226,7 +237,7 @@ impl AccountStateStore {
 
 	/// Loads every static account record in stable account-ID order.
 	pub fn load_accounts(&self) -> Result<Vec<AccountRecord>, AccountStateStoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut routes = BTreeMap::<AccountId, BTreeSet<RouteId>>::new();
 		let mut statement = connection.prepare(
 			"SELECT account_id, route_id FROM account_state_account_routes ORDER BY account_id, \
@@ -305,8 +316,7 @@ impl AccountStateStore {
 		generation: u64,
 	) -> Result<bool, AccountStateStoreError> {
 		let generation = i64::try_from(generation).map_err(|_| AccountStateStoreError::OutOfRange)?;
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let changed = transaction.execute(
 			"UPDATE account_state_accounts SET credential_generation = ?3
@@ -333,8 +343,7 @@ impl AccountStateStore {
 	) -> Result<(), AccountStateStoreError> {
 		let generation =
 			i64::try_from(rejection.generation).map_err(|_| AccountStateStoreError::OutOfRange)?;
-		let _guard = self.writes.lock();
-		self.connection()?.execute(
+		self.connection().execute(
 			"INSERT INTO account_state_rejections (account_id, generation, observed_at_ms)
 			 VALUES (?1, ?2, ?3)
 			 ON CONFLICT(account_id) DO UPDATE SET
@@ -353,8 +362,7 @@ impl AccountStateStore {
 		account: &AccountId<str>,
 		enabled: bool,
 	) -> Result<bool, AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let changed = self.connection()?.execute(
+		let changed = self.connection().execute(
 			"UPDATE account_state_accounts SET enabled = ?2 WHERE account_id = ?1",
 			params![account.as_str(), enabled],
 		)?;
@@ -367,7 +375,7 @@ impl AccountStateStore {
 		&self,
 		account: &AccountId<str>,
 	) -> Result<PersistedAccountState, AccountStateStoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let cooldown = connection
 			.query_row(
 				"SELECT until_ms, reason FROM account_state_cooldowns WHERE account_id = ?1",
@@ -475,8 +483,7 @@ impl AccountStateStore {
 	/// Atomically upserts an explicit cooldown without touching credential
 	/// tables.
 	pub fn save_cooldown(&self, cooldown: &PersistedCooldown) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		transaction.execute(
 			"INSERT INTO account_state_cooldowns (account_id, until_ms, reason) VALUES (?1, ?2, ?3)
@@ -493,9 +500,8 @@ impl AccountStateStore {
 
 	/// Removes only the explicit cooldown for an account.
 	pub fn clear_cooldown(&self, account: &AccountId<str>) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
 		self
-			.connection()?
+			.connection()
 			.execute(
 				"DELETE FROM account_state_cooldowns WHERE account_id = ?1",
 				[account.as_str()],
@@ -510,8 +516,7 @@ impl AccountStateStore {
 		provider: Option<&ProviderId<str>>,
 		account: Option<&AccountId<str>>,
 	) -> Result<usize, AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let (rate, quota) = if let Some(account) = account {
 			(
@@ -557,8 +562,7 @@ impl AccountStateStore {
 		account: &AccountId<str>,
 		observation: &RateObservation,
 	) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		transaction.execute(
 			"INSERT INTO account_state_rate_receipts
@@ -585,8 +589,7 @@ impl AccountStateStore {
 		account: &AccountId<str>,
 		scopes: &[Str],
 	) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if scopes.is_empty() {
 			transaction.execute("DELETE FROM account_state_rate_receipts WHERE account_id = ?1", [
@@ -611,8 +614,7 @@ impl AccountStateStore {
 		account: &AccountId<str>,
 		observation: &QuotaObservation,
 	) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		transaction.execute(
 			"INSERT INTO account_state_quota_receipts
@@ -637,8 +639,7 @@ impl AccountStateStore {
 
 	/// Atomically records durable account/principal affinity.
 	pub fn save_affinity(&self, affinity: &AccountAffinity) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let owns_principal = transaction.query_row(
 			"SELECT EXISTS(
@@ -672,7 +673,7 @@ impl AccountStateStore {
 		&self,
 		scope: &AffinityScope,
 	) -> Result<Option<AccountAffinity>, AccountStateStoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection
 			.query_row(
 				"SELECT account_id, principal_id, updated_at_ms FROM account_state_affinity WHERE \
@@ -699,8 +700,7 @@ impl AccountStateStore {
 		account: &AccountId<str>,
 		name: &AccountName,
 	) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let provider = transaction
 			.query_row(
@@ -731,16 +731,15 @@ impl AccountStateStore {
 
 	/// Removes the name of `account`; reports whether it had one.
 	pub fn clear_name(&self, account: &AccountId<str>) -> Result<bool, AccountStateStoreError> {
-		let _guard = self.writes.lock();
 		let changed = self
-			.connection()?
+			.connection()
 			.execute("DELETE FROM account_state_names WHERE account_id = ?1", [account.as_str()])?;
 		Ok(changed != 0)
 	}
 
 	/// Loads every account name in stable account-ID order.
 	pub fn load_names(&self) -> Result<Vec<(AccountId, AccountName)>, AccountStateStoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection
 			.prepare("SELECT account_id, name FROM account_state_names ORDER BY account_id")?;
 		let rows =
@@ -761,8 +760,7 @@ impl AccountStateStore {
 
 	/// Atomically purges account ownership and all associated secret-free state.
 	pub fn purge_account(&self, account: &AccountId<str>) -> Result<(), AccountStateStoreError> {
-		let _guard = self.writes.lock();
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		transaction.execute("DELETE FROM account_state_cooldowns WHERE account_id = ?1", [
 			account.as_str(),
@@ -789,13 +787,26 @@ impl AccountStateStore {
 		Ok(())
 	}
 
-	fn connection(&self) -> Result<Connection, AccountStateStoreError> {
-		let connection = Connection::open(&self.path)?;
-		connection.busy_timeout(Duration::from_secs(5))?;
-		connection.pragma_update(None, "foreign_keys", true)?;
-		connection.pragma_update(None, "journal_mode", "WAL")?;
-		Ok(connection)
+	/// How many SQLite connections this store has opened.
+	///
+	/// Opening one costs a WAL teardown when it is dropped, so this is the
+	/// observable a regression test asserts on instead of wall-clock time.
+	pub fn connection_opens(&self) -> u64 {
+		self.opens.load(Ordering::Relaxed)
 	}
+
+	fn connection(&self) -> MutexGuard<'_, Connection> {
+		self.connection.lock()
+	}
+}
+
+/// Opens one connection with the pragmas every operation relies on.
+fn open_connection(path: &Path) -> Result<Connection, AccountStateStoreError> {
+	let connection = Connection::open(path)?;
+	connection.busy_timeout(Duration::from_secs(5))?;
+	connection.pragma_update(None, "foreign_keys", true)?;
+	connection.pragma_update(None, "journal_mode", "WAL")?;
+	Ok(connection)
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), AccountStateStoreError> {

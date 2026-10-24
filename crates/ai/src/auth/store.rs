@@ -12,6 +12,7 @@ use std::{
 };
 
 use omp_core::{ExposeSecret, Secret, SecretBox, SecretString, Str, sf};
+use parking_lot::{Mutex, MutexGuard};
 use ring::hmac;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -413,8 +414,12 @@ impl From<rusqlite::Error> for StoreError {
 /// transactions provide concurrent readers plus cross-process write and lease
 /// serialization without sharing secret material between processes.
 pub struct CredentialStore {
-	path: PathBuf,
-	keys: Arc<dyn KeySource>,
+	path:       PathBuf,
+	keys:       Arc<dyn KeySource>,
+	/// The one connection every operation borrows, for the reason
+	/// `AccountStateStore` holds the same database open: a connection per
+	/// operation unlinks the WAL and shared-memory files on every drop.
+	connection: Arc<Mutex<Connection>>,
 }
 
 /// Secret-safe credential source backed by [`CredentialStore`].
@@ -446,11 +451,11 @@ impl fmt::Debug for StoredCredentialSource {
 impl CredentialStore {
 	/// Opens or migrates a credential store.
 	pub fn open(path: impl Into<PathBuf>, keys: Arc<dyn KeySource>) -> Result<Self, StoreError> {
-		let store = Self { path: path.into(), keys };
-		let mut connection = store.connection()?;
+		let path = path.into();
+		let mut connection = open_connection(&path)?;
 		connection.pragma_update(None, "journal_mode", "WAL")?;
 		migrate(&mut connection)?;
-		Ok(store)
+		Ok(Self { path, keys, connection: Arc::new(Mutex::new(connection)) })
 	}
 
 	/// Atomically inserts or replaces a credential and increments its
@@ -596,7 +601,7 @@ impl CredentialStore {
 			return Err(StoreError::EphemeralCredential);
 		}
 		let active_key = self.keys.active_key()?;
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if let Some((lease, now_ms)) = lease {
 			let owns_lease = transaction.query_row(
@@ -723,7 +728,7 @@ impl CredentialStore {
 
 	/// Loads and authenticates one credential.
 	pub(crate) fn get(&self, account_id: &AccountId<str>) -> Result<StoredCredential, StoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let row = connection
 			.query_row(
 				"SELECT principal_id, kind, generation, created_at_ms, updated_at_ms,
@@ -801,7 +806,7 @@ impl CredentialStore {
 		}
 		let metadata = self.metadata(account_id)?.ok_or(StoreError::NotFound)?;
 		let observed_at_ms = unix_ms(SystemTime::now())?;
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let existing = transaction
 			.query_row(
@@ -852,6 +857,8 @@ impl CredentialStore {
 			)?;
 		}
 		transaction.commit()?;
+		// `get` takes the connection again, so this one must be released first.
+		drop(connection);
 		let stored = self.get(account_id)?;
 		if stored.metadata.generation != metadata.generation {
 			return Err(StoreError::GenerationConflict);
@@ -873,7 +880,7 @@ impl CredentialStore {
 		limit: usize,
 	) -> Result<Vec<CredentialAuditEntry>, StoreError> {
 		let limit = limit.min(1_000) as u32;
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT * FROM (
 				 SELECT 'import_oauth' AS action, extension, caller_principal, provider,
@@ -943,7 +950,7 @@ impl CredentialStore {
 		{
 			return Err(StoreError::InvalidScopedGrant);
 		}
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let exists = transaction
 			.query_row(
@@ -1028,7 +1035,7 @@ impl CredentialStore {
 		&self,
 		account_id: &AccountId<str>,
 	) -> Result<Option<CredentialMetadata>, StoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		connection
 			.query_row(
 				"SELECT principal_id, kind, generation, created_at_ms, updated_at_ms, expires_at_ms
@@ -1042,7 +1049,7 @@ impl CredentialStore {
 
 	/// Lists every credential as secret-free metadata.
 	pub fn list_metadata(&self) -> Result<Vec<CredentialMetadata>, StoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let mut statement = connection.prepare(
 			"SELECT account_id, principal_id, kind, generation, created_at_ms, updated_at_ms, \
 			 expires_at_ms
@@ -1060,7 +1067,7 @@ impl CredentialStore {
 	/// Deletes credential metadata, encrypted bytes, and associated leases
 	/// atomically.
 	pub fn delete(&self, account_id: &AccountId<str>) -> Result<bool, StoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		Ok(connection
 			.execute("DELETE FROM credentials WHERE account_id = ?1", [account_id.as_str()])?
 			!= 0)
@@ -1069,7 +1076,7 @@ impl CredentialStore {
 	/// Re-encrypts every secret with the active key in one transaction.
 	pub fn rotate_keys(&self) -> Result<usize, StoreError> {
 		let active = self.keys.active_key()?;
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		let encrypted = {
 			let mut statement = transaction.prepare(
@@ -1170,7 +1177,7 @@ impl CredentialStore {
 		let expires_at_ms = now_ms
 			.checked_add(u64::try_from(ttl.as_millis()).map_err(|_| StoreError::InvalidTime)?)
 			.ok_or(StoreError::InvalidTime)?;
-		let mut connection = self.connection()?;
+		let mut connection = self.connection();
 		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 		if !transaction.query_row(
 			"SELECT EXISTS(SELECT 1 FROM credentials WHERE account_id = ?1)",
@@ -1226,7 +1233,7 @@ impl CredentialStore {
 		let expires_at_ms = now_ms
 			.checked_add(u64::try_from(ttl.as_millis()).map_err(|_| StoreError::InvalidTime)?)
 			.ok_or(StoreError::InvalidTime)?;
-		let connection = self.connection()?;
+		let connection = self.connection();
 		let changed = connection.execute(
 			"UPDATE leases SET expires_at_ms = ?5
 			 WHERE account_id = ?1 AND kind = ?2 AND owner = ?3 AND epoch = ?4 AND expires_at_ms > ?6",
@@ -1247,7 +1254,7 @@ impl CredentialStore {
 
 	/// Releases a lease only when its fencing token still matches.
 	pub fn release_lease(&self, lease: &PersistentLease) -> Result<bool, StoreError> {
-		let connection = self.connection()?;
+		let connection = self.connection();
 		Ok(connection.execute(
 			"DELETE FROM leases WHERE account_id = ?1 AND kind = ?2 AND owner = ?3 AND epoch = ?4",
 			params![lease.account_id.as_str(), lease.kind.as_str(), lease.owner.as_str(), lease.epoch],
@@ -1297,12 +1304,17 @@ impl CredentialStore {
 		Ok(())
 	}
 
-	fn connection(&self) -> Result<Connection, StoreError> {
-		let connection = Connection::open(&self.path)?;
-		connection.busy_timeout(BUSY_TIMEOUT)?;
-		connection.pragma_update(None, "foreign_keys", true)?;
-		Ok(connection)
+	fn connection(&self) -> MutexGuard<'_, Connection> {
+		self.connection.lock()
 	}
+}
+
+/// Opens one connection with the pragmas every operation relies on.
+fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+	let connection = Connection::open(path)?;
+	connection.busy_timeout(BUSY_TIMEOUT)?;
+	connection.pragma_update(None, "foreign_keys", true)?;
+	Ok(connection)
 }
 
 impl StoredCredentialSource {
@@ -1523,8 +1535,9 @@ impl RefreshLeaseStore for CredentialStore {
 				.as_str()
 				.parse::<u64>()
 				.map_err(|_| refresh_contract_error("refresh lease identity is malformed"))?;
-			let connection = self.connection().map_err(refresh_store_error)?;
-			let owns_lease = connection
+			// The guard must not still be alive when `metadata` takes it.
+			let owns_lease = self
+				.connection()
 				.query_row(
 					"SELECT EXISTS(
 						SELECT 1 FROM leases
@@ -1580,7 +1593,11 @@ impl RefreshLeaseStore for CredentialStore {
 
 impl Clone for CredentialStore {
 	fn clone(&self) -> Self {
-		Self { path: self.path.clone(), keys: Arc::clone(&self.keys) }
+		Self {
+			path:       self.path.clone(),
+			keys:       Arc::clone(&self.keys),
+			connection: Arc::clone(&self.connection),
+		}
 	}
 }
 
