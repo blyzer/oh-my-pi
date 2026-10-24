@@ -1778,12 +1778,12 @@ fn browser_fault(operation: &'static str, error: omp_webview::Error) -> Fault {
 		omp_webview::Error::Launch { .. } => {
 			(sf!("browser_launch_failed"), sf!("browser process failed to launch"))
 		},
-		omp_webview::Error::Timeout(_) => (sf!("browser_timeout"), redact(&error.to_string())),
+		omp_webview::Error::Timeout { .. } => (sf!("browser_timeout"), redact(&error.to_string())),
 		omp_webview::Error::Closed => (sf!("browser_closed"), sf!("browser connection closed")),
 		omp_webview::Error::Protocol(_) => {
 			(sf!("browser_protocol_failed"), redact(&error.to_string()))
 		},
-		omp_webview::Error::Unsupported(_) => {
+		omp_webview::Error::Unsupported { .. } => {
 			(sf!("browser_unsupported"), redact(&error.to_string()))
 		},
 		_ => (sf!("browser_automation_failed"), redact(&error.to_string())),

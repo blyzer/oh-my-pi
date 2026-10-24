@@ -131,8 +131,8 @@ fn map_webview_error(error: omp_webview::Error) -> BrowserFetchError {
 	match error {
 		omp_webview::Error::NoEngine(_)
 		| omp_webview::Error::Launch { .. }
-		| omp_webview::Error::Unsupported(_) => BrowserFetchError::Unavailable,
-		omp_webview::Error::Timeout(_) => BrowserFetchError::TimedOut,
+		| omp_webview::Error::Unsupported { .. } => BrowserFetchError::Unavailable,
+		omp_webview::Error::Timeout { .. } => BrowserFetchError::TimedOut,
 		_ => BrowserFetchError::Navigation,
 	}
 }

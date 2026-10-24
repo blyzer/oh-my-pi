@@ -229,7 +229,7 @@ where
 			// Channel-drop shutdown: the driver observes command disconnect (or
 			// its own bounded connect timeout) and terminates the engine.
 			drop(cmd_tx);
-			Err(Error::Timeout("launching browser engine"))
+			Err(Error::Timeout { phase: "launching browser engine" })
 		},
 	}
 }

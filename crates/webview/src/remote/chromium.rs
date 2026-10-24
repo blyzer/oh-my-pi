@@ -200,7 +200,7 @@ async fn connect_attached(
 	let link =
 		timeout(page.connect_timeout.unwrap_or(Duration::from_secs(35)), WsLink::connect(&websocket))
 			.await
-			.map_err(|_| Error::Timeout("connecting to the CDP endpoint"))??;
+			.map_err(|_| Error::Timeout { phase: "connecting to the CDP endpoint" })??;
 	let mut cdp = Cdp::new(link, events, state, None, cancelled, Some(kind));
 	wire_attached(&mut cdp, target_matcher, config, page).await?;
 	Ok(cdp)
@@ -235,7 +235,7 @@ async fn resolve_cdp_websocket(endpoint: &str, connect_timeout: Duration) -> Res
 	let deadline = Instant::now() + connect_timeout;
 	loop {
 		if Instant::now() >= deadline {
-			return Err(Error::Timeout("waiting for the CDP endpoint"));
+			return Err(Error::Timeout { phase: "waiting for the CDP endpoint" });
 		}
 		let request = Request::get(uri.clone())
 			.body(Empty::<Bytes>::new())
@@ -364,7 +364,7 @@ async fn connect(
 		let url = wait_devtools_port(profile, startup_timeout).await?;
 		timeout(startup_timeout, WsLink::connect(&url))
 			.await
-			.map_err(|_| Error::Timeout("connecting to the owned browser"))?
+			.map_err(|_| Error::Timeout { phase: "connecting to the owned browser" })?
 	}
 	.await;
 	match connected {
@@ -427,7 +427,7 @@ async fn wait_devtools_port(profile: &Path, startup_timeout: Duration) -> Result
 			}
 		}
 		if Instant::now() >= deadline {
-			return Err(Error::Timeout("waiting for the DevTools port"));
+			return Err(Error::Timeout { phase: "waiting for the DevTools port" });
 		}
 		sleep(POLL_INTERVAL).await;
 	}
@@ -618,7 +618,7 @@ async fn wire_window(cdp: &mut Cdp, page: &PageOptions) -> Result<()> {
 			);
 		}
 		if Instant::now() >= deadline {
-			return Err(Error::Timeout("waiting for the app window target"));
+			return Err(Error::Timeout { phase: "waiting for the app window target" });
 		}
 		sleep(POLL_INTERVAL).await;
 	};
@@ -821,7 +821,7 @@ impl Cdp {
 			}
 			let remaining = deadline.saturating_duration_since(Instant::now());
 			if remaining.is_zero() {
-				return Err(Error::Timeout("waiting for a CDP reply"));
+				return Err(Error::Timeout { phase: "waiting for a CDP reply" });
 			}
 			let reply =
 				match timeout(remaining.min(Duration::from_millis(25)), self.link.recv_json()).await {
