@@ -35,7 +35,7 @@ impl builtins::Command for PrintfCommand {
 
 			// Convert to a string.
 			let result_str = String::from_utf8(result)
-				.map_err(|_| ErrorKind::PrintfInvalidUsage("invalid UTF-8 output".into()))?;
+				.map_err(|_| ErrorKind::PrintfInvalidUsage { usage: "invalid UTF-8 output".into() })?;
 
 			// Assign to the selected variable.
 			expansion::assign_to_named_parameter(
@@ -63,11 +63,14 @@ fn format(format_and_args: &[String], writer: impl Write) -> Result<(), Error> {
 		// Handle a format string with arguments using the first-party engine.
 		[fmt, args @ ..] => printf_engine::format(fmt, args, writer).map_err(|error| match error {
 			printf_engine::PrintfError::Io(error) => error.into(),
-			error => ErrorKind::PrintfInvalidUsage(format!("printf formatting error: {error}")).into(),
+			error => {
+				ErrorKind::PrintfInvalidUsage { usage: format!("printf formatting error: {error}") }
+					.into()
+			},
 		}),
 		// Handle case with no format string (we shouldn't be able to get here since clap will
 		// fail parsing when the format string is missing)
-		[] => Err(ErrorKind::PrintfInvalidUsage("missing operand".into()).into()),
+		[] => Err(ErrorKind::PrintfInvalidUsage { usage: "missing operand".into() }.into()),
 	}
 }
 

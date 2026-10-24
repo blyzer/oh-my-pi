@@ -68,7 +68,7 @@ pub struct KeyStroke {
 /// * `input` - The input string to parse
 pub fn parse_key_sequence(input: &str) -> Result<KeySequence, error::BindingParseError> {
 	readline_binding::key_sequence(input)
-		.map_err(|_err| error::BindingParseError::Unknown(input.to_owned()))
+		.map_err(|_err| error::BindingParseError::Unknown { binding: input.to_owned() })
 }
 
 /// Parses a binding specification that maps a key sequence
@@ -81,7 +81,7 @@ pub fn parse_key_sequence_shell_cmd_binding(
 	input: &str,
 ) -> Result<KeySequenceShellCommandBinding, error::BindingParseError> {
 	readline_binding::key_sequence_shell_cmd_binding(input)
-		.map_err(|_err| error::BindingParseError::Unknown(input.to_owned()))
+		.map_err(|_err| error::BindingParseError::Unknown { binding: input.to_owned() })
 }
 
 /// Parses a binding specification that maps a key sequence
@@ -94,7 +94,7 @@ pub fn parse_key_sequence_readline_binding(
 	input: &str,
 ) -> Result<KeySequenceReadlineBinding, error::BindingParseError> {
 	readline_binding::key_sequence_readline_binding(input)
-		.map_err(|_err| error::BindingParseError::Unknown(input.to_owned()))
+		.map_err(|_err| error::BindingParseError::Unknown { binding: input.to_owned() })
 }
 
 /// Converts a `KeySequence` to a vector of `KeyStroke`.

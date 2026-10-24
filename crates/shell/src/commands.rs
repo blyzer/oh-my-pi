@@ -506,7 +506,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 					let _ = post_execute(&mut self.shell);
 				}
 
-				Err(ErrorKind::CommandNotFound(self.command_name).into())
+				Err(ErrorKind::CommandNotFound { name: self.command_name }.into())
 			}
 		} else {
 			let command_name = PathBuf::from(self.command_name.clone());
@@ -840,7 +840,7 @@ pub(crate) fn execute_external_command(
 							.into(),
 					)
 				} else {
-					Err(error::ErrorKind::CommandNotFound(context.command_name).into())
+					Err(error::ErrorKind::CommandNotFound { name: context.command_name }.into())
 				}
 			} else {
 				Err(error::ErrorKind::FailedToExecuteCommand(context.command_name, spawn_err).into())

@@ -33,8 +33,11 @@ pub struct ParseErrorLocation {
 #[derive(Debug, thiserror::Error)]
 pub enum WordParseError {
 	/// A numeric literal used by word syntax exceeds its supported range.
-	#[error("{0} out of range")]
-	NumericLiteralOutOfRange(&'static str),
+	#[error("{literal} out of range")]
+	NumericLiteralOutOfRange {
+		/// The out-of-range literal kind.
+		literal: &'static str,
+	},
 
 	/// An error occurred while parsing an arithmetic expression.
 	#[error("failed to parse arithmetic expression")]
@@ -70,8 +73,11 @@ pub struct TestCommandParseError(#[from] peg::error::ParseError<usize>);
 #[derive(Debug, thiserror::Error)]
 pub enum BindingParseError {
 	/// The binding could not be parsed.
-	#[error("unknown error while parsing key-binding: '{0}'")]
-	Unknown(String),
+	#[error("unknown error while parsing key-binding: '{binding}'")]
+	Unknown {
+		/// The unparsed binding specification.
+		binding: String,
+	},
 
 	/// A key code was missing from the binding.
 	#[error("missing key code in binding")]

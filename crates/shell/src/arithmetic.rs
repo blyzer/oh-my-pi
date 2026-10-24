@@ -29,8 +29,11 @@ pub enum EvalError {
 	FailedToTokenizeExpression,
 
 	/// Failed to expand an arithmetic expression.
-	#[error("failed to expand expression: {0}")]
-	FailedToExpandExpression(String),
+	#[error("failed to expand expression: {expr}")]
+	FailedToExpandExpression {
+		/// The unexpandable expression.
+		expr: String,
+	},
 
 	/// Failed to access an element of an array.
 	#[error("failed to access array")]
@@ -41,12 +44,18 @@ pub enum EvalError {
 	FailedToUpdateEnvironment,
 
 	/// Failed to parse an arithmetic expression.
-	#[error("failed to parse expression: {0}")]
-	ParseError(String),
+	#[error("failed to parse expression: {expr}")]
+	ParseError {
+		/// The unparseable expression.
+		expr: String,
+	},
 
 	/// Error expanding an unset variable.
-	#[error("expanding unset variable: {0}")]
-	ExpandingUnsetVariable(String),
+	#[error("expanding unset variable: {variable}")]
+	ExpandingUnsetVariable {
+		/// The unset variable name.
+		variable: String,
+	},
 
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
@@ -98,10 +107,10 @@ pub(crate) async fn expand_and_eval(
 	let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
 	let expanded_self = expansion::basic_expand_word_with_options(shell, params, expr, &options)
 		.await
-		.map_err(|_e| EvalError::FailedToExpandExpression(expr.to_owned()))?;
+		.map_err(|_e| EvalError::FailedToExpandExpression { expr: expr.to_owned() })?;
 
 	// Now parse.
-	let expr = parse(&expanded_self).map_err(|_e| EvalError::ParseError(expanded_self))?;
+	let expr = parse(&expanded_self).map_err(|_e| EvalError::ParseError { expr: expanded_self })?;
 
 	// Trace if applicable.
 	if trace_if_needed && shell.options().print_commands_and_arguments {
@@ -188,7 +197,7 @@ fn get_var_value<'a>(
 	}
 
 	if shell.options().treat_unset_variables_as_error {
-		return Err(EvalError::ExpandingUnsetVariable(name.into()));
+		return Err(EvalError::ExpandingUnsetVariable { variable: name.into() });
 	}
 
 	Ok("".into())
@@ -213,8 +222,8 @@ fn deref_lvalue(
 		},
 	};
 
-	let parsed_value =
-		parse(value_str.as_ref()).map_err(|_err| EvalError::ParseError(value_str.to_string()))?;
+	let parsed_value = parse(value_str.as_ref())
+		.map_err(|_err| EvalError::ParseError { expr: value_str.to_string() })?;
 
 	// Literals don't need depth tracking — they can't cause recursion.
 	// Only increment depth when the parsed value requires further evaluation

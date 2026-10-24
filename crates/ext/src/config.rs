@@ -272,7 +272,7 @@ impl CliContribution {
 			|| !flag_name(&self.name)
 			|| self.sink.key.is_empty()
 		{
-			return Err(CliCollision::Invalid(self.qualified_name()));
+			return Err(CliCollision::Invalid { contribution: self.qualified_name() });
 		}
 		let valid_default = match (&self.kind, &self.default) {
 			(_, None) => true,
@@ -280,7 +280,7 @@ impl CliContribution {
 			(CliValueKind::String | CliValueKind::OptionalString, Some(value)) => value.is_string(),
 		};
 		if !valid_default {
-			return Err(CliCollision::InvalidDefault(self.qualified_name()));
+			return Err(CliCollision::InvalidDefault { contribution: self.qualified_name() });
 		}
 		Ok(())
 	}
@@ -290,11 +290,17 @@ impl CliContribution {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CliCollision {
 	/// Static contribution syntax is invalid.
-	#[error("invalid extension CLI contribution `{0}`")]
-	Invalid(Str),
+	#[error("invalid extension CLI contribution `{contribution}`")]
+	Invalid {
+		/// The malformed contribution spelling.
+		contribution: Str,
+	},
 	/// A typed default does not match the contribution kind.
-	#[error("invalid default for extension CLI contribution `{0}`")]
-	InvalidDefault(Str),
+	#[error("invalid default for extension CLI contribution `{contribution}`")]
+	InvalidDefault {
+		/// The contribution with the mismatched default.
+		contribution: Str,
+	},
 	/// Two extensions own one spelling.
 	#[error("extension CLI flag `--{name}` is declared by both {first} and {second}")]
 	Duplicate {

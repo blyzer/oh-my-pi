@@ -28,7 +28,7 @@ pub fn kill_process(
 		| traps::TrapSignal::Err
 		| traps::TrapSignal::Exit
 		| traps::TrapSignal::Return => {
-			return Err(error::ErrorKind::InvalidSignal(signal.to_string()).into());
+			return Err(error::ErrorKind::InvalidSignal { signal: signal.to_string() }.into());
 		},
 	};
 

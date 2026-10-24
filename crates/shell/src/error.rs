@@ -68,16 +68,25 @@ pub enum ErrorKind {
 	CheckedExpansionError(String),
 
 	/// A reference was made to an unknown shell function.
-	#[error("function not found: {0}")]
-	FunctionNotFound(String),
+	#[error("function not found: {name}")]
+	FunctionNotFound {
+		/// The unknown function name.
+		name: String,
+	},
 
 	/// Command was not found.
-	#[error("command not found: {0}")]
-	CommandNotFound(String),
+	#[error("command not found: {name}")]
+	CommandNotFound {
+		/// The unresolved command name.
+		name: String,
+	},
 
 	/// Not a builtin.
-	#[error("not a shell builtin: {0}")]
-	BuiltinNotFound(String),
+	#[error("not a shell builtin: {name}")]
+	BuiltinNotFound {
+		/// The requested builtin name.
+		name: String,
+	},
 
 	/// The working directory does not exist.
 	#[error("working directory does not exist: {0}")]
@@ -95,8 +104,11 @@ pub enum ErrorKind {
 	HistoryNotEnabled,
 
 	/// The requested functionality has not yet been implemented in this shell.
-	#[error("not yet implemented: {0}")]
-	Unimplemented(&'static str),
+	#[error("not yet implemented: {feature}")]
+	Unimplemented {
+		/// The unimplemented feature.
+		feature: &'static str,
+	},
 
 	/// The requested functionality has not yet been implemented in this shell;
 	/// it is tracked in a GitHub issue.
@@ -181,8 +193,11 @@ pub enum ErrorKind {
 	ReadonlyVariable,
 
 	/// The indicated pattern is invalid.
-	#[error("invalid pattern: '{0}'")]
-	InvalidPattern(String),
+	#[error("invalid pattern: '{pattern}'")]
+	InvalidPattern {
+		/// The invalid pattern text.
+		pattern: String,
+	},
 
 	/// A regular expression error occurred
 	#[error("regex error: {0}")]
@@ -197,8 +212,11 @@ pub enum ErrorKind {
 	IoError(#[from] io::Error),
 
 	/// Invalid substitution syntax.
-	#[error("bad substitution: {0}")]
-	BadSubstitution(String),
+	#[error("bad substitution: {expr}")]
+	BadSubstitution {
+		/// The malformed substitution expression.
+		expr: String,
+	},
 
 	/// An error occurred while creating a child process.
 	#[error("failed to create child process")]
@@ -229,8 +247,11 @@ pub enum ErrorKind {
 	ThreadingError(#[from] task::JoinError),
 
 	/// An invalid signal was referenced.
-	#[error("{0}: invalid signal specification")]
-	InvalidSignal(String),
+	#[error("{signal}: invalid signal specification")]
+	InvalidSignal {
+		/// The invalid signal specification.
+		signal: String,
+	},
 
 	/// A platform error occurred.
 	#[error("platform error: {0}")]
@@ -244,12 +265,18 @@ pub enum ErrorKind {
 	SuspendNotSupportedInShellHost,
 
 	/// The given open file cannot be read from.
-	#[error("cannot read from {0}")]
-	OpenFileNotReadable(&'static str),
+	#[error("cannot read from {file}")]
+	OpenFileNotReadable {
+		/// The unreadable open-file description.
+		file: &'static str,
+	},
 
 	/// The given open file cannot be written to.
-	#[error("cannot write to {0}")]
-	OpenFileNotWritable(&'static str),
+	#[error("cannot write to {file}")]
+	OpenFileNotWritable {
+		/// The unwritable open-file description.
+		file: &'static str,
+	},
 
 	/// Bad file descriptor.
 	#[error("bad file descriptor: {0}")]
@@ -260,8 +287,11 @@ pub enum ErrorKind {
 	PrintfFailure(i32),
 
 	/// Printf invalid usage
-	#[error("printf: {0}")]
-	PrintfInvalidUsage(String),
+	#[error("printf: {usage}")]
+	PrintfInvalidUsage {
+		/// The user-facing printf usage complaint.
+		usage: String,
+	},
 
 	/// Interrupted
 	#[error("interrupted")]
@@ -276,8 +306,11 @@ pub enum ErrorKind {
 	TimeError(#[from] time::SystemTimeError),
 
 	/// Array index out of range.
-	#[error("array index out of range: {0}")]
-	ArrayIndexOutOfRange(String),
+	#[error("array index out of range: {index}")]
+	ArrayIndexOutOfRange {
+		/// The out-of-range index expression.
+		index: String,
+	},
 
 	/// Unhandled key code.
 	#[error("unhandled key code: {0:?}")]
@@ -288,12 +321,18 @@ pub enum ErrorKind {
 	BuiltinError(Box<dyn BuiltinError>, String),
 
 	/// Operation not supported on this platform.
-	#[error("operation not supported on this platform: {0}")]
-	NotSupportedOnThisPlatform(&'static str),
+	#[error("operation not supported on this platform: {operation}")]
+	NotSupportedOnThisPlatform {
+		/// The unsupported operation.
+		operation: &'static str,
+	},
 
 	/// Expanding an unset variable.
-	#[error("expanding unset variable: {0}")]
-	ExpandingUnsetVariable(String),
+	#[error("expanding unset variable: {variable}")]
+	ExpandingUnsetVariable {
+		/// The unset variable name.
+		variable: String,
+	},
 
 	/// An internal error occurred.
 	#[error("internal shell error: {0}")]
@@ -331,8 +370,11 @@ pub enum ErrorKind {
 	},
 
 	/// A glob pattern failed to match any files (failglob).
-	#[error("no match: {0}")]
-	NoMatch(String),
+	#[error("no match: {pattern}")]
+	NoMatch {
+		/// The unmatched glob pattern.
+		pattern: String,
+	},
 }
 
 /// Trait implementable by built-in commands to represent errors.
@@ -370,8 +412,8 @@ where
 impl From<&ErrorKind> for results::ExecutionExitCode {
 	fn from(value: &ErrorKind) -> Self {
 		match value {
-			ErrorKind::CommandNotFound(..) => Self::NotFound,
-			ErrorKind::Unimplemented(..) | ErrorKind::UnimplementedAndTracked(..) => {
+			ErrorKind::CommandNotFound { .. } => Self::NotFound,
+			ErrorKind::Unimplemented { .. } | ErrorKind::UnimplementedAndTracked(..) => {
 				Self::Unimplemented
 			},
 			ErrorKind::ParseError(..) => Self::InvalidUsage,
@@ -478,7 +520,7 @@ impl Error {
 ///
 /// * `msg` - The message to include in the error
 pub fn unimp<T>(msg: &'static str) -> Result<T, Error> {
-	Err(ErrorKind::Unimplemented(msg).into())
+	Err(ErrorKind::Unimplemented { feature: msg }.into())
 }
 
 /// Convenience function for returning an error for *tracked*, unimplemented

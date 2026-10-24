@@ -67,14 +67,14 @@ impl Signal {
 			"TERM" | "SIGTERM" => Ok(Self::Terminate),
 			"KILL" | "SIGKILL" => Ok(Self::Kill),
 			"INT" | "SIGINT" => Ok(Self::Interrupt),
-			_ => Err(error::ErrorKind::InvalidSignal(s.into()).into()),
+			_ => Err(error::ErrorKind::InvalidSignal { signal: s.into() }.into()),
 		}
 	}
 
 	/// Creates a `Signal` from a string representation.
 	#[cfg(not(windows))]
 	pub fn from_str(s: &str) -> Result<Self, error::Error> {
-		Err(error::ErrorKind::InvalidSignal(s.into()).into())
+		Err(error::ErrorKind::InvalidSignal { signal: s.into() }.into())
 	}
 }
 
@@ -82,12 +82,12 @@ impl TryFrom<i32> for Signal {
 	type Error = error::Error;
 
 	fn try_from(value: i32) -> Result<Self, Self::Error> {
-		Err(error::ErrorKind::InvalidSignal(std::format!("{value}")).into())
+		Err(error::ErrorKind::InvalidSignal { signal: std::format!("{value}") }.into())
 	}
 }
 
 pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "continuing process" }.into())
 }
 
 /// Sends a signal to a specific process.
@@ -124,7 +124,7 @@ pub fn kill_process(
 		Ok(())
 	}
 	#[cfg(not(windows))]
-	Err(error::ErrorKind::NotSupportedOnThisPlatform("killing process").into())
+	Err(error::ErrorKind::NotSupportedOnThisPlatform { operation: "killing process" }.into())
 }
 
 pub(crate) fn lead_new_process_group() -> Result<(), error::Error> {

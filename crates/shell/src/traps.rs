@@ -101,7 +101,7 @@ impl TryFrom<i32> for TrapSignal {
 			0 => Self::Exit,
 			value => Self::Signal(
 				signal::Signal::try_from(value)
-					.map_err(|_| error::ErrorKind::InvalidSignal(value.to_string()))?,
+					.map_err(|_| error::ErrorKind::InvalidSignal { signal: value.to_string() })?,
 			),
 		})
 	}
@@ -129,7 +129,7 @@ impl TryFrom<&str> for TrapSignal {
 				}
 				signal::Signal::from_str(s.as_str())
 					.map(TrapSignal::Signal)
-					.map_err(|_| error::ErrorKind::InvalidSignal(value.into()))?
+					.map_err(|_| error::ErrorKind::InvalidSignal { signal: value.into() })?
 			},
 		})
 	}
