@@ -442,9 +442,25 @@ unchanged; the resample thread is the interrupted thread plus exactly the inject
 volatile notice), P6 (a crash before the redirect patch resumes unmarked and fires again; after it
 the journal replays to the identical tree and stays quiet), and P2 (an interrupt while the
 resample streams keeps the one committed redirect and records no second assistant, end, or
-receipt). Each was run against a mutation of the loop that it must catch. Still unproven:
-byte-identical no-watcher journals, the JSON-string decoder (no code to test), non-interrupting
-reminder continuation, and hidden/compaction turn gating.
+receipt). Each was run against a mutation of the loop that it must catch. Added 2026-10-23 in
+`stream_watch.rs`, both mutation-checked: a watcher that only ever passes journals nothing of its
+own (entry identities are ULIDs, so the observable is the entry sequence, not the bytes; the
+engaged run differs from an unwatched one by exactly the explicit `director.engage` patch), and a
+non-interrupting match records a `<diag>` on the culprit call and the rule body as a
+`<developer>` aside without resampling. Still unproven: the JSON-string decoder (no code to
+test).
+
+Two mechanisms §2, §3 and §6 describe do not exist in the code, found while trying to prove
+them. First, there is no deferred-reminder continuation: `StreamRules` implements no `on_yield`,
+holds no pending-reminder state, and never returns `Continue { reminder }`. A prose `never` match
+puts the rule body in `StreamEffect::developer`, which the loop commits as a `<developer>` node in
+the same turn, so the model does see it, but on this turn rather than delivered after a yield.
+Second, there is no hidden-turn gate: `watch_stream` has exactly one call site
+(`loop.rs:1662`), reached unconditionally for a visible response, and neither the loop nor
+`StreamRules::watch_stream` checks for a hidden turn. Hidden and compaction work is unwatched
+only because auxiliary `ErasedInference` calls never reach that call site, which is a different
+claim from the gate the record describes. Both are read from the code, not executed; neither has
+an owner decision recorded.
 
 Divergence from §4, found while writing P6: `assistant_end("interrupted")` and the
 `turn.receipt` are journaled before the `director.stream-interrupt` patch, not inside it. The

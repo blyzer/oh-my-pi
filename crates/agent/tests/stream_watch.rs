@@ -111,6 +111,67 @@ impl StreamWatch for ToolWatch {
 	}
 }
 
+/// Never interrupts: a text match records its body as a developer aside, a
+/// tool match records a `<diag>` against the call.
+struct NonInterrupting;
+
+impl Director for NonInterrupting {
+	fn id(&self) -> &str {
+		FAMILY
+	}
+
+	fn watch_stream(&self, _: &DirectorCx<'_>, _: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
+		Some(Box::new(NoteWatch))
+	}
+}
+
+struct NoteWatch;
+
+impl StreamWatch for NoteWatch {
+	fn fragment(&mut self, _: StreamFragment<'_>) -> StreamVerdict {
+		StreamVerdict::Pass
+	}
+
+	fn block_end(&mut self, _: u32) -> StreamVerdict {
+		StreamVerdict::Note(StreamEffect {
+			developer: Some(Str::new_static(INJECTION)),
+			notice: Some(Str::new_static("forbidden word noted")),
+			notice_name: Some(Str::new_static("stream-rule")),
+			..StreamEffect::default()
+		})
+	}
+
+	fn call_ready(&mut self, _: u32, call: &ToolCall) -> StreamVerdict {
+		StreamVerdict::Note(StreamEffect {
+			call_diags: vec![(call.id.clone(), Str::new_static(INJECTION))],
+			..StreamEffect::default()
+		})
+	}
+}
+
+/// A Director whose watcher never matches contributes nothing of its own to
+/// the journal: the engaged run records the same entry sequence as an
+/// unwatched run, plus the one `director.engage` patch that engaging it is.
+struct Quiet;
+
+impl Director for Quiet {
+	fn id(&self) -> &str {
+		FAMILY
+	}
+
+	fn watch_stream(&self, _: &DirectorCx<'_>, _: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
+		Some(Box::new(QuietWatch))
+	}
+}
+
+struct QuietWatch;
+
+impl StreamWatch for QuietWatch {
+	fn fragment(&mut self, _: StreamFragment<'_>) -> StreamVerdict {
+		StreamVerdict::Pass
+	}
+}
+
 /// Queues a user interrupt with the redirect, exercising the next admission
 /// boundary before a resample can start.
 struct RedirectThenInterrupt(Sender<Up>);
@@ -640,4 +701,110 @@ async fn redirect_consumes_the_request_budget_before_its_resample() {
 			.count(),
 		1
 	);
+}
+
+/// ADR 0038 test plan: "without a watcher, the journal is byte-identical to
+/// today". Entry identities are ULIDs, so two runs never share bytes; the
+/// observable is the entry sequence. A watcher that only ever passes adds no
+/// entry of its own, and the engaged run differs from the unwatched one by
+/// exactly the `director.engage` patch that engaging it is.
+#[tokio::test]
+async fn a_watcher_that_never_matches_adds_nothing_to_the_journal() {
+	async fn run(engage: bool, path: &std::path::Path, blobs: &std::path::Path) -> Vec<String> {
+		let (inference, requests) = ScriptedInference::new([text_script("a clean answer")]);
+		let mut directors = DirectorRegistry::standard();
+		directors.register_extension(Box::new(Quiet));
+		let mut kernel = Kernel::new(
+			inference,
+			registry(std::iter::empty()),
+			DispatchPolicy::new(BlobStore::open(blobs).expect("blobs")),
+			StaticPrompt(Str::new_static("test system")),
+		)
+		.with_director_registry(directors.clone());
+		let mut session = fresh_session(path);
+		if engage {
+			DirectorStack::from_dom(session.dom(), &directors)
+				.engage_registered(&mut session, FAMILY)
+				.expect("watcher engages");
+		}
+		kernel
+			.run_turn(
+				&mut session,
+				TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+				RunControl::default(),
+			)
+			.await
+			.expect("the unwatched turn completes");
+		assert_eq!(requests.lock().len(), 1, "a passing watcher never resamples");
+		drop(session);
+		journal_entries(path)
+			.into_iter()
+			.map(|entry| match entry.label {
+				Some(label) => format!("{}:{label}", entry.kind.name),
+				None => entry.kind.name.to_string(),
+			})
+			.collect()
+	}
+
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let watched =
+		run(true, &directory.path().join("watched.oms"), &directory.path().join("b1")).await;
+	let plain = run(false, &directory.path().join("plain.oms"), &directory.path().join("b2")).await;
+	// Both runs engage a standard Director mid-turn; only the first entry is
+	// the explicit engagement under test.
+	let mut engaged = watched.clone();
+	if let Some(index) = engaged
+		.iter()
+		.position(|entry| entry == "patch:director.engage")
+	{
+		engaged.remove(index);
+	}
+	assert_eq!(engaged, plain, "a passing watcher journals nothing of its own:\n{watched:#?}");
+}
+
+/// ADR 0038 §6: a non-interrupting match uses the structured channels. A tool
+/// source becomes a `<diag>` child of its call element; a text source becomes
+/// the rule body as a developer aside. Neither resamples.
+#[tokio::test]
+async fn a_non_interrupting_match_records_a_diag_and_a_developer_aside() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("note.oms");
+	let (inference, requests) = ScriptedInference::new([two_tool_calls(), text_script("clean")]);
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(NonInterrupting));
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("read", 1, "unused"), spec("edit", 1, "unused")]),
+		DispatchPolicy::new(BlobStore::open(directory.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_director_registry(directors.clone());
+	let mut session = fresh_session(&journal_path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("watcher engages");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("answer"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("the noted turn completes");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert!(requests.lock().len() >= 2, "the tool round trip still runs");
+	let diags = session
+		.dom()
+		.select("body turn [id=culprit-edit] diag")
+		.expect("selector")
+		.count();
+	assert!(diags >= 1, "a tool-source note lands as a diag on its call");
+	let developers = session
+		.dom()
+		.select("body turn developer")
+		.expect("selector")
+		.count();
+	assert!(developers >= 1, "a text-source note lands as a developer aside");
 }
