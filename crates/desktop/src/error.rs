@@ -97,7 +97,17 @@ impl DesktopError {
 		Self::new(ErrorCode::AxUnsupported, "accessibility is unavailable on this backend")
 	}
 
-	pub(crate) fn ax_failed(message: impl Into<String>) -> Self {
+	pub(crate) fn ax_failed(cause: impl std::fmt::Display) -> Self {
+		Self::new(ErrorCode::AxFailed, cause.to_string())
+	}
+
+	pub(crate) fn ax_failed_in(
+		context: impl std::fmt::Display,
+		cause: impl std::fmt::Display,
+	) -> Self {
+		let mut message = context.to_string();
+		message.push_str(": ");
+		message.push_str(&cause.to_string());
 		Self::new(ErrorCode::AxFailed, message)
 	}
 
@@ -111,6 +121,36 @@ impl DesktopError {
 
 	pub(crate) fn internal(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Internal, message)
+	}
+
+	/// Renders `cause` and its source chain once at this model-facing fault
+	/// boundary.
+	pub(crate) fn chained(code: ErrorCode, cause: &(dyn std::error::Error + 'static)) -> Self {
+		use std::fmt::Write as _;
+		let mut message = cause.to_string();
+		let mut source = cause.source();
+		while let Some(inner) = source {
+			let _ = write!(message, ": {inner}");
+			source = inner.source();
+		}
+		Self { code, message }
+	}
+
+	/// Renders `context` plus `cause` and its source chain once at this
+	/// model-facing fault boundary.
+	pub(crate) fn caused<E>(code: ErrorCode, context: impl std::fmt::Display, cause: &E) -> Self
+	where
+		E: std::error::Error + 'static,
+	{
+		use std::fmt::Write as _;
+		let mut message = context.to_string();
+		let _ = write!(message, ": {cause}");
+		let mut source = cause.source();
+		while let Some(inner) = source {
+			let _ = write!(message, ": {inner}");
+			source = inner.source();
+		}
+		Self { code, message }
 	}
 }
 
