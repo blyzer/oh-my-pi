@@ -4,29 +4,10 @@
 # with `just lintx-ratchet-update` after migrating sites; it refuses to raise any count.
 
 [error-format]
-agent = 1
-catalog = 9
-e2e = 2
-edit = 15
-observability = 2
-rpc = 6
-serve = 12
-shell = 5
 tools = 10
-tui = 4
-vcs = 2
-walker = 2
-webview = 1
 
 [error-str-payload]
-agent = 1
 core = 1
-edit = 3
 envd = 54
-observability = 2
-rpc = 4
-shell = 5
 tool = 1
 tools = 27
-vcs = 1
-webview = 1
