@@ -817,8 +817,8 @@ pub enum SessionToolError {
 	#[error("session tool JSON is invalid")]
 	Json(#[from] serde_json::Error),
 	/// Host composition rejected the operation before a typed tool fault.
-	// lintx-allow: error-str-payload model-facing rejection diagnostic rendered once by its
-	// constructors
+	// Model-facing rejection diagnostic rendered once by its constructors.
+	// lintx-allow: error-str-payload model-facing rejection text
 	#[error("{message}")]
 	Rejected {
 		/// Stable diagnostic.

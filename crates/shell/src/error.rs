@@ -64,8 +64,8 @@ pub enum ErrorKind {
 	CannotAssignToSpecialParameter,
 
 	/// Checked expansion error.
-	// lintx-allow: error-str-payload carries the user-authored `${var?message}` text, not a rendered
-	// error
+	// Carries the user-authored `${var?message}` text, not a rendered error.
+	// lintx-allow: error-str-payload user-authored expansion text
 	#[error("expansion error: {0}")]
 	CheckedExpansionError(String),
 

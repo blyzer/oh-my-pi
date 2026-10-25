@@ -10,18 +10,18 @@ use crate::{error, openfiles, openfiles::OpenFile};
 #[derive(Clone, Debug, thiserror::Error)]
 enum ReaderWriterError {
 	/// I/O read error.
-	// lintx-allow: error-str-payload configured static message of a deliberately failing stream; no
-	// inner error exists
+	// Configured static message of a deliberately failing stream; no inner error.
+	// lintx-allow: error-str-payload static test-stream message
 	#[error("I/O read error: {0}")]
 	Read(&'static str),
 	/// I/O write error.
-	// lintx-allow: error-str-payload configured static message of a deliberately failing stream; no
-	// inner error exists
+	// Configured static message of a deliberately failing stream; no inner error.
+	// lintx-allow: error-str-payload static test-stream message
 	#[error("I/O write error: {0}")]
 	Write(&'static str),
 	/// I/O flush error.
-	// lintx-allow: error-str-payload configured static message of a deliberately failing stream; no
-	// inner error exists
+	// Configured static message of a deliberately failing stream; no inner error.
+	// lintx-allow: error-str-payload static test-stream message
 	#[error("I/O flush error: {0}")]
 	Flush(&'static str),
 }

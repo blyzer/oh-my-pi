@@ -106,8 +106,8 @@ pub mod authority {
 			capability: Str,
 		},
 		/// The request is malformed.
-		// lintx-allow: error-str-payload malformed-request diagnostic on a Clone/Eq wire error; no
-		// inner error exists
+		// Malformed-request diagnostic on a Clone/Eq wire error; no inner error exists.
+		// lintx-allow: error-str-payload wire diagnostic without an inner error
 		#[error("invalid telemetry request: {0}")]
 		Invalid(Str),
 		/// The named host resource does not exist.

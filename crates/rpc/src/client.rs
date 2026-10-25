@@ -100,8 +100,9 @@ impl Default for RpcClientOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
 	/// The client has already been shut down or its child exited.
-	// lintx-allow: error-str-payload disconnect reason broadcast to every pending request must be
-	// Clone; rendered once by `fail_all`
+	// The disconnect reason is broadcast to every pending request, so it must be
+	// Clone; `fail_all` renders the cause once.
+	// lintx-allow: error-str-payload Clone broadcast reason rendered once
 	#[error("RPC client is disconnected: {0}")]
 	Disconnected(String),
 	/// Starting or communicating with the child failed.

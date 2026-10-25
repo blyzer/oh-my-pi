@@ -20,13 +20,13 @@ pub enum EditError {
 	},
 	/// The payload parsed but could not be applied (missing file, overlap,
 	/// invalid op, auto-generated target, no-op, …).
-	// lintx-allow: error-str-payload model-facing prose trained byte-for-byte; rendered once via
-	// `EditError::apply`
+	// Model-facing prose trained byte-for-byte; rendered once via `EditError::apply`.
+	// lintx-allow: error-str-payload model-facing apply prose
 	#[error("{0}")]
 	Apply(String),
 	/// A search anchor could not be located in the target text.
-	// lintx-allow: error-str-payload model-facing prose trained byte-for-byte; rendered once via
-	// `EditError::matched`
+	// Model-facing prose trained byte-for-byte; rendered once via `EditError::matched`.
+	// lintx-allow: error-str-payload model-facing match prose
 	#[error("{0}")]
 	Match(String),
 	/// Filesystem failure reading a target.

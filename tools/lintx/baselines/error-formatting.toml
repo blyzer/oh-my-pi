@@ -6,17 +6,10 @@
 [error-format]
 shell-builtins = 184
 tools = 10
-walker = 2
 
 [error-str-payload]
-agent = 1
 core = 1
-edit = 2
 envd = 54
-observability = 1
-rpc = 1
-shell = 4
 shell-builtins = 13
 tool = 1
 tools = 27
-vcs = 1
