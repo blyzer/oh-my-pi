@@ -826,17 +826,19 @@ fn spill_into_description(node: &mut Map<String, Value>, spill: &[(&str, String)
 ///
 /// Keeps universal keys everywhere (root combinators excepted — Anthropic
 /// rejects `anyOf`/`allOf`/`oneOf` at the schema root), keeps per-type keys
-/// additively, and spills everything else into `description`. Object nodes
-/// default to `additionalProperties: false`; explicit open maps are preserved
-/// so the strict pass demotes them to non-strict instead of fabricating a
-/// closed object.
-fn normalize_tool_schema(schema: &Value, is_root: bool) -> Value {
+/// additively, and spills everything else into `description`. With
+/// `close_objects`, object nodes default to `additionalProperties: false`;
+/// explicit open maps are preserved so the strict pass demotes them to
+/// non-strict instead of fabricating a closed object. Grammar fallbacks pass
+/// `close_objects: false`: their looseness is deliberate (ADR 0021), so no
+/// default is inserted and absent means open.
+fn normalize_tool_schema(schema: &Value, is_root: bool, close_objects: bool) -> Value {
 	let object = match schema {
 		Value::Array(entries) => {
 			return Value::Array(
 				entries
 					.iter()
-					.map(|entry| normalize_tool_schema(entry, false))
+					.map(|entry| normalize_tool_schema(entry, false, close_objects))
 					.collect(),
 			);
 		},
@@ -879,7 +881,7 @@ fn normalize_tool_schema(schema: &Value, is_root: bool) -> Value {
 				spill.push(("minItems", rendered));
 			}
 		},
-		Some("object") => {
+		Some("object") if close_objects => {
 			result
 				.entry("additionalProperties")
 				.or_insert(Value::Bool(false));
@@ -889,13 +891,15 @@ fn normalize_tool_schema(schema: &Value, is_root: bool) -> Value {
 	if let Some(Value::Object(properties)) = result.get_mut("properties") {
 		*properties = properties
 			.iter()
-			.map(|(name, property)| (name.clone(), normalize_tool_schema(property, false)))
+			.map(|(name, property)| {
+				(name.clone(), normalize_tool_schema(property, false, close_objects))
+			})
 			.collect();
 	}
 	if let Some(additional) = result.get_mut("additionalProperties")
 		&& additional.is_object()
 	{
-		let normalized = normalize_tool_schema(additional, false);
+		let normalized = normalize_tool_schema(additional, false, close_objects);
 		*additional = match &normalized {
 			Value::Object(map) if map.is_empty() => Value::Bool(true),
 			_ => normalized,
@@ -904,25 +908,27 @@ fn normalize_tool_schema(schema: &Value, is_root: bool) -> Value {
 	if let Some(items) = result.get_mut("items")
 		&& (items.is_array() || items.is_object())
 	{
-		*items = normalize_tool_schema(items, false);
+		*items = normalize_tool_schema(items, false, close_objects);
 	}
 	if let Some(prefix_items) = result.get_mut("prefixItems")
 		&& prefix_items.is_array()
 	{
-		*prefix_items = normalize_tool_schema(prefix_items, false);
+		*prefix_items = normalize_tool_schema(prefix_items, false, close_objects);
 	}
 	for key in SCHEMA_COMBINATORS {
 		if let Some(variants) = result.get_mut(*key)
 			&& variants.is_array()
 		{
-			*variants = normalize_tool_schema(variants, false);
+			*variants = normalize_tool_schema(variants, false, close_objects);
 		}
 	}
 	for key in ["$defs", "definitions"] {
 		if let Some(Value::Object(definitions)) = result.get_mut(key) {
 			*definitions = definitions
 				.iter()
-				.map(|(name, definition)| (name.clone(), normalize_tool_schema(definition, false)))
+				.map(|(name, definition)| {
+					(name.clone(), normalize_tool_schema(definition, false, close_objects))
+				})
 				.collect();
 		}
 	}
@@ -1123,7 +1129,11 @@ fn plan_tool_schemas(tools: &[ToolDefinition], disable_strict: bool) -> Vec<Tool
 	let mut plans: Vec<ToolSchemaPlan> = tools
 		.iter()
 		.map(|tool| ToolSchemaPlan {
-			input_schema: normalize_tool_schema(tool.input.wire_schema().0.as_value(), true),
+			input_schema: normalize_tool_schema(
+				tool.input.wire_schema().0.as_value(),
+				true,
+				tool.input.grammar().is_none(),
+			),
 			strict:       false,
 		})
 		.collect();
@@ -3809,12 +3819,11 @@ mod tests {
 			panic!("exactly one client tool: {:?}", lowered.tools);
 		};
 		assert_eq!(tool.name.as_str(), "match_input");
-		// Anthropic normalizes every tool schema closed, so the fallback ships
-		// with `additionalProperties: false` added. It is the declared
-		// fallback otherwise, and the grammar is gone.
-		let mut closed = fallback;
-		closed["additionalProperties"] = serde_json::Value::Bool(false);
-		assert_eq!(tool.input_schema, closed, "the fallback schema is what ships, closed");
+		// ADR 0021: the fallback's looseness is deliberate, so the Anthropic
+		// closing convention does not apply to it. The declared fallback ships
+		// verbatim — no `additionalProperties: false` fabricated — and the
+		// grammar is gone.
+		assert_eq!(tool.input_schema, fallback, "the fallback schema ships open and verbatim");
 		assert_eq!(tool.strict, None, "a fallback never claims strict decoding");
 	}
 
@@ -4809,6 +4818,7 @@ mod tests {
 				},
 				"required": ["limit"]
 			}),
+			true,
 			true,
 		);
 		let limit = &normalized["properties"]["limit"];
