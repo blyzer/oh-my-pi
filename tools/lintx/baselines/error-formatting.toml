@@ -3,9 +3,6 @@
 # A crate may never exceed its count; absent crates have a baseline of zero. Lower this file
 # with `just lintx-ratchet-update` after migrating sites; it refuses to raise any count.
 
-[error-format]
-tools = 10
-
 [error-str-payload]
 core = 1
 envd = 54

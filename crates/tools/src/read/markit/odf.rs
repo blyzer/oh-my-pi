@@ -9,7 +9,7 @@ use quick_xml::{Error as XmlError, events::Event};
 
 use super::{
 	MarkitError, convert_with_anydoc,
-	ooxml::{Archive, attribute, decode_xml_bytes, local_name, xml_reader},
+	ooxml::{Archive, OoxmlError, attribute, decode_xml_bytes, local_name, xml_reader},
 };
 
 /// Internal validation failure before conversion reaches the model-facing
@@ -26,8 +26,8 @@ enum OdfError {
 	MissingRecognizedBody,
 	#[error("content.xml has no OpenDocument body")]
 	MissingBody,
-	#[error("invalid XML: {xml_error}")]
-	InvalidXml { xml_error: String },
+	#[error(transparent)]
+	InvalidXml(#[from] OoxmlError),
 	#[error("invalid content.xml: {source}")]
 	InvalidContentXml {
 		#[source]
@@ -38,12 +38,6 @@ enum OdfError {
 		#[source]
 		source: XmlError,
 	},
-}
-
-impl From<String> for OdfError {
-	fn from(xml_error: String) -> Self {
-		Self::InvalidXml { xml_error }
-	}
 }
 
 /// Converts one `OpenDocument` package after validating its declared identity.
@@ -60,14 +54,14 @@ pub(super) fn convert(
 	expected_mimetype: &'static str,
 ) -> Result<Str, MarkitError> {
 	let mut archive =
-		Archive::open(bytes).map_err(|error| MarkitError::conversion(format_name, error))?;
+		Archive::open(bytes).map_err(|error| MarkitError::conversion_from(format_name, error))?;
 	// Parse the optional manifest once. Encryption has precedence over
 	// content validation because encrypted content.xml bytes are not XML.
 	// A syntactically corrupt optional manifest proves nothing; archive and
 	// entity-expansion limit failures from `read_xml` still propagate.
 	let manifest = archive
 		.read_xml("META-INF/manifest.xml")
-		.map_err(|error| MarkitError::conversion(format_name, error))?
+		.map_err(|error| MarkitError::conversion_from(format_name, error))?
 		.and_then(|xml| parse_manifest(&xml).ok())
 		.unwrap_or_default();
 	if manifest.encrypted {
@@ -75,7 +69,7 @@ pub(super) fn convert(
 	}
 	let declared = if let Some(mimetype) = archive
 		.read_xml("mimetype")
-		.map_err(|error| MarkitError::conversion(format_name, error))?
+		.map_err(|error| MarkitError::conversion_from(format_name, error))?
 	{
 		Some(
 			decode_xml_bytes(&mimetype)
@@ -94,7 +88,7 @@ pub(super) fn convert(
 	}
 	let content = archive
 		.read_xml("content.xml")
-		.map_err(|error| MarkitError::conversion(format_name, error))?
+		.map_err(|error| MarkitError::conversion_from(format_name, error))?
 		.ok_or_else(|| {
 			MarkitError::conversion(format_name, "Invalid OpenDocument package: missing content.xml")
 		})?;
