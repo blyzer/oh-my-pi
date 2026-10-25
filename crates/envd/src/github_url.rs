@@ -397,9 +397,8 @@ impl GithubResolver {
 				}
 				bytes.extend_from_slice(&chunk);
 			}
-			let page_comments: Vec<Value> = serde_json::from_slice(&bytes).map_err(|error| {
-				Fault::Invalid { message: Str::new(format!("Invalid GitHub comments JSON: {error}")) }
-			})?;
+			let page_comments: Vec<Value> = serde_json::from_slice(&bytes)
+				.map_err(|error| invalid_json("GitHub comments", error))?;
 			let complete = page_comments.len() < 100;
 			comments.extend(page_comments);
 			if complete {
@@ -683,9 +682,8 @@ impl Target {
 			let text = str::from_utf8(body).map_err(|_| invalid("GitHub diff is not UTF-8."))?;
 			return render_diff(text, mode, self.repo.identity(), self.number.expect("diff number"));
 		}
-		let value: Value = serde_json::from_slice(body).map_err(|error| Fault::Invalid {
-			message: Str::new(format!("Invalid GitHub JSON: {error}")),
-		})?;
+		let value: Value =
+			serde_json::from_slice(body).map_err(|error| invalid_json("GitHub", error))?;
 		let mut out = String::new();
 		match (&self.view, value) {
 			(View::List { .. }, Value::Array(items)) => {
@@ -871,6 +869,11 @@ fn now_ms() -> u64 {
 }
 fn invalid(message: &'static str) -> Fault {
 	Fault::Invalid { message: Str::new_static(message) }
+}
+/// Creates an invalid-JSON fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn invalid_json(what: &'static str, cause: impl Display) -> Fault {
+	Fault::Invalid { message: sf!("Invalid {what} JSON: {cause}") }
 }
 fn cache_fault(error: impl Display) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }

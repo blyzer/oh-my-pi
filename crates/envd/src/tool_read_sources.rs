@@ -150,8 +150,7 @@ impl SystemHttpClient {
 	}
 
 	async fn request(&self, request: HttpRequest) -> Result<HttpResponse, WebError> {
-		let mut authored_url = Url::parse(&request.url)
-			.map_err(|error| WebError::InvalidUrl(error.to_string().into()))?;
+		let mut authored_url = Url::parse(&request.url).map_err(invalid_url_fault)?;
 		validate_http_url(&authored_url)?;
 		authored_url.set_fragment(None);
 		time::timeout(HTTP_TIMEOUT, self.request_with_retries(authored_url, request))
@@ -180,7 +179,7 @@ impl SystemHttpClient {
 				{
 					Ok(response) => response,
 					Err(error) => {
-						last_error = Some(WebError::request(error.to_string()));
+						last_error = Some(WebError::request(error));
 						break;
 					},
 				};
@@ -246,12 +245,36 @@ fn parse_request_headers(headers: &[(Str, Str)]) -> Result<HeaderMap, WebError> 
 	let mut parsed = HeaderMap::with_capacity(headers.len());
 	for (name, value) in headers {
 		let name = HeaderName::from_bytes(name.as_bytes())
-			.map_err(|error| WebError::request(format!("invalid request header '{name}': {error}")))?;
+			.map_err(|error| request_fault(&format!("invalid request header '{name}'"), error))?;
 		let value = HeaderValue::from_str(value)
-			.map_err(|error| WebError::request(format!("invalid request header value: {error}")))?;
+			.map_err(|error| request_fault("invalid request header value", error))?;
 		parsed.insert(name, value);
 	}
 	Ok(parsed)
+}
+
+/// Creates a request fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn request_fault(context: &str, cause: impl std::fmt::Display) -> WebError {
+	WebError::request(sf!("{context}: {cause}"))
+}
+
+/// Creates an invalid-URL fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn invalid_url_fault(cause: impl std::fmt::Display) -> WebError {
+	WebError::InvalidUrl(sf!("{cause}"))
+}
+
+/// Creates a source fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn source_fault(cause: impl std::fmt::Display) -> Fault {
+	Fault::source(sf!("{cause}"))
+}
+
+/// Creates a directory-read fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn directory_fault(cause: impl std::fmt::Display) -> Fault {
+	Fault::source(sf!("Cannot read directory: {cause}"))
 }
 
 fn request_headers(user_agent: &'static str, caller: &HeaderMap) -> HeaderMap {
@@ -281,7 +304,7 @@ async fn read_bounded(response: reqwest::Response, max_bytes: usize) -> Result<B
 	let mut bytes = BytesMut::with_capacity(initial_capacity);
 	let mut stream = response.bytes_stream();
 	while let Some(chunk) = stream.next().await {
-		let chunk = chunk.map_err(|error| WebError::request(error.to_string()))?;
+		let chunk = chunk.map_err(WebError::request)?;
 		if bytes.len().saturating_add(chunk.len()) > max_bytes {
 			return Err(WebError::ResponseTooLarge { max_bytes });
 		}
@@ -655,9 +678,9 @@ impl ReadLease for ReadDocumentLease {
 
 	async fn read_all(&self) -> Result<Bytes, Fault> {
 		match &self.backing {
-			ReadLeaseBacking::Document { host, lease } => read_whole(host, lease)
-				.await
-				.map_err(|error| Fault::source(error.to_string())),
+			ReadLeaseBacking::Document { host, lease } => {
+				read_whole(host, lease).await.map_err(source_fault)
+			},
 			ReadLeaseBacking::Resolved { bytes, .. } | ReadLeaseBacking::File(bytes) => {
 				Ok(bytes.clone())
 			},
@@ -744,7 +767,7 @@ impl ReadSources for ReadSourceAdapter {
 		let cancel = CancellationToken::new();
 		let lease = DocumentHost::open(&self.documents, resolved.uri, None, &cancel)
 			.await
-			.map_err(|error| Fault::source(error.to_string()))?;
+			.map_err(source_fault)?;
 		let (revision, _canonical_path) =
 			read_document_metadata(lease.head()).map_err(Fault::source)?;
 		if self.documents.editor_route().is_none() {
@@ -760,7 +783,7 @@ impl ReadSources for ReadSourceAdapter {
 		// commits against the revision the authority actually holds.
 		let disk = read_whole(&self.documents, &lease)
 			.await
-			.map_err(|error| Fault::source(error.to_string()))?;
+			.map_err(source_fault)?;
 		let (bytes, diags) = match self.documents.editor_base(lease.head(), &disk).await {
 			Ok(base) => (base.bytes.unwrap_or(disk), base.diags),
 			Err(conflict) => (disk, vec![conflict.diag()]),
@@ -816,11 +839,9 @@ impl ReadSources for ReadSourceAdapter {
 				self
 					.workspace
 					.walk(&request, &CancellationToken::new())
-					.map_err(|error| Fault::source(format!("Cannot read directory: {error}")))?
+					.map_err(directory_fault)?
 			} else {
-				request
-					.collect()
-					.map_err(|error| Fault::source(format!("Cannot read directory: {error}")))?
+				request.collect().map_err(directory_fault)?
 			};
 			let entries = outcome
 				.entries
@@ -858,8 +879,7 @@ impl ReadSources for ReadSourceAdapter {
 			.ok_or_else(|| Fault::source("document media source filename is not UTF-8"))?;
 		let sequence = MEDIA_COMMIT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 		let destination = parent.join(format!(".{name}.media-{sequence:016x}"));
-		commit_document_media(&destination, conversion)
-			.map_err(|error| Fault::source(error.to_string()))
+		commit_document_media(&destination, conversion).map_err(source_fault)
 	}
 
 	fn record_snapshot(&self, record: SnapshotRecord) -> Result<Option<Str>, Fault> {

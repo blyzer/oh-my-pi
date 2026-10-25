@@ -81,6 +81,7 @@ use super::{
 	reflection_relay::OwnedReflection,
 	sandbox_proxy::{BrokerDenial, EgressGrants},
 };
+use crate::fault;
 
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
@@ -3784,8 +3785,8 @@ async fn wait_ready_probe(process: Arc<NamedProcess>, probe: ReadyProbe) -> Resu
 	let timeout = Duration::from_millis(probe.timeout_ms);
 	match probe.probe {
 		Some(ready_probe::Probe::Log(log)) => {
-			let pattern = Regex::new(&log.pattern)
-				.map_err(|error| ExecError::Readiness(Str::from(error.to_string())))?;
+			let pattern =
+				Regex::new(&log.pattern).map_err(|error| ExecError::Readiness(fault(error)))?;
 			let (backlog, events) = readiness_events(&process);
 			let wait = async {
 				let mut output = Vec::new();

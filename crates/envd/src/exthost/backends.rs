@@ -680,7 +680,7 @@ impl PolicyAuditSink for DurablePolicyAuditSink {
 		};
 		append_json_line(&self.path, &self.append, &record)
 			.await
-			.map_err(|error| PolicyControlFailure::Audit(Str::from(error.to_string())))
+			.map_err(PolicyControlFailure::audit)
 	}
 }
 
@@ -750,7 +750,7 @@ impl DirectFilesystemJournal for DurableDirectFilesystemJournal {
 		};
 		append_json_line(&self.path, &self.append, &record)
 			.await
-			.map_err(|error| DirectFilesystemAuthorityError::Audit(Str::from(error.to_string())))?;
+			.map_err(DirectFilesystemAuthorityError::audit)?;
 		Ok(Str::from(receipt))
 	}
 }

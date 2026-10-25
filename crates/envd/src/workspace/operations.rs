@@ -162,6 +162,20 @@ pub enum WorkspaceOperationError {
 	CredentialRules(#[source] SecretRuleError),
 }
 
+impl WorkspaceOperationError {
+	/// Creates a worktree-record error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn invalid_worktree_record(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidWorktreeRecord(sf!("{cause}"))
+	}
+
+	/// Creates a snapshot-record error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn invalid_snapshot_record(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidSnapshotRecord(sf!("{cause}"))
+	}
+}
+
 /// Result of merging an isolated worktree without invoking a VCS subprocess.
 #[derive(Clone, Debug)]
 pub struct WorktreeMerge {
@@ -688,9 +702,8 @@ impl WorkspaceOperations {
 		} else {
 			request.owner_pid
 		};
-		let owner = serde_json::to_vec(&IsolationOwner { pid: owner_pid, id: id.as_str() }).map_err(
-			|error| WorkspaceOperationError::InvalidWorktreeRecord(Str::from(error.to_string())),
-		)?;
+		let owner = serde_json::to_vec(&IsolationOwner { pid: owner_pid, id: id.as_str() })
+			.map_err(WorkspaceOperationError::invalid_worktree_record)?;
 		fs::write(root.join(ISOLATION_OWNER_FILE), owner)?;
 		let manifest = self.load_manifest(&snapshot.snapshot_id)?;
 		for entry in manifest.entries.values() {
@@ -1153,9 +1166,8 @@ impl WorkspaceOperations {
 		snapshot: &pb::WorkspaceSnapshot,
 	) -> Result<(), WorkspaceOperationError> {
 		let durable = DurableSnapshotRecord::from_snapshot(snapshot);
-		let bytes = serde_json::to_vec(&durable).map_err(|error| {
-			WorkspaceOperationError::InvalidSnapshotRecord(Str::from(error.to_string()))
-		})?;
+		let bytes =
+			serde_json::to_vec(&durable).map_err(WorkspaceOperationError::invalid_snapshot_record)?;
 		let path = self
 			.inner
 			.worktree_root
@@ -1461,9 +1473,8 @@ impl WorkspaceOperations {
 			class:       "task-isolation".to_owned(),
 			source_root: self.inner.workspace.root().to_path_buf(),
 		};
-		let bytes = serde_json::to_vec(&durable).map_err(|error| {
-			WorkspaceOperationError::InvalidWorktreeRecord(Str::from(error.to_string()))
-		})?;
+		let bytes =
+			serde_json::to_vec(&durable).map_err(WorkspaceOperationError::invalid_worktree_record)?;
 		let path = self.record_path(record.id.as_str());
 		let temporary = path.with_extension(format!("json.{}.tmp", Ulid::generate()));
 		fs::write(&temporary, bytes)?;
@@ -1638,9 +1649,8 @@ fn load_snapshot_records(
 			continue;
 		}
 		let bytes = fs::read(entry.path())?;
-		let durable: DurableSnapshotRecord = serde_json::from_slice(&bytes).map_err(|error| {
-			WorkspaceOperationError::InvalidSnapshotRecord(Str::from(error.to_string()))
-		})?;
+		let durable: DurableSnapshotRecord = serde_json::from_slice(&bytes)
+			.map_err(WorkspaceOperationError::invalid_snapshot_record)?;
 		snapshots.push((entry.file_name(), durable.into_snapshot()?));
 	}
 	snapshots.sort_by(|(left_name, left), (right_name, right)| {

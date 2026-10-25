@@ -35,6 +35,7 @@ use crate::{
 		RelayEndpoint, RelayLease, acquire_relay_lease_address, parse_relay_endpoint,
 		probe_relay_ready_address_with_timeout, probe_relay_serving_address_with_timeout,
 	},
+	fault_in,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -493,8 +494,9 @@ struct SpawnedRelay {
 
 impl SpawnedRelay {
 	fn start(endpoint: &RelayEndpoint) -> Result<Self, Fault> {
-		let executable = std::env::current_exe()
-			.map_err(|error| relay_fault_owned(sf!("could not locate the omp executable: {error}")))?;
+		let executable = std::env::current_exe().map_err(|error| {
+			relay_fault_owned(fault_in("could not locate the omp executable", error))
+		})?;
 		let bind = endpoint
 			.auto_bind
 			.expect("managed relay spawn is restricted to loopback");
@@ -523,7 +525,7 @@ impl SpawnedRelay {
 		}
 		let child = command
 			.spawn()
-			.map_err(|error| relay_fault_owned(sf!("browser relay failed to start: {error}")))?;
+			.map_err(|error| relay_fault_owned(fault_in("browser relay failed to start", error)))?;
 		Self::observe(child)
 	}
 
@@ -538,7 +540,7 @@ impl SpawnedRelay {
 		let reader = thread::Builder::new()
 			.name("omp-relay-stderr".to_owned())
 			.spawn(move || capture_relay_stderr(stderr, &reader_capture))
-			.map_err(|error| relay_fault_owned(sf!("could not observe browser relay: {error}")))?;
+			.map_err(|error| relay_fault_owned(fault_in("could not observe browser relay", error)))?;
 		Ok(Self { child, bootstrap, stderr: captured, reader: Some(reader) })
 	}
 
@@ -550,7 +552,7 @@ impl SpawnedRelay {
 		self
 			.child
 			.try_wait()
-			.map_err(|error| relay_fault_owned(sf!("could not observe browser relay: {error}")))
+			.map_err(|error| relay_fault_owned(fault_in("could not observe browser relay", error)))
 	}
 
 	fn exit_fault(&mut self, status: ExitStatus) -> Fault {

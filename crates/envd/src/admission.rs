@@ -1245,6 +1245,11 @@ fn merge_patch(target: &mut Value, patch: Value) {
 	}
 }
 
+/// Renders a shell parse failure once at this model-facing fault boundary.
+fn parse_fault(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
+}
+
 pub(crate) fn bash_ir(tool_name: &str, args: &Value, cwd: &Path, root: &Path) -> Option<BashIr> {
 	if tool_name != SHELL_TOOL {
 		return None;
@@ -1260,7 +1265,7 @@ pub(crate) fn bash_ir(tool_name: &str, args: &Value, cwd: &Path, root: &Path) ->
 		Err(error) => BashIr {
 			source: command.to_owned(),
 			parse_ok: false,
-			parse_error: Some(error.to_string()),
+			parse_error: Some(parse_fault(error)),
 			..BashIr::default()
 		},
 	})

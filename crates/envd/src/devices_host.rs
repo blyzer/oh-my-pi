@@ -31,6 +31,7 @@ use super::{
 	mcp::manager::McpManager,
 	reflection_relay::OwnedReflection,
 };
+use crate::{fault, fault_in};
 
 tokio::task_local! {
 	static EXEC_DIAGS: Arc<Mutex<Vec<Diag>>>;
@@ -284,7 +285,7 @@ impl DynHost {
 					cancellation.clone(),
 				)
 				.await
-				.map_err(|error| DynFault::new(error.to_string()))?;
+				.map_err(|error| DynFault::new(fault(error)))?;
 		}
 		self.mcp.call(name.as_str(), args, cancellation).await
 	}
@@ -345,12 +346,11 @@ impl DynHost {
 		let outcome = self
 			.proposals
 			.finalize(id, decision)
-			.map_err(|error| DynFault::new(error.to_string()))?;
+			.map_err(|error| DynFault::new(fault(error)))?;
 		let diags = recovery_snapshot_diag(&outcome.payload)
 			.into_iter()
 			.collect();
-		let payload =
-			serde_json::to_value(outcome).map_err(|error| DynFault::new(error.to_string()))?;
+		let payload = serde_json::to_value(outcome).map_err(|error| DynFault::new(fault(error)))?;
 		Ok(DynCallOutput { output: DynOutput::Json(payload), diags })
 	}
 }
@@ -516,7 +516,7 @@ impl DynHost {
 						.await
 				}
 				.await
-				.map_err(|error| DynFault::new(error.to_string()))?;
+				.map_err(|error| DynFault::new(fault(error)))?;
 				let args_json = Bytes::from(raw.clone());
 				// The registry reads a dropped feed as an aborted invocation, so a
 				// native target's feed must outlive its stream; otherwise any target
@@ -537,7 +537,7 @@ impl DynHost {
 						feed = Some(committed);
 						registry
 							.invoke_device(&path, params)
-							.map_err(|error| DynFault::new(format!("device dispatch failed: {error}")))?
+							.map_err(|error| DynFault::new(fault_in("device dispatch failed", error)))?
 					},
 					ToolRoute::Remote => {
 						return Err(DynFault::new("device is owned by the remote environment host"));
@@ -647,7 +647,7 @@ fn project_result(
 		Ok(None) => DynOutput::Text(Str::default()),
 		Err(RegistryError::UnsupportedExternal { .. }) => project_external_verdict(verdict)?,
 		Err(error) => {
-			return Err(DynFault::new(format!("device result projection failed: {error}")));
+			return Err(DynFault::new(fault_in("device result projection failed", error)));
 		},
 	};
 	if faulted(verdict) {

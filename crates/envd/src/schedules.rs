@@ -240,6 +240,14 @@ pub enum DurableScheduleError {
 	Closed,
 }
 
+impl DurableScheduleError {
+	/// Constructs a storage failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn storage(cause: impl std::fmt::Display) -> Self {
+		Self::Storage(sf!("{cause}"))
+	}
+}
+
 impl From<rusqlite::Error> for DurableScheduleError {
 	fn from(error: rusqlite::Error) -> Self {
 		Self::Storage(Str::from(error.to_string()))
@@ -784,7 +792,7 @@ impl Owner {
 			{
 				let trigger = parse_trigger(&row.trigger)?;
 				row.next_ms = next_occurrence(&trigger, row.id.as_str(), row.created_ms, at_ms)
-					.map_err(|error| invalid("trigger", error.to_string()))?;
+					.map_err(|error| invalid("trigger", error))?;
 				if matches!(trigger, Trigger::At { .. }) {
 					row.enabled = false;
 				}
@@ -853,7 +861,7 @@ impl Owner {
 		while cursor <= now && due.len() < MAX_RECOVERED_OCCURRENCES {
 			due.push(cursor);
 			let Some(next) = next_occurrence(&trigger, id, row.created_ms, cursor)
-				.map_err(|error| invalid("trigger", error.to_string()))?
+				.map_err(|error| invalid("trigger", error))?
 			else {
 				break;
 			};
@@ -940,7 +948,7 @@ impl Owner {
 			.miss_count
 			.saturating_add(skipped.saturating_sub(journaled_skips));
 		updated.next_ms = next_occurrence(&trigger, id, row.created_ms, *due.last().unwrap_or(&now))
-			.map_err(|error| invalid("trigger", error.to_string()))?;
+			.map_err(|error| invalid("trigger", error))?;
 		if let Trigger::AfterIdle { idle } = &trigger {
 			updated.next_ms = Some(
 				now.saturating_add(
@@ -1318,8 +1326,7 @@ struct ScheduleJournal {
 impl ScheduleJournal {
 	fn open(path: &Path) -> Result<Self, DurableScheduleError> {
 		if let Some(parent) = path.parent() {
-			fs::create_dir_all(parent)
-				.map_err(|error| DurableScheduleError::Storage(Str::from(error.to_string())))?;
+			fs::create_dir_all(parent).map_err(DurableScheduleError::storage)?;
 		}
 		let connection = Connection::open(path)?;
 		connection.execute_batch(
@@ -1407,8 +1414,7 @@ fn initial_occurrence(
 	if let Trigger::At { epoch_ms } = trigger {
 		return Ok(Some(*epoch_ms));
 	}
-	next_occurrence(trigger, id, created_ms, now)
-		.map_err(|error| invalid("trigger", error.to_string()))
+	next_occurrence(trigger, id, created_ms, now).map_err(|error| invalid("trigger", error))
 }
 
 fn parse_trigger(value: &Value) -> Result<Trigger, DurableScheduleError> {
@@ -1579,8 +1585,10 @@ fn required_u64(
 		.ok_or_else(|| invalid(field, sf!("{name} must be a non-negative integer")))
 }
 
-fn invalid(field: &'static str, reason: impl Into<Str>) -> DurableScheduleError {
-	DurableScheduleError::Invalid { field, reason: reason.into() }
+/// Builds an invalid-field failure, rendering the reason once at this
+/// model-facing fault boundary.
+fn invalid(field: &'static str, reason: impl std::fmt::Display) -> DurableScheduleError {
+	DurableScheduleError::Invalid { field, reason: sf!("{reason}") }
 }
 
 fn now_ms() -> u64 {

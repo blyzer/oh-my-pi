@@ -26,7 +26,7 @@ use bytecount::count;
 use grep_matcher::Matcher;
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_walker::{
 	CompiledWalkGlob, DirectoryErrorMode, FileCandidate, FollowLinks, SizeHintPolicy, WalkDetail,
 	WalkFilter, WalkOrder, WalkRequest,
@@ -202,6 +202,26 @@ pub enum GrepError {
 	/// The caller cancelled the search.
 	#[error("grep was cancelled")]
 	Cancelled,
+}
+
+impl GrepError {
+	/// Creates a glob-compilation error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn invalid_glob(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidGlob { message: sf!("{cause}") }
+	}
+
+	/// Creates a traversal error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn walk(cause: impl std::fmt::Display) -> Self {
+		Self::Walk { message: sf!("{cause}") }
+	}
+
+	/// Creates a search error, rendering the cause once at this model-facing
+	/// fault boundary.
+	fn search(cause: impl std::fmt::Display) -> Self {
+		Self::Search { message: sf!("{cause}") }
+	}
 }
 /// Regex-engine options used when compiling a [`CompiledGrep`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -556,9 +576,7 @@ fn stream_search_slice<S: GrepSink>(
 	if let Some(error) = sink_error {
 		return Err(GrepStreamError::Sink(error));
 	}
-	result.map_err(|error| {
-		GrepStreamError::Grep(GrepError::Search { message: Str::from(error.to_string()) })
-	})?;
+	result.map_err(|error| GrepStreamError::Grep(GrepError::search(error)))?;
 	summary.status = status;
 	Ok(summary)
 }
@@ -808,7 +826,7 @@ fn grep_stream_inner<S: GrepSink>(
 				} else if deadline.expired() {
 					GrepError::Timeout { timeout_ms: options.timeout_ms.unwrap_or(0) }
 				} else {
-					GrepError::Walk { message: Str::from(error.to_string()) }
+					GrepError::walk(error)
 				})
 			})?
 	};
@@ -975,7 +993,7 @@ fn resolve_search_path(path: &str) -> Result<PathBuf, GrepError> {
 	}
 	env::current_dir()
 		.map(|cwd| cwd.join(path))
-		.map_err(|error| GrepError::Walk { message: Str::from(error.to_string()) })
+		.map_err(GrepError::walk)
 }
 
 fn build_walk_request(target: &Path, options: &GrepOptions) -> Result<WalkRequest, GrepError> {
@@ -988,8 +1006,7 @@ fn build_walk_request(target: &Path, options: &GrepOptions) -> Result<WalkReques
 		.filter(|glob| !glob.is_empty())
 	{
 		let pattern = normalize_recursive_glob(glob);
-		let compiled = CompiledWalkGlob::new([pattern])
-			.map_err(|error| GrepError::InvalidGlob { message: Str::from(error.to_string()) })?;
+		let compiled = CompiledWalkGlob::new([pattern]).map_err(GrepError::invalid_glob)?;
 		filter = filter.glob(compiled);
 	}
 	let mentions_node_modules = options

@@ -36,6 +36,7 @@ use super::{
 	media_tts::{SpeechConfig, SpeechInput, SpeechOutput, SpeechProducer},
 	search_backend::SearchBridgeHost,
 };
+use crate::fault;
 
 /// Production ask-dialog vocalizer over the application inference facade.
 pub struct AskVocalizer {
@@ -95,11 +96,11 @@ impl omp_tools::ask::AskVocalizer for AskVocalizer {
 			.map(|sample| f32::from(i16::from_le_bytes([sample[0], sample[1]])) / f32::from(i16::MAX))
 			.collect::<Vec<_>>();
 		let mut playback = PlaybackStream::start(24_000)
-			.map_err(|error| ask::Fault::Presenter { message: Str::from(error.to_string()) })?;
+			.map_err(|error| ask::Fault::Presenter { message: fault(error) })?;
 		playback
 			.writer()
 			.and_then(|writer| writer.write_owned(samples))
-			.map_err(|error| ask::Fault::Presenter { message: Str::from(error.to_string()) })?;
+			.map_err(|error| ask::Fault::Presenter { message: fault(error) })?;
 		tokio::select! {
 			biased;
 			() = cancellation.cancelled() => {

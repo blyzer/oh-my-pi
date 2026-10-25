@@ -204,10 +204,7 @@ impl EvalExec for ProcessEvalExec {
 			.inner
 			.host
 			.freeze_runtime(owner, &session.id)
-			.map_err(|error| Fault::Resource {
-				operation: sf!("runtime_snapshot"),
-				message:   Str::from(error.to_string()),
-			})
+			.map_err(|error| resource_fault("runtime_snapshot", error))
 	}
 
 	fn run<'a>(
@@ -304,10 +301,7 @@ impl ProcessEvalExec {
 			.inner
 			.exec
 			.child_sandbox()
-			.map_err(|error| Fault::Resource {
-				operation: sf!("open_session"),
-				message:   Str::from(error.to_string()),
-			})?;
+			.map_err(|error| resource_fault("open_session", error))?;
 		// The gate covers child replacement as well as execution, so callers
 		// queued on the same session coalesce around the first fresh child.
 		let forced_reset = owned.needs_reset.swap(false, Ordering::AcqRel);
@@ -949,7 +943,7 @@ impl EvalChild {
 					let capability_error = match host.capabilities() {
 						Ok(value) if value.allows(name.as_str()) => None,
 						Ok(_) => Some(Str::from(format!("bridge capability denied: {name}"))),
-						Err(error) => Some(Str::from(error.to_string())),
+						Err(error) => Some(render_bridge_fault(error)),
 					};
 					if let Some(error) = capability_error {
 						if write_frame(&mut self.stdin, &ParentFrame::BridgeResponse {
@@ -997,7 +991,7 @@ impl EvalChild {
 						.await;
 						let (value, error) = match response {
 							Ok(value) => (Some(value), None),
-							Err(error) => (None, Some(Str::from(error.to_string()))),
+							Err(error) => (None, Some(render_bridge_fault(error))),
 						};
 						let _ = task_events.send(BridgeTaskEvent::Response { request_id, value, error });
 					});
@@ -1580,7 +1574,7 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 	let engine = omp_py::Engine::builder()
 		.init()
 		.map(Arc::new)
-		.map_err(|error| ProcessError::Python(Str::from(error.to_string())))?;
+		.map_err(ProcessError::Python)?;
 	let eval = EmbeddedPython::with_installer(engine, installer, interrupt_grace)?;
 	let session = eval.open_session().await.map_err(ProcessError::Eval)?;
 	child_host
@@ -1620,7 +1614,7 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 						child_host.active_run.store(0, Ordering::Release);
 						child_host
 							.outgoing
-							.send_async(ChildFrame::Fatal { message: Str::from(format!("{error:?}")) })
+							.send_async(fatal_frame(error))
 							.await
 							.map_err(|_| ProcessError::Exited)?;
 						continue;
@@ -1683,11 +1677,7 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 							Err(error) => {
 								run_route.active_run.store(0, Ordering::Release);
 								active_flag.store(false, Ordering::Release);
-								let _ = outgoing
-									.send_async(ChildFrame::Fatal {
-										message: Str::from(format!("{error:?}")),
-									})
-									.await;
+								let _ = outgoing.send_async(fatal_frame(error)).await;
 								break;
 							},
 						}
@@ -1761,8 +1751,8 @@ pub enum ProcessError {
 	#[error("eval child managed environment snapshot is invalid")]
 	InvalidManagedEnvironment,
 	/// The child could not initialize embedded Python.
-	#[error("eval child embedded Python failed: {0}")]
-	Python(Str),
+	#[error("eval child embedded Python failed")]
+	Python(#[source] omp_py::InitError),
 	/// A configured or serialized duration was not representable.
 	#[error("eval child duration failed: {0}")]
 	Duration(#[from] DurationError),
@@ -1775,6 +1765,23 @@ pub enum ProcessError {
 	/// The authenticated host bridge rejected startup or dispatch.
 	#[error(transparent)]
 	Bridge(#[from] BridgeHostError),
+}
+
+/// Builds a resource fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn resource_fault(operation: &'static str, cause: impl std::fmt::Display) -> Fault {
+	Fault::Resource { operation: Str::new_static(operation), message: sf!("{cause}") }
+}
+
+/// Renders a bridge host failure once at this child-facing fault boundary.
+fn render_bridge_fault(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
+}
+
+/// Builds a fatal child frame, rendering the cause once at this wire fault
+/// boundary.
+fn fatal_frame(cause: impl std::fmt::Debug) -> ChildFrame {
+	ChildFrame::Fatal { message: sf!("{cause:?}") }
 }
 
 async fn write_frame<W: AsyncWrite + Unpin + Send, T: Serialize + Sync>(
@@ -2101,10 +2108,6 @@ const fn timeout_completion(duration_ms: u64) -> RunCompletion {
 		result:          None,
 		display_outputs: Vec::new(),
 	}
-}
-
-fn resource_fault(operation: &'static str, error: ProcessError) -> Fault {
-	Fault::Resource { operation: sf!(operation), message: Str::from(error.to_string()) }
 }
 
 fn session_lost(error: ProcessError) -> Fault {

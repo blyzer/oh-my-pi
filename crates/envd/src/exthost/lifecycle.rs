@@ -893,7 +893,7 @@ impl LifecycleHost for ControlLifecycleHost {
 				.dispatch(dispatch)
 				.await
 				.map(|_| ())
-				.map_err(|error| Str::from(error.to_string()))
+				.map_err(render_dispatch_error)
 		}
 	}
 
@@ -944,9 +944,14 @@ impl LifecycleHost for ControlLifecycleHost {
 				.dispatch(dispatch)
 				.await
 				.map(|_| ())
-				.map_err(|error| Str::from(error.to_string()))
+				.map_err(render_dispatch_error)
 		}
 	}
+}
+
+/// Renders a lifecycle dispatch failure once at this host fault boundary.
+fn render_dispatch_error(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
 }
 
 /// Failure of a declaration or activation sequence.

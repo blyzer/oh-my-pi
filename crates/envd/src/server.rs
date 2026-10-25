@@ -62,7 +62,6 @@ use omp_walker::{
 	WalkOptions, WalkOrder, WalkRequest, WalkStatus,
 };
 use parking_lot::Mutex;
-use serde_json::value::RawValue;
 use thiserror::Error;
 #[cfg(any(unix, windows))]
 use tokio::sync::watch;
@@ -176,6 +175,7 @@ use crate::{
 		dispatch::{CallbackDispatcher, CallbackDispatcherSlot, UiCallbackDispatch},
 		extensions::SealedRegistryEvidence,
 	},
+	fault, fault_in,
 	tools::{
 		DeviceCatalogObserver, DeviceControlFactory, DeviceInvocationAdmission,
 		DynamicDeviceCatalogEntry, HookControlFactory, RegistryControlFactory,
@@ -453,6 +453,26 @@ pub enum EnvdError {
 		/// Policy `omp envd` resolves from the configuration files alone.
 		spawnable: DaemonPolicy,
 	},
+}
+
+impl EnvdError {
+	/// Creates a document-authority error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn document(cause: impl std::fmt::Display) -> Self {
+		Self::Document(sf!("{cause}"))
+	}
+
+	/// Creates a state-authority error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn state(cause: impl std::fmt::Display) -> Self {
+		Self::State(sf!("{cause}"))
+	}
+
+	/// Creates a blob-host error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn blob(cause: impl std::fmt::Display) -> Self {
+		Self::Blob(sf!("{cause}"))
+	}
 }
 
 impl From<DocumentError> for EnvdError {
@@ -831,10 +851,10 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 				deadline:      PRELUDE_CALL_DEADLINE,
 			})
 			.map_err(|error| {
-				BridgeHostError::message(sf!("failed to open prelude helper invocation: {error}"))
+				BridgeHostError::because("failed to open prelude helper invocation", error)
 			})?;
 		let raw = serde_json::to_vec(&args).map_err(|error| {
-			BridgeHostError::message(sf!("failed to encode prelude helper arguments: {error}"))
+			BridgeHostError::because("failed to encode prelude helper arguments", error)
 		})?;
 		let (effect_token, authorized_at_ms) = internal_worker_authorization();
 		invocation
@@ -846,7 +866,7 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 				..pb::ArgsCommitted::default()
 			})
 			.map_err(|error| {
-				BridgeHostError::message(sf!("failed to commit prelude helper arguments: {error}"))
+				BridgeHostError::because("failed to commit prelude helper arguments", error)
 			})?;
 		loop {
 			let event = invocation.next().await.map_err(|_| {
@@ -864,9 +884,7 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 					match complete.kind {
 						ExtHostOutcomeKind::Ok => {
 							return serde_json::from_slice(&details).map_err(|error| {
-								BridgeHostError::message(sf!(
-									"prelude helper returned invalid JSON: {error}"
-								))
+								BridgeHostError::because("prelude helper returned invalid JSON", error)
 							});
 						},
 						ExtHostOutcomeKind::ArgsRejected => {
@@ -900,9 +918,10 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 									))
 								})?,
 								Err(error) => {
-									return Err(BridgeHostError::message(sf!(
-										"prelude helper {kind} with invalid JSON details: {error}"
-									)));
+									return Err(BridgeHostError::because(
+										sf!("prelude helper {kind} with invalid JSON details"),
+										error,
+									));
 								},
 							};
 							return Err(BridgeHostError::message(sf!("prelude helper {kind}: {detail}")));
@@ -1214,9 +1233,9 @@ impl LateBoundControlAuthority {
 				sf!("the active CONTROL lease does not grant {}", self.domain.name()),
 			)
 		})?;
-		let owner = factory.bind(Arc::clone(&self.identity)).map_err(|error| {
-			ControlProtocolError::new("AuthorityBindingFailed", Str::from(error.to_string()))
-		})?;
+		let owner = factory
+			.bind(Arc::clone(&self.identity))
+			.map_err(|error| ControlProtocolError::new("AuthorityBindingFailed", fault(error)))?;
 		if !self.slot.is_live(id) {
 			return Err(ControlProtocolError::new(
 				"StaleGeneration",
@@ -1458,9 +1477,7 @@ impl ControlAuthority for ProductionEnvdControlAuthority {
 						ControlProtocolError::new("InvalidUrl", "omp.urls.read requires a non-empty url")
 					})?;
 				let parsed = selector::parse_uri(url)
-					.map_err(|error| {
-						ControlProtocolError::new("InvalidUrl", Str::from(error.to_string()))
-					})?
+					.map_err(|error| ControlProtocolError::new("InvalidUrl", fault(error)))?
 					.ok_or_else(|| {
 						ControlProtocolError::new(
 							"InvalidUrl",
@@ -1641,7 +1658,7 @@ impl ControlAuthority for ProductionEnvdControlAuthority {
 				let encoded = serde_json::to_vec(&payload).map_err(|error| {
 					ControlProtocolError::new(
 						"InvalidTelemetry",
-						sf!("telemetry event is not JSON encodable: {error}"),
+						fault_in("telemetry event is not JSON encodable", error),
 					)
 				})?;
 				let kind = payload
@@ -1657,7 +1674,7 @@ impl ControlAuthority for ProductionEnvdControlAuthority {
 					.map_err(|error| {
 						ControlProtocolError::new(
 							"TelemetryWriteFailed",
-							sf!("the Environment telemetry owner rejected the event: {error}"),
+							fault_in("the Environment telemetry owner rejected the event", error),
 						)
 					})?;
 				Ok(())
@@ -1745,7 +1762,7 @@ impl ControlAuthority for ProductionMcpControlAuthority {
 			.map_err(|error| {
 				ControlProtocolError::new(
 					"McpControlError",
-					sf!("the Environment MCP owner rejected the request: {error}"),
+					fault_in("the Environment MCP owner rejected the request", error),
 				)
 			})
 	}
@@ -2115,7 +2132,7 @@ async fn start_memory_runtime(
 		Some(
 			vcs::snapshot(project_root, &cancel)
 				.await
-				.map_err(|error| EnvdError::State(Str::from(error.to_string())))?,
+				.map_err(EnvdError::state)?,
 		)
 	};
 	memory::start(
@@ -2126,7 +2143,7 @@ async fn start_memory_runtime(
 		project_root.to_path_buf(),
 		snapshot.as_ref(),
 	)
-	.map_err(|error| EnvdError::State(Str::from(error.to_string())))
+	.map_err(EnvdError::state)
 }
 
 #[derive(Debug, Error)]
@@ -2299,9 +2316,9 @@ fn canonical_privileged_target(root: &Path, input: &str) -> Result<(String, Path
 		.parent()
 		.ok_or_else(|| "privileged target has no parent directory".to_owned())?;
 	let parent = fs::canonicalize(parent)
-		.map_err(|error| format!("privileged target parent is not canonical: {error}"))?;
+		.map_err(|error| fault_in("privileged target parent is not canonical", error).to_string())?;
 	let root = fs::canonicalize(root)
-		.map_err(|error| format!("Environment root is not canonical: {error}"))?;
+		.map_err(|error| fault_in("Environment root is not canonical", error).to_string())?;
 	if parent != root && !parent.starts_with(&root) {
 		return Err("privileged target escapes the Environment root".to_owned());
 	}
@@ -2513,8 +2530,7 @@ impl EnvServer {
 		bridges: RegistryBridges,
 	) -> Result<Self, EnvdError> {
 		let workspace = WorkspaceHost::open(root)?;
-		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3"))
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3")).map_err(EnvdError::state)?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, workspace.root())
 				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
@@ -2524,12 +2540,12 @@ impl EnvServer {
 		let lsp_settings = LspSettings::from_con(con);
 		let workspace_trust = bridges.content.workspace_trust;
 		let doc_config = crate::docserver::ServerConfig::new(root)
-			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
+			.map_err(EnvdError::document)?
 			.with_server_build(omp_env::build_id::current())
 			.with_project_binaries(lsp_settings.project_binaries)
 			.with_workspace_trust(workspace_trust);
-		let environment = crate::docserver::Environment::new(doc_config)
-			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
+		let environment =
+			crate::docserver::Environment::new(doc_config).map_err(EnvdError::document)?;
 		let (document_client, document_server) = duplex(64 * 1024);
 		tokio::spawn(async move {
 			let _ = crate::docserver::connection::serve_connection(
@@ -2557,7 +2573,7 @@ impl EnvServer {
 				state_dir.join("github-cache.sqlite3"),
 				GithubCacheSettings::from_con(con).policy(),
 			)
-			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+			.map_err(EnvdError::state)?,
 		);
 		let blobs = BlobHost::open_managed(
 			omp_env::project_state::blob_store(state_dir),
@@ -2570,7 +2586,7 @@ impl EnvServer {
 			.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
-				.map_err(|error| EnvdError::State(Str::from(error.to_string())))?,
+				.map_err(EnvdError::state)?,
 		);
 		let local_root =
 			crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id);
@@ -2606,7 +2622,7 @@ impl EnvServer {
 				supervisor: Arc::downgrade(&ext_hosts),
 			}));
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
-			.map_err(|error| EnvdError::Blob(Str::from(error.to_string())))?;
+			.map_err(EnvdError::blob)?;
 		let materializations = ResourceMaterializer::open(
 			workspace.root(),
 			state_dir,
@@ -2625,7 +2641,7 @@ impl EnvServer {
 		let mcp_settings = McpSettings::from_con(con, workspace_trust);
 		mcp.start_native_configs(mcp_settings.project_config)
 			.await
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+			.map_err(EnvdError::state)?;
 		let workspace_ops = WorkspaceOperations::open(
 			workspace.clone(),
 			documents.clone(),
@@ -2767,8 +2783,7 @@ impl EnvServer {
 	) -> Result<Self, EnvdError> {
 		let workspace = WorkspaceHost::open(root)?;
 		let root = workspace.root().to_path_buf();
-		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3"))
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3")).map_err(EnvdError::state)?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, workspace.root())
 				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
@@ -2849,7 +2864,7 @@ impl EnvServer {
 				state_dir.join("github-cache.sqlite3"),
 				GithubCacheSettings::from_con(con).policy(),
 			)
-			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+			.map_err(EnvdError::state)?,
 		);
 		let blobs = BlobHost::open_managed(
 			omp_env::project_state::blob_store(state_dir),
@@ -2866,7 +2881,7 @@ impl EnvServer {
 		.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
-				.map_err(|error| EnvdError::State(Str::from(error.to_string())))?,
+				.map_err(EnvdError::state)?,
 		);
 		let local_root =
 			crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id);
@@ -2902,7 +2917,7 @@ impl EnvServer {
 				supervisor: Arc::downgrade(&ext_hosts),
 			}));
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
-			.map_err(|error| EnvdError::Blob(Str::from(error.to_string())))?;
+			.map_err(EnvdError::blob)?;
 		let materializations = ResourceMaterializer::open(
 			workspace.root(),
 			state_dir,
@@ -2924,7 +2939,7 @@ impl EnvServer {
 		let mcp_settings = McpSettings::from_con(con, workspace_trust);
 		mcp.start_native_configs(mcp_settings.project_config)
 			.await
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+			.map_err(EnvdError::state)?;
 		let workspace_ops = WorkspaceOperations::open(
 			workspace.clone(),
 			documents.clone(),
@@ -3066,8 +3081,7 @@ impl EnvServer {
 			bridges.session_authority.as_ref(),
 		);
 
-		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3"))
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3")).map_err(EnvdError::state)?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, &root)
 				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
@@ -3079,7 +3093,7 @@ impl EnvServer {
 				state_dir.join("github-cache.sqlite3"),
 				GithubCacheSettings::from_con(con).policy(),
 			)
-			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+			.map_err(EnvdError::state)?,
 		);
 		let blobs = BlobHost::open_managed(
 			omp_env::project_state::blob_store(state_dir),
@@ -3091,7 +3105,7 @@ impl EnvServer {
 			.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
-				.map_err(|error| EnvdError::State(Str::from(error.to_string())))?,
+				.map_err(EnvdError::state)?,
 		);
 		let local_root =
 			crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id);
@@ -3109,7 +3123,7 @@ impl EnvServer {
 		// through the live transport supervisor.
 		mcp.start_native_configs(mcp_settings.project_config)
 			.await
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+			.map_err(EnvdError::state)?;
 
 		register_extension_convars(con, &ext_host_config.extensions)?;
 		let schedules = DurableScheduleActor::spawn(state_dir)?;
@@ -3136,7 +3150,7 @@ impl EnvServer {
 			}));
 
 		let sites = SiteMaterializer::open(state_dir.join("ext"), blobs.store().clone())
-			.map_err(|error| EnvdError::Blob(Str::from(error.to_string())))?;
+			.map_err(EnvdError::blob)?;
 		let materializations = ResourceMaterializer::open(
 			&root,
 			state_dir,
@@ -4944,7 +4958,7 @@ impl EnvServer {
 								responses,
 								frame.request_id,
 								pb::ProtocolErrorCode::PreconditionFailed,
-								&error.to_string(),
+								&error,
 							)
 							.await;
 							None
@@ -5039,7 +5053,7 @@ impl EnvServer {
 						responses,
 						frame.request_id,
 						pb::ProtocolErrorCode::InvalidArgument,
-						&error.to_string(),
+						&error,
 					)
 					.await;
 					return;
@@ -5829,7 +5843,7 @@ impl EnvServer {
 									responses,
 									request_id,
 									pb::ProtocolErrorCode::PermissionDenied,
-									&error.to_string(),
+									&error,
 								)
 								.await;
 								return;
@@ -5847,31 +5861,20 @@ impl EnvServer {
 						| SiteError::InvalidFilePath { path: _ }
 						| SiteError::InvalidBlobHash),
 					) => {
-						send_error(
-							responses,
-							request_id,
-							pb::ProtocolErrorCode::InvalidArgument,
-							&error.to_string(),
-						)
-						.await;
+						send_error(responses, request_id, pb::ProtocolErrorCode::InvalidArgument, &error)
+							.await;
 					},
 					Err(error @ SiteError::TrustedLoad(_)) => {
 						send_error(
 							responses,
 							request_id,
 							pb::ProtocolErrorCode::PermissionDenied,
-							&error.to_string(),
+							&error,
 						)
 						.await;
 					},
 					Err(error) => {
-						send_error(
-							responses,
-							request_id,
-							pb::ProtocolErrorCode::Internal,
-							&error.to_string(),
-						)
-						.await;
+						send_error(responses, request_id, pb::ProtocolErrorCode::Internal, &error).await;
 					},
 				}
 			},
@@ -6344,7 +6347,7 @@ impl EnvServer {
 					responses,
 					request_id,
 					pb::ProtocolErrorCode::Internal,
-					&format!("privileged mutation worker failed: {error}"),
+					fault_in("privileged mutation worker failed", error),
 				)
 				.await;
 			},
@@ -6965,7 +6968,7 @@ impl EnvServer {
 							responses,
 							request_id,
 							pb::ProtocolErrorCode::Internal,
-							&format!("input capture worker failed: {source}"),
+							fault_in("input capture worker failed", source),
 						)
 						.await;
 						return;
@@ -7813,13 +7816,7 @@ impl EnvServer {
 			}) {
 				Ok(invocation) => invocation,
 				Err(error) => {
-					send_error(
-						responses,
-						request_id,
-						pb::ProtocolErrorCode::Internal,
-						&error.to_string(),
-					)
-					.await;
+					send_error(responses, request_id, pb::ProtocolErrorCode::Internal, &error).await;
 					return;
 				},
 			};
@@ -8066,13 +8063,8 @@ impl EnvServer {
 				};
 				if let Err(error) = worker.args_committed(request) {
 					self.authority.settle(owner, id);
-					send_error(
-						responses,
-						request_id,
-						pb::ProtocolErrorCode::PreconditionFailed,
-						&error.to_string(),
-					)
-					.await;
+					send_error(responses, request_id, pb::ProtocolErrorCode::PreconditionFailed, &error)
+						.await;
 					return;
 				}
 				*committed = true;
@@ -9637,7 +9629,7 @@ async fn spawn_native_invocation(
 													&responses,
 													request_id,
 													pb::ProtocolErrorCode::NotFound,
-													&error.to_string(),
+													&error,
 												)
 												.await;
 											}
@@ -10606,15 +10598,17 @@ fn effective_effects(
 	effects.is_subset_of(admitted).then_some(effects)
 }
 
+/// Sends an invocation-terminal protocol error, rendering the message once at
+/// this model-facing fault boundary.
 async fn send_invocation_error(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	code: pb::ProtocolErrorCode,
-	message: &str,
+	message: impl std::fmt::Display,
 ) -> bool {
 	let body = server_frame::Body::Error(pb::ProtocolError {
 		code:    code as i32,
-		message: message.to_owned(),
+		message: message.to_string(),
 		props:   Default::default(),
 	});
 	send_invocation_terminal_body(responses, request_id, body).await;
@@ -10790,13 +10784,7 @@ async fn parse_mounted_resource_uri<'a>(
 			None
 		},
 		Err(error) => {
-			send_error(
-				responses,
-				request_id,
-				pb::ProtocolErrorCode::InvalidArgument,
-				&error.to_string(),
-			)
-			.await;
+			send_error(responses, request_id, pb::ProtocolErrorCode::InvalidArgument, &error).await;
 			None
 		},
 	}
@@ -11727,7 +11715,7 @@ fn worker_completion_json(
 		.ok_or_else(|| sf!("worker completion omitted structured details"))?;
 	let json = match complete.kind {
 		ExtHostOutcomeKind::Ok | ExtHostOutcomeKind::Faulted => {
-			worker_verdict_json(details, is_error).map_err(|error| Str::from(error.to_string()))?
+			worker_verdict_json(details, is_error).map_err(fault)?
 		},
 		ExtHostOutcomeKind::ArgsRejected => {
 			let issue = complete
@@ -11753,17 +11741,16 @@ fn worker_completion_json(
 				serde_json::to_vec(&CallOutcome::<serde_json::Value, serde_json::Value>::ArgsRejected(
 					issue,
 				))
-				.map_err(|error| Str::from(error.to_string()))?,
+				.map_err(fault)?,
 			)
 		},
 		ExtHostOutcomeKind::Aborted => {
-			let abort: Abort =
-				serde_json::from_slice(&details).map_err(|error| Str::from(error.to_string()))?;
+			let abort: Abort = serde_json::from_slice(&details).map_err(fault)?;
 			Bytes::from(
 				serde_json::to_vec(&CallOutcome::<serde_json::Value, serde_json::Value>::aborted(
 					abort,
 				))
-				.map_err(|error| Str::from(error.to_string()))?,
+				.map_err(fault)?,
 			)
 		},
 	};
@@ -11825,7 +11812,7 @@ fn workspace_walk_request(
 			.map_err(|error| {
 				(
 					pb::ProtocolErrorCode::InvalidArgument,
-					format!("walk root is not a valid URI: {error}"),
+					fault_in("walk root is not a valid URI", error).to_string(),
 				)
 			})?
 			.to_file_path()
@@ -11913,7 +11900,10 @@ fn workspace_walk_request(
 	});
 	if !request.include.is_empty() {
 		let glob = CompiledWalkGlob::new(request.include.iter().cloned()).map_err(|error| {
-			(pb::ProtocolErrorCode::InvalidArgument, format!("walk include glob is invalid: {error}"))
+			(
+				pb::ProtocolErrorCode::InvalidArgument,
+				fault_in("walk include glob is invalid", error).to_string(),
+			)
 		})?;
 		walk = walk.filter(WalkFilter::all().glob(glob));
 	}
@@ -12304,18 +12294,20 @@ async fn send_stream_error(
 	.await;
 }
 
+/// Sends a protocol error frame, rendering the message once at this
+/// model-facing fault boundary.
 async fn send_error(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	code: pb::ProtocolErrorCode,
-	message: &str,
+	message: impl std::fmt::Display,
 ) {
 	send_body(
 		responses,
 		request_id,
 		server_frame::Body::Error(pb::ProtocolError {
 			code:    code as i32,
-			message: message.to_owned(),
+			message: message.to_string(),
 			props:   Default::default(),
 		}),
 	)

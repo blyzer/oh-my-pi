@@ -16,7 +16,7 @@ use omp_agent::{
 	ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket,
 	TicketState,
 };
-use omp_core::{InvocationPhase, LifecyclePhase, Str};
+use omp_core::{InvocationPhase, LifecyclePhase, Str, sf};
 use omp_proto::policy::v1;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -642,6 +642,18 @@ pub enum PolicyControlFailure {
 }
 
 impl PolicyControlFailure {
+	/// Constructs a malformed-request failure, rendering the cause once at
+	/// this model-facing fault boundary.
+	fn invalid(cause: impl std::fmt::Display) -> Self {
+		Self::Invalid(sf!("{cause}"))
+	}
+
+	/// Constructs an audit failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn audit(cause: impl std::fmt::Display) -> Self {
+		Self::Audit(sf!("{cause}"))
+	}
+
 	fn protocol(&self) -> ControlProtocolError {
 		let code = match self {
 			Self::StaleGeneration => "StaleGeneration",
@@ -795,8 +807,8 @@ impl PolicyControlOwner {
 			reason:     Option<Str>,
 			audited:    bool,
 		}
-		let decision: Decision = serde_json::from_value(value)
-			.map_err(|error| PolicyControlFailure::Invalid(Str::from(error.to_string())))?;
+		let decision: Decision =
+			serde_json::from_value(value).map_err(PolicyControlFailure::invalid)?;
 		let source = ApprovalSource::from_str(decision.source.as_str())
 			.map_err(|_| PolicyControlFailure::Invalid(Str::new_static("unknown approval source")))?;
 		let scope = match decision.scope {
@@ -1075,7 +1087,7 @@ fn take_typed<T: for<'de> Deserialize<'de>>(
 		ControlProtocolError::new("InvalidArguments", format!("{name} is required"))
 	})?;
 	serde_json::from_value(value)
-		.map_err(|error| ControlProtocolError::new("InvalidArguments", format!("{name}: {error}")))
+		.map_err(|error| ControlProtocolError::caused_by("InvalidArguments", name, error))
 }
 
 fn policy_cwd(
@@ -1416,13 +1428,14 @@ fn match_paths_json(
 	} else {
 		let mut builder = globset::GlobSetBuilder::new();
 		for pattern in &patterns {
-			builder.add(globset::Glob::new(pattern).map_err(|error| {
-				ControlProtocolError::new("InvalidPattern", Str::from(error.to_string()))
-			})?);
+			builder.add(
+				globset::Glob::new(pattern)
+					.map_err(|error| ControlProtocolError::caused("InvalidPattern", error))?,
+			);
 		}
-		let set = builder.build().map_err(|error| {
-			ControlProtocolError::new("InvalidPattern", Str::from(error.to_string()))
-		})?;
+		let set = builder
+			.build()
+			.map_err(|error| ControlProtocolError::caused("InvalidPattern", error))?;
 		set.is_match(&lexical) || set.is_match(&resolved)
 	};
 	if !matched {

@@ -268,12 +268,8 @@ impl LocalResolver {
 		let root = self.session_root()?;
 		let relative = decode_relative(resource)?;
 		let candidate = root.path.join(&relative);
-		let canonical = fs::canonicalize(&candidate).map_err(|source| Fault::Source {
-			message: Str::new(format!(
-				"Local resource '{}' cannot be resolved: {source}",
-				relative.display()
-			)),
-		})?;
+		let canonical =
+			fs::canonicalize(&candidate).map_err(|source| resolve_fault(&relative, source))?;
 		if !canonical.starts_with(&root.path) {
 			return Err(Fault::Invalid {
 				message: Str::new_static("local:// path escapes the session scratch root."),
@@ -544,6 +540,17 @@ fn binary_fault(resource: &str) -> Fault {
 
 fn io_fault(source: io::Error) -> Fault {
 	Fault::Source { message: Str::new(format!("local:// I/O failed: {source}")) }
+}
+
+/// Creates a resolution fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn resolve_fault(relative: &Path, cause: impl std::fmt::Display) -> Fault {
+	Fault::Source {
+		message: Str::new(format!(
+			"Local resource '{}' cannot be resolved: {cause}",
+			relative.display()
+		)),
+	}
 }
 #[cfg(test)]
 mod tests {

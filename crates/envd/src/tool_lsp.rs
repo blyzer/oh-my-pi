@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use globset::Glob;
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_proto::{
 	document::v1::{
 		self as pb, commit_transaction_response, document_mutation, lsp_response, text_mutation,
@@ -887,9 +887,9 @@ impl DocumentLspControl {
 			match self.checker.run(request, cancel.child_token()).await {
 				Ok(output) => match checkers::parse_output(*preset, &output) {
 					Ok(mut findings) => diagnostics.append(&mut findings),
-					Err(error) => failures.push(Str::from(error.to_string())),
+					Err(error) => failures.push(failure_text(error)),
 				},
-				Err(error) => failures.push(Str::from(error.to_string())),
+				Err(error) => failures.push(failure_text(error)),
 			}
 		}
 		let result = DiagnosticResult::new(diagnostics, failures.is_empty());
@@ -902,6 +902,11 @@ impl DocumentLspControl {
 		});
 		Ok(Payload { action: Action::Diagnostics, servers, output, data, omitted: result.omitted })
 	}
+}
+
+/// Renders a checker failure once at this model-facing fault boundary.
+fn failure_text(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
 }
 
 fn lsp_roster_payload(action: Action, roster: pb::LspStatusResponse, workspace: &str) -> Payload {

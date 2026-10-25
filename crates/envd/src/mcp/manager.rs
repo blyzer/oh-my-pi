@@ -87,6 +87,7 @@ use super::{
 	timeout::{McpDeadlineError, McpTimeout},
 	transport::{McpTransport, TransportError, TransportFailure},
 };
+use crate::fault_in;
 
 const STARTUP_RACE: Duration = Duration::from_millis(250);
 const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
@@ -3064,7 +3065,7 @@ impl DynHost for McpManager {
 			let result = service
 				.invoke(request, cancellation)
 				.await
-				.map_err(|error| DynFault::new(format!("MCP device invocation failed: {error}")))?;
+				.map_err(|error| DynFault::new(fault_in("MCP device invocation failed", error)))?;
 			mcp_dyn_output(&result, render_markdown).map(Into::into)
 		})
 	}

@@ -172,14 +172,14 @@ impl ShellExecHost {
 			None
 		};
 		let root = Url::parse(&self.cwd_uri)
-			.map_err(|error| cwd_fault(format!("workspace root URI is invalid: {error}")))?;
+			.map_err(|error| cwd_fault_from("workspace root URI is invalid", error))?;
 		let root_path = root
 			.to_file_path()
 			.map_err(|()| cwd_fault("workspace root is not a local file URI"))?;
 		let path = match requested {
 			None => root_path,
 			Some(value) if value.contains("://") => Url::parse(value)
-				.map_err(|error| cwd_fault(format!("working-directory URI is invalid: {error}")))?
+				.map_err(|error| cwd_fault_from("working-directory URI is invalid", error))?
 				.to_file_path()
 				.map_err(|()| cwd_fault("working-directory URI is not a local file URI"))?,
 			Some(value) => {
@@ -342,6 +342,11 @@ fn named_process(started: v1::ProcessStarted) -> DetachedJob {
 fn cwd_fault(message: impl Into<Str>) -> Fault {
 	Fault::Resource { operation: sf!("cwd"), message: message.into() }
 }
+/// Creates a working-directory fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn cwd_fault_from(context: &'static str, cause: impl std::fmt::Display) -> Fault {
+	cwd_fault(sf!("{context}: {cause}"))
+}
 /// Foreground shell run retaining the concrete host's process-tree guard.
 pub struct HostShellRun {
 	host: ExecHost,
@@ -458,14 +463,8 @@ impl ShellExec for ShellExecHost {
 		let blobs = self.blobs.clone();
 		let id = tokio::task::spawn_blocking(move || blobs.put(&bytes))
 			.await
-			.map_err(|error| Fault::Resource {
-				operation: sf!("store_shell_attachment"),
-				message:   Str::new(error.to_string()),
-			})?
-			.map_err(|error| Fault::Resource {
-				operation: sf!("store_shell_attachment"),
-				message:   Str::new(error.to_string()),
-			})?;
+			.map_err(attachment_fault)?
+			.map_err(attachment_fault)?;
 		Ok(BlobRef {
 			hash: Str::from(hex::encode(&id.hash).into_string()),
 			media_type,
@@ -624,6 +623,12 @@ fn tool_diag(diag: v1::ToolDiag) -> Result<omp_tool::Diag, Fault> {
 
 fn resource_fault(operation: &'static str, error: ExecError) -> Fault {
 	protocol_fault(operation, sf!("{error}"))
+}
+
+/// Creates an attachment-store fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn attachment_fault(cause: impl std::fmt::Display) -> Fault {
+	Fault::Resource { operation: sf!("store_shell_attachment"), message: sf!("{cause}") }
 }
 
 fn protocol_fault(operation: &'static str, message: impl Into<Str>) -> Fault {

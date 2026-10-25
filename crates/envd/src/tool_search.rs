@@ -15,7 +15,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_edit::store::file_hash;
 use omp_tool::FetchEffects;
 use omp_tools::{
@@ -122,9 +122,7 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 			let operation = task::spawn_blocking(move || {
 				search_blocking(&host, request, external, deadline, &cancel, blocking_cancel)
 			});
-			let result = operation.await.map_err(|error| grep::Fault::Workspace {
-				message: Str::from(format!("workspace search task failed: {error}")),
-			})?;
+			let result = operation.await.map_err(grep_task_failed)?;
 			drop(cancel_on_drop);
 			result
 		}
@@ -174,9 +172,7 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		async move {
 			let cancel_on_drop = CancelOnDrop(cancellation.clone());
 			let operation = task::spawn_blocking(move || glob_blocking(&host, request, &cancellation));
-			let result = operation.await.map_err(|error| glob::Fault::Workspace {
-				message: Str::from(format!("workspace walk task failed: {error}")),
-			})?;
+			let result = operation.await.map_err(glob_task_failed)?;
 			drop(cancel_on_drop);
 			result
 		}
@@ -265,7 +261,7 @@ fn resource_walk_target(target: &str) -> Result<Option<ParsedUri<'_>>, glob::Fau
 		return Ok(None);
 	}
 	let parsed = parse_uri(target)
-		.map_err(|error| glob::Fault::Workspace { message: Str::new(error.to_string()) })?
+		.map_err(glob_workspace_message)?
 		.ok_or_else(|| glob::Fault::UnsupportedScheme { scheme: Str::new_static("file") })?;
 	if !matches!(parsed.scheme, Scheme::Ssh | Scheme::Vault | Scheme::Memory) {
 		return Err(glob::Fault::UnsupportedScheme {
@@ -324,9 +320,7 @@ async fn resource_glob(
 				glob_blocking(&local_host, local_request, &local_cancellation)
 			})
 			.await
-			.map_err(|error| glob::Fault::Workspace {
-				message: Str::from(format!("workspace walk task failed: {error}")),
-			})?;
+			.map_err(glob_task_failed)?;
 			match local {
 				Ok(result) => {
 					found_target = true;
@@ -346,10 +340,7 @@ async fn resource_glob(
 		let pattern = parsed.resource;
 		let base = walk_base(pattern);
 		let compiled =
-			CompiledWalkGlob::new([pattern]).map_err(|error| glob::Fault::InvalidPattern {
-				pattern: Str::new(pattern),
-				message: Str::new(error.to_string()),
-			})?;
+			CompiledWalkGlob::new([pattern]).map_err(|error| glob_invalid_pattern(pattern, error))?;
 		let mut pending = VecDeque::from([Str::new(base)]);
 		let mut listed_any = false;
 		while let Some(directory) = pending.pop_front() {
@@ -521,7 +512,7 @@ async fn materialize_external_roots(
 					},
 					Err(message) => materialized
 						.archive_unreadable
-						.push(Str::from(format!("{} ({message})", root.path))),
+						.push(archive_unreadable_text(&root.path, message)),
 				}
 			},
 			SearchRootKind::Url => {
@@ -581,7 +572,7 @@ async fn materialize_archive_root(
 			materialize_archive_bytes(&root, root_index, candidate, archive_key, bytes)
 		})
 		.await
-		.map_err(|error| format!("archive materialization task failed: {error}"))?;
+		.map_err(|error| archive_failure("archive materialization task failed", error))?;
 	}
 	Err(format!(
 		"cannot open archive: {}",
@@ -600,9 +591,9 @@ fn materialize_archive_bytes(
 		.or_else(|| archive::sniff_archive_format(&bytes))
 		.ok_or_else(|| "cannot determine archive format".to_owned())?;
 	let contents = archive::open_archive_bytes(bytes, format)
-		.map_err(|error| format!("cannot open archive: {error}"))?
+		.map_err(|error| archive_failure("cannot open archive", error))?
 		.materialize_text_members()
-		.map_err(|error| format!("cannot read archive: {error}"))?;
+		.map_err(|error| archive_failure("cannot read archive", error))?;
 	let selected = candidate.sub_path.trim_matches('/');
 	let selected_prefix = format!("{selected}/");
 	let matches_selected = |path: &str| path == selected || path.starts_with(&selected_prefix);
@@ -1199,12 +1190,8 @@ fn glob_blocking(
 			});
 			continue;
 		}
-		let compiled = CompiledWalkGlob::new([target.parsed.pattern.as_str()]).map_err(|error| {
-			glob::Fault::InvalidPattern {
-				pattern: Str::from(target.parsed.pattern.clone()),
-				message: Str::from(error.to_string()),
-			}
-		})?;
+		let compiled = CompiledWalkGlob::new([target.parsed.pattern.as_str()])
+			.map_err(|error| glob_invalid_pattern(target.parsed.pattern.as_str(), error))?;
 		let mentions_node_modules = target.parsed.pattern.contains("node_modules");
 		let max_depth = glob_max_depth(&target.parsed.pattern);
 		let walk = WalkRequest::new(&target.canonical)
@@ -1278,6 +1265,14 @@ enum WalkStop {
 	Workspace(Str),
 }
 
+impl WalkStop {
+	/// Creates a workspace-walk failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn workspace(cause: impl Display) -> Self {
+		Self::Workspace(sf!("{cause}"))
+	}
+}
+
 fn walk_glob_target(
 	workspace_root: &Path,
 	canonical_root: &Path,
@@ -1302,7 +1297,7 @@ fn walk_glob_target(
 		|entry| {
 			let mut path =
 				glob_display_path(workspace_root, canonical_root, visible_root, &entry.absolute_path)
-					.map_err(|error| WalkStop::Workspace(Str::from(error.to_string())))?;
+					.map_err(WalkStop::workspace)?;
 			let is_dir = entry.file_type == FileType::Dir;
 			if is_dir {
 				path.push('/');
@@ -1328,7 +1323,7 @@ fn walk_glob_target(
 			return Err(glob::Fault::Workspace { message });
 		},
 		Err(error) => {
-			return Err(glob::Fault::Workspace { message: Str::from(error.to_string()) });
+			return Err(glob_workspace_message(error));
 		},
 	};
 	matches.sort_by(|left, right| {
@@ -1561,6 +1556,35 @@ fn grep_workspace_message(error: impl Display) -> grep::Fault {
 
 fn glob_workspace_message(error: impl Display) -> glob::Fault {
 	glob::Fault::Workspace { message: Str::from(error.to_string()) }
+}
+
+/// Creates a search-task fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn grep_task_failed(cause: impl Display) -> grep::Fault {
+	grep::Fault::Workspace { message: sf!("workspace search task failed: {cause}") }
+}
+
+/// Creates a walk-task fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn glob_task_failed(cause: impl Display) -> glob::Fault {
+	glob::Fault::Workspace { message: sf!("workspace walk task failed: {cause}") }
+}
+
+/// Creates an invalid-pattern fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn glob_invalid_pattern(pattern: &str, cause: impl Display) -> glob::Fault {
+	glob::Fault::InvalidPattern { pattern: Str::new(pattern), message: sf!("{cause}") }
+}
+
+/// Renders an unreadable-archive note once at this model-facing fault
+/// boundary.
+fn archive_unreadable_text(path: impl Display, cause: impl Display) -> Str {
+	sf!("{path} ({cause})")
+}
+
+/// Renders an archive failure once at this model-facing fault boundary.
+fn archive_failure(context: &str, cause: impl Display) -> String {
+	format!("{context}: {cause}")
 }
 
 fn check_glob_cancel(cancel: &CancellationToken) -> Result<(), glob::Fault> {

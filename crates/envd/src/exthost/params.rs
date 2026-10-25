@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use omp_core::{InvocationPhase, LifecyclePhase, Str};
+use omp_core::{InvocationPhase, LifecyclePhase, Str, sf};
 use omp_proto::toolhost::v1;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -460,6 +460,12 @@ pub enum DirectFilesystemAuthorityError {
 }
 
 impl DirectFilesystemAuthorityError {
+	/// Constructs an audit failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn audit(cause: impl std::fmt::Display) -> Self {
+		Self::Audit(sf!("{cause}"))
+	}
+
 	fn protocol(&self) -> ControlProtocolError {
 		let code = match self {
 			Self::StaleGeneration => "StaleGeneration",
