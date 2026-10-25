@@ -838,6 +838,77 @@ mod tests {
 		drop(local_transport);
 	}
 
+	#[tokio::test]
+	async fn w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream() {
+		const WAIT: Duration = Duration::from_millis(200);
+		let (local_pipe, local_transport) = in_process_frames(8);
+		let (remote_pipe, remote_transport) = in_process_frames(8);
+		let mut remote_tools = FastHashSet::default();
+		remote_tools.insert(Str::from("bash"));
+		let (client, router) =
+			PartitionedEnvTransport::spawn(local_pipe, remote_pipe, Arc::new(remote_tools));
+		let (hello, (), ()) = tokio::join!(
+			client.hello(ClientHello::default()),
+			accept_hello(&local_transport),
+			accept_hello(&remote_transport),
+		);
+		hello.expect("partitioned hello");
+
+		let mut remote = client
+			.invoke(InvokeTool {
+				invocation_id: "remote-in-flight".into(),
+				name: "bash".into(),
+				..InvokeTool::default()
+			})
+			.await
+			.expect("open remote invocation");
+		assert!(matches!(
+			receive(&remote_transport).await.body,
+			Some(client_frame::Body::InvokeTool(_))
+		));
+		let mut local = client
+			.invoke(InvokeTool {
+				invocation_id: "local-in-flight".into(),
+				name: "ask".into(),
+				..InvokeTool::default()
+			})
+			.await
+			.expect("open local invocation");
+		assert!(matches!(
+			receive(&local_transport).await.body,
+			Some(client_frame::Body::InvokeTool(_))
+		));
+
+		drop(remote_transport);
+		assert!(
+			tokio::time::timeout(WAIT, remote.next_event())
+				.await
+				.is_err(),
+			"the closed remote backend unexpectedly settled its in-flight invocation"
+		);
+
+		let _ = client
+			.invoke(InvokeTool {
+				invocation_id: "remote-after-close".into(),
+				name: "bash".into(),
+				..InvokeTool::default()
+			})
+			.await;
+		assert!(matches!(
+			tokio::time::timeout(WAIT, local.next_event())
+				.await
+				.expect("local stream did not settle after router exit"),
+			Err(ClientError::TransportClosed)
+		));
+
+		drop(client);
+		let result = tokio::time::timeout(Duration::from_secs(2), router)
+			.await
+			.expect("router shutdown timed out")
+			.expect("router task panicked");
+		assert!(matches!(result, Err(PartitionError::BackendClosed { backend: "remote" })));
+	}
+
 	#[test]
 	fn grant_revocation_routes_to_the_environment_and_opens_no_route() {
 		let revoke = frame(0, client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {}));
