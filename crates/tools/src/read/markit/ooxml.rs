@@ -41,14 +41,14 @@ pub(super) enum OoxmlError {
 	},
 	#[error("invalid XML: entity expansion count exceeds {limit}")]
 	EntityExpansionCap { limit: usize },
-	#[error("{source}")]
+	#[error(transparent)]
 	InvalidUtf8 {
-		#[source]
+		#[from]
 		source: str::Utf8Error,
 	},
-	#[error("{source}")]
+	#[error(transparent)]
 	InvalidDecodedUtf8 {
-		#[source]
+		#[from]
 		source: FromUtf8Error,
 	},
 	#[error("invalid XML: {source}")]
@@ -77,6 +77,9 @@ pub(super) enum OoxmlError {
 
 /// Bridge into the XLSX and PPTX pipelines, which still carry their own
 /// parse failures as rendered text.
+///
+/// shortcut: renders `OoxmlError` for the untyped XLSX and PPTX paths;
+/// delete it once those pipelines carry typed errors of their own.
 impl From<OoxmlError> for String {
 	fn from(error: OoxmlError) -> Self {
 		error.to_string()
