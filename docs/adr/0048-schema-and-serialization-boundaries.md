@@ -214,3 +214,21 @@ This ADR authorizes no format migration. After owner acceptance:
 - B1–B9 land as separate changes, each with tests.
 
 Benchmarks in the research document stay plans (UNVERIFIED) and do not gate CI.
+
+## Status in omp
+
+**Status: Partially implemented.** The format-preservation decision is in
+force and the Buf check plus most hardening items are implemented, but the ADR
+is still proposed and its acceptance evidence is incomplete.
+
+- **Done:** Buf breaking configuration and CI, B1, B2, B3, B6, B7, and B8.
+- **Partial:** B5 has two golden journal fixture pairs, not coverage for every
+  kind or field addition named by the ADR.
+- **Open:** B4 does not validate every normal host/worker frame before prost
+  decode.
+- **Partial:** B9 fixes the Python schema revision drift, but
+  `docs/architecture/processes.md` still contains the stale
+  `WorkerProcess::spawn` description and issue filing for WorkerHello and
+  gateway Hello is not established.
+- **Acceptance still required:** local Buf proof, owner confirmation of the
+  ignore list, and the B1 variant choice.
