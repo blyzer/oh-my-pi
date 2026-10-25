@@ -38,3 +38,18 @@ pub mod delegated_host;
 pub mod delegated_policy;
 pub mod delegated_resolver;
 pub mod workspace_trust;
+
+/// Renders an error cause once into model-facing fault text at this
+/// presentation boundary (ADR 0035 / PR #411 pattern).
+pub(crate) fn fault(cause: impl std::fmt::Display) -> omp_core::Str {
+	omp_core::sf!("{cause}")
+}
+
+/// Renders an error `cause` prefixed by `context` once into model-facing
+/// fault text at this presentation boundary (ADR 0035 / PR #411 pattern).
+pub(crate) fn fault_in(
+	context: impl std::fmt::Display,
+	cause: impl std::fmt::Display,
+) -> omp_core::Str {
+	omp_core::sf!("{context}: {cause}")
+}

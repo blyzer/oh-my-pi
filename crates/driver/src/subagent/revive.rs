@@ -247,7 +247,7 @@ async fn live_loop(child: Revived, first: Option<Str>, cancel: CancellationToken
 		Err(source) => JobSettlement {
 			status:     Str::new_static("failed"),
 			output:     None,
-			error:      Some(Str::new(source.to_string())),
+			error:      Some(crate::fault(source)),
 			completion: None,
 		},
 	}

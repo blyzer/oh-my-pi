@@ -951,7 +951,7 @@ fn load_rule(
 		Err(error) => {
 			warnings.push(Warning {
 				path:    path.to_path_buf(),
-				message: Str::new(format!("Failed to read rule file: {error}")),
+				message: crate::fault_in("Failed to read rule file", error),
 			});
 			return None;
 		},
@@ -1024,7 +1024,7 @@ fn rules_in_dir(
 		Err(error) => {
 			warnings.push(Warning {
 				path:    dir.to_path_buf(),
-				message: Str::new(format!("Failed to read rules directory: {error}")),
+				message: crate::fault_in("Failed to read rules directory", error),
 			});
 			return Vec::new();
 		},
@@ -1034,7 +1034,7 @@ fn rules_in_dir(
 		Err(error) => {
 			warnings.push(Warning {
 				path:    dir.to_path_buf(),
-				message: Str::new(format!("Failed to resolve rules directory: {error}")),
+				message: crate::fault_in("Failed to resolve rules directory", error),
 			});
 			return Vec::new();
 		},
@@ -1069,7 +1069,7 @@ fn rules_in_dir(
 				Err(error) => {
 					warnings.push(Warning {
 						path,
-						message: Str::new(format!("Failed to resolve rule file: {error}")),
+						message: crate::fault_in("Failed to resolve rule file", error),
 					});
 					return None;
 				},
@@ -1165,7 +1165,7 @@ impl ContentResolver for RuleResolver {
 			let piece = self
 				.lines
 				.slice(resource, &bytes, *range)
-				.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+				.map_err(|error| Fault::Invalid { message: crate::fault(error) })?;
 			output.extend_from_slice(&piece);
 		}
 		Ok(CowBytes::from(output))

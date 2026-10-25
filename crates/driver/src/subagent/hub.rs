@@ -688,9 +688,10 @@ async fn process_start(
 		let _ = jobs.terminate(session, handle).await?;
 	}
 	let start = process_start_request(name, application, params);
-	let started = env.start_process(&cwd, start).await.map_err(|error| {
-		omp_agent::SessionToolError::Rejected { message: Str::new(error.to_string()) }
-	})?;
+	let started = env
+		.start_process(&cwd, start)
+		.await
+		.map_err(|error| omp_agent::SessionToolError::Rejected { message: crate::fault(error) })?;
 	let process = find_process(env, name).await?;
 	if process.generation != started.generation {
 		return Err(omp_agent::SessionToolError::Rejected {
@@ -820,7 +821,7 @@ fn attach_process_job(
 			let started = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
 				.map_err(|error| omp_agent::SessionToolError::Rejected {
-					message: Str::new(error.to_string()),
+					message: crate::fault(error),
 				})?
 				.as_millis()
 				.to_string();
@@ -865,7 +866,7 @@ fn spawn_process_task(
 		match monitor_process(&env, &name, initial, cancel).await {
 			Ok(process) => process_settlement(process),
 			Err(error) => {
-				let message = Str::new(error.to_string());
+				let message = crate::fault(error);
 				JobSettlement {
 					status:     Str::new_static("failed"),
 					output:     None,
@@ -1223,9 +1224,7 @@ async fn process_logs(
 		.as_deref()
 		.map(regex::Regex::new)
 		.transpose()
-		.map_err(|error| omp_agent::SessionToolError::Rejected {
-			message: Str::new(error.to_string()),
-		})?;
+		.map_err(|error| omp_agent::SessionToolError::Rejected { message: crate::fault(error) })?;
 	let timeout = params
 		.timeout
 		.map_or(Duration::from_secs(30), Duration::from_secs_f64);
@@ -1326,9 +1325,7 @@ async fn process_wait(
 		.as_deref()
 		.map(regex::Regex::new)
 		.transpose()
-		.map_err(|error| omp_agent::SessionToolError::Rejected {
-			message: Str::new(error.to_string()),
-		})?;
+		.map_err(|error| omp_agent::SessionToolError::Rejected { message: crate::fault(error) })?;
 	if pattern.is_none() && process_matches_wait(&process, lifecycle) {
 		return Ok(Response {
 			text:    Str::new(serde_json::json!({ "process": process_json(&process) }).to_string()),
