@@ -909,7 +909,7 @@ fn restore(path: &Path, bytes: Option<&[u8]>) {
 }
 
 fn integrity(error: io::Error) -> ExtensionError {
-	ExtensionError::new(ExtensionCode::EIntegrity, error.to_string())
+	ExtensionError::caused(ExtensionCode::EIntegrity, error)
 }
 
 #[cfg(test)]
