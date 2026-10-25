@@ -82,11 +82,26 @@ labels are stale relative to the current tree. Use this section, the ADR, and
 
 ## Deferred PR audit
 
-`pr-deferred-audit` is **HISTORICAL**. It audited PRs 1–346 as of 2026-10-19.
-It remains useful evidence for finding deferred promises, stubs, and forward
-references, but it predates later PRs and must not be treated as a current
-checklist. Its unresolved rows require a fresh code and PR-state re-audit before
-promotion into this ledger.
+The active inventory is the committed
+[`docs/audits/pr-deferred-adr-audit-2026-10-21.md`](../audits/pr-deferred-adr-audit-2026-10-21.md)
+(95 classified rows: already-done, actionable-now, blocked, stale). The
+session-local `pr-deferred-audit` (PRs 1–346, 2026-10-19) is **HISTORICAL**
+and superseded by that file.
+
+Deltas verified 2026-10-25 against `omp2` after PR #419:
+
+- **RESOLVED** `SCOPED_WRITERS` typed-confinement follow-up (PR #197 item):
+  PR #349 added `Confinement::DocumentAuthority`; the name list is gone.
+- **RESOLVED** account-pin notice (PR #172 item): `crates/app/tests/rpc_spine.rs`
+  asserts the `account-pin` notice frame.
+- **RESOLVED** ADR 0038 open decisions (FOLLOW-0038, FOLLOW-0038B): PR #413.
+- **RESOLVED** ADR 0045 W8 evidence (0045-CONTAIN test deliverable): PR #419.
+- **Progressed** FOLLOW-0035 error-format migration: ratchet 1042 → 639
+  formatted sites after PRs #414–#417.
+- **STILL OPEN** `reattach_execution` backend call
+  (`crates/agent/src/jobs.rs:979` TODO; blocked on ADR 0039 Part B).
+- **STILL OPEN** kernel dispatch `channel_for(None, ..)`
+  (`crates/agent/src/dispatch.rs:1549`; owner decision).
 
 ## Superseded task snapshots
 
