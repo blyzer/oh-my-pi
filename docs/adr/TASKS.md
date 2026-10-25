@@ -32,7 +32,12 @@ that no implementation is authorized before acceptance.
 - **BLOCKED** owner acceptance and decision-item-7 answers. Required answers
   include reconnect policy, admission placement, approval/reflection relay
   treatment, MCP process locus, daemon sharing, and the future of schedules.
-- **OPEN** W8 daemon-kill evidence with an in-flight invocation.
+- **DONE** W8 daemon-kill evidence with an in-flight invocation:
+  `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream`
+  (`crates/env/src/partition.rs`) and
+  `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
+  (`crates/e2e/tests/p12_daemon_approvals.rs`, macOS, real daemon). Both pin
+  the gap; the containment fix inverts them into acceptance tests.
 - **OPEN** P8 baselines for workloads W1–W9 in attached and embedded modes.
 - **OPEN after acceptance** containment fixes in `crates/env/src/partition.rs`:
   typed terminal errors for pending remote routes and local-backend survival

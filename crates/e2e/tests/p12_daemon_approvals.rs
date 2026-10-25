@@ -178,8 +178,14 @@ async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()
 	remote_tools.insert(Str::from("bash"));
 	let (client, router) =
 		PartitionedEnvTransport::spawn(local_pipe, remote_pipe, std::sync::Arc::new(remote_tools));
-	let (hello, local) =
-		tokio::join!(client.hello(Default::default()), accept_local_hello(&local_transport));
+	let (hello, local) = tokio::join!(
+		client.hello(omp_proto::env::v1::ClientHello {
+			client: "w8-probe".to_owned(),
+			schema_rev: omp_proto::SCHEMA_REV,
+			..Default::default()
+		}),
+		accept_local_hello(&local_transport)
+	);
 	hello.context("partitioned client hello")?;
 	local?;
 
@@ -217,17 +223,28 @@ async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()
 		"the killed daemon unexpectedly settled the remote invocation"
 	);
 
-	let _ = client
-		.invoke(InvokeTool {
-			invocation_id: "w8-remote-after-kill".into(),
-			name: "bash".into(),
-			..InvokeTool::default()
-		})
-		.await;
-	assert!(matches!(
-		within("local invocation transport loss", DEFAULT_TIMEOUT, local.next_event()).await?,
-		Err(ClientError::TransportClosed)
-	));
+	// The router dies only on a remote-bound send arriving after the UDS
+	// bridge observed the daemon's EOF, so keep sending until the local
+	// stream reports the collateral loss.
+	let lost = within("local invocation transport loss", DEFAULT_TIMEOUT, async {
+		let mut attempt = 0_u32;
+		loop {
+			attempt += 1;
+			let _ = client
+				.invoke(InvokeTool {
+					invocation_id: format!("w8-after-kill-{attempt}"),
+					name: "bash".into(),
+					..InvokeTool::default()
+				})
+				.await;
+			match tokio::time::timeout(Duration::from_millis(200), local.next_event()).await {
+				Ok(result) => break result,
+				Err(_) => {},
+			}
+		}
+	})
+	.await?;
+	assert!(matches!(lost, Err(ClientError::TransportClosed)));
 
 	drop(client);
 	let result = within("partition router termination", DEFAULT_TIMEOUT, router).await?;

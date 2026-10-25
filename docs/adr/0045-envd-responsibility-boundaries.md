@@ -113,10 +113,16 @@ This ADR is a proposal. **No implementation is authorized.** Work begins only af
 **Status: Not started.** The ADR remains proposed and its implementation gate
 prohibits production changes before owner acceptance.
 
-- The containment gap is still present in `crates/env/src/partition.rs`: a
-  remote-bound send after backend closure can terminate the router and take the
-  local backend with it.
-- The W8 daemon-kill proof, P8 W1–W9 baselines, and owner answers in decision
-  item 7 are not recorded as accepted evidence.
+- The containment gap is present and now demonstrated by two tests that pin the
+  current behavior until the containment fix inverts them:
+  - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream`
+    (`crates/env/src/partition.rs`): a closed remote backend leaves an in-flight
+    invocation stream pending, and a later remote-bound frame ends the router,
+    dropping an unrelated local invocation with `TransportClosed`.
+  - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
+    (`crates/e2e/tests/p12_daemon_approvals.rs`): the same sequence against a
+    SIGKILLed production `omp envd` child over the owner UDS (macOS, with the
+    other P12 proofs).
+- P8 W1–W9 baselines and owner answers in decision item 7 are not recorded.
 - `adr0045-slice-b.md` is an investigation of this gap, not an implementation
   authorization.
