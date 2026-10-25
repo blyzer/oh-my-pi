@@ -424,6 +424,18 @@ impl BridgeHostError {
 	pub fn message(message: impl IntoStr) -> Self {
 		Self::Message(message.into_str())
 	}
+
+	/// Constructs a model-facing bridge failure, rendering the cause once at
+	/// this model-facing fault boundary.
+	pub fn caused(cause: impl fmt::Display) -> Self {
+		Self::Message(sf!("{cause}"))
+	}
+
+	/// Constructs a model-facing bridge failure for a failed operation,
+	/// rendering the cause once at this model-facing fault boundary.
+	pub fn because(operation: impl fmt::Display, cause: impl fmt::Display) -> Self {
+		Self::Message(sf!("{operation}: {cause}"))
+	}
 }
 
 /// Correlated, ordered progress destination for one bridge request.
@@ -564,7 +576,7 @@ impl BridgeDispatcher {
 		timeout
 			.host_wait(host.call(name, args, progress))
 			.await
-			.map_err(|error| BridgeCallError::Host { message: Str::from(error.to_string()) })
+			.map_err(BridgeCallError::host)
 	}
 
 	fn unregister(&self, grant: &BridgeGrant) {
@@ -724,6 +736,14 @@ pub enum BridgeCallError {
 	Host { message: Str },
 }
 
+impl BridgeCallError {
+	/// Constructs a host-call failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn host(cause: impl fmt::Display) -> Self {
+		Self::Host { message: sf!("{cause}") }
+	}
+}
+
 /// Adapter for the native tools in the exact environment registry. Privileged
 /// names such as `__agent__` remain separate host capabilities and are never
 /// silently translated into ordinary registry tools.
@@ -757,16 +777,15 @@ impl BridgeHost for RegistryBridgeHost {
 		if let Some(object) = args.as_object_mut() {
 			object.remove("i");
 		}
-		let raw = serde_json::to_string(&args).map_err(|error| {
-			BridgeHostError::message(format!("bridge arguments are not JSON: {error}"))
-		})?;
+		let raw = serde_json::to_string(&args)
+			.map_err(|error| BridgeHostError::because("bridge arguments are not JSON", error))?;
 		let (feed, params) = IncomingParams::channel();
 		feed
 			.arg_text(Str::from(raw.as_str()))
-			.map_err(|error| BridgeHostError::message(error.to_string()))?;
+			.map_err(BridgeHostError::caused)?;
 		feed
 			.args_committed(Str::from(raw))
-			.map_err(|error| BridgeHostError::message(error.to_string()))?;
+			.map_err(BridgeHostError::caused)?;
 		let mut events = self.registry.invoke(name, params).map_err(registry_error)?;
 		let mut diags = Vec::<Diag>::new();
 		while let Some(event) = events.next().await {
@@ -777,15 +796,15 @@ impl BridgeHost for RegistryBridgeHost {
 						continue;
 					}
 					let update: Value = serde_json::from_slice(&update).map_err(|error| {
-						BridgeHostError::message(format!(
-							"tool {name} returned invalid update JSON: {error}"
-						))
+						BridgeHostError::because(
+							format!("tool {name} returned invalid update JSON"),
+							error,
+						)
 					})?;
 					progress.progress(json!({ "op": "tool", "name": name, "update": update }))?;
 				},
 				ErasedEv::Done(ErasedOutcome::Detached(job)) => {
-					let value = serde_json::to_value(job)
-						.map_err(|error| BridgeHostError::message(error.to_string()))?;
+					let value = serde_json::to_value(job).map_err(BridgeHostError::caused)?;
 					return attach_diags(value, diags);
 				},
 				ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) => {
@@ -827,8 +846,7 @@ fn attach_diags(mut value: Value, diags: Vec<Diag>) -> Result<Value, BridgeHostE
 	if diags.is_empty() {
 		return Ok(value);
 	}
-	let diags =
-		serde_json::to_value(diags).map_err(|error| BridgeHostError::message(error.to_string()))?;
+	let diags = serde_json::to_value(diags).map_err(BridgeHostError::caused)?;
 	match &mut value {
 		Value::Object(object) => {
 			object.insert("diags".to_owned(), diags);
@@ -1382,14 +1400,13 @@ impl NamespaceInstaller for BridgeNamespaceInstaller {
 		let registration = self
 			.dispatcher
 			.register(self.session.clone(), run, capabilities, host, watchdog.clone())
-			.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+			.map_err(py_error)?;
 		let abort = Arc::new(CellAbort::default());
 		let client = registration.client().with_abort(Arc::clone(&abort));
 		install_python_bridge(py, globals, client.clone(), self.runtime.clone())?;
 		install_python_prelude(py, globals)?;
 		if !self.stubs.is_empty() {
-			let encoded = serde_json::to_string(&self.stubs)
-				.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+			let encoded = serde_json::to_string(&self.stubs).map_err(py_error)?;
 			let specs = PyModule::import(py, "json")?.call_method1("loads", (encoded,))?;
 			let installer = globals
 				.get_item("__omp_install_prelude_helpers__")?
@@ -1477,6 +1494,18 @@ fn registry_error(error: impl Display) -> BridgeHostError {
 	BridgeHostError::message(error.to_string())
 }
 
+/// Converts a failure into a Python runtime error, rendering the cause once
+/// at this model-facing fault boundary.
+fn py_error(cause: impl Display) -> PyErr {
+	PyRuntimeError::new_err(cause.to_string())
+}
+
+/// Converts a failed operation into a Python runtime error, rendering the
+/// cause once at this model-facing fault boundary.
+fn py_error_in(operation: impl Display, cause: impl Display) -> PyErr {
+	PyRuntimeError::new_err(format!("{operation}: {cause}"))
+}
+
 fn projected_parts(parts: Vec<Part>) -> Result<Value, BridgeHostError> {
 	let mut text = String::new();
 	let mut json_parts: Vec<Value> = Vec::new();
@@ -1485,9 +1514,10 @@ fn projected_parts(parts: Vec<Part>) -> Result<Value, BridgeHostError> {
 		match part {
 			Part::Text { text: value } => text.push_str(value.as_str()),
 			Part::Json { json } => {
-				json_parts.push(serde_json::from_slice(&json).map_err(|error| {
-					BridgeHostError::message(format!("tool returned invalid JSON: {error}"))
-				})?);
+				json_parts
+					.push(serde_json::from_slice(&json).map_err(|error| {
+						BridgeHostError::because("tool returned invalid JSON", error)
+					})?);
 			},
 			Part::Blob { blob, alt } => blobs.push(json!({ "blob": blob, "alt": alt })),
 		}
@@ -1505,24 +1535,22 @@ struct PythonProgressSink {
 
 impl BridgeProgressSink for PythonProgressSink {
 	fn progress(&self, event: Value) -> Result<(), BridgeHostError> {
-		let encoded = serde_json::to_string(&event)
-			.map_err(|error| BridgeHostError::message(error.to_string()))?;
+		let encoded = serde_json::to_string(&event).map_err(BridgeHostError::caused)?;
 		Python::attach(|py| {
 			let globals = self.globals.bind(py);
 			let consumer = globals
 				.get_item("__omp_consume_bridge_progress__")
-				.map_err(|error| BridgeHostError::message(error.to_string()))?
+				.map_err(BridgeHostError::caused)?
 				.ok_or_else(|| {
 					BridgeHostError::message("Python bridge progress consumer is missing")
 				})?;
-			let json_module = PyModule::import(py, "json")
-				.map_err(|error| BridgeHostError::message(error.to_string()))?;
+			let json_module = PyModule::import(py, "json").map_err(BridgeHostError::caused)?;
 			let event = json_module
 				.call_method1("loads", (encoded,))
-				.map_err(|error| BridgeHostError::message(error.to_string()))?;
+				.map_err(BridgeHostError::caused)?;
 			consumer
 				.call1((self.name.as_str(), event))
-				.map_err(|error| BridgeHostError::message(error.to_string()))?;
+				.map_err(BridgeHostError::caused)?;
 			Ok(())
 		})
 	}
@@ -1545,9 +1573,8 @@ impl PythonBridgeCallable {
 	) -> PyResult<Py<PyAny>> {
 		let json_module = PyModule::import(py, "json")?;
 		let encoded: String = json_module.call_method1("dumps", (args,))?.extract()?;
-		let args = serde_json::from_str(&encoded).map_err(|error| {
-			PyRuntimeError::new_err(format!("bridge arguments are not JSON: {error}"))
-		})?;
+		let args = serde_json::from_str(&encoded)
+			.map_err(|error| py_error_in("bridge arguments are not JSON", error))?;
 		let progress =
 			PythonProgressSink { globals: self.globals.clone_ref(py), name: Str::new(name) };
 		let value = py
@@ -1556,9 +1583,9 @@ impl PythonBridgeCallable {
 					.runtime
 					.block_on(self.client.call_with_progress(name, args, &progress))
 			})
-			.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+			.map_err(py_error)?;
 		let encoded = serde_json::to_string(&value)
-			.map_err(|error| PyRuntimeError::new_err(format!("bridge result is not JSON: {error}")))?;
+			.map_err(|error| py_error_in("bridge result is not JSON", error))?;
 		Ok(json_module.call_method1("loads", (encoded,))?.unbind())
 	}
 }

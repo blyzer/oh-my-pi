@@ -992,9 +992,10 @@ impl ControlAuthority for ServiceControlAuthority {
 		Self::validate_method_input(&schema, args_values, kwargs_values)?;
 		let payload =
 			serde_json::to_vec(&json!({"args": args, "kwargs": kwargs})).map_err(|error| {
-				ControlProtocolError::new(
+				ControlProtocolError::caused_by(
 					"InvalidServiceArguments",
-					sf!("service arguments are not encodable: {error}"),
+					"service arguments are not encodable",
+					error,
 				)
 			})?;
 		let meta = ServiceRequestMeta {
@@ -1027,9 +1028,10 @@ impl ControlAuthority for ServiceControlAuthority {
 			},
 		})?;
 		let result = serde_json::from_slice(encoded.as_ref()).map_err(|error| {
-			ControlProtocolError::new(
+			ControlProtocolError::caused_by(
 				"ServiceResultCodecError",
-				sf!("provider returned malformed JSON: {error}"),
+				"provider returned malformed JSON",
+				error,
 			)
 		})?;
 		Self::validate_method_result(&schema, result)

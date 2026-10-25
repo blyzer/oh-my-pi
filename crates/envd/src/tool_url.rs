@@ -14,7 +14,7 @@ use std::{fmt::Display, path::PathBuf, sync::Arc};
 
 use omp_agent::{SessionAuthority, SessionEndpoint};
 use omp_cache::github_cache::GithubCache;
-use omp_core::{CowBytes, Str};
+use omp_core::{CowBytes, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 use omp_journal::blob::{BlobRef, BlobStore};
 use omp_tool::FetchEffects;
@@ -678,9 +678,8 @@ pub(super) fn production_url_resolvers(
 	Arc::new(builder.build())
 }
 fn project_json(bytes: Vec<u8>, query: Option<&str>, path: Option<&str>) -> Result<Vec<u8>, Fault> {
-	let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|source| {
-		Fault::Invalid { message: Str::new(format!("Agent output is not valid JSON: {source}")) }
-	})?;
+	let value: serde_json::Value = serde_json::from_slice(&bytes)
+		.map_err(|source| invalid_fault_from("Agent output is not valid JSON", source))?;
 	let query = if let Some(query) = query {
 		let mut selected = None;
 		for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -888,16 +887,34 @@ pub(super) fn select_bytes(
 		return lines
 			.slice(resource, &bytes, ranges[0])
 			.map(CowBytes::into_owned)
-			.map_err(|error| Fault::Invalid { message: Str::from(error.to_string()) });
+			.map_err(invalid_fault);
 	}
 	let mut output = Vec::new();
 	for range in ranges {
 		let piece = lines
 			.slice(resource, &bytes, *range)
-			.map_err(|error| Fault::Invalid { message: Str::from(error.to_string()) })?;
+			.map_err(invalid_fault)?;
 		output.extend_from_slice(&piece);
 	}
 	Ok(CowBytes::from(output))
+}
+
+/// Creates an invalid-resource fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn invalid_fault(cause: impl std::fmt::Display) -> Fault {
+	Fault::Invalid { message: sf!("{cause}") }
+}
+
+/// Creates an invalid-resource fault with leading context, rendering the
+/// cause once at this model-facing fault boundary.
+fn invalid_fault_from(context: &'static str, cause: impl std::fmt::Display) -> Fault {
+	Fault::Invalid { message: sf!("{context}: {cause}") }
+}
+
+/// Creates a source fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn source_fault(cause: impl std::fmt::Display) -> Fault {
+	Fault::Source { message: sf!("{cause}") }
 }
 
 #[cfg(test)]

@@ -967,8 +967,10 @@ impl RpcError {
 		Self { code: -32601, message: sf!("method not found: {method}") }
 	}
 
-	fn invalid_params(message: impl AsRef<str>) -> Self {
-		Self { code: -32602, message: Str::new(message.as_ref()) }
+	/// Builds an invalid-params rejection, rendering the cause once at this
+	/// wire fault boundary.
+	fn invalid_params(cause: impl std::fmt::Display) -> Self {
+		Self { code: -32602, message: sf!("{cause}") }
 	}
 }
 
@@ -1529,7 +1531,7 @@ async fn dispatch_response(
 			.ok_or_else(|| RpcError::invalid_params("binding stopped before notification dispatch"))?;
 		registry
 			.publish_inbound_event(handle, method, message.params.clone())
-			.map_err(|error| RpcError::invalid_params(error.to_string()))?;
+			.map_err(RpcError::invalid_params)?;
 		return Ok(Bytes::from_static(b"null"));
 	}
 	match method {
@@ -1539,7 +1541,7 @@ async fn dispatch_response(
 			registry
 				.register_capabilities(handle, message.params.clone(), cancellation.child_token())
 				.await
-				.map_err(|error| RpcError::invalid_params(error.to_string()))?;
+				.map_err(RpcError::invalid_params)?;
 			Ok(Bytes::from_static(b"null"))
 		},
 		"client/unregisterCapability" => {
@@ -1548,7 +1550,7 @@ async fn dispatch_response(
 			registry
 				.unregister_capabilities(handle, message.params.clone(), cancellation.child_token())
 				.await
-				.map_err(|error| RpcError::invalid_params(error.to_string()))?;
+				.map_err(RpcError::invalid_params)?;
 			Ok(Bytes::from_static(b"null"))
 		},
 		"workspace/configuration" => configuration_response(&message.params),
@@ -1557,7 +1559,7 @@ async fn dispatch_response(
 			"name": root_name,
 		}]))
 		.map(Bytes::from)
-		.map_err(|error| RpcError::invalid_params(error.to_string())),
+		.map_err(RpcError::invalid_params),
 		"window/workDoneProgress/create"
 		| "workspace/semanticTokens/refresh"
 		| "workspace/codeLens/refresh"
@@ -1586,8 +1588,7 @@ async fn await_binding(
 }
 
 fn configuration_response(params: &[u8]) -> Result<Bytes, RpcError> {
-	let value: Value = serde_json::from_slice(params)
-		.map_err(|error| RpcError::invalid_params(error.to_string()))?;
+	let value: Value = serde_json::from_slice(params).map_err(RpcError::invalid_params)?;
 	let count = value
 		.get("items")
 		.and_then(Value::as_array)
@@ -1595,7 +1596,7 @@ fn configuration_response(params: &[u8]) -> Result<Bytes, RpcError> {
 		.len();
 	serde_json::to_vec(&vec![Value::Null; count])
 		.map(Bytes::from)
-		.map_err(|error| RpcError::invalid_params(error.to_string()))
+		.map_err(RpcError::invalid_params)
 }
 
 #[cfg(test)]

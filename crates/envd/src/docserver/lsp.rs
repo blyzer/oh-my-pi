@@ -465,9 +465,7 @@ impl SelectorPattern {
 					.ok_or_else(|| LspError::InvalidRegistration {
 						reason: sf!("relative pattern baseUri must contain a URI"),
 					})?;
-				let base = Url::parse(base).map_err(|error| LspError::InvalidRegistration {
-					reason: Str::new(error.to_string()),
-				})?;
+				let base = Url::parse(base).map_err(invalid_registration)?;
 				(pattern, Some(base))
 			},
 			_ => {
@@ -479,7 +477,7 @@ impl SelectorPattern {
 		let matcher = PatternBuilder::new(pattern)
 			.literal_separator(false)
 			.build()
-			.map_err(|error| LspError::InvalidRegistration { reason: Str::new(error.to_string()) })?;
+			.map_err(invalid_registration)?;
 		Ok(Self { matcher, base_uri })
 	}
 
@@ -1580,6 +1578,12 @@ fn ensure_json(bytes: &[u8]) -> Result<(), LspError> {
 
 fn invalid_json(error: serde_json::Error) -> LspError {
 	LspError::InvalidJson { reason: Str::new(error.to_string()) }
+}
+
+/// Builds a dynamic-registration failure, rendering the cause once at this
+/// fault boundary.
+fn invalid_registration(cause: impl std::fmt::Display) -> LspError {
+	LspError::InvalidRegistration { reason: sf!("{cause}") }
 }
 
 fn is_lifecycle_method(method: &str) -> bool {

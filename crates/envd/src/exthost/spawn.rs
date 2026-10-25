@@ -355,9 +355,9 @@ impl RunningHost {
 		let result = match (&mut self.pump).await {
 			Ok(result) => result.map_err(Into::into),
 			Err(error) => Err(
-				ControlRuntimeError::Protocol(ControlProtocolError::new(
+				ControlRuntimeError::Protocol(ControlProtocolError::caused(
 					"control_task_failed",
-					error.to_string(),
+					error,
 				))
 				.into(),
 			),
@@ -412,6 +412,14 @@ pub enum SpawnError {
 	/// The child process could not be spawned.
 	#[error("extension host spawn failed: {0}")]
 	Spawn(io::Error),
+}
+
+impl SpawnError {
+	/// Constructs a Python runtime failure, rendering the cause once at this
+	/// fault boundary.
+	fn python(cause: impl std::fmt::Display) -> Self {
+		Self::Python(cause.to_string())
+	}
 }
 
 /// Session-local lazy child admission bound.
@@ -595,7 +603,7 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 					.map(Str::as_str)
 					.collect::<Vec<_>>(),
 			)
-			.map_err(|error| SpawnError::Python(error.to_string()))?,
+			.map_err(SpawnError::python)?,
 		)
 		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
@@ -754,7 +762,7 @@ pub fn run_ext_host_entry() -> Result<(), SpawnError> {
 	}
 	let engine = omp_py::Engine::builder()
 		.init()
-		.map_err(|error| SpawnError::Python(error.to_string()))?;
+		.map_err(SpawnError::python)?;
 	install_package_snapshot(&engine)?;
 	engine
 		.attach(|py| -> PyResult<()> {
@@ -763,7 +771,7 @@ pub fn run_ext_host_entry() -> Result<(), SpawnError> {
 			host.call_method0("run_forever")?;
 			Ok(())
 		})
-		.map_err(|error| SpawnError::Python(error.to_string()))
+		.map_err(SpawnError::python)
 }
 
 /// Installs the private site tree and parent-verified snapshot before any
@@ -784,7 +792,7 @@ fn install_package_snapshot(engine: &omp_py::Engine) -> Result<(), SpawnError> {
 			packages.call_method1("_install_snapshot_json", (snapshot,))?;
 			Ok(())
 		})
-		.map_err(|error| SpawnError::Python(error.to_string()))
+		.map_err(SpawnError::python)
 }
 #[cfg(test)]
 mod tests {

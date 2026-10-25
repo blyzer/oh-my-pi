@@ -17,7 +17,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{Hash32, Str};
+use omp_core::{Hash32, Str, sf};
 use omp_ext::{claude_plugin::ClaudePlugin, workspace_trust::WorkspaceTrust};
 use parking_lot::Mutex;
 use tokio::{sync::watch, time::timeout};
@@ -424,11 +424,16 @@ impl NativeLspSupervisor {
 				if current.as_ref() != Some(&key) {
 					return;
 				}
-				self.set_state(name, LspServerState::Failed, Some(Str::from(error.to_string())));
+				self.set_state(name, LspServerState::Failed, Some(Self::render_startup_error(&error)));
 				self.publish(name, LspStartupStage::Failed);
 				tracing::warn!(server = %name, %error, "LSP server failed to start");
 			},
 		}
+	}
+
+	/// Renders a server startup failure once at this status-detail boundary.
+	fn render_startup_error(cause: impl std::fmt::Display) -> Str {
+		sf!("{cause}")
 	}
 
 	fn set_state(&self, name: &Str, state: LspServerState, detail: Option<Str>) {

@@ -259,7 +259,7 @@ impl ReadBlobs for SessionReadBlobs {
 		let result = self
 			.blobs
 			.put(&bytes)
-			.map_err(|error| ReadFault::Blob { message: Str::from(error.to_string()) })
+			.map_err(blob_fault)
 			.map(|id| BlobRef {
 				hash: Str::from(hex::encode_n(&id.hash).as_str()),
 				media_type,
@@ -274,10 +274,7 @@ impl ReadBlobs for SessionReadBlobs {
 		media_type: Str,
 	) -> impl Future<Output = Result<StoredArtifact, ReadFault>> + Send + '_ {
 		let result = (|| {
-			let id = self
-				.blobs
-				.put(&bytes)
-				.map_err(|error| ReadFault::Blob { message: Str::from(error.to_string()) })?;
+			let id = self.blobs.put(&bytes).map_err(blob_fault)?;
 			let digest = hex::encode_n(&id.hash);
 			Ok(StoredArtifact {
 				blob: BlobRef {
@@ -355,7 +352,7 @@ impl EditDocuments for DocumentHost {
 			};
 		let lease = Self::open(self, resolved.uri, None, &CancellationToken::new())
 			.await
-			.map_err(|error| edit_invalid(error.to_string()))?;
+			.map_err(edit_invalid)?;
 		if pb::DocumentKind::try_from(lease.head().kind) != Ok(pb::DocumentKind::Text) {
 			return Err(edit_invalid("hashline edits require a text document"));
 		}
@@ -365,9 +362,7 @@ impl EditDocuments for DocumentHost {
 			return Err(edit_invalid(format!("document does not exist: {}", request.path)));
 		}
 		let canonical_path = document_path(lease.head()).map_err(edit_invalid)?;
-		let raw_base_bytes = read_whole(self, &lease)
-			.await
-			.map_err(|error| edit_invalid(error.to_string()))?;
+		let raw_base_bytes = read_whole(self, &lease).await.map_err(edit_invalid)?;
 		if request.guard_generated
 			&& auto_generated_file(Path::new(canonical_path.as_str()), &raw_base_bytes)
 		{
@@ -385,8 +380,7 @@ impl EditDocuments for DocumentHost {
 			.map_err(|conflict| editor_conflict_fault(&conflict))?;
 		let notebook = canonical_path.ends_with(".ipynb");
 		let base_bytes = if notebook {
-			let rendered = notebook::render(&raw_base_bytes, &request.path)
-				.map_err(|error| edit_invalid(error.to_string()))?;
+			let rendered = notebook::render(&raw_base_bytes, &request.path).map_err(edit_invalid)?;
 			Bytes::from(rendered.text)
 		} else {
 			editor.bytes.unwrap_or_else(|| raw_base_bytes.clone())
@@ -542,7 +536,7 @@ impl EditDocuments for DocumentHost {
 		let response = self
 			.commit_transaction(transaction_id.clone(), operations, &CancellationToken::new())
 			.await
-			.map_err(|error| edit_unknown(error.to_string()))?;
+			.map_err(edit_unknown)?;
 		let committed = match response.outcome {
 			Some(commit_transaction_response::Outcome::Committed(committed))
 				if committed.transaction_id == transaction_id =>
@@ -774,17 +768,7 @@ async fn rollback_partial_commit(
 	let outcome = host
 		.commit_transaction(rollback_id.clone(), compensation, &CancellationToken::new())
 		.await
-		.map_err(|error| {
-			sf!(
-				"rollback failed for paths {}: {}",
-				affected_paths
-					.iter()
-					.cloned()
-					.collect::<Vec<_>>()
-					.join(", "),
-				error
-			)
-		})?;
+		.map_err(|error| rollback_failed(&affected_paths, error))?;
 	match outcome.outcome {
 		Some(commit_transaction_response::Outcome::Committed(committed))
 			if committed.transaction_id == rollback_id =>
@@ -881,13 +865,10 @@ async fn read_committed_view(
 		.as_str();
 	let lease = DocumentHost::open(host, uri.into(), None, &CancellationToken::new())
 		.await
-		.map_err(|error| edit_unknown(error.to_string()))?;
-	let raw = read_whole(host, &lease)
-		.await
-		.map_err(|error| edit_unknown(error.to_string()))?;
+		.map_err(edit_unknown)?;
+	let raw = read_whole(host, &lease).await.map_err(edit_unknown)?;
 	if notebook {
-		let rendered =
-			notebook::render(&raw, display_path).map_err(|error| edit_unknown(error.to_string()))?;
+		let rendered = notebook::render(&raw, display_path).map_err(edit_unknown)?;
 		Ok(Bytes::from(rendered.text))
 	} else {
 		Ok(raw)
@@ -904,7 +885,7 @@ fn resolve_document_for_prepare(
 	allow_missing: bool,
 ) -> Result<ResolvedDocument, String> {
 	let root_url = Url::parse(host.hello().root_uri.as_str())
-		.map_err(|error| format!("document workspace root is not a valid URI: {error}"))?;
+		.map_err(|error| fault_message("document workspace root is not a valid URI", error))?;
 	if root_url.scheme() != "file" {
 		return Err("document workspace root is not a file URI".into());
 	}
@@ -981,7 +962,7 @@ fn recover_workspace_suffix(
 	}
 	let suffix = normalize_relative(Path::new(authored_path))?;
 	let root_url = Url::parse(host.hello().root_uri.as_str())
-		.map_err(|error| format!("document workspace root is not a valid URI: {error}"))?;
+		.map_err(|error| fault_message("document workspace root is not a valid URI", error))?;
 	let root = root_url
 		.to_file_path()
 		.map_err(|()| "document workspace root is not a local file URI".to_owned())?;
@@ -1047,7 +1028,7 @@ fn resolve_move_destination(
 	input: &str,
 ) -> Result<ResolvedDestination, String> {
 	let root_url = Url::parse(host.hello().root_uri.as_str())
-		.map_err(|error| format!("document workspace root is not a valid URI: {error}"))?;
+		.map_err(|error| fault_message("document workspace root is not a valid URI", error))?;
 	let root_path = root_url
 		.to_file_path()
 		.map_err(|()| "document workspace root is not a local file URI".to_owned())?;
@@ -1069,12 +1050,12 @@ fn resolve_move_destination(
 		return Err("document path escapes or names the workspace root".into());
 	}
 	let canonical_root = std_fs::canonicalize(&root_path)
-		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+		.map_err(|error| fault_message("cannot canonicalize document workspace root", error))?;
 	let parent = candidate
 		.parent()
 		.ok_or_else(|| "move destination has no parent directory".to_owned())?;
 	let canonical_parent = std_fs::canonicalize(parent)
-		.map_err(|error| format!("cannot canonicalize move destination parent: {error}"))?;
+		.map_err(|error| fault_message("cannot canonicalize move destination parent", error))?;
 	if !canonical_parent.starts_with(&canonical_root) {
 		return Err("move destination escapes the canonical workspace root".into());
 	}
@@ -1095,7 +1076,7 @@ fn ensure_canonical_containment(
 	allow_missing: bool,
 ) -> Result<(), String> {
 	let canonical_root = std_fs::canonicalize(root)
-		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+		.map_err(|error| fault_message("cannot canonicalize document workspace root", error))?;
 	let canonical_candidate = match std_fs::canonicalize(candidate) {
 		Ok(candidate) => candidate,
 		Err(error) if allow_missing && error.kind() == io::ErrorKind::NotFound => {
@@ -1103,13 +1084,13 @@ fn ensure_canonical_containment(
 				.parent()
 				.ok_or_else(|| "document create target has no parent directory".to_owned())?;
 			let parent = std_fs::canonicalize(parent)
-				.map_err(|error| format!("cannot canonicalize document create parent: {error}"))?;
+				.map_err(|error| fault_message("cannot canonicalize document create parent", error))?;
 			if !parent.starts_with(&canonical_root) {
 				return Err("document create target escapes the canonical workspace root".into());
 			}
 			return Ok(());
 		},
-		Err(error) => return Err(format!("cannot canonicalize document path: {error}")),
+		Err(error) => return Err(fault_message("cannot canonicalize document path", error)),
 	};
 	if canonical_candidate == canonical_root || !canonical_candidate.starts_with(&canonical_root) {
 		return Err("document path escapes the canonical workspace root".into());
@@ -1241,7 +1222,7 @@ fn document_path(head: &pb::DocumentHead) -> Result<Str, String> {
 		.uri
 		.as_str();
 	let uri = Url::parse(uri)
-		.map_err(|error| format!("document head returned an invalid canonical URI: {error}"))?;
+		.map_err(|error| fault_message("document head returned an invalid canonical URI", error))?;
 	if uri.scheme() != "file" {
 		return Err("document head canonical URI is not a file URI".into());
 	}
@@ -1337,7 +1318,7 @@ fn serialize_notebook_edit(
 	})?;
 	notebook::round_trip(original, editable)
 		.map(Bytes::from)
-		.map_err(|error| format!("Invalid notebook edit for {display_path}: {error}"))
+		.map_err(|error| fault_message(&format!("Invalid notebook edit for {display_path}"), error))
 }
 
 /// Decodes exact document bytes and returns BOM-stripped, LF-normalized text.
@@ -1559,9 +1540,11 @@ fn editor_conflict_fault(conflict: &EditorConflict) -> EditFault {
 	}
 }
 
-fn edit_invalid(message: impl Into<String>) -> EditFault {
+/// Creates an invalid-patch edit fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn edit_invalid(cause: impl std::fmt::Display) -> EditFault {
 	EditFault {
-		reason:    RejectionReason::InvalidPatch { message: Str::from(message.into()) },
+		reason:    RejectionReason::InvalidPatch { message: sf!("{cause}") },
 		conflicts: Vec::new(),
 	}
 }
@@ -1573,12 +1556,46 @@ fn edit_stale(message: impl Into<Str>) -> EditFault {
 	}
 }
 
-fn edit_invalid_commit(message: impl Into<String>) -> EditCommitError {
-	EditCommitError::Rejected(edit_invalid(message))
+/// Creates a rejected commit error, rendering the cause once at this
+/// model-facing fault boundary.
+fn edit_invalid_commit(cause: impl std::fmt::Display) -> EditCommitError {
+	EditCommitError::Rejected(edit_invalid(cause))
 }
 
-fn edit_unknown(reason: impl Into<Str>) -> EditCommitError {
-	EditCommitError::EffectsUnknown { reason: reason.into() }
+/// Creates an effects-unknown commit error, rendering the cause once at this
+/// model-facing fault boundary.
+fn edit_unknown(cause: impl std::fmt::Display) -> EditCommitError {
+	EditCommitError::EffectsUnknown { reason: sf!("{cause}") }
+}
+
+/// Creates a blob-store fault, rendering the cause once at this model-facing
+/// fault boundary.
+fn blob_fault(cause: impl std::fmt::Display) -> ReadFault {
+	ReadFault::Blob { message: sf!("{cause}") }
+}
+
+/// Renders a rollback failure once at this model-facing fault boundary.
+fn rollback_failed(affected_paths: &BTreeSet<String>, cause: impl std::fmt::Display) -> Str {
+	sf!(
+		"rollback failed for paths {}: {cause}",
+		affected_paths
+			.iter()
+			.cloned()
+			.collect::<Vec<_>>()
+			.join(", ")
+	)
+}
+
+/// Renders a `String`-typed document fault once at this model-facing fault
+/// boundary, prefixed with `context`.
+fn fault_message(context: &str, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
+}
+
+/// Renders a `String`-typed document fault once at this model-facing fault
+/// boundary.
+fn fault_text(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
 }
 
 #[derive(Debug)]
@@ -1641,7 +1658,7 @@ where
 	let mut cancel_on_drop = CancelSpecialWriteOnDrop(Some(control));
 	let result = task::spawn_blocking(move || worker(&task_control)).await;
 	cancel_on_drop.disarm();
-	result.map_err(|error| special_fault(format!("{task_name} write task failed: {error}")))?
+	result.map_err(|error| special_task_fault(task_name, error))?
 }
 
 impl DocumentHost {
@@ -1696,7 +1713,7 @@ impl WriteDocuments for DocumentHost {
 					.ssh
 					.write(&alias, &path, request.content.as_bytes())
 					.await
-					.map_err(|error| write_rejected(Str::new(error.to_string())))?;
+					.map_err(write_rejected)?;
 				NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed)
 			},
 			MutationCapability::Vault => {
@@ -1793,7 +1810,7 @@ impl WriteDocuments for DocumentHost {
 			MutationCapability::Host => {
 				write(&request.uri, request.content.to_string())
 					.await
-					.map_err(|error| write_rejected(Str::new(error.to_string())))?;
+					.map_err(write_rejected)?;
 				NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed)
 			},
 		};
@@ -1837,7 +1854,7 @@ impl WriteDocuments for DocumentHost {
 			{
 				false
 			},
-			Err(error) => return Err(write_rejected(error.to_string())),
+			Err(error) => return Err(write_rejected(error)),
 		};
 		if existed {
 			let prefix = read_file_prefix(&resolved.path, 16 * 1024).map_err(write_rejected)?;
@@ -1854,7 +1871,7 @@ impl WriteDocuments for DocumentHost {
 			.ok_or_else(|| write_rejected("document path has no parent directory"))?;
 		tokio::fs::create_dir_all(parent)
 			.await
-			.map_err(|error| write_rejected(error.to_string()))?;
+			.map_err(write_rejected)?;
 
 		let content = Bytes::copy_from_slice(request.content.as_bytes());
 		let absolute_path = Str::from(resolved.path.to_string_lossy().into_owned());
@@ -1901,9 +1918,7 @@ impl WriteDocuments for DocumentHost {
 				&CancellationToken::new(),
 			)
 			.await
-			.map_err(|error| WriteCommitError::EffectsUnknown {
-				reason: Str::from(error.to_string()),
-			})?;
+			.map_err(write_unknown)?;
 		let committed = match response.outcome {
 			Some(commit_transaction_response::Outcome::Committed(committed))
 				if committed.transaction_id == transaction_id =>
@@ -2050,7 +2065,7 @@ impl WriteDocuments for DocumentHost {
 
 fn resolve_plain_write(host: &DocumentHost, input: &str) -> Result<ResolvedPlainWrite, String> {
 	let root_uri = Url::parse(host.hello().root_uri.as_str())
-		.map_err(|error| format!("document workspace root is not a valid URI: {error}"))?;
+		.map_err(|error| fault_message("document workspace root is not a valid URI", error))?;
 	if root_uri.scheme() != "file" || root_uri.query().is_some() || root_uri.fragment().is_some() {
 		return Err("document workspace root is not a query-free file URI".into());
 	}
@@ -2110,7 +2125,7 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 					.ok_or_else(|| "document path has no existing ancestor".to_owned())?;
 			},
 			Err(error) => {
-				return Err(format!("cannot canonicalize document path ancestor: {error}"));
+				return Err(fault_message("cannot canonicalize document path ancestor", error));
 			},
 		}
 	};
@@ -2127,7 +2142,7 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
 	std_fs::canonicalize(root)
-		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))
+		.map_err(|error| fault_message("cannot canonicalize document workspace root", error))
 }
 
 fn join_nonempty_suffix(mut base: PathBuf, suffix: &Path) -> PathBuf {
@@ -2153,12 +2168,12 @@ fn display_write_path(path: &Path, workspace_root: &Path) -> Str {
 fn read_file_prefix(path: &Path, limit: u64) -> Result<Bytes, String> {
 	use io::Read as _;
 
-	let file = std_fs::File::open(path).map_err(|error| error.to_string())?;
+	let file = std_fs::File::open(path).map_err(fault_text)?;
 	let mut prefix = Vec::with_capacity(usize::try_from(limit).unwrap_or(16 * 1024));
 	file
 		.take(limit)
 		.read_to_end(&mut prefix)
-		.map_err(|error| error.to_string())?;
+		.map_err(fault_text)?;
 	Ok(Bytes::from(prefix))
 }
 
@@ -2192,25 +2207,21 @@ fn atomic_write_plain(path: &Path, content: &Bytes) -> Result<(), String> {
 	let existing_permissions = match std_fs::metadata(path) {
 		Ok(metadata) => Some(metadata.permissions()),
 		Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-		Err(error) => return Err(error.to_string()),
+		Err(error) => return Err(fault_text(error)),
 	};
 	let temporary = unique_temp_path(path);
 	let mut output = OpenOptions::new()
 		.write(true)
 		.create_new(true)
 		.open(&temporary)
-		.map_err(|error| error.to_string())?;
+		.map_err(fault_text)?;
 	let prepared = (|| -> Result<(), String> {
-		output
-			.write_all(content)
-			.map_err(|error| error.to_string())?;
+		output.write_all(content).map_err(fault_text)?;
 		if let Some(permissions) = existing_permissions {
-			output
-				.set_permissions(permissions)
-				.map_err(|error| error.to_string())?;
+			output.set_permissions(permissions).map_err(fault_text)?;
 		}
-		output.flush().map_err(|error| error.to_string())?;
-		output.sync_all().map_err(|error| error.to_string())
+		output.flush().map_err(fault_text)?;
+		output.sync_all().map_err(fault_text)
 	})();
 	if let Err(error) = prepared {
 		let _ = std_fs::remove_file(&temporary);
@@ -2218,7 +2229,7 @@ fn atomic_write_plain(path: &Path, content: &Bytes) -> Result<(), String> {
 	}
 	if let Err(error) = replace_file_atomically(&temporary, path) {
 		let _ = std_fs::remove_file(&temporary);
-		return Err(error.to_string());
+		return Err(fault_text(error));
 	}
 	if let Some(parent) = path.parent()
 		&& let Ok(directory) = std_fs::File::open(parent)
@@ -2299,13 +2310,11 @@ async fn open_conflict_document(
 	let resolved = resolve_document(host, display_path).map_err(write_rejected)?;
 	let lease = DocumentHost::open(host, resolved.uri, None, &CancellationToken::new())
 		.await
-		.map_err(|error| write_rejected(error.to_string()))?;
+		.map_err(write_rejected)?;
 	if pb::DocumentKind::try_from(lease.head().kind) != Ok(pb::DocumentKind::Text) {
 		return Err(write_rejected("conflict splices require a UTF-8 text document"));
 	}
-	let current = read_whole(host, &lease)
-		.await
-		.map_err(|error| write_rejected(error.to_string()))?;
+	let current = read_whole(host, &lease).await.map_err(write_rejected)?;
 	let current = str::from_utf8(&current)
 		.map_err(|_| write_rejected("conflict splices require a UTF-8 text document"))?
 		.to_owned();
@@ -2339,7 +2348,7 @@ async fn commit_conflict_content(
 			&CancellationToken::new(),
 		)
 		.await
-		.map_err(|error| WriteCommitError::EffectsUnknown { reason: Str::from(error.to_string()) })?;
+		.map_err(write_unknown)?;
 	let committed = match response.outcome {
 		Some(commit_transaction_response::Outcome::Committed(committed))
 			if committed.transaction_id == transaction_id =>
@@ -2407,8 +2416,16 @@ fn scope_rejected(denied: write_scope::WriteScopeDenied) -> WriteCommitError {
 	WriteCommitError::Rejected(WriteFault::WriteScope(denied))
 }
 
-fn write_rejected(message: impl Into<Str>) -> WriteCommitError {
-	WriteCommitError::Rejected(WriteFault::Document { message: message.into() })
+/// Creates a rejected write error, rendering the cause once at this
+/// model-facing fault boundary.
+fn write_rejected(cause: impl std::fmt::Display) -> WriteCommitError {
+	WriteCommitError::Rejected(WriteFault::Document { message: sf!("{cause}") })
+}
+
+/// Creates an effects-unknown write error, rendering the cause once at this
+/// model-facing fault boundary.
+fn write_unknown(cause: impl std::fmt::Display) -> WriteCommitError {
+	WriteCommitError::EffectsUnknown { reason: sf!("{cause}") }
 }
 
 #[cfg(unix)]
@@ -3195,7 +3212,7 @@ fn write_archive_member_blocking(
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {
 				resolved.push((candidate, absolute, false));
 			},
-			Err(error) => return Err(special_fault(error.to_string())),
+			Err(error) => return Err(special_fault(error)),
 		}
 	}
 	let (target, authored_path, exists) = resolved
@@ -3226,84 +3243,69 @@ fn write_archive_member_blocking(
 		return Err(special_write_cancelled());
 	}
 	if let Some(parent) = final_path.parent() {
-		std_fs::create_dir_all(parent).map_err(|error| special_fault(error.to_string()))?;
+		std_fs::create_dir_all(parent).map_err(special_fault)?;
 	}
 	atomic_replace(&final_path, |output| match (format_for_path(&final_path), exists) {
 		(archive::ArchiveFormat::Zip, true) => {
-			let input =
-				std_fs::File::open(&final_path).map_err(|error| special_fault(error.to_string()))?;
+			let input = std_fs::File::open(&final_path).map_err(special_fault)?;
 			rewrite_zip_member(input, output, &target.member_path, &content)
 		},
 		(archive::ArchiveFormat::Zip, false) => {
 			create_zip_member(output, &target.member_path, &content)
 		},
 		(archive::ArchiveFormat::Tar, true) => {
-			let input =
-				std_fs::File::open(&final_path).map_err(|error| special_fault(error.to_string()))?;
+			let input = std_fs::File::open(&final_path).map_err(special_fault)?;
 			rewrite_tar_member(input, output, &target.member_path, &content)
 		},
 		(archive::ArchiveFormat::Tar, false) => {
 			create_tar_member(output, &target.member_path, &content)
 		},
 		(archive::ArchiveFormat::TarGz, true) => {
-			let input =
-				std_fs::File::open(&final_path).map_err(|error| special_fault(error.to_string()))?;
+			let input = std_fs::File::open(&final_path).map_err(special_fault)?;
 			let mut decoder = GzDecoder::new(input);
 			let limit = archive::MAX_TAR_ARCHIVE_BYTES;
 			let mut decoded = Vec::new();
 			let mut bounded = io::Read::take(&mut decoder, limit.saturating_add(1));
-			io::Read::read_to_end(&mut bounded, &mut decoded)
-				.map_err(|error| special_fault(error.to_string()))?;
+			io::Read::read_to_end(&mut bounded, &mut decoded).map_err(special_fault)?;
 			if decoded.len() as u64 > limit {
-				return Err(special_fault(
-					omp_ar::Error::ArchiveTooLarge { actual: decoded.len() as u64, limit }.to_string(),
-				));
+				return Err(special_fault(omp_ar::Error::ArchiveTooLarge {
+					actual: decoded.len() as u64,
+					limit,
+				}));
 			}
 			let mut encoder = GzEncoder::new(output, flate2::Compression::default());
 			rewrite_tar_member(io::Cursor::new(decoded), &mut encoder, &target.member_path, &content)?;
-			encoder
-				.finish()
-				.map_err(|error| special_fault(error.to_string()))?;
+			encoder.finish().map_err(special_fault)?;
 			Ok(())
 		},
 		(archive::ArchiveFormat::TarGz, false) => {
 			let mut encoder = GzEncoder::new(output, flate2::Compression::default());
 			create_tar_member(&mut encoder, &target.member_path, &content)?;
-			encoder
-				.finish()
-				.map_err(|error| special_fault(error.to_string()))?;
+			encoder.finish().map_err(special_fault)?;
 			Ok(())
 		},
 		(archive::ArchiveFormat::TarZst, true) => {
-			let input =
-				std_fs::File::open(&final_path).map_err(|error| special_fault(error.to_string()))?;
-			let mut decoder = zstd::stream::read::Decoder::new(input)
-				.map_err(|error| special_fault(error.to_string()))?;
+			let input = std_fs::File::open(&final_path).map_err(special_fault)?;
+			let mut decoder = zstd::stream::read::Decoder::new(input).map_err(special_fault)?;
 			let limit = archive::MAX_TAR_ARCHIVE_BYTES;
 			let mut decoded = Vec::new();
 			let mut bounded = io::Read::take(&mut decoder, limit.saturating_add(1));
-			io::Read::read_to_end(&mut bounded, &mut decoded)
-				.map_err(|error| special_fault(error.to_string()))?;
+			io::Read::read_to_end(&mut bounded, &mut decoded).map_err(special_fault)?;
 			if decoded.len() as u64 > limit {
-				return Err(special_fault(
-					omp_ar::Error::ArchiveTooLarge { actual: decoded.len() as u64, limit }.to_string(),
-				));
+				return Err(special_fault(omp_ar::Error::ArchiveTooLarge {
+					actual: decoded.len() as u64,
+					limit,
+				}));
 			}
-			let mut encoder = zstd::stream::write::Encoder::new(output, 0)
-				.map_err(|error| special_fault(error.to_string()))?;
+			let mut encoder = zstd::stream::write::Encoder::new(output, 0).map_err(special_fault)?;
 			rewrite_tar_member(io::Cursor::new(decoded), &mut encoder, &target.member_path, &content)?;
-			encoder
-				.finish()
-				.map_err(|error| special_fault(error.to_string()))?;
+			encoder.finish().map_err(special_fault)?;
 			Ok(())
 		},
 		(archive::ArchiveFormat::TarZst, false) => {
-			let mut encoder = zstd::stream::write::Encoder::new(output, 0)
-				.map_err(|error| special_fault(error.to_string()))?;
+			let mut encoder = zstd::stream::write::Encoder::new(output, 0).map_err(special_fault)?;
 			create_tar_member(&mut encoder, &target.member_path, &content)?;
-			encoder
-				.finish()
-				.map_err(|error| special_fault(error.to_string()))?;
+			encoder.finish().map_err(special_fault)?;
 			Ok(())
 		},
 		(other, _) => {
@@ -3354,9 +3356,8 @@ fn archive_member_exists(
 			<&'static str>::from(format)
 		)));
 	}
-	let file = std_fs::File::open(path).map_err(|error| special_fault(error.to_string()))?;
-	let archive = omp_ar::Archive::with_format(file, format)
-		.map_err(|error| special_fault(error.to_string()))?;
+	let file = std_fs::File::open(path).map_err(special_fault)?;
+	let archive = omp_ar::Archive::with_format(file, format).map_err(special_fault)?;
 	Ok(archive
 		.entry(member)
 		.is_some_and(|entry| !entry.is_directory()))
@@ -3400,7 +3401,7 @@ fn write_sqlite_row_blocking(
 			},
 			Ok(_) => {},
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-			Err(error) => return Err(special_fault(error.to_string())),
+			Err(error) => return Err(special_fault(error)),
 		}
 	}
 	if selected.is_none() && saw_existing_non_sqlite {
@@ -3417,11 +3418,11 @@ fn write_sqlite_row_blocking(
 		&absolute,
 		OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
 	)
-	.map_err(|error| special_fault(error.to_string()))?;
+	.map_err(special_fault)?;
 	let progress = control.clone();
 	connection
 		.progress_handler(1_000, Some(move || progress.is_cancelled()))
-		.map_err(|error| special_fault(error.to_string()))?;
+		.map_err(special_fault)?;
 	interrupt.install(&connection);
 	if control.is_cancelled() {
 		interrupt.interrupt();
@@ -3454,9 +3455,8 @@ fn resolve_special_write_path(
 			"archive member and SQLite row writes are not supported for local:// targets",
 		));
 	}
-	let root_url = Url::parse(host.hello().root_uri.as_str()).map_err(|error| {
-		special_fault(format!("document workspace root is not a valid URI: {error}"))
-	})?;
+	let root_url = Url::parse(host.hello().root_uri.as_str())
+		.map_err(|error| special_fault_from("document workspace root is not a valid URI", error))?;
 	let root = normalize_absolute(
 		&root_url
 			.to_file_path()
@@ -3481,7 +3481,7 @@ fn resolve_special_write_path(
 					.parent()
 					.ok_or_else(|| special_fault("write path has no existing ancestor"))?;
 			},
-			Err(error) => return Err(special_fault(error.to_string())),
+			Err(error) => return Err(special_fault(error)),
 		}
 	};
 	let suffix = candidate
@@ -3503,14 +3503,14 @@ fn atomic_replace(
 		.write(true)
 		.create_new(true)
 		.open(&tmp_path)
-		.map_err(|error| special_fault(error.to_string()))?;
+		.map_err(special_fault)?;
 	if let Err(error) = write(output) {
 		let _ = std_fs::remove_file(&tmp_path);
 		return Err(error);
 	}
 	if let Err(error) = replace_file_atomically(&tmp_path, path) {
 		let _ = std_fs::remove_file(&tmp_path);
-		return Err(special_fault(error.to_string()));
+		return Err(special_fault(error));
 	}
 	Ok(())
 }
@@ -3529,8 +3529,22 @@ fn special_write_cancelled() -> backends::Fault {
 	special_fault("special write cancelled before mutation began")
 }
 
-fn special_fault(message: impl Into<Str>) -> backends::Fault {
-	backends::Fault::new(message.into())
+/// Creates a special-write fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn special_fault(cause: impl std::fmt::Display) -> backends::Fault {
+	backends::Fault::new(sf!("{cause}"))
+}
+
+/// Creates a special-write fault with leading context, rendering the cause
+/// once at this model-facing fault boundary.
+fn special_fault_from(context: &str, cause: impl std::fmt::Display) -> backends::Fault {
+	backends::Fault::new(sf!("{context}: {cause}"))
+}
+
+/// Creates a special-write task fault, rendering the cause once at this
+/// model-facing fault boundary.
+fn special_task_fault(task_name: &str, cause: impl std::fmt::Display) -> backends::Fault {
+	backends::Fault::new(sf!("{task_name} write task failed: {cause}"))
 }
 
 #[cfg(test)]

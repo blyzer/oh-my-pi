@@ -65,14 +65,14 @@ impl Resolve for DocsResolver {
 				.lines
 				.slice(resource, &bytes, ranges[0])
 				.map(CowBytes::into_owned)
-				.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) });
+				.map_err(super::invalid_fault);
 		}
 		let mut output = Vec::new();
 		for range in ranges {
 			let piece = self
 				.lines
 				.slice(resource, &bytes, *range)
-				.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+				.map_err(super::invalid_fault)?;
 			output.extend_from_slice(&piece);
 		}
 		Ok(CowBytes::from(output))

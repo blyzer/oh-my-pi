@@ -151,6 +151,18 @@ pub enum HttpEgressError {
 }
 
 impl HttpEgressError {
+	/// Creates an invalid-argument error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn invalid_argument(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidArgument(cause.to_string())
+	}
+
+	/// Creates a contextualized invalid-argument error, rendering the cause
+	/// once at this model-facing fault boundary.
+	fn invalid_argument_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::InvalidArgument(format!("{context}: {cause}"))
+	}
+
 	fn transport(error: reqwest::Error) -> Self {
 		let diagnostic = error.to_string();
 		let proxy_failure = {
@@ -211,8 +223,7 @@ fn parse_method(method: &str) -> Result<Method, HttpEgressError> {
 }
 
 fn parse_url(value: &str) -> Result<Url, HttpEgressError> {
-	let url =
-		Url::parse(value).map_err(|error| HttpEgressError::InvalidArgument(error.to_string()))?;
+	let url = Url::parse(value).map_err(HttpEgressError::invalid_argument)?;
 	if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
 		return Err(HttpEgressError::InvalidArgument(
 			"HTTP egress URL must use http or https and include a host".to_owned(),
@@ -239,9 +250,9 @@ fn redirect_location(status: StatusCode, headers: &HeaderMap) -> Option<String> 
 }
 
 fn parse_redirect_url(base: &Url, location: &str) -> Result<Url, HttpEgressError> {
-	let url = base.join(location).map_err(|error| {
-		HttpEgressError::InvalidArgument(format!("invalid redirect URL: {error}"))
-	})?;
+	let url = base
+		.join(location)
+		.map_err(|error| HttpEgressError::invalid_argument_in("invalid redirect URL", error))?;
 	if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
 		return Err(HttpEgressError::InvalidArgument(
 			"HTTP redirect URL must use http or https and include a host".to_owned(),
@@ -266,16 +277,16 @@ fn parse_headers(headers: &[pb::HttpHeader]) -> Result<HeaderMap, HttpEgressErro
 	let mut parsed = HeaderMap::with_capacity(headers.len());
 	for header in headers {
 		let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|error| {
-			HttpEgressError::InvalidArgument(format!(
-				"invalid HTTP header name {:?}: {error}",
-				header.name
-			))
+			HttpEgressError::invalid_argument_in(
+				format!("invalid HTTP header name {:?}", header.name),
+				error,
+			)
 		})?;
 		let value = HeaderValue::from_str(&header.value).map_err(|error| {
-			HttpEgressError::InvalidArgument(format!(
-				"invalid HTTP header value for {:?}: {error}",
-				header.name
-			))
+			HttpEgressError::invalid_argument_in(
+				format!("invalid HTTP header value for {:?}", header.name),
+				error,
+			)
 		})?;
 		parsed.append(name, value);
 	}

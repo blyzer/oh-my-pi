@@ -3,7 +3,7 @@
 use std::{mem, sync::Arc};
 
 use async_trait::async_trait;
-use omp_core::{InvocationPhase, LifecyclePhase, Str};
+use omp_core::{InvocationPhase, LifecyclePhase, Str, sf};
 use omp_observability::authority::{
 	DurableTelemetryQuery, SpanEvent, SpanFault, TelemetryAuthority, TelemetryAuthorityError,
 	TelemetryAuthorityIdentity, TelemetryCallContext,
@@ -371,22 +371,17 @@ impl ControlAuthority for TelemetryControlAuthority {
 			TelemetryControlRequest::RevMetrics { tool, family, since, scope } => self
 				.owner
 				.rev_metrics(call, tool.as_str(), family.as_deref(), since.as_ref(), scope.as_str()),
-			TelemetryControlRequest::ExportStats(id) => {
-				self.owner.exporter_stats(call, id).and_then(|stats| {
-					serde_json::to_value(stats)
-						.map_err(|error| TelemetryAuthorityError::Owner(Str::new(error.to_string())))
-				})
-			},
+			TelemetryControlRequest::ExportStats(id) => self
+				.owner
+				.exporter_stats(call, id)
+				.and_then(|stats| serde_json::to_value(stats).map_err(owner_error)),
 			TelemetryControlRequest::ExportStop(id) => {
 				self.owner.stop_exporter(call, id).map(|()| Value::Null)
 			},
 			TelemetryControlRequest::SpanOpen { name, attributes } => self
 				.owner
 				.open_span(call, name.as_str(), &attributes)
-				.and_then(|span| {
-					serde_json::to_value(span)
-						.map_err(|error| TelemetryAuthorityError::Owner(Str::new(error.to_string())))
-				}),
+				.and_then(|span| serde_json::to_value(span).map_err(owner_error)),
 			TelemetryControlRequest::SpanClose { handle, attributes, events, fault } => self
 				.owner
 				.close_span(call, handle.as_str(), &attributes, &events, fault.as_ref())
@@ -572,7 +567,7 @@ fn decode_telemetry_request(
 					.and_then(|value| value.as_array().cloned())
 					.unwrap_or_default(),
 			))
-			.map_err(|error| protocol("invalid_telemetry_request", error.to_string()))?;
+			.map_err(|error| protocol("invalid_telemetry_request", error))?;
 			let fault = match arguments.remove("fault") {
 				None | Some(Value::Null) => None,
 				Some(Value::Array(values)) if values.len() == 2 => Some(SpanFault {
@@ -585,7 +580,7 @@ fn decode_telemetry_request(
 				}),
 				Some(value) => Some(
 					serde_json::from_value(value)
-						.map_err(|error| protocol("invalid_telemetry_request", error.to_string()))?,
+						.map_err(|error| protocol("invalid_telemetry_request", error))?,
 				),
 			};
 			Ok(TelemetryControlRequest::SpanClose { handle, attributes, events, fault })
@@ -784,11 +779,19 @@ fn telemetry_error(error: TelemetryAuthorityError) -> ControlProtocolError {
 		TelemetryAuthorityError::NotFound { .. } => "TelemetryResourceNotFound",
 		TelemetryAuthorityError::Owner(_) => "TelemetryOwnerFailed",
 	};
-	protocol(code, error.to_string())
+	protocol(code, error)
 }
 
-fn protocol(code: impl Into<Str>, message: impl Into<Str>) -> ControlProtocolError {
-	ControlProtocolError::new(code, message).with_details(json!({}))
+/// Builds a telemetry protocol rejection, rendering the message once at this
+/// model-facing fault boundary.
+fn protocol(code: impl Into<Str>, message: impl std::fmt::Display) -> ControlProtocolError {
+	ControlProtocolError::new(code, sf!("{message}")).with_details(json!({}))
+}
+
+/// Builds a telemetry owner failure, rendering the cause once at this
+/// model-facing fault boundary.
+fn owner_error(cause: impl std::fmt::Display) -> TelemetryAuthorityError {
+	TelemetryAuthorityError::Owner(sf!("{cause}"))
 }
 
 #[cfg(test)]

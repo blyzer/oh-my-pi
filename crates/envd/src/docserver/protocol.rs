@@ -1577,7 +1577,7 @@ async fn build_text_mutation(
 						.map(|range| ByteEdit::new(range, edit.replacement))
 				})
 				.collect::<CoreResult<Vec<_>>>()
-				.map_err(|error| build_invalid(error.to_string()))?;
+				.map_err(build_invalid)?;
 			TextProposal::Edits(edits)
 		},
 		text_mutation::Change::Proposal(proposal) => {
@@ -1601,8 +1601,7 @@ async fn build_text_mutation(
 				return Err(build_precondition("whole base snapshot read returned slices"));
 			};
 			let snapshot = Arc::new(
-				DocumentSnapshot::new(read.head().clone(), content.clone())
-					.map_err(|error| build_invalid(error.to_string()))?,
+				DocumentSnapshot::new(read.head().clone(), content.clone()).map_err(build_invalid)?,
 			);
 			let path = canonical_path_for_locator(session, locator, cancellation)
 				.await
@@ -1613,7 +1612,7 @@ async fn build_text_mutation(
 			let edits = session
 				.edit_adapters()
 				.lower(&proposal.format, &path, snapshot, proposal.payload, proposal.options_json)
-				.map_err(|error| build_invalid(error.to_string()))?;
+				.map_err(build_invalid)?;
 			TextProposal::Edits(edits)
 		},
 	};
@@ -2223,7 +2222,7 @@ async fn validate_text_document_uri(
 	cancellation: &CancellationToken,
 ) -> DispatchResult<()> {
 	let value: serde_json::Value = serde_json::from_slice(params_json)
-		.map_err(|error| Failure::invalid(format!("invalid LSP params JSON: {error}")))?;
+		.map_err(|error| Failure::invalid_caused("invalid LSP params JSON", error))?;
 	let supplied = value
 		.pointer("/textDocument/uri")
 		.and_then(serde_json::Value::as_str)
@@ -2952,8 +2951,7 @@ fn parse_file_uri(value: &str) -> DispatchResult<Url> {
 	if value.is_empty() {
 		return Err(Failure::invalid("file URI must not be empty"));
 	}
-	let uri =
-		Url::parse(value).map_err(|error| Failure::invalid(format!("invalid URI: {error}")))?;
+	let uri = Url::parse(value).map_err(|error| Failure::invalid_caused("invalid URI", error))?;
 	if uri.scheme() != "file" {
 		return Err(Failure::invalid("URI scheme must be file"));
 	}
@@ -2981,8 +2979,10 @@ fn required<T>(value: Option<T>, name: &str) -> DispatchResult<T> {
 	value.ok_or_else(|| Failure::invalid(format!("{name} is required")))
 }
 
-fn build_invalid(message: impl AsRef<str>) -> TransactionBuildError {
-	TransactionBuildError::new(TransactionRejectReason::InvalidContent, message)
+/// Builds an invalid-content rejection, rendering the cause once at this
+/// protocol fault boundary.
+fn build_invalid(cause: impl std::fmt::Display) -> TransactionBuildError {
+	TransactionBuildError::new(TransactionRejectReason::InvalidContent, cause.to_string())
 }
 
 fn build_precondition(message: impl AsRef<str>) -> TransactionBuildError {
@@ -3029,6 +3029,12 @@ impl Failure {
 
 	fn invalid(message: impl Into<String>) -> Self {
 		Self::new(proto::ProtocolErrorCode::InvalidArgument, message)
+	}
+
+	/// Builds an invalid-argument failure with a contextual prefix, rendering
+	/// the cause once at this protocol fault boundary.
+	fn invalid_caused(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::invalid(format!("{context}: {cause}"))
 	}
 
 	fn not_found(message: impl Into<String>) -> Self {

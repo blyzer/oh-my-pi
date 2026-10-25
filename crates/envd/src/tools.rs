@@ -61,7 +61,7 @@ use omp_tool::{
 use omp_tools::{
 	ask::PresenterSlot,
 	checkpoint,
-	device::{DeviceCatalog, dyn_enabled, flatten_slots},
+	device::{DeviceCatalog, FlattenCollision, dyn_enabled, flatten_slots},
 	edit::{EditRevisionCandidates, resolve_edit_revision},
 	eval::{EvalSessionControl, TaskDescriptionSnapshot},
 	goal,
@@ -823,7 +823,7 @@ impl DeviceControlFactory {
 					"docs": entry.docs.as_deref(),
 					"artifact": context.connection.artifact_digest.as_str(),
 				}))
-				.map_err(|error| invalid_device(error.to_string()))?,
+				.map_err(invalid_device)?,
 			);
 			leaves.push(RegistryLeaf {
 				name:  path.clone(),
@@ -1003,8 +1003,10 @@ fn device_catalog_error(error: LeafReplacementError) -> ControlProtocolError {
 	}
 }
 
-fn invalid_device(message: impl Into<Str>) -> ControlProtocolError {
-	ControlProtocolError::new("DeviceError", message)
+/// Creates a device-protocol error, rendering the cause once at this
+/// model-facing fault boundary.
+fn invalid_device(cause: impl std::fmt::Display) -> ControlProtocolError {
+	ControlProtocolError::new("DeviceError", sf!("{cause}"))
 }
 
 fn required_string(
@@ -1069,7 +1071,7 @@ fn request_timeout(
 	};
 	value
 		.parse::<Duration>()
-		.map_err(|error| invalid_device(error.to_string()))?
+		.map_err(invalid_device)?
 		.to_std()
 		.map_err(|_| invalid_device("deadline exceeds host duration range"))
 }
@@ -2295,9 +2297,7 @@ fn gate_decision_from_json(value: JsonValue, mut payload: JsonValue) -> GateDeci
 					target: None,
 					args:   Some(bytes::Bytes::from(args)),
 				}),
-				Err(error) => GateDecision::Deny(Str::from(format!(
-					"could not encode effective hook payload: {error}"
-				))),
+				Err(error) => deny_payload_encode(error),
 			}
 		},
 		Some("deny") => {
@@ -2376,9 +2376,7 @@ fn gate_decision_from_json(value: JsonValue, mut payload: JsonValue) -> GateDeci
 						.map(|args| args.map(|args| HookPatch { target: None, args: Some(args) }));
 					match patch {
 						Ok(patch) => GateDecision::RequireApprovals { specs, patch },
-						Err(error) => GateDecision::Deny(Str::from(format!(
-							"could not encode effective hook payload: {error}"
-						))),
+						Err(error) => deny_payload_encode(error),
 					}
 				},
 				Ok(_) => GateDecision::Deny(sf!("composed approval decision was empty")),
@@ -2387,6 +2385,12 @@ fn gate_decision_from_json(value: JsonValue, mut payload: JsonValue) -> GateDeci
 		},
 		_ => GateDecision::Deny(sf!("hook composer returned an illegal admission decision")),
 	}
+}
+
+/// Creates a deny decision, rendering the encode failure once at this
+/// model-facing fault boundary.
+fn deny_payload_encode(cause: impl std::fmt::Display) -> GateDecision {
+	GateDecision::Deny(sf!("could not encode effective hook payload: {cause}"))
 }
 
 impl McpNotificationSink for HookControlFactory {
@@ -3632,7 +3636,7 @@ fn configured_model_edit_revision(ctx: &Ctx) -> Result<Option<Rev>, EnvdError> {
 	revision
 		.parse::<Rev>()
 		.map(Some)
-		.map_err(|error| EnvdError::EditDialect(error.to_string().into()))
+		.map_err(edit_dialect_error)
 }
 
 fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
@@ -3902,12 +3906,7 @@ fn register_session_workers(
 				.ok_or_else(|| worker_declaration_error("worker tool declaration has no definition"))?;
 			slots.push((Str::from(definition.name.as_str()), registration.owner.extension().clone()));
 		}
-		Some(flatten_slots(slots).map_err(|collision| {
-			EnvdError::WorkerDeclaration(Str::from(format!(
-				"tool_only slot {} is owned by both {} and {}",
-				collision.slot, collision.existing_owner, collision.conflicting_owner
-			)))
-		})?)
+		Some(flatten_slots(slots).map_err(slot_collision_error)?)
 	} else {
 		None
 	};
@@ -4546,13 +4545,13 @@ pub(crate) fn production_registry<
 			&HostPaths::new(&user_config_root, workspace.root()),
 			content.workspace_trust,
 		)
-		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+		.map_err(state_error)?,
 	);
 	let vault = VaultService::load_layered(
 		&VaultPaths::new(&user_config_root, workspace.root()),
 		content.workspace_trust,
 	)
-	.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
+	.map_err(state_error)?
 	.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
 	documents.set_resource_mutations(ResourceMutationServices {
 		ssh:            ssh.clone(),
@@ -4981,15 +4980,15 @@ pub(crate) fn production_registry<
 		.map_err(|_| EnvdError::WorkerDeclaration(sf!("dynamic device catalog installed twice")))?;
 	eval_host
 		.bind_registry(Arc::clone(&registry))
-		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+		.map_err(eval_error)?;
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
-		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+		.map_err(eval_error)?;
 	// Nested `tool.<name>()` calls obey explicit per-tool `deny` overrides,
 	// frozen at composition like the `dyn` builtin's nested admission.
 	eval_host
 		.bind_approval_overrides(tool_settings.approval.clone())
-		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+		.map_err(eval_error)?;
 	Ok((
 		registry,
 		eval_host,
@@ -5010,10 +5009,10 @@ fn compose_eval_executor<T>(
 ) -> Result<Option<T>, EnvdError> {
 	match executor {
 		Ok(executor) => Ok(Some(executor)),
-		Err(error) if py_eval_explicit => Err(EnvdError::Eval(Str::from(format!(
-			"environment composition could not construct the explicitly requested py_eval executor: \
-			 {error}"
-		)))),
+		Err(error) if py_eval_explicit => Err(eval_error_from(
+			"environment composition could not construct the explicitly requested py_eval executor",
+			error,
+		)),
 		Err(error) => {
 			tracing::warn!(
 				error = %error,
@@ -5873,16 +5872,22 @@ fn prelude_params(
 			.as_deref()
 			.map(|raw| {
 				serde_json::from_slice::<serde_json::Value>(raw).map_err(|error| {
-					EnvdError::WorkerDeclaration(Str::from(format!(
-						"prelude helper {helper_name} parameter {} has an invalid JSON default: {error}",
-						param.name
-					)))
+					worker_declaration_from(
+						&format!(
+							"prelude helper {helper_name} parameter {} has an invalid JSON default",
+							param.name
+						),
+						error,
+					)
 				})?;
 				Str::from_utf8(raw).map_err(|error| {
-					EnvdError::WorkerDeclaration(Str::from(format!(
-						"prelude helper {helper_name} parameter {} has a non-UTF-8 default: {error}",
-						param.name
-					)))
+					worker_declaration_from(
+						&format!(
+							"prelude helper {helper_name} parameter {} has a non-UTF-8 default",
+							param.name
+						),
+						error,
+					)
 				})
 			})
 			.transpose()?;
@@ -5900,7 +5905,7 @@ fn worker_revision(declaration: &ToolDecl) -> Result<Rev, EnvdError> {
 	declaration
 		.rev
 		.parse::<Rev>()
-		.map_err(|error| EnvdError::WorkerDeclaration(Str::from(error.to_string())))
+		.map_err(worker_declaration_fault)
 }
 
 fn is_prelude_declaration(declaration: &ToolDecl) -> Result<bool, EnvdError> {
@@ -5935,7 +5940,7 @@ pub fn worker_spec(declaration: &ToolDecl, owner: &HostKey) -> Result<ToolSpec, 
 		projection_code: worker_projection_code(declaration),
 		effects:         owner
 			.declared_or_undeclared_effects(declaration.effects.as_ref())
-			.map_err(|error| EnvdError::WorkerDeclaration(Str::from(error.to_string())))?,
+			.map_err(worker_declaration_fault)?,
 	})
 }
 
@@ -6011,6 +6016,53 @@ fn constraint_priority(priority: u32) -> Result<u8, EnvdError> {
 
 const fn worker_declaration_error(message: &'static str) -> EnvdError {
 	EnvdError::WorkerDeclaration(sf!(message))
+}
+
+/// Creates a worker-declaration error, rendering the cause once at this
+/// model-facing fault boundary.
+fn worker_declaration_fault(cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::WorkerDeclaration(sf!("{cause}"))
+}
+
+/// Creates a worker-declaration error with leading context, rendering the
+/// cause once at this model-facing fault boundary.
+fn worker_declaration_from(context: &str, cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::WorkerDeclaration(sf!("{context}: {cause}"))
+}
+
+/// Creates a slot-collision error, rendering the collision once at this
+/// model-facing fault boundary.
+fn slot_collision_error(collision: FlattenCollision) -> EnvdError {
+	EnvdError::WorkerDeclaration(sf!(
+		"tool_only slot {} is owned by both {} and {}",
+		collision.slot,
+		collision.existing_owner,
+		collision.conflicting_owner
+	))
+}
+
+/// Creates a state error, rendering the cause once at this model-facing
+/// fault boundary.
+fn state_error(cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::State(sf!("{cause}"))
+}
+
+/// Creates an eval error, rendering the cause once at this model-facing
+/// fault boundary.
+fn eval_error(cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::Eval(sf!("{cause}"))
+}
+
+/// Creates an eval error with leading context, rendering the cause once at
+/// this model-facing fault boundary.
+fn eval_error_from(context: &str, cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::Eval(sf!("{context}: {cause}"))
+}
+
+/// Creates an edit-dialect error, rendering the cause once at this
+/// model-facing fault boundary.
+fn edit_dialect_error(cause: impl std::fmt::Display) -> EnvdError {
+	EnvdError::EditDialect(sf!("{cause}"))
 }
 
 #[cfg(test)]

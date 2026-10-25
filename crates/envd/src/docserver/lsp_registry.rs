@@ -14,7 +14,7 @@ use std::{
 
 use bytes::Bytes;
 use flume::Receiver;
-use omp_core::{Hash32, Str};
+use omp_core::{Hash32, Str, sf};
 use omp_proto::lsp::{Diagnostic, PositionEncoding};
 use omp_walker::glob::{CompiledPattern, PatternBuilder};
 use parking_lot::Mutex;
@@ -128,9 +128,7 @@ impl LspSelector {
 			let matcher = PatternBuilder::new(pattern.as_str())
 				.literal_separator(false)
 				.build()
-				.map_err(|error| LspRegistryError::InvalidSelector {
-					reason: Str::new(error.to_string()),
-				})?;
+				.map_err(LspRegistryError::invalid_selector)?;
 			path_matchers.push(matcher);
 		}
 		Ok(Self { languages, schemes, path_patterns, path_matchers })
@@ -1604,9 +1602,8 @@ impl LspRegistry {
 		let binding = self.binding_for_handle(handle)?;
 		let binding_id = binding.id;
 		let method = method.as_ref();
-		let value: Value = serde_json::from_slice(&params_json).map_err(|error| {
-			LspRegistryError::InvalidInboundJson { reason: Str::new(error.to_string()) }
-		})?;
+		let value: Value =
+			serde_json::from_slice(&params_json).map_err(LspRegistryError::invalid_inbound_json)?;
 		let uri = value
 			.get("uri")
 			.or_else(|| value.pointer("/textDocument/uri"))
@@ -2533,9 +2530,7 @@ impl LspRegistry {
 								str::from_utf8(&content).unwrap_or_default(),
 								None,
 							))
-							.map_err(|error| LspRegistryError::InvalidInboundJson {
-								reason: Str::new(error.to_string()),
-							})?,
+							.map_err(LspRegistryError::invalid_inbound_json)?,
 						),
 						cancel.child_token(),
 					)
@@ -3031,6 +3026,20 @@ pub enum LspRegistryError {
 	/// The selected LSP lane rejected the operation.
 	#[error(transparent)]
 	Lsp(#[from] LspError),
+}
+
+impl LspRegistryError {
+	/// Builds a selector failure, rendering the cause once at this fault
+	/// boundary.
+	fn invalid_selector(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidSelector { reason: sf!("{cause}") }
+	}
+
+	/// Builds an inbound-JSON failure, rendering the cause once at this fault
+	/// boundary.
+	fn invalid_inbound_json(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidInboundJson { reason: sf!("{cause}") }
+	}
 }
 
 #[cfg(test)]

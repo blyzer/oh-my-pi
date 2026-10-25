@@ -69,6 +69,7 @@ use crate::{
 		services::{ServiceControlAuthorityFactory, ServiceDispatch, ServiceDispatchBackend},
 		spawn::spawn,
 	},
+	fault, fault_in,
 	policy::{AuthorityTable, Grants},
 	tools::{HookControlFactory, HookEventPolicy, HookSubscription, RegistryControlFactory},
 	worker_pool::WorkerUnavailable,
@@ -266,7 +267,7 @@ impl ServiceDispatchBackend for ServiceRouter {
 			.await
 			.map_err(|_| sf!("service call deadline elapsed"))?
 			.map_err(|_| sf!("service provider response channel closed"))?
-			.map_err(|error| Str::from(error.to_string()))
+			.map_err(fault)
 	}
 }
 
@@ -737,7 +738,7 @@ impl ExtHostInvocation {
 					self.host_generation,
 					self.session_generation,
 				)
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 		}
 		self
 			.commands
@@ -896,8 +897,7 @@ impl DynamicAgentsControlAuthority {
 			(binding.id, Arc::clone(&binding.factory))
 		};
 		let authority = factory.bind(Arc::clone(&self.identity)).map_err(|error| {
-			ControlProtocolError::new("AgentsOwnerUnavailable", Str::from(error.to_string()))
-				.retryable(true)
+			ControlProtocolError::new("AgentsOwnerUnavailable", fault(error)).retryable(true)
 		})?;
 		if !slot.is_live(id) {
 			return Err(ControlProtocolError::new(
@@ -1072,7 +1072,7 @@ fn control_manifest_snapshot(spec: &ExtHostSpec) -> Result<Str, ExtHostError> {
 	}
 	serde_json::to_string(&snapshot)
 		.map(Str::from)
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))
+		.map_err(ExtHostError::protocol)
 }
 
 fn control_connection_identity(
@@ -1262,22 +1262,16 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 			deadline:  EventDeadline { at: Instant::now() + self.lifecycle_timeout },
 		};
 		async move {
-			let mut frozen = self
-				.control
-				.dispatch(dispatch)
-				.await
-				.map_err(|error| Str::from(error.to_string()))?;
-			normalize_control_availability(&self.manifest, &mut frozen)
-				.map_err(|error| Str::from(error.to_string()))?;
+			let mut frozen = self.control.dispatch(dispatch).await.map_err(fault)?;
+			normalize_control_availability(&self.manifest, &mut frozen).map_err(fault)?;
 			let evidence = seal_registry_evidence(
 				Arc::clone(&self.identity),
 				self.session.clone(),
 				&self.manifest,
 				frozen,
 			)
-			.map_err(|error| Str::from(error.to_string()))?;
-			ensure_committed_argument_tools(&evidence.tools)
-				.map_err(|error| Str::from(error.to_string()))?;
+			.map_err(fault)?;
+			ensure_committed_argument_tools(&evidence.tools).map_err(fault)?;
 			let evidence = Arc::new(evidence);
 			let key = (
 				self.identity.layer.clone(),
@@ -1325,11 +1319,11 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 			&self.cli_contributions,
 			&self.contributed_values,
 		)
-		.map_err(|error| Str::from(error.to_string()))
+		.map_err(fault)
 		.and_then(|mut delivery| {
 			delivery
 				.deliver(self.extension.as_str(), generation)
-				.map_err(|error| Str::from(error.to_string()))
+				.map_err(fault)
 		})
 		.map(|values| {
 			values
@@ -1376,7 +1370,7 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 					deadline: EventDeadline { at: Instant::now() + lifecycle_timeout },
 				})
 				.await
-				.map_err(|error| Str::from(error.to_string()))?;
+				.map_err(fault)?;
 			if let Some((key, evidence)) = self.staged_evidence.take() {
 				self.frozen_registry.lock().insert(key, evidence);
 			}
@@ -1453,10 +1447,10 @@ async fn freeze_control_registry(
 			deadline: EventDeadline { at: std::time::Instant::now() + timeout },
 		})
 		.await
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	normalize_control_availability(manifest, &mut payload)?;
 	let evidence = seal_registry_evidence(identity, session, manifest, payload)
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	ensure_committed_argument_tools(&evidence.tools)?;
 	Ok(Arc::new(evidence))
 }
@@ -1676,10 +1670,10 @@ impl ExtHostSupervisor {
 					extension.key.clone(),
 					extension.manifest.resource_limits.iter().cloned(),
 				)
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			service_broker
 				.publish_manifest(extension.key.clone(), extension.manifest.services.clone())
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 		}
 		let service_router = Arc::new(ServiceRouter {
 			broker: Arc::new(Mutex::new(service_broker)),
@@ -1739,12 +1733,10 @@ impl ExtHostSupervisor {
 				))
 			})?;
 			let identity = control_connection_identity(&config, extension, 1);
-			let agents = agents_control
-				.factory()
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+			let agents = agents_control.factory().map_err(ExtHostError::protocol)?;
 			let authority = factory
 				.bind_with_agents(Arc::clone(&identity), Arc::clone(&agents))
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			let mut modules = Vec::with_capacity(extension.manifest.declaration_modules.len() + 1);
 			modules.push(extension.manifest.entry.clone());
 			modules.extend(extension.manifest.declaration_modules.iter().cloned());
@@ -1785,21 +1777,21 @@ impl ExtHostSupervisor {
 					continue;
 				},
 				Err(error) => {
-					return Err(ExtHostError::Protocol(Str::from(error.to_string())));
+					return Err(ExtHostError::protocol(error));
 				},
 			};
 			let running = spawned
 				.start_control((*identity).clone(), authority, &authority_snapshot)
 				.await
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			let receipt = quota_runtime
 				.receipt(config.session_id.as_str(), &extension.key)
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			running
 				.control()
 				.install_resource_receipt(&receipt)
 				.await
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			let evidence = match time::timeout(
 				config.spawn_timeout,
 				freeze_control_registry(
@@ -1840,7 +1832,7 @@ impl ExtHostSupervisor {
 			};
 			let evidence = registry
 				.install_evidence(evidence)
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			let python_route = PyCallbackRoute::new(
 				running.control(),
 				python_registration_authority(
@@ -1948,7 +1940,7 @@ impl ExtHostSupervisor {
 				.broker
 				.lock()
 				.activate_provider_declarations(&extension.key, 1, evidence.services.iter().cloned())
-				.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+				.map_err(ExtHostError::protocol)?;
 			service_router
 				.routes
 				.lock()
@@ -2364,9 +2356,9 @@ impl ExtHostSupervisor {
 		let owner = dispatch.owner.clone();
 		let request = dispatch
 			.request(1, timeout)
-			.map_err(|error| ControlProtocolError::new("InvalidUiDispatch", error.to_string()))?;
+			.map_err(|error| ControlProtocolError::new("InvalidUiDispatch", fault(error)))?;
 		let envelope = UiHostEnvelope::decode(request.payload.as_ref())
-			.map_err(|error| ControlProtocolError::new("InvalidUiDispatch", error.to_string()))?;
+			.map_err(|error| ControlProtocolError::new("InvalidUiDispatch", fault(error)))?;
 		let Some(ui_host_envelope::Body::Dispatch(dispatch)) = envelope.body else {
 			return Err(ControlProtocolError::new(
 				"InvalidUiDispatch",
@@ -2534,7 +2526,7 @@ impl ExtHostSupervisor {
 		}
 		.encode_to_vec();
 		crate::exthost::decode_ui_dispatch_result(&payload, &owner)
-			.map_err(|error| ControlProtocolError::new("InvalidUiDispatchResult", error.to_string()))
+			.map_err(|error| ControlProtocolError::new("InvalidUiDispatchResult", fault(error)))
 	}
 
 	/// Starts a spawned extension host only after every authority has bound.
@@ -3115,6 +3107,14 @@ pub enum ExtHostError {
 	ResultEncoding(#[source] serde_json::Error),
 }
 
+impl ExtHostError {
+	/// Creates a protocol-violation error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn protocol(cause: impl std::fmt::Display) -> Self {
+		Self::Protocol(sf!("{cause}"))
+	}
+}
+
 enum ControlHostCommand {
 	Open {
 		id:              u64,
@@ -3264,7 +3264,7 @@ async fn activate_control_generation(
 				host:    host_generation,
 				session: activation.session_generation,
 			})
-			.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+			.map_err(ExtHostError::protocol)?;
 	}
 	let mut host = FrozenControlLifecycleHost::new(
 		control,
@@ -3326,7 +3326,7 @@ fn next_control_authority(
 	activation
 		.host_factory
 		.bind_with_agents(Arc::new(identity), Arc::clone(&activation.agents_factory))
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))
+		.map_err(ExtHostError::protocol)
 }
 fn text_part(text: String) -> Part {
 	Part { kind: Some(part::Kind::Text(text)) }
@@ -3350,7 +3350,7 @@ fn control_result_storage(
 	let details = worker_verdict_json(details, is_error).map_err(ExtHostError::ResultEncoding)?;
 	let blob = store
 		.put_verdict_bytes(Some(session), call_id, &details)
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	Ok((None, Some(blob)))
 }
 
@@ -3538,7 +3538,7 @@ fn install_hook_evidence(
 					composition: hook.composition.clone(),
 				},
 			})
-			.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+			.map_err(ExtHostError::protocol)?;
 	}
 	Ok(())
 }
@@ -3728,7 +3728,7 @@ async fn run_control_supervisor(
 							)
 							.await
 						},
-						Err(error) => Err(ExtHostError::Protocol(Str::from(error.to_string()))),
+						Err(error) => Err(ExtHostError::protocol(error)),
 					};
 					match restored {
 						Ok(()) => {
@@ -3778,7 +3778,7 @@ async fn run_control_supervisor(
 							.events
 							.send(ExtHostEvent::ProtocolError(ProtocolError {
 								code:    ProtocolErrorCode::InvalidArgument.into(),
-								message: sf!("extension tool revision is invalid: {error}").to_string(),
+								message: fault_in("extension tool revision is invalid", error).to_string(),
 								props:   None,
 							}));
 						continue;
@@ -3888,7 +3888,7 @@ async fn run_control_supervisor(
 								let _ = invocation.events.send(ExtHostEvent::Aborted(ExtHostAbort {
 									call_id:         invocation.call.invocation_id,
 									kind:            ExtHostAbortKind::Crashed,
-									reason:          Str::from(error.to_string()),
+									reason:          fault(error),
 									effects_unknown: true,
 								}));
 							},
@@ -3921,9 +3921,7 @@ async fn run_control_supervisor(
 									running
 										.restart_with_authority(authority)
 										.await
-										.map_err(|error| {
-											ExtHostError::Protocol(Str::from(error.to_string()))
-										})?;
+										.map_err(|error| ExtHostError::protocol(error))?;
 									refresh_control_generation(
 										&mut activation,
 										&running,
@@ -3991,7 +3989,7 @@ async fn run_control_supervisor(
 					running
 						.restart_with_authority(authority)
 						.await
-						.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+						.map_err(ExtHostError::protocol)?;
 					refresh_control_generation(
 						&mut activation,
 						&running,
@@ -4054,12 +4052,12 @@ async fn refresh_control_generation(
 	let receipt = activation
 		.quota_runtime
 		.receipt(activation.session_id.as_str(), &activation.key)
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	running
 		.control()
 		.install_resource_receipt(&receipt)
 		.await
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	let evidence = freeze_control_registry(
 		running.control(),
 		Arc::clone(&activation.identity),
@@ -4082,7 +4080,7 @@ async fn refresh_control_generation(
 	let evidence = activation
 		.registry_control
 		.install_evidence(evidence)
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	*activation.registered_ui.write() = Some(evidence.ui_registration.clone());
 	activate_control_generation(
 		activation,
@@ -4118,7 +4116,7 @@ async fn refresh_control_generation(
 				running.generation(),
 				evidence.services.iter().cloned(),
 			)
-			.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+			.map_err(ExtHostError::protocol)?;
 	}
 	if let Some(gate) = activation.lifecycle_gate.as_deref() {
 		notify_extension_load(gate, &activation.manifest.provenance, hot_reload);
@@ -4163,7 +4161,7 @@ async fn send_control_result(
 			let _ = invocation.events.send(ExtHostEvent::Aborted(ExtHostAbort {
 				call_id:         invocation.call.invocation_id.clone(),
 				kind:            ExtHostAbortKind::Crashed,
-				reason:          Str::from(error.to_string()),
+				reason:          fault(error),
 				effects_unknown: true,
 			}));
 		},
@@ -4201,8 +4199,8 @@ async fn dispatch_control_service(
 	activation: &PendingControlActivation,
 	dispatch: ServiceDispatch,
 ) -> Result<ServiceResponse, ExtHostError> {
-	let payload: serde_json::Value = serde_json::from_slice(dispatch.payload.as_ref())
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+	let payload: serde_json::Value =
+		serde_json::from_slice(dispatch.payload.as_ref()).map_err(ExtHostError::protocol)?;
 	let payload = payload
 		.as_object()
 		.ok_or_else(|| ExtHostError::Protocol(sf!("service payload is not a JSON object")))?;
@@ -4247,7 +4245,7 @@ async fn dispatch_control_service(
 			deadline: EventDeadline { at: std::time::Instant::now() + deadline },
 		})
 		.await
-		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
+		.map_err(ExtHostError::protocol)?;
 	let values = result
 		.as_array()
 		.filter(|values| values.len() == 2)

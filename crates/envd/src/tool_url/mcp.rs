@@ -115,7 +115,7 @@ impl Resolve for McpUrlResolver {
 				CancellationToken::new(),
 			)
 			.await
-			.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
+			.map_err(super::source_fault)?;
 		if result.truncated {
 			return Err(Fault::Source {
 				message: Str::new_static("MCP resource exceeded the read size limit."),

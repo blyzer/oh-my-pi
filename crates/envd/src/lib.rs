@@ -335,6 +335,17 @@ mod settings_tests {
 	}
 }
 
+/// Renders a fault cause once at this model-facing fault boundary.
+pub(crate) fn fault(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
+}
+
+/// Renders a contextualized fault cause once at this model-facing fault
+/// boundary.
+pub(crate) fn fault_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Str {
+	sf!("{context}: {cause}")
+}
+
 pub(crate) fn atomic_replace(path: &Path, content: &str) -> io::Result<()> {
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent)?;
@@ -1233,7 +1244,7 @@ impl ProjectEnvironment {
 			.reload_native_configs()
 			.await
 			.map(|_| ())
-			.map_err(|error| EnvdError::State(Str::from(error.to_string())))
+			.map_err(EnvdError::state)
 	}
 
 	/// Returns the immutable production tool registry.

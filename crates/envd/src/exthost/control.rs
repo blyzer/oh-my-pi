@@ -1157,6 +1157,22 @@ impl ControlProtocolError {
 		}
 	}
 
+	/// Builds a typed protocol rejection, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn caused(code: impl Into<Str>, cause: impl std::fmt::Display) -> Self {
+		Self::new(code, sf!("{cause}"))
+	}
+
+	/// Builds a typed protocol rejection with a contextual prefix, rendering
+	/// the cause once at this model-facing fault boundary.
+	pub fn caused_by(
+		code: impl Into<Str>,
+		context: impl std::fmt::Display,
+		cause: impl std::fmt::Display,
+	) -> Self {
+		Self::new(code, sf!("{context}: {cause}"))
+	}
+
 	/// Marks a rejection retryable.
 	pub const fn retryable(mut self, retryable: bool) -> Self {
 		self.retryable = retryable;
@@ -3037,9 +3053,10 @@ impl ControlRuntime {
 			)
 		})?;
 		sender.try_send(update).map_err(|error| {
-			ControlProtocolError::new(
+			ControlProtocolError::caused_by(
 				"progress_overflow",
-				format!("dispatch progress owner rejected an update: {error}"),
+				"dispatch progress owner rejected an update",
+				error,
 			)
 		})?;
 		state.events += 1;
