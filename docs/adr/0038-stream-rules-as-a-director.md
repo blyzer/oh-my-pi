@@ -450,28 +450,34 @@ non-interrupting match records a `<diag>` on the culprit call and the rule body 
 `<developer>` aside without resampling. Still unproven: the JSON-string decoder (no code to
 test).
 
-Two mechanisms §2, §3 and §6 describe do not exist in the code, found while trying to prove
-them. First, there is no deferred-reminder continuation: `StreamRules` implements no `on_yield`,
-holds no pending-reminder state, and never returns `Continue { reminder }`. A prose `never` match
-puts the rule body in `StreamEffect::developer`, which the loop commits as a `<developer>` node in
-the same turn, so the model does see it, but on this turn rather than delivered after a yield.
-Second, there is no hidden-turn gate: `watch_stream` has exactly one call site
-(`loop.rs:1662`), reached unconditionally for a visible response, and neither the loop nor
-`StreamRules::watch_stream` checks for a hidden turn. Hidden and compaction work is unwatched
-only because auxiliary `ErasedInference` calls never reach that call site, which is a different
-claim from the gate the record describes. Both are read from the code, not executed; neither has
-an owner decision recorded.
+Resolved (2026-10-24, owner: implement). The three gaps this section previously recorded are
+closed, each with a mutation-checked loop-level proof in `stream_rules_director.rs`:
 
-Divergence from §4, found while writing P6: `assistant_end("interrupted")` and the
-`turn.receipt` are journaled before the `director.stream-interrupt` patch, not inside it. The
-patch carries the `interrupt` mark, the exclusion, the notice, the injection, and the fired
-marks. A crash between them resumes with an interrupted, receipted assistant that has no
-`interrupt` mark and no exclusion, and no fired rule, so the rule can fire again. Whether the
-resumed projection still sends that partial assistant to the provider is not checked.
+- Deferred prose reminders (§3): a non-interrupting text or thinking match stages its body
+  durably under the Director's `pending` state instead of landing a same-turn aside.
+  `StreamRules::evaluate` delivers it at the yield as `Continue { reminder }` and clears the
+  state; `before_inference` delivers it as a developer aside (returning `Prepared::Rebuild`)
+  on the next request when an inner Director consumed the yield
+  (`a_never_prose_match_defers_its_reminder_to_the_yield`).
+- Hidden-turn gate (§2/§6): `DirectorCx` carries a `hidden` marker and the stack walker's
+  `watch_stream` refuses watchers for hidden contexts, so hidden and compaction work is gated
+  by construction rather than by auxiliary `ErasedInference` calls merely not reaching the
+  loop's call site (`a_hidden_context_opens_no_stream_watchers`).
+- Redirect atomicity (§4): the `director.stream-interrupt` patch (interrupt mark, exclusion,
+  notice, injection, fired marks) commits before `assistant_end("interrupted")` and the
+  receipt. `MsgAssistantEnd` and `TurnReceipt` are distinct journal kinds, so a single
+  transaction would be a journal-schema change; the reorder gives the invariants that matter:
+  a crash after the patch resumes as an ordinary mid-stream crash whose marks already hold,
+  the rule cannot fire twice, and an exclusion is never separated from a receipted assistant.
 
-**Open implementation decisions (owner):** the matcher currently keeps one `StreamRuleSet` rather
-than the pooled per-key caches §5 describes; and redirect notices plus hook events omit the
-matched excerpt §4 describes. Neither is resolved by this test coverage.
+Resolved (2026-10-24, owner: implement) with the gap fixes above: the compiled `StreamRuleSet`
+owns a recycled cache pool (§5) — cursors borrow a cache per stream key and watchers return
+them on drop, so steady-state watching allocates nothing across requests — and redirect
+notices plus hook observations carry the match end offset, with a bounded (≤256-byte) excerpt
+recovered cold from the journaled assistant content at commit time
+(`a_redirect_notice_carries_the_offset_and_journal_excerpt`). Tool matches run over projected
+text that is not a journaled stream, so they carry the offset only and the notice names the
+call.
 
 ### Surfaces as built: `omp rules`
 
