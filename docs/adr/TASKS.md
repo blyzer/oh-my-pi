@@ -103,6 +103,33 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).
 
+Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
+
+- **STILL OPEN** ADR 0039 phase R1 (read-only attach over the owner UDS). PR
+  #342, titled "ADR 0039 A5", reports merged (`3c2695eb8e`), but it targeted
+  `feat/session-host`, not `omp2`. Only the base commits under that merge
+  (`de39d50718` and earlier) reached `omp2`, and `origin/feat/session-host`
+  still points at the merge itself. Two of its nine paths never arrived:
+  `crates/app/src/attach_cmd.rs` (the CLI command) and
+  `crates/driver/src/session_wire.rs` (the driver-side gRPC projection). The
+  attach wiring the merge added to `crates/app/src/cli.rs` and
+  `crates/app/src/lib.rs` is absent with them. The top-level `Command` enum
+  has no `Attach` variant, and the `JobsCommand::Attach` in `cli.rs` is the
+  unrelated `omp jobs attach`. The merge's other content is on `omp2` through
+  separate commits (`session.proto` and `omp_proto::session`,
+  `crates/rpc/src/device_auth.rs` and its `ring` dependency, and the
+  `device_load_or_generate` block in `crates/app/src/daemon.rs`). Both lost
+  files live in `561583c686`, the merge's second parent, reachable from
+  `origin/feat/session-host` or after `git fetch origin refs/pull/342/head`.
+  `attach_cmd::run` parks on `std::future::pending()`, so it is not restored
+  on its own. It lands with the real R1 gRPC projection. ADR 0039's `Status
+  in omp` and its `STATUS.md` row are corrected in the same change.
+- **NO ACTION** Codex `auth_required` object-form classification. PR #366
+  classified a signed-out `-32000` inside `codex_app_server`; `286ff0945b`
+  reverted it and moved the rule to `acp_client::wire::is_missing_login`,
+  because that shape arrives through the ACP client. The Codex adapter is
+  correct as it stands. Do not re-apply #366.
+
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
