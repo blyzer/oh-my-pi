@@ -234,7 +234,7 @@ fn lower_content_value(
 /// plugin rows so one bad entry cannot hide valid siblings.
 pub fn parse_catalog(bytes: &[u8], source: &str) -> Result<MarketplaceCatalog, ExtensionError> {
 	let mut value: Value = serde_json::from_slice(bytes)
-		.map_err(|error| catalog_error(format!("failed to parse {source}: {error}")))?;
+		.map_err(|error| catalog_fault(format_args!("failed to parse {source}"), error))?;
 	let object = value
 		.as_object_mut()
 		.ok_or_else(|| catalog_error(format!("catalog {source} must be an object")))?;
@@ -263,7 +263,7 @@ pub fn parse_catalog(bytes: &[u8], source: &str) -> Result<MarketplaceCatalog, E
 			.is_ok_and(|plugin| valid_name(plugin.name.as_str()) && plugin.source_spec().is_ok())
 	});
 	serde_json::from_value(value)
-		.map_err(|error| catalog_error(format!("invalid catalog {source}: {error}")))
+		.map_err(|error| catalog_fault(format_args!("invalid catalog {source}"), error))
 }
 
 /// Resolves a catalog-relative plugin directory without permitting traversal.
@@ -280,11 +280,11 @@ pub fn contained_plugin_path(
 	append_contained(&mut joined, relative)?;
 	let root = catalog_root
 		.canonicalize()
-		.map_err(|error| catalog_error(error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EManifestParse, error))?;
 	let candidate = root
 		.join(joined)
 		.canonicalize()
-		.map_err(|error| catalog_error(error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EManifestParse, error))?;
 	if !candidate.starts_with(&root) || candidate == root {
 		return Err(catalog_error("plugin source escapes the marketplace root"));
 	}
@@ -322,6 +322,12 @@ pub fn valid_name(name: &str) -> bool {
 
 fn catalog_error(detail: impl AsRef<str>) -> ExtensionError {
 	ExtensionError::new(ExtensionCode::EManifestParse, detail)
+}
+
+/// Creates a catalog error with leading context, rendering the cause once at
+/// this model-facing fault boundary.
+fn catalog_fault(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> ExtensionError {
+	ExtensionError::caused_by(ExtensionCode::EManifestParse, context, cause)
 }
 
 #[cfg(test)]

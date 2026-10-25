@@ -46,10 +46,10 @@ impl IndexConfig {
 			return Ok(Self::default());
 		}
 		let result = fs::read_to_string(path)
-			.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))
+			.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))
 			.and_then(|text| {
 				toml::from_str::<Self>(&text)
-					.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))
+					.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))
 			});
 		if let Ok(config) = &result {
 			tracing::debug!(
@@ -211,10 +211,9 @@ impl SignedIndex {
 	pub fn read(path: &Path, index_key: &str) -> Result<Self, ExtensionError> {
 		let result: Result<Self, ExtensionError> = (|| {
 			let bytes = fs::read(path)
-				.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))?;
-			let index: Self = serde_json::from_slice(&bytes).map_err(|error| {
-				ExtensionError::new(ExtensionCode::EManifestParse, error.to_string())
-			})?;
+				.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))?;
+			let index: Self = serde_json::from_slice(&bytes)
+				.map_err(|error| ExtensionError::caused(ExtensionCode::EManifestParse, error))?;
 			index.verify(index_key)?;
 			Ok(index)
 		})();
@@ -251,15 +250,17 @@ impl SignedIndex {
 			));
 		}
 		let issued_at = Timestamp::from_str(self.issued_at.as_str()).map_err(|error| {
-			ExtensionError::new(
+			ExtensionError::caused_by(
 				ExtensionCode::EIntegrity,
-				format!("invalid signed-index issued_at: {error}"),
+				"invalid signed-index issued_at",
+				error,
 			)
 		})?;
 		let valid_until = Timestamp::from_str(self.valid_until.as_str()).map_err(|error| {
-			ExtensionError::new(
+			ExtensionError::caused_by(
 				ExtensionCode::EIntegrity,
-				format!("invalid signed-index valid_until: {error}"),
+				"invalid signed-index valid_until",
+				error,
 			)
 		})?;
 		if issued_at > now || valid_until <= now || valid_until <= issued_at {
@@ -344,7 +345,7 @@ impl SignedIndex {
 			valid_until: &self.valid_until,
 			extensions:  &self.extensions,
 		})
-		.map_err(|error| ExtensionError::new(ExtensionCode::ESig, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::ESig, error))?;
 		verify_signed_payload(index_key, &payload, self.signature.as_str())
 	}
 

@@ -161,9 +161,9 @@ impl PinsFile {
 			return Ok(Self { version: 1, pins: Vec::new() });
 		}
 		let value = fs::read_to_string(path)
-			.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))?;
+			.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))?;
 		toml::from_str(&value)
-			.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))
+			.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))
 	}
 
 	/// Sets or replaces one exact pin and persists atomically.

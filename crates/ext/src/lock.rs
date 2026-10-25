@@ -277,7 +277,7 @@ impl LockFile {
 			packages:        &self.packages,
 			frozen:          &self.frozen,
 		})
-		.map_err(|error| ExtensionError::new(ExtensionCode::ELockDrift, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::ELockDrift, error))?;
 		Ok(Str::new(format!("b3:{}", blake3::hash(&bytes).to_hex())))
 	}
 
@@ -291,9 +291,9 @@ impl LockFile {
 	pub fn read(path: &Path, layer: Layer) -> Result<Self, ExtensionError> {
 		let result: Result<Self, ExtensionError> = (|| {
 			let text = fs::read_to_string(path)
-				.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+				.map_err(|error| ExtensionError::caused(ExtensionCode::ELockVersion, error))?;
 			let lock: Self = toml::from_str(&text)
-				.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+				.map_err(|error| ExtensionError::caused(ExtensionCode::ELockVersion, error))?;
 			lock.validate_for(layer)?;
 			Ok(lock)
 		})();
@@ -592,7 +592,7 @@ pub fn package_snapshot(
 		}),
 	};
 	let envelope = serde_json::to_string(&envelope)
-		.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))?;
 	Ok(Some(Str::new(envelope)))
 }
 
@@ -618,9 +618,9 @@ impl InstalledRecord {
 			return Ok(Self { version: installed_version(), ..Self::default() });
 		}
 		let text = fs::read_to_string(path)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+			.map_err(|error| ExtensionError::caused(ExtensionCode::ELockVersion, error))?;
 		let mut record: Self = toml::from_str(&text)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+			.map_err(|error| ExtensionError::caused(ExtensionCode::ELockVersion, error))?;
 		if record.version > installed_version() {
 			return Err(ExtensionError::new(
 				ExtensionCode::ELockVersion,

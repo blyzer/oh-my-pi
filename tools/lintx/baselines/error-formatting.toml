@@ -13,7 +13,6 @@ desktop = 50
 driver = 42
 e2e = 2
 edit = 15
-ext = 37
 observability = 2
 rpc = 6
 serve = 12

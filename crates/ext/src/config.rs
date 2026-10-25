@@ -1625,9 +1625,8 @@ pub fn apply_resolved_setting_overrides(
 		})?;
 		let parsed = parse_override_value(extension, &value.key, schema, &value.value)?;
 		validate_setting_value(extension, &value.key, schema, &parsed)?;
-		let parsed = serde_json::to_value(parsed).map_err(|source| {
-			ExtensionError::new(ExtensionCode::EManifestParse, source.to_string())
-		})?;
+		let parsed = serde_json::to_value(parsed)
+			.map_err(|source| ExtensionError::caused(ExtensionCode::EManifestParse, source))?;
 		resolved.insert(value.key.to_string(), parsed);
 	}
 	Ok(())
@@ -1677,9 +1676,7 @@ pub fn resolve_extension_settings(
 		.map(|(key, value)| {
 			serde_json::to_value(value)
 				.map(|value| (key.to_string(), value))
-				.map_err(|source| {
-					ExtensionError::new(ExtensionCode::EManifestParse, source.to_string())
-				})
+				.map_err(|source| ExtensionError::caused(ExtensionCode::EManifestParse, source))
 		})
 		.collect()
 }
@@ -1688,7 +1685,7 @@ impl DeploymentManifest {
 	/// Parses a projected wheel `omp.toml`.
 	pub fn parse(input: &str) -> Result<Self, ExtensionError> {
 		toml::from_str(input)
-			.map_err(|source| ExtensionError::new(ExtensionCode::EManifestParse, source.to_string()))
+			.map_err(|source| ExtensionError::caused(ExtensionCode::EManifestParse, source))
 	}
 
 	/// Validates feature ownership and the exact static-content row shape.
@@ -1895,7 +1892,7 @@ pub fn manifest_capability_digest(manifest: &DeploymentManifest) -> Result<Str, 
 
 fn canonical_digest(value: &impl Serialize) -> Result<Str, ExtensionError> {
 	let bytes = serde_json::to_vec(value)
-		.map_err(|source| ExtensionError::new(ExtensionCode::EManifestParse, source.to_string()))?;
+		.map_err(|source| ExtensionError::caused(ExtensionCode::EManifestParse, source))?;
 	Ok(Str::new(format!("b3:{}", blake3::hash(&bytes).to_hex())))
 }
 
