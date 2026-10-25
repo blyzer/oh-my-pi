@@ -838,6 +838,10 @@ mod tests {
 		drop(local_transport);
 	}
 
+	/// W8 evidence (ADR 0045): a closed remote backend leaves an in-flight
+	/// invocation stream pending, and a later remote-bound frame ends the
+	/// router, dropping an unrelated local stream. This pins the containment
+	/// gap; the containment fix inverts it into the acceptance test.
 	#[tokio::test]
 	async fn w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream() {
 		const WAIT: Duration = Duration::from_millis(200);

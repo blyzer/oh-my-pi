@@ -162,9 +162,10 @@ async fn accept_local_hello(transport: &InProcessEnvTransport) -> Result<()> {
 	Ok(())
 }
 
-/// W8 evidence: SIGKILL leaves an in-flight daemon invocation pending, then
-/// a later remote-bound request ends the router and drops an unrelated local
-/// invocation. This records the existing containment gap; it is not a fix.
+/// W8 evidence: SIGKILL leaves an in-flight daemon command stream pending,
+/// then a later remote-bound request ends the router and drops an unrelated
+/// local invocation. This pins the ADR 0045 containment gap; the containment
+/// fix inverts it into the acceptance test (typed terminal, local survives).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()> {
 	let Some(daemon) = Daemon::start().await? else {
@@ -189,14 +190,15 @@ async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()
 	hello.context("partitioned client hello")?;
 	local?;
 
-	let mut remote = client
-		.invoke(InvokeTool {
-			invocation_id: "w8-remote".into(),
-			name: "bash".into(),
-			..InvokeTool::default()
-		})
-		.await
-		.context("opening remote invocation")?;
+	// A genuinely in-flight daemon command: its session opens and its exec
+	// reports `Started` before the kill, so the pre-kill state never races
+	// the daemon's request validation.
+	let session = open_session(&client, &daemon.project).await?;
+	let mut run = exec(&client, &session, "sleep 30").await?;
+	assert!(matches!(
+		within("command start event", DEFAULT_TIMEOUT, run.next_event()).await??,
+		Some(ExecEvent::Started(_))
+	));
 	let mut local = client
 		.invoke(InvokeTool {
 			invocation_id: "w8-local".into(),
@@ -217,10 +219,10 @@ async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()
 	signal::kill(Pid::from_raw(daemon.pid()?.cast_signed()), signal::Signal::SIGKILL)
 		.context("SIGKILL project daemon")?;
 	assert!(
-		within("remote invocation stays pending", Duration::from_millis(250), remote.next_event())
+		within("command stream stays pending", Duration::from_millis(250), run.next_event())
 			.await
 			.is_err(),
-		"the killed daemon unexpectedly settled the remote invocation"
+		"the killed daemon unexpectedly settled the in-flight command stream"
 	);
 
 	// The router dies only on a remote-bound send arriving after the UDS
