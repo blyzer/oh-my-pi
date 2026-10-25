@@ -105,6 +105,11 @@ pub enum StreamVerdict {
 pub struct StreamInterrupt {
 	/// Tool call that triggered the redirect, if any.
 	pub culprit:       Option<omp_ai::ToolCallId>,
+	/// Journaled prose location of the match (ADR 0038 §4): the loop recovers
+	/// a bounded excerpt from the journaled stream text at commit time. Tool
+	/// matches run over projected text that is not a journaled stream, so they
+	/// carry `None` and the notice names the call instead.
+	pub excerpt:       Option<StreamExcerptRef>,
 	/// Whether partial assistant output remains in model context.
 	pub partial:       PartialOutput,
 	/// Placeholder label for the triggering tool call.
@@ -113,6 +118,17 @@ pub struct StreamInterrupt {
 	pub sibling_label: Str,
 	/// Durable effects to commit with the redirect.
 	pub effect:        StreamEffect,
+}
+
+/// Journaled location one redirect excerpt is recovered from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamExcerptRef {
+	/// Assistant content kind: `text` or `thinking`.
+	pub thinking: bool,
+	/// Provider block index of the content child.
+	pub block:    u32,
+	/// Byte offset the match ended at within that block's journaled text.
+	pub end:      u64,
 }
 
 /// Visibility of partial assistant output after a stream redirect.

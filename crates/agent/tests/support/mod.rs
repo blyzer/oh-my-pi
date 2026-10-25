@@ -396,3 +396,25 @@ pub fn tool_script(id: &str, name: &str, arguments: serde_json::Value) -> Vec<Ch
 		completed(FinishReason::ToolCalls, 1),
 	]
 }
+
+/// A minimal request for watcher-surface tests that never reach a provider.
+#[must_use]
+pub fn empty_request() -> ChatRequest {
+	ChatRequest {
+		messages:          Arc::from([]),
+		tools:             Arc::from([]),
+		hosted_tools:      Arc::from([]),
+		tool_choice:       omp_ai::Setting::Unset,
+		output:            omp_ai::Setting::Unset,
+		reasoning:         omp_ai::Setting::Unset,
+		verbosity:         omp_ai::Setting::Unset,
+		cache_retention:   omp_ai::Setting::Unset,
+		service_tier:      omp_ai::Setting::Unset,
+		sampling:          omp_ai::Sampling::default(),
+		max_output_tokens: None,
+		top_logprobs:      None,
+		safety:            Arc::from([]),
+		negotiation:       omp_ai::NegotiationPolicy::default(),
+		forced_call:       None,
+	}
+}
