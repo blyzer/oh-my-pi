@@ -24,6 +24,7 @@ use std::{
 
 use bytes::Bytes;
 use flume::Receiver;
+use nix::{sys::signal, unistd::Pid};
 use omp_core::{EnvPath, Str};
 use omp_e2e::{
 	Context as _, Result, error,
@@ -34,10 +35,13 @@ use omp_e2e::{
 };
 use omp_env::{
 	APPROVAL_RELAY_CAPABILITY, ApprovalQueryEvent, ClientError, EnvClient, ExecEvent, ExecRun,
+	InProcessEnvTransport, PartitionedEnvTransport, in_process_frames,
 };
+use omp_envd::EnvServer;
 use omp_proto::env::v1::{
 	ApprovalAnswer, ApprovalDecision, ApprovalQuery, CloseSessionRequest, ExecOutcome, ExecRequest,
-	ExecStatusMsg, OpenSessionRequest, Script, client_frame, server_frame,
+	ExecStatusMsg, InvokeTool, OpenSessionRequest, Script, ServerFrame, ServerHello, client_frame,
+	server_frame,
 };
 use url::Url;
 
@@ -142,6 +146,95 @@ fn exec_request(session: &Bytes, text: &str) -> ExecRequest {
 		source: Some(Script { text: text.to_owned(), ..Script::default() }),
 		..ExecRequest::default()
 	}
+}
+
+async fn accept_local_hello(transport: &InProcessEnvTransport) -> Result<()> {
+	let frame = transport.recv().await.context("local hello request")?;
+	assert!(matches!(frame.body, Some(client_frame::Body::Hello(_))));
+	transport
+		.send(ServerFrame {
+			request_id: 0,
+			body: Some(server_frame::Body::Hello(ServerHello::default())),
+			..ServerFrame::default()
+		})
+		.await
+		.context("local hello response")?;
+	Ok(())
+}
+
+/// W8 evidence: SIGKILL leaves an in-flight daemon invocation pending, then
+/// a later remote-bound request ends the router and drops an unrelated local
+/// invocation. This records the existing containment gap; it is not a fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()> {
+	let Some(daemon) = Daemon::start().await? else {
+		return Ok(());
+	};
+	let (local_pipe, local_transport) = in_process_frames(8);
+	let (remote_pipe, remote_pump) = EnvServer::connect_owner_uds_frames(daemon.process.socket())
+		.await
+		.context("connecting the partition router to the production daemon")?;
+	let mut remote_tools = omp_core::FastHashSet::default();
+	remote_tools.insert(Str::from("bash"));
+	let (client, router) =
+		PartitionedEnvTransport::spawn(local_pipe, remote_pipe, std::sync::Arc::new(remote_tools));
+	let (hello, local) =
+		tokio::join!(client.hello(Default::default()), accept_local_hello(&local_transport));
+	hello.context("partitioned client hello")?;
+	local?;
+
+	let mut remote = client
+		.invoke(InvokeTool {
+			invocation_id: "w8-remote".into(),
+			name: "bash".into(),
+			..InvokeTool::default()
+		})
+		.await
+		.context("opening remote invocation")?;
+	let mut local = client
+		.invoke(InvokeTool {
+			invocation_id: "w8-local".into(),
+			name: "ask".into(),
+			..InvokeTool::default()
+		})
+		.await
+		.context("opening local invocation")?;
+	assert!(matches!(
+		local_transport
+			.recv()
+			.await
+			.context("local invocation request")?
+			.body,
+		Some(client_frame::Body::InvokeTool(_))
+	));
+
+	signal::kill(Pid::from_raw(daemon.pid()?.cast_signed()), signal::Signal::SIGKILL)
+		.context("SIGKILL project daemon")?;
+	assert!(
+		within("remote invocation stays pending", Duration::from_millis(250), remote.next_event())
+			.await
+			.is_err(),
+		"the killed daemon unexpectedly settled the remote invocation"
+	);
+
+	let _ = client
+		.invoke(InvokeTool {
+			invocation_id: "w8-remote-after-kill".into(),
+			name: "bash".into(),
+			..InvokeTool::default()
+		})
+		.await;
+	assert!(matches!(
+		within("local invocation transport loss", DEFAULT_TIMEOUT, local.next_event()).await?,
+		Err(ClientError::TransportClosed)
+	));
+
+	drop(client);
+	let result = within("partition router termination", DEFAULT_TIMEOUT, router).await?;
+	assert!(matches!(result.context("partition router task")?, Err(_)));
+	remote_pump.abort();
+	let _ = daemon.shutdown().await;
+	Ok(())
 }
 
 async fn exec(client: &EnvClient, session: &Bytes, text: &str) -> Result<ExecRun> {
