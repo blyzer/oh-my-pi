@@ -1027,8 +1027,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				},
 				Err(fault) if multiple => {
 					push_payload_part(&mut parts, PayloadPart::Text {
-						// lintx-allow: error-format per-target failures render inline in multi-target
-						// output
+						// lintx-allow: error-format inline per-target failure
 						text: sf!("[Could not read {}: {}]", target, fault.message()),
 					});
 				},
