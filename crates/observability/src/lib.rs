@@ -106,6 +106,8 @@ pub mod authority {
 			capability: Str,
 		},
 		/// The request is malformed.
+		// lintx-allow: error-str-payload malformed-request diagnostic on a Clone/Eq wire error; no
+		// inner error exists
 		#[error("invalid telemetry request: {0}")]
 		Invalid(Str),
 		/// The named host resource does not exist.
@@ -115,8 +117,17 @@ pub mod authority {
 			resource: Str,
 		},
 		/// The authoritative durable index or exporter rejected the operation.
+		// lintx-allow: error-str-payload Clone/Eq wire error; rendered once via `owner_fault`
 		#[error("telemetry owner failed: {0}")]
 		Owner(Str),
+	}
+
+	impl TelemetryAuthorityError {
+		/// Renders an owner-side failure once into this Clone/Eq authority
+		/// error (ADR 0035 / PR #411 pattern).
+		pub fn owner_fault(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+			Self::Owner(Str::new(format!("{context}: {cause}")))
+		}
 	}
 
 	/// One canonical event retained in a subscription ring.
@@ -195,9 +206,7 @@ pub mod authority {
 		/// Serializes the canonical CONTROL result without a second schema.
 		pub fn into_value(self) -> Result<Value, TelemetryAuthorityError> {
 			serde_json::to_value(self).map_err(|error| {
-				TelemetryAuthorityError::Owner(Str::new(format!(
-					"telemetry result serialization failed: {error}"
-				)))
+				TelemetryAuthorityError::owner_fault("telemetry result serialization failed", error)
 			})
 		}
 	}

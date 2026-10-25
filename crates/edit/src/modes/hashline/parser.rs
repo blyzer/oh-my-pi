@@ -73,6 +73,13 @@ pub enum ParseFailure {
 	/// Other.
 	Other(String),
 }
+impl ParseFailure {
+	/// Renders a tokenizer failure once into this Clone/Eq parse failure
+	/// (ADR 0035 / PR #411 pattern).
+	fn other(cause: impl std::fmt::Display) -> Self {
+		Self::Other(cause.to_string())
+	}
+}
 impl fmt::Display for ParseFailure {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -851,7 +858,7 @@ fn parse_impl(diff: &str, streaming: bool) -> Result<Parsed, ParseFailure> {
 	let mut executor = Executor::new();
 	for token in tokenizer
 		.feed(diff)
-		.map_err(|error| ParseFailure::Other(error.to_string()))?
+		.map_err(|error| ParseFailure::other(error))?
 	{
 		executor.feed(token)?;
 	}

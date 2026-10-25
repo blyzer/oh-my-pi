@@ -100,6 +100,8 @@ impl Default for RpcClientOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
 	/// The client has already been shut down or its child exited.
+	// lintx-allow: error-str-payload disconnect reason broadcast to every pending request must be
+	// Clone; rendered once by `fail_all`
 	#[error("RPC client is disconnected: {0}")]
 	Disconnected(String),
 	/// Starting or communicating with the child failed.
@@ -115,6 +117,7 @@ pub enum ClientError {
 	#[error("timed out waiting for RPC ready handshake")]
 	ReadyTimeout,
 	/// The server handshake was incompatible with this SDK.
+	// lintx-allow: error-str-payload protocol handshake diagnostic with no inner error to carry
 	#[error("incompatible RPC ready handshake: {0}")]
 	IncompatibleHandshake(String),
 	/// A command response was not received before its deadline.
@@ -134,6 +137,7 @@ pub enum ClientError {
 		code:    Option<RpcErrorCode>,
 	},
 	/// A response did not match its request or expected result shape.
+	// lintx-allow: error-str-payload protocol-shape diagnostic with no inner error to carry
 	#[error("invalid RPC response: {0}")]
 	InvalidResponse(String),
 	/// An event subscriber fell behind the bounded event stream.
@@ -146,6 +150,7 @@ pub enum ClientError {
 
 /// Error reported by an embedding host-tool implementation.
 #[derive(Clone, Debug, thiserror::Error)]
+// lintx-allow: error-str-payload agent-facing tool failure text; rendered once by its constructors
 #[error("{message}")]
 pub struct HostToolError {
 	/// Text returned to the agent as the tool failure.
@@ -157,6 +162,18 @@ impl HostToolError {
 	pub fn new(message: impl Into<String>) -> Self {
 		Self { message: message.into() }
 	}
+
+	/// Host-tool failure with a context prefix; renders the cause once into
+	/// the agent-facing tool failure text (ADR 0035 / PR #411 pattern).
+	pub fn caused_by(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self { message: format!("{context}: {cause}") }
+	}
+}
+
+/// Renders a transport failure once into the disconnect reason broadcast to
+/// every pending request (ADR 0035 / PR #411 pattern).
+fn transport_fault(context: &str, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
 }
 
 mod host_context {
@@ -563,7 +580,7 @@ impl ClientState {
 			});
 			let result = match task.await {
 				Ok(result) => result,
-				Err(error) => Err(HostToolError::new(format!("host tool task failed: {error}"))),
+				Err(error) => Err(HostToolError::caused_by("host tool task failed", error)),
 			};
 			update_task.abort();
 			let cancelled = state
@@ -672,8 +689,10 @@ impl ClientState {
 		});
 	}
 
-	async fn fail_all(&self, reason: impl Into<String>) {
-		let reason = reason.into();
+	/// Fails every pending request, rendering the disconnect cause once at
+	/// this boundary (ADR 0035 / PR #411 pattern).
+	async fn fail_all(&self, reason: impl std::fmt::Display) {
+		let reason = reason.to_string();
 		self.ready.lock().await.take();
 		let pending = mem::take(&mut *self.pending.lock().await);
 		for (_, sender) in pending {
@@ -770,14 +789,14 @@ impl RpcClient {
 				if let Err(error) = stdin.write_all(&frame).await {
 					tracing::warn!(%error, "RPC transport write failed");
 					writer_state
-						.fail_all(format!("stdin write failed: {error}"))
+						.fail_all(transport_fault("stdin write failed", error))
 						.await;
 					return;
 				}
 				if let Err(error) = stdin.flush().await {
 					tracing::warn!(%error, "RPC transport flush failed");
 					writer_state
-						.fail_all(format!("stdin flush failed: {error}"))
+						.fail_all(transport_fault("stdin flush failed", error))
 						.await;
 					return;
 				}
@@ -800,7 +819,7 @@ impl RpcClient {
 					Err(error) => {
 						tracing::warn!(%error, "RPC transport read failed");
 						reader_state
-							.fail_all(format!("stdout read failed: {error}"))
+							.fail_all(transport_fault("stdout read failed", error))
 							.await;
 						return;
 					},
@@ -811,14 +830,14 @@ impl RpcClient {
 						Ok(Some(value)) => {
 							if let Err(error) = reader_state.dispatch(value).await {
 								tracing::warn!(%error, "RPC response dispatch failed");
-								reader_state.fail_all(error.to_string()).await;
+								reader_state.fail_all(error).await;
 								return;
 							}
 						},
 						Ok(None) => {},
 						Err(error) => {
 							tracing::warn!(%error, "RPC frame decoding failed");
-							reader_state.fail_all(error.to_string()).await;
+							reader_state.fail_all(error).await;
 							return;
 						},
 					}

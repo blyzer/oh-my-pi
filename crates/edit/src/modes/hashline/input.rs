@@ -21,7 +21,7 @@ use super::{
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
-use crate::error::EditError;
+use crate::error::{EditError, fault};
 
 /// Envelope and abort sentinels recognized when nested inside a header row.
 const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT_MARKER];
@@ -86,7 +86,7 @@ impl PatchSection {
 	/// Parse and memoize this section's body.
 	pub fn parse(&self) -> Result<&Parsed, EditError> {
 		let result = self.parsed.get_or_init(|| {
-			let mut parsed = parse_patch(&self.diff).map_err(|error| error.to_string())?;
+			let mut parsed = parse_patch(&self.diff).map_err(|error| fault(error))?;
 			if self.interleaved && has_clipboard_edit(&parsed.edits) {
 				return Err(CLIPBOARD_INTERLEAVED_SECTIONS.to_string());
 			}

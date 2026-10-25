@@ -13,6 +13,7 @@ use super::{
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	engine::{FileOp as EngineFileOp, PreviewFile},
+	error::fault,
 	files::FileSource,
 	store::{Clipboard, EditStore},
 };
@@ -33,7 +34,7 @@ fn streaming_diff(
 	normalized: &str,
 	clipboard: &mut Clipboard,
 ) -> Result<(String, Option<u32>), String> {
-	let parsed = parse_patch_streaming(&section.diff).map_err(|error| error.to_string())?;
+	let parsed = parse_patch_streaming(&section.diff).map_err(|error| fault(error))?;
 	let block_resolved = resolve_block_edits(
 		&parsed.edits,
 		normalized,
@@ -42,7 +43,7 @@ fn streaming_diff(
 		&mut |_| {},
 		&mut |_| {},
 	)
-	.map_err(|error| error.to_string())?;
+	.map_err(|error| fault(error))?;
 	let file_lines = normalized
 		.split('\n')
 		.map(str::to_owned)
@@ -136,7 +137,7 @@ fn preview_section(
 			result.diff = Some(diff);
 			result.first_changed_line = first;
 			let parsed = parse_patch_streaming(&target.diff)
-				.map_err(|error| crate::error::EditError::parse(error.to_string()))?;
+				.map_err(|error| crate::error::EditError::parse(error))?;
 			result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 				EngineFileOp::Delete
 			} else {
@@ -186,7 +187,7 @@ fn preview_section(
 	})();
 	if let Err(error) = outcome {
 		result.diff = None;
-		result.error = Some(error.to_string());
+		result.error = Some(fault(error));
 	}
 	result
 }

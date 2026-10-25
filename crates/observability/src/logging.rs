@@ -163,6 +163,12 @@ fn parse_timing(raw: Option<impl AsRef<str>>) -> TimingMode {
 	}
 }
 
+/// Renders an invalid log-filter diagnostic once into the deferred startup
+/// warning (ADR 0035 / PR #411 pattern).
+fn filter_fault(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
+}
+
 fn filter_from_env(name: &'static str) -> (LogFilter, Option<(&'static str, String)>, bool) {
 	let Some(raw) = env::var_os(name) else {
 		return (LogFilter::Default, None, false);
@@ -172,7 +178,7 @@ fn filter_from_env(name: &'static str) -> (LogFilter, Option<(&'static str, Stri
 	};
 	match EnvFilter::try_new(raw) {
 		Ok(filter) => (LogFilter::Env(filter), None, true),
-		Err(error) => (LogFilter::Default, Some((name, error.to_string())), true),
+		Err(error) => (LogFilter::Default, Some((name, filter_fault(error))), true),
 	}
 }
 

@@ -91,7 +91,7 @@ struct CompiledSection {
 	ir:   Vec<String>,
 }
 
-fn parse_error(message: impl Into<String>) -> EditError {
+fn parse_error(message: impl std::fmt::Display) -> EditError {
 	EditError::parse(message)
 }
 

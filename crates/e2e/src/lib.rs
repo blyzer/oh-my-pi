@@ -25,11 +25,11 @@ where
 	E: Display + Send + Sync + 'static,
 {
 	fn context(self, context: impl Display) -> Result<T> {
-		self.map_err(|error| io::Error::other(format!("{context}: {error}")).into())
+		self.map_err(|error| labelled(context, error))
 	}
 
 	fn with_context(self, context: impl FnOnce() -> String) -> Result<T> {
-		self.map_err(|error| io::Error::other(format!("{}: {error}", context())).into())
+		self.map_err(|error| labelled(context(), error))
 	}
 }
 
@@ -41,6 +41,12 @@ impl<T> Context<T> for Option<T> {
 	fn with_context(self, context: impl FnOnce() -> String) -> Result<T> {
 		self.ok_or_else(|| io::Error::other(context()).into())
 	}
+}
+
+/// Renders a labelled fixture failure once into the boxed harness error
+/// (ADR 0035 / PR #411 pattern).
+fn labelled(context: impl Display, cause: impl Display) -> Error {
+	io::Error::other(format!("{context}: {cause}")).into()
 }
 
 /// Creates a boxed test-harness error from a displayable message.

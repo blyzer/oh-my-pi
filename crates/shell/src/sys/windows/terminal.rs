@@ -188,8 +188,7 @@ pub fn move_to_foreground(_pid: sys::process::ProcessId) -> Result<(), error::Er
 /// Moves the current process to the foreground of the attached terminal.
 pub fn move_self_to_foreground() -> Result<(), io::Error> {
 	let pid = current_process_id();
-	move_to_foreground(pid as sys::process::ProcessId)
-		.map_err(|err| io::Error::other(err.to_string()))
+	move_to_foreground(pid as sys::process::ProcessId).map_err(io::Error::other)
 }
 
 /// Tries to get the path of the terminal device associated with the attached

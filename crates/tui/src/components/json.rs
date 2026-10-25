@@ -78,7 +78,7 @@ impl JsonPreview {
 		}
 		self.document = match serde_json::from_str(source.as_ref()) {
 			Ok(value) => Document::Valid(value),
-			Err(error) => Document::Invalid(Str::new(error.to_string())),
+			Err(error) => invalid_document(error),
 		};
 		self.source = Some(source);
 		self.bounds = None;
@@ -117,6 +117,12 @@ impl JsonPreview {
 			self.projects += 1;
 		}
 	}
+}
+
+/// Renders the parse failure once into the displayed invalid-JSON text
+/// (ADR 0035 / PR #411 pattern).
+fn invalid_document(cause: impl std::fmt::Display) -> Document {
+	Document::Invalid(Str::new(cause.to_string()))
 }
 
 impl Default for JsonPreview {

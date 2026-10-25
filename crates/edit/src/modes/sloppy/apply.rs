@@ -2507,18 +2507,22 @@ fn apply_operations(
 	Ok(result)
 }
 
+/// Appends the atomicity notice and renders the cause once at this
+/// model-facing fault boundary (ADR 0035 / PR #411 pattern).
+fn atomic_fault(cause: impl std::fmt::Display) -> EditError {
+	let mut message = cause.to_string();
+	if !message.contains(ATOMICITY_NOTICE) {
+		message.push('\n');
+		message.push_str(ATOMICITY_NOTICE);
+	}
+	EditError::matched(message)
+}
+
 /// Parse, locate, and atomically apply one sloppy section.
 pub fn apply_sloppy(
 	content: &str,
 	input: &str,
 	mut context: ApplyContext<'_>,
 ) -> Result<String, EditError> {
-	apply_operations(content, input, &mut context).map_err(|error| {
-		let mut message = error.to_string();
-		if !message.contains(ATOMICITY_NOTICE) {
-			message.push('\n');
-			message.push_str(ATOMICITY_NOTICE);
-		}
-		EditError::matched(message)
-	})
+	apply_operations(content, input, &mut context).map_err(|error| atomic_fault(error))
 }

@@ -64,6 +64,8 @@ pub enum ErrorKind {
 	CannotAssignToSpecialParameter,
 
 	/// Checked expansion error.
+	// lintx-allow: error-str-payload carries the user-authored `${var?message}` text, not a rendered
+	// error
 	#[error("expansion error: {0}")]
 	CheckedExpansionError(String),
 
@@ -335,6 +337,7 @@ pub enum ErrorKind {
 	},
 
 	/// An internal error occurred.
+	// lintx-allow: error-str-payload invariant-violation description; no inner error exists
 	#[error("internal shell error: {0}")]
 	InternalError(String),
 

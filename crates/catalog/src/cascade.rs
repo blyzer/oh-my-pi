@@ -251,6 +251,14 @@ pub enum CascadeError {
 	AmbiguousOverlap(Box<OverlapDetails>),
 }
 
+impl CascadeError {
+	/// Renders a KDL parse failure once into this Clone/Eq cascade error
+	/// (ADR 0035 / PR #411 pattern).
+	pub(crate) fn parse_fault(file: &str, cause: impl std::fmt::Display) -> Self {
+		Self::Parse { file: file.to_str(), message: cause.to_string().to_str() }
+	}
+}
+
 /// Colliding-rule evidence for [`CascadeError::AmbiguousOverlap`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OverlapDetails {
@@ -465,7 +473,7 @@ impl CompatCascade {
 		for &(file, text) in sources {
 			let document: KdlDocument = text.parse().map_err(|error: kdl::KdlError| {
 				tracing::warn!(file, "catalog compatibility KDL failed to parse");
-				CascadeError::Parse { file: file.to_str(), message: error.to_string().to_str() }
+				CascadeError::parse_fault(file, error)
 			})?;
 			for node in document.nodes() {
 				match node.name().value() {

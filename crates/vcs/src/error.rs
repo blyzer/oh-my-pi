@@ -68,6 +68,8 @@ pub enum Error {
 	},
 
 	/// A patch did not apply (context mismatch, missing file, malformed input).
+	// lintx-allow: error-str-payload user-facing apply diagnostic naming the offending path; no
+	// typed inner error exists
 	#[error("patch does not apply: {message}")]
 	PatchFailed {
 		/// Human-readable reason, including the offending path when known.

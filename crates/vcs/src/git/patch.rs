@@ -999,6 +999,12 @@ fn split_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
 	lines
 }
 
+/// Renders a zlib decode failure once into the patch apply diagnostic
+/// (ADR 0035 / PR #411 pattern).
+fn zlib_fault(cause: impl std::fmt::Display) -> ApplyFailure {
+	ApplyFailure::Invalid(format!("invalid zlib stream: {cause}"))
+}
+
 fn decode_binary_block(
 	block: &BinaryBlock,
 	base: &[u8],
@@ -1039,7 +1045,7 @@ fn decode_binary_block(
 	let mut decoder = gix::features::zlib::Inflate::default();
 	let (status, consumed, written) = decoder
 		.once(&compressed, &mut inflated)
-		.map_err(|err| ApplyFailure::Invalid(format!("invalid zlib stream: {err}")))?;
+		.map_err(|err| zlib_fault(err))?;
 	if status != gix::features::zlib::Status::StreamEnd || consumed != compressed.len() {
 		return Err(ApplyFailure::Invalid("incomplete zlib stream".into()));
 	}

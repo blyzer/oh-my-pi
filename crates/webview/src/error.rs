@@ -108,6 +108,7 @@ pub enum Error {
 
 	/// The engine sent traffic the driver could not interpret, or answered a
 	/// command with an error.
+	// lintx-allow: error-str-payload engine-reported wire diagnostic; no typed inner error exists
 	#[error("protocol error: {0}")]
 	Protocol(Str),
 

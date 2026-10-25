@@ -482,7 +482,7 @@ impl ResourceDescription {
 		};
 		let resource = self
 			.get(context.shell, protected, hard)
-			.unwrap_or_else(|e| format!("{e}"));
+			.unwrap_or_else(|e| resource_fault(e));
 		writeln!(context.stdout(), "{:<26}{:>16} {}", self.description, unit, resource)
 	}
 
@@ -498,6 +498,12 @@ impl ResourceDescription {
 			}
 		)
 	}
+}
+
+/// Renders a limit lookup failure once into the printed resource column
+/// (ADR 0035 / PR #411 pattern).
+fn resource_fault(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
 }
 
 impl IntoResettable<StyledStr> for ResourceDescription {

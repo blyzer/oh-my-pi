@@ -282,6 +282,8 @@ where
 	E: Display,
 {
 	options.cache = false;
+	// lintx-allow: error-format public collect API keeps its `E = String` contract
+	// (#408); heartbeat fault rendered once here
 	collect_entries_native(root, options, || heartbeat().map_err(|err| err.to_string()))
 }
 

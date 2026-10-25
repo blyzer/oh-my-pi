@@ -63,15 +63,18 @@ fn format(format_and_args: &[String], writer: impl Write) -> Result<(), Error> {
 		// Handle a format string with arguments using the first-party engine.
 		[fmt, args @ ..] => printf_engine::format(fmt, args, writer).map_err(|error| match error {
 			printf_engine::PrintfError::Io(error) => error.into(),
-			error => {
-				ErrorKind::PrintfInvalidUsage { usage: format!("printf formatting error: {error}") }
-					.into()
-			},
+			error => usage_fault(error),
 		}),
 		// Handle case with no format string (we shouldn't be able to get here since clap will
 		// fail parsing when the format string is missing)
 		[] => Err(ErrorKind::PrintfInvalidUsage { usage: "missing operand".into() }.into()),
 	}
+}
+
+/// Renders a printf engine failure once into the user-facing usage diagnostic
+/// (ADR 0035 / PR #411 pattern).
+fn usage_fault(cause: impl std::fmt::Display) -> Error {
+	ErrorKind::PrintfInvalidUsage { usage: format!("printf formatting error: {cause}") }.into()
 }
 
 fn format_special_case_for_percent_q(

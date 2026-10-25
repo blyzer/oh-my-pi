@@ -166,6 +166,12 @@ impl Drop for RemoteView {
 	}
 }
 
+/// Renders the driver failure once into the subscriber-facing crash event
+/// (ADR 0035 / PR #411 pattern).
+fn crashed_event(cause: impl std::fmt::Display) -> WebViewEvent {
+	WebViewEvent::Crashed(sf!("{cause}"))
+}
+
 /// Spawn a driver thread and block until it is operational.
 ///
 /// `drive` runs on a fresh current-thread tokio runtime and owns the whole
@@ -211,7 +217,7 @@ where
 				},
 				Err(err) => {
 					tracing::warn!(error = err.kind(), "webview driver stopped unexpectedly");
-					let _ = evt_tx.send(WebViewEvent::Crashed(sf!("{err}")));
+					let _ = evt_tx.send(crashed_event(err));
 				},
 			}
 		})
