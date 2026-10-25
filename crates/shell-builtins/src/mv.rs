@@ -45,6 +45,7 @@ use crate::{
 			self as backup_control, BackupMode, source_is_target_backup,
 			update_control::{self, UpdateMode},
 		},
+		fault::fault_in,
 		fsutil::{
 			MissingHandling, ResolveMode, are_hardlinks_or_one_way_symlink_to_same_file,
 			are_hardlinks_to_same_file, canonicalize, path_ends_with_terminator,
@@ -99,6 +100,7 @@ enum MvFailure {
 	Move(#[from] MvError),
 	#[error(transparent)]
 	Io(#[from] io::Error),
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	Message(String),
 }
@@ -648,10 +650,9 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 
 				rename(host, source, target, opts, None, hardlink_params.0, hardlink_params.1).map_err(
 					|e| {
-						MvFailure::Message(format!(
-							"cannot move {} to {}: {e}",
-							source.quote(),
-							target.quote()
+						MvFailure::Message(fault_in(
+							format!("cannot move {} to {}", source.quote(), target.quote()),
+							e,
 						))
 					},
 				)
@@ -686,7 +687,7 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 		let hardlink_params = (None, None);
 
 		rename(host, source, target, opts, None, hardlink_params.0, hardlink_params.1)
-			.map_err(|e| MvFailure::Message(format!("{e}")))
+			.map_err(MvFailure::Io)
 	}
 }
 
@@ -910,7 +911,8 @@ fn move_files_into_dir(
 		) {
 			Err(e) if e.to_string().is_empty() => host.fail(1),
 			Err(e) => {
-				let e = format!("cannot move {} to {}: {e}", sourcepath.quote(), targetpath.quote());
+				let e =
+					fault_in(format!("cannot move {} to {}", sourcepath.quote(), targetpath.quote()), e);
 				if let Some(pb) = &display_manager {
 					pb.suspend(|| show(host, e));
 				} else {
@@ -1485,10 +1487,13 @@ fn rename_file_fallback(
 	// Remove existing target file if it exists
 	if to_fs.is_symlink() {
 		fs::remove_file(&to_fs).map_err(|err| {
-			let inter_device_msg = format!(
-				"inter-device move failed: {} to {}; unable to remove target: {err}",
-				from.quote(),
-				to.quote()
+			let inter_device_msg = fault_in(
+				format!(
+					"inter-device move failed: {} to {}; unable to remove target",
+					from.quote(),
+					to.quote()
+				),
+				&err,
 			);
 			io::Error::new(err.kind(), inter_device_msg)
 		})?;
@@ -1746,9 +1751,6 @@ mod hardlink {
 		/// An underlying filesystem operation failed.
 		#[error("I/O error during hardlink operation: {0}")]
 		Io(#[from] io::Error),
-		/// Pre-scanning a hardlink group failed.
-		#[error("Failed to scan files for hardlinks: {0}")]
-		Scan(String),
 		/// Recreating a hardlink at its destination failed.
 		#[error(
 			"Failed to preserve hardlink: {} -> {}",
@@ -1769,7 +1771,6 @@ mod hardlink {
 		fn from(error: HardlinkError) -> Self {
 			match error {
 				HardlinkError::Io(e) => e,
-				HardlinkError::Scan(msg) => Self::other(msg),
 				HardlinkError::Preservation { source_path, target_path } => Self::other(format!(
 					"Failed to preserve hardlink: {} -> {}",
 					source_path.quote(),

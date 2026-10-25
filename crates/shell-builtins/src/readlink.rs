@@ -16,6 +16,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, os_bytes, util},
 	support::{
+		fault::fault_in,
 		fsutil::{MissingHandling, ResolveMode, canonicalize},
 		line_ending::LineEnding,
 		quote::Quotable,
@@ -108,7 +109,7 @@ impl Utility for Readlink {
 						let message = if err.raw_os_error() == Some(EINVAL) {
 							format!("{}: Invalid argument", operand.maybe_quote())
 						} else {
-							format!("{}: {err}", operand.maybe_quote())
+							fault_in(operand.maybe_quote(), err)
 						};
 						let _ = writeln!(host.stderr, "readlink: {message}");
 					}

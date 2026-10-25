@@ -61,6 +61,8 @@ mod imp {
 	use libc::mode_t;
 	use thiserror::Error;
 
+	#[cfg(windows)]
+	use crate::support::fault::fault;
 	#[cfg(unix)]
 	use crate::support::{
 		entries,
@@ -143,7 +145,10 @@ for details about the options it supports.";
 		InvalidDirective { directive: String },
 		#[error("cannot read table of mounted file systems: {error}")]
 		#[cfg_attr(not(unix), allow(dead_code, reason = "mount tables are unix-only"))]
-		CannotReadFilesystem { error: String },
+		CannotReadFilesystem {
+			#[source]
+			error: io::Error,
+		},
 		#[error("using '-' to denote standard input does not work in file system mode")]
 		#[cfg_attr(not(unix), allow(dead_code, reason = "stdin filesystem mode is unix-only"))]
 		StdinFilesystemMode,
@@ -1039,7 +1044,7 @@ for details about the options it supports.";
 		#[cfg(unix)]
 		fn populate_mount_list() -> Result<Vec<OsString>, StatError> {
 			let mut mount_list = read_fs_list()
-				.map_err(|e| StatError::CannotReadFilesystem { error: e.to_string() })?
+				.map_err(|e| StatError::CannotReadFilesystem { error: e })?
 				.iter()
 				.map(|mi| mi.mount_dir.clone())
 				.collect::<Vec<_>>();
@@ -2595,7 +2600,7 @@ for details about the options it supports.";
 			let resolved = host.resolve(file);
 			if self.show_fs {
 				let result = fs::metadata(&resolved)
-					.map_err(|error| error.to_string())
+					.map_err(|error| fault(error))
 					.and_then(|_| win::statfs(&resolved));
 				match result {
 					Ok(meta) => {

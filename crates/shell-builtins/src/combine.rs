@@ -19,7 +19,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	support::fault::fault,
+};
 
 const ARG_FILE1: &str = "file1";
 const ARG_OP: &str = "op";
@@ -193,7 +196,7 @@ fn operate(
 			}
 		},
 	}
-	out.flush().map_err(|err| Error::Msg(err.to_string()))?;
+	out.flush().map_err(|err| Error::Msg(fault(err)))?;
 	Ok(())
 }
 
@@ -203,7 +206,7 @@ fn open_input(name: &OsStr, host: &Host) -> Result<Option<File>, Error> {
 	}
 	let file = host
 		.open_read(name)
-		.map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
+		.map_err(|err| Error::Msg(input_error(name, &fault(err))))?;
 	Ok(Some(file))
 }
 
@@ -223,7 +226,7 @@ fn each_line(
 		line.clear();
 		let n = reader
 			.read_until(b'\n', &mut line)
-			.map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
+			.map_err(|err| Error::Msg(input_error(name, &fault(err))))?;
 		if n == 0 {
 			return Ok(());
 		}
@@ -251,8 +254,7 @@ fn key(line: &[u8]) -> &[u8] {
 }
 
 fn write_line(out: &mut impl Write, line: &[u8]) -> Result<(), Error> {
-	out.write_all(line)
-		.map_err(|err| Error::Msg(err.to_string()))
+	out.write_all(line).map_err(|err| Error::Msg(fault(err)))
 }
 
 fn input_error(name: &OsStr, err: &str) -> String {

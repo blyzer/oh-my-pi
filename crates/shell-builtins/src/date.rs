@@ -796,7 +796,11 @@ use jiff::{
 	tz::{Offset, TimeZone, TimeZoneDatabase},
 };
 
-use crate::support::{clap_ext::ShortcutValueParser, quote::Quotable};
+use crate::support::{
+	clap_ext::ShortcutValueParser,
+	fault::{fault, fault_in},
+	quote::Quotable,
+};
 
 // Options
 const DATE: &str = "date";
@@ -1201,6 +1205,12 @@ fn parse_bsd_adjustment(spec: &str) -> Option<BsdAdjustment> {
 	})
 }
 
+/// Renders `context (cause)` — GNU date's parenthesized fault wording —
+/// once at this presentation boundary (ADR 0035 / PR #411 pattern).
+fn fault_paren(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> String {
+	format!("{context} ({cause})")
+}
+
 /// Apply BSD `-v` adjustments to `date` in command-line order.
 fn apply_bsd_adjustments(mut date: Zoned, adjustments: &[BsdAdjustment]) -> Result<Zoned, String> {
 	for adjustment in adjustments {
@@ -1216,10 +1226,10 @@ fn apply_bsd_adjustments(mut date: Zoned, adjustments: &[BsdAdjustment]) -> Resu
 					BsdAdjustUnit::Minute => span.try_minutes(value),
 					BsdAdjustUnit::Second => span.try_seconds(value),
 				}
-				.map_err(|error| format!("invalid adjustment ({error})"))?;
+				.map_err(|error| fault_paren("invalid adjustment", error))?;
 				date
 					.checked_add(span)
-					.map_err(|error| format!("cannot adjust date ({error})"))?
+					.map_err(|error| fault_paren("cannot adjust date", error))?
 			},
 			BsdAdjustment::Set(value, unit) => {
 				let narrow = |unit: char| {
@@ -1252,7 +1262,7 @@ fn apply_bsd_adjustments(mut date: Zoned, adjustments: &[BsdAdjustment]) -> Resu
 				};
 				with
 					.build()
-					.map_err(|error| format!("cannot adjust date ({error})"))?
+					.map_err(|error| fault_paren("cannot adjust date", error))?
 			},
 		};
 	}
@@ -1637,9 +1647,9 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 					format!("expected file, got directory {}", path.quote()),
 				));
 			}
-			let file = host.open_read(&resolved).map_err(|error| {
-				DateError::new(1, format!("{}: {error}", path.as_os_str().maybe_quote()))
-			})?;
+			let file = host
+				.open_read(&resolved)
+				.map_err(|error| DateError::new(1, fault_in(path.as_os_str().maybe_quote(), error)))?;
 			Dates::File(parse_dates_from_reader(
 				file,
 				&now,
@@ -1649,9 +1659,8 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		},
 		DateSource::FileMtime(path) => {
 			// directory; `path` is kept for display.
-			let metadata = fs::metadata(host.resolve(path)).map_err(|error| {
-				DateError::new(1, format!("{}: {error}", path.as_os_str().maybe_quote()))
-			})?;
+			let metadata = fs::metadata(host.resolve(path))
+				.map_err(|error| DateError::new(1, fault_in(path.as_os_str().maybe_quote(), error)))?;
 			let mtime = metadata.modified()?;
 			let ts = Timestamp::try_from(mtime)
 				.map_err(|_| DateError::new(1, "cannot set date".to_string()))?;
@@ -1701,10 +1710,13 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 				};
 				match format_date(&date, format_string, &config) {
 					Ok(s) => writeln!(stdout, "{s}")
-						.map_err(|e| DateError::new(1, format!("write error: {e}")))?,
+						.map_err(|e| DateError::new(1, fault_in("write error", e)))?,
 					Err(e) => {
 						let _ = stdout.flush();
-						return Err(DateError::new(1, format!("invalid format '{format_string}' ({e})")));
+						return Err(DateError::new(
+							1,
+							fault_paren(format!("invalid format '{format_string}'"), e),
+						));
 					},
 				}
 			},
@@ -1720,7 +1732,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 
 	stdout
 		.flush()
-		.map_err(|e| DateError::new(1, format!("write error: {e}")))?;
+		.map_err(|e| DateError::new(1, fault_in("write error", e)))?;
 	drop(stdout);
 
 	if had_error {
@@ -1946,13 +1958,13 @@ fn format_date(
 	if let Some(result) =
 		format_modifiers::format_with_modifiers_if_present(date, format_string, config)
 	{
-		return result.map_err(|e| e.to_string());
+		return result.map_err(|e| fault(e));
 	}
 
 	let broken_down = BrokenDownTime::from(date);
 	broken_down
 		.to_string_with_config(config, format_string)
-		.map_err(|e| e.to_string())
+		.map_err(|e| fault(e))
 }
 
 /// Return the appropriate format string for the given settings.
@@ -2524,7 +2536,7 @@ fn set_system_datetime(date: Zoned) -> Result<(), DateError> {
 		Timespec { tv_sec: timestamp.as_second() as _, tv_nsec: timestamp.subsec_nanosecond() as _ };
 	clock_settime(ClockId::Realtime, timespec)
 		.map_err(io::Error::from)
-		.map_err(|error| DateError::new(1, format!("cannot set date: {error}")))
+		.map_err(|error| DateError::new(1, fault_in("cannot set date", error)))
 }
 
 #[cfg(not(unix))]

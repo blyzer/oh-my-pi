@@ -99,6 +99,7 @@ enum TouchError {
 		/// The Windows error code text.
 		code: String,
 	},
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	Message(String),
 }
@@ -1062,6 +1063,7 @@ fn pathbuf_from_stdout() -> Result<PathBuf, TouchError> {
 
 		// Don't include the null terminator
 		Ok(String::from_utf16(&file_path_buffer[0..buffer_size])
+			// lintx-allow: error-format windows-only UTF-16 decode rendered once here
 			.map_err(|e| TouchError::WindowsStdoutPathError { code: e.to_string() })?
 			.into())
 	}

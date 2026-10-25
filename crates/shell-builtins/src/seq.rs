@@ -15,7 +15,10 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
-	support::num::{ExtendedBigDecimal, fast_inc},
+	support::{
+		fault::fault_in,
+		num::{ExtendedBigDecimal, fast_inc},
+	},
 };
 
 mod seq_format {
@@ -1181,7 +1184,7 @@ fn seq_main(matches: &ArgMatches, host: &mut Host) -> Result<(), Box<dyn Error>>
 			let _ = writeln!(host.stderr, "seq: write error: {err}");
 			Ok(())
 		},
-		Err(err) => Err(format!("write error: {err}").into()),
+		Err(err) => Err(fault_in("write error", err).into()),
 	}
 }
 

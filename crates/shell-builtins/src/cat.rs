@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
-	support::{num::fast_inc_one, quote::Quotable},
+	support::{fault::fault_in, num::fast_inc_one, quote::Quotable},
 };
 
 // Allocate 32 digits for the line number. An estimate is that we can print
@@ -378,7 +378,7 @@ where
 		match cat_path(path, options, &mut state, host, stdout) {
 			Ok(()) => {},
 			Err(CatError::BrokenPipe) => return host.exit_code(),
-			Err(error) => host.error(format!("{}: {error}", path.maybe_quote()), 1),
+			Err(error) => host.error(fault_in(path.maybe_quote(), error), 1),
 		}
 	}
 	if state.skipped_carriage_return {

@@ -31,7 +31,10 @@ use ignore::{
 	types::{Types, TypesBuilder},
 };
 
-use crate::host::{Host, StreamWriter, Utility};
+use crate::{
+	host::{Host, StreamWriter, Utility},
+	support::fault::{fault, fault_in},
+};
 
 /// Exit status for a process terminated by `SIGPIPE` (`128 + 13`).
 const SIGPIPE_EXIT_CODE: i32 = 141;
@@ -633,7 +636,7 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 				captures.interpolate(|name| matcher.capture_index(name), line, replacement, output);
 				true
 			})
-			.map_err(|error| io::Error::other(error.to_string()))?;
+			.map_err(|error| io::Error::other(fault(error)))?;
 		let mut output = mem::take(&mut self.scratch);
 		let result = self.write_line(&output);
 		output.clear();
@@ -652,7 +655,7 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 			let Some(found) = self
 				.matcher
 				.find_at(line, at)
-				.map_err(|error| io::Error::other(error.to_string()))?
+				.map_err(|error| io::Error::other(fault(error)))?
 			else {
 				break;
 			};
@@ -660,15 +663,14 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 				at = found.end() + 1;
 				continue;
 			}
-			let match_offset = line_offset.saturating_add(
-				u64::try_from(found.start()).map_err(|error| io::Error::other(error.to_string()))?,
-			);
+			let match_offset =
+				line_offset.saturating_add(u64::try_from(found.start()).map_err(io::Error::other)?);
 			self.write_prefix(line_number, Some(found.start() + 1), match_offset, b':')?;
 			if let Some(replacement) = self.opts.replacement.as_deref() {
 				let matched = self
 					.matcher
 					.captures_at(line, found.start(), &mut self.captures)
-					.map_err(|error| io::Error::other(error.to_string()))?;
+					.map_err(|error| io::Error::other(fault(error)))?;
 				if matched {
 					self.scratch.clear();
 					self.captures.interpolate(
@@ -700,7 +702,7 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 			let Some(found) = self
 				.matcher
 				.find_at(line, at)
-				.map_err(|error| io::Error::other(error.to_string()))?
+				.map_err(|error| io::Error::other(fault(error)))?
 			else {
 				break;
 			};
@@ -709,9 +711,8 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 			} else {
 				at + 1
 			};
-			let match_offset = line_offset.saturating_add(
-				u64::try_from(found.start()).map_err(|error| io::Error::other(error.to_string()))?,
-			);
+			let match_offset =
+				line_offset.saturating_add(u64::try_from(found.start()).map_err(io::Error::other)?);
 			self.write_prefix(line_number, Some(found.start() + 1), match_offset, b':')?;
 			self.write_replaced_line(line)?;
 			printed = true;
@@ -874,7 +875,7 @@ fn effective_line_number(cli: &Rg) -> bool {
 fn first_column<M: Matcher>(matcher: &M, line: &[u8]) -> io::Result<Option<usize>> {
 	Ok(matcher
 		.find(line)
-		.map_err(|error| io::Error::other(error.to_string()))?
+		.map_err(|error| io::Error::other(fault(error)))?
 		.filter(|matched| !matched.is_empty())
 		.map(|matched| matched.start() + 1))
 }
@@ -885,7 +886,7 @@ fn count_matches<M: Matcher>(matcher: &M, line: &[u8]) -> io::Result<u64> {
 	while at <= line.len() {
 		let Some(matched) = matcher
 			.find_at(line, at)
-			.map_err(|error| io::Error::other(error.to_string()))?
+			.map_err(|error| io::Error::other(fault(error)))?
 		else {
 			break;
 		};
@@ -935,9 +936,7 @@ fn build_pcre_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Pcre
 		.utf(unicode)
 		.ucp(unicode)
 		.jit_if_available(pcre2_jit_enabled(host));
-	builder
-		.build_many(patterns)
-		.map_err(|error| error.to_string())
+	builder.build_many(patterns).map_err(|error| fault(error))
 }
 
 fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledMatcher, String> {
@@ -949,7 +948,7 @@ fn build_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<CompiledM
 	match engine {
 		RegexEngine::Default => build_rust_matcher(patterns, cli)
 			.map(CompiledMatcher::Rust)
-			.map_err(|error| error.to_string()),
+			.map_err(|error| fault(error)),
 		RegexEngine::Pcre2 => build_pcre_matcher(host, patterns, cli).map(CompiledMatcher::Pcre),
 		RegexEngine::Auto => match build_rust_matcher(patterns, cli) {
 			Ok(matcher) => Ok(CompiledMatcher::Rust(matcher)),
@@ -979,7 +978,7 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 	let (encoding, bom_sniffing) = match cli.encoding.as_deref() {
 		None | Some("auto") => (None, true),
 		Some("none") => (None, false),
-		Some(label) => (Some(Encoding::new(label).map_err(|error| format!("rg: {error}"))?), true),
+		Some(label) => (Some(Encoding::new(label).map_err(|error| fault_in("rg", error))?), true),
 	};
 	let mut builder = SearcherBuilder::new();
 	builder
@@ -1007,13 +1006,13 @@ fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, Strin
 		host
 			.stdin
 			.read_to_string(&mut text)
-			.map_err(|err| format!("rg: -: {err}"))?;
+			.map_err(|err| fault_in("rg: -", err))?;
 	} else {
 		let resolved = host.resolve(path);
 		host
 			.open_read(&resolved)
 			.and_then(|mut file| file.read_to_string(&mut text))
-			.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
+			.map_err(|err| fault_in(format!("rg: {}", path.to_string_lossy()), err))?;
 	}
 	Ok(text
 		.lines()
@@ -1085,7 +1084,7 @@ fn parse_size(input: &str) -> Result<u64, String> {
 	};
 	let value = digits
 		.parse::<u64>()
-		.map_err(|err| format!("invalid size {input:?}: {err}"))?;
+		.map_err(|err| fault_in(format!("invalid size {input:?}"), err))?;
 	Ok(value.saturating_mul(multiplier))
 }
 
@@ -1098,7 +1097,7 @@ fn type_builder(cli: &Rg) -> Result<TypesBuilder, String> {
 	for def in &cli.type_adds {
 		builder
 			.add_def(def)
-			.map_err(|err| format!("rg: --type-add {def:?}: {err}"))?;
+			.map_err(|err| fault_in(format!("rg: --type-add {def:?}"), err))?;
 	}
 	for name in &cli.types {
 		builder.select(name);
@@ -1112,15 +1111,14 @@ fn type_builder(cli: &Rg) -> Result<TypesBuilder, String> {
 fn print_type_list<W: Write>(cli: &Rg, out: &mut W) -> Result<(), String> {
 	let builder = type_builder(cli)?;
 	for def in builder.definitions() {
-		write!(out, "{}: ", def.name()).map_err(|err| err.to_string())?;
+		write!(out, "{}: ", def.name()).map_err(|err| fault(err))?;
 		for (idx, glob) in def.globs().iter().enumerate() {
 			if idx > 0 {
-				out.write_all(b", ").map_err(|err| err.to_string())?;
+				out.write_all(b", ").map_err(|err| fault(err))?;
 			}
-			out.write_all(glob.as_bytes())
-				.map_err(|err| err.to_string())?;
+			out.write_all(glob.as_bytes()).map_err(|err| fault(err))?;
 		}
-		out.write_all(b"\n").map_err(|err| err.to_string())?;
+		out.write_all(b"\n").map_err(|err| fault(err))?;
 	}
 	Ok(())
 }
@@ -1187,7 +1185,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 	let max_filesize = cli
 		.max_filesize
 		.as_ref()
-		.map(|size| parse_size(size).map_err(|error| format!("rg: {error}")))
+		.map(|size| parse_size(size).map_err(|error| fault_in("rg", error)))
 		.transpose()?;
 	let overrides = if cli.globs.is_empty() && cli.iglobs.is_empty() {
 		None
@@ -1196,24 +1194,24 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		if cli.glob_case_insensitive {
 			overrides
 				.case_insensitive(true)
-				.map_err(|error| format!("rg: --glob-case-insensitive: {error}"))?;
+				.map_err(|error| fault_in("rg: --glob-case-insensitive", error))?;
 		}
 		for glob in &cli.globs {
 			overrides
 				.add(glob)
-				.map_err(|error| format!("rg: --glob {glob:?}: {error}"))?;
+				.map_err(|error| fault_in(format!("rg: --glob {glob:?}"), error))?;
 		}
 		if !cli.iglobs.is_empty() && !cli.glob_case_insensitive {
 			overrides
 				.case_insensitive(true)
-				.map_err(|error| format!("rg: --iglob: {error}"))?;
+				.map_err(|error| fault_in("rg: --iglob", error))?;
 		}
 		for glob in &cli.iglobs {
 			overrides
 				.add(glob)
-				.map_err(|error| format!("rg: --iglob {glob:?}: {error}"))?;
+				.map_err(|error| fault_in(format!("rg: --iglob {glob:?}"), error))?;
 		}
-		Some(overrides.build().map_err(|error| format!("rg: {error}"))?)
+		Some(overrides.build().map_err(|error| fault_in("rg", error))?)
 	};
 	let explicit = if cli.ignore_files.is_empty() {
 		None
@@ -1226,7 +1224,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 				return Err(format!("rg: {}: {error}", path.to_string_lossy()));
 			}
 		}
-		Some(builder.build().map_err(|error| format!("rg: {error}"))?)
+		Some(builder.build().map_err(|error| fault_in("rg", error))?)
 	};
 	let types = if cli.types.is_empty() && cli.type_nots.is_empty() {
 		None
@@ -1234,7 +1232,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		Some(
 			type_builder(cli)?
 				.build()
-				.map_err(|error| format!("rg: {error}"))?,
+				.map_err(|error| fault_in("rg", error))?,
 		)
 	};
 	Ok(PathFilters { overrides, explicit, types, max_filesize })
@@ -1313,7 +1311,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 
 	let captures = matcher
 		.new_captures()
-		.map_err(|error| io::Error::other(error.to_string()))?;
+		.map_err(|error| io::Error::other(fault(error)))?;
 	let mut sink = RgSink {
 		out,
 		matcher,
@@ -1565,7 +1563,7 @@ fn collect_filtered_files(host: &mut Host, cli: &Rg, root: &Path) -> Result<Vec<
 		Err(omp_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
 			return Err(String::from("rg: cancelled"));
 		},
-		Err(err) => return Err(format!("rg: {err}")),
+		Err(err) => return Err(fault_in("rg", err)),
 	};
 	let mut files = Vec::new();
 	for entry in outcome.entries {

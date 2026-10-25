@@ -2,6 +2,8 @@
 #[cfg(unix)]
 use rustix::fs;
 
+use crate::support::fault::fault;
+
 /// Applies an octal mode expression to `current_mode`.
 pub(crate) fn parse_numeric(
 	current_mode: u32,
@@ -14,7 +16,7 @@ pub(crate) fn parse_numeric(
 	let change = if mode.is_empty() {
 		0
 	} else {
-		u32::from_str_radix(mode, 8).map_err(|error| error.to_string())?
+		u32::from_str_radix(mode, 8).map_err(|error| fault(error))?
 	};
 	if change > 0o7777 {
 		return Err(format!("mode is too large ({change:o} > 7777)"));

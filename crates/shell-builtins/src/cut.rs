@@ -14,6 +14,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, os_bytes, util},
 	support::{
+		fault::fault_in,
 		line_ending::LineEnding,
 		quote::Quotable,
 		ranges::{Range, complement},
@@ -758,9 +759,7 @@ where
 		let result = if let Some(path) = path {
 			host
 				.open_read(path)
-				.map_err(|error| {
-					io::Error::new(error.kind(), format!("{}: {error}", filename.maybe_quote()))
-				})
+				.map_err(|error| io::Error::new(error.kind(), fault_in(filename.maybe_quote(), error)))
 				.and_then(|file| match mode {
 					Mode::Bytes(ranges, opts) | Mode::Characters(ranges, opts) => {
 						cut_bytes(file, &mut out, ranges, opts)

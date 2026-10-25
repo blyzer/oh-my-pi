@@ -15,7 +15,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, ReadOpener, Utility, format_usage, matches_parser, util},
-	support::{line_ending::LineEnding, quote::Quotable},
+	support::{fault::fault_in, line_ending::LineEnding, quote::Quotable},
 };
 
 mod options {
@@ -137,7 +137,7 @@ fn read_context(
 ) -> Result<usize, String> {
 	reader
 		.read_line(buf)
-		.map_err(|e| format!("{}: {e}", name.maybe_quote()))
+		.map_err(|e| fault_in(name.maybe_quote(), e))
 }
 
 fn compare(
@@ -179,7 +179,7 @@ fn compare(
 				if !opts.get_flag(options::COLUMN_1) {
 					stdout
 						.write_all(&ra)
-						.map_err(|e| format!("write error: {e}"))?;
+						.map_err(|e| fault_in("write error", e))?;
 				}
 				ra.clear();
 				na = read_context(a, &mut ra, name1)?;
@@ -191,7 +191,7 @@ fn compare(
 				}
 				if !opts.get_flag(options::COLUMN_2) {
 					write_delimited(&mut *stdout, col2.as_bytes(), &rb)
-						.map_err(|e| format!("write error: {e}"))?;
+						.map_err(|e| fault_in("write error", e))?;
 				}
 				rb.clear();
 				nb = read_context(b, &mut rb, name2)?;
@@ -203,7 +203,7 @@ fn compare(
 				}
 				if !opts.get_flag(options::COLUMN_3) {
 					write_delimited(&mut *stdout, col3.as_bytes(), &ra)
-						.map_err(|e| format!("write error: {e}"))?;
+						.map_err(|e| fault_in("write error", e))?;
 				}
 				ra.clear();
 				rb.clear();
@@ -219,9 +219,9 @@ fn compare(
 	if opts.get_flag(options::TOTAL) {
 		let ending = LineEnding::from_zero_flag(opts.get_flag(options::ZERO_TERMINATED));
 		write!(stdout, "{n1}{delim}{n2}{delim}{n3}{delim}total{ending}")
-			.map_err(|e| format!("write error: {e}"))?;
+			.map_err(|e| fault_in("write error", e))?;
 	}
-	stdout.flush().map_err(|e| format!("write error: {e}"))?;
+	stdout.flush().map_err(|e| fault_in("write error", e))?;
 	if should_check && (c1.has_error || c2.has_error) {
 		if delayed_error {
 			let _ = writeln!(stderr, "comm: input is not in sorted order");

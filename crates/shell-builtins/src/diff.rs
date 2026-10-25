@@ -20,7 +20,10 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::glob::CompiledPattern;
 use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
 
-use crate::host::{Host, Utility, util};
+use crate::{
+	host::{Host, Utility, util},
+	support::fault::fault_in,
+};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -293,7 +296,7 @@ fn classify(name: &Path, new_file: bool, host: &Host) -> Result<Operand, String>
 		Ok(meta) if meta.is_dir() => Ok(Operand::Dir(resolved)),
 		Ok(_) => Ok(Operand::File(resolved)),
 		Err(err) if err.kind() == io::ErrorKind::NotFound && new_file => Ok(Operand::Absent),
-		Err(err) => Err(format!("{}: {}", name.display(), io_msg(&err))),
+		Err(err) => Err(fault_in(name.display(), io_msg(&err))),
 	}
 }
 
@@ -311,13 +314,13 @@ fn read_operand(
 			host
 				.stdin
 				.read_to_end(&mut buf)
-				.map_err(|err| format!("-: {}", io_msg(&err)))?;
+				.map_err(|err| fault_in("-", io_msg(&err)))?;
 			Ok((buf, None))
 		},
 		Operand::File(resolved) => {
 			let bytes = host
 				.read_file(resolved)
-				.map_err(|err| format!("{}: {}", name.display(), io_msg(&err)))?;
+				.map_err(|err| fault_in(name.display(), io_msg(&err)))?;
 			let mtime = fs::metadata(resolved)
 				.ok()
 				.and_then(|meta| meta.modified().ok());
@@ -770,10 +773,10 @@ fn diff_dirs(
 ) -> Result<bool, String> {
 	let mut names: BTreeSet<OsString> = BTreeSet::new();
 	for (dir_name, dir_res) in [(name_a, res_a), (name_b, res_b)] {
-		let entries = fs::read_dir(dir_res)
-			.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
+		let entries =
+			fs::read_dir(dir_res).map_err(|err| fault_in(dir_name.display(), io_msg(&err)))?;
 		for entry in entries {
-			let entry = entry.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
+			let entry = entry.map_err(|err| fault_in(dir_name.display(), io_msg(&err)))?;
 			let name = entry.file_name();
 			if !is_excluded(&name, opts.excludes) {
 				names.insert(name);
@@ -828,10 +831,10 @@ fn diff_dirs(
 			(Some(ma), Some(mb)) => {
 				let bytes_a = host
 					.read_file(&child_res_a)
-					.map_err(|err| format!("{}: {}", child_name_a.display(), io_msg(&err)))?;
+					.map_err(|err| fault_in(child_name_a.display(), io_msg(&err)))?;
 				let bytes_b = host
 					.read_file(&child_res_b)
-					.map_err(|err| format!("{}: {}", child_name_b.display(), io_msg(&err)))?;
+					.map_err(|err| fault_in(child_name_b.display(), io_msg(&err)))?;
 				let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 				differed |= diff_pair(
 					&child_name_a,
@@ -855,7 +858,7 @@ fn diff_dirs(
 					};
 					let bytes = host
 						.read_file(present_res)
-						.map_err(|err| format!("{}: {}", present_name.display(), io_msg(&err)))?;
+						.map_err(|err| fault_in(present_name.display(), io_msg(&err)))?;
 					let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 					let present_mtime = meta.modified().ok();
 					let epoch = Some(SystemTime::UNIX_EPOCH);

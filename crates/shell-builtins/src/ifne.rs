@@ -18,7 +18,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand, builder::ValueParser};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::{
+	host::{Host, Utility, matches_parser, util},
+	support::fault::fault_in,
+};
 
 const USAGE: &str = "usage: ifne [-n] command [args...]";
 const CHUNK: usize = 64 * 1024;
@@ -61,7 +64,7 @@ impl Utility for Ifne {
 					}
 				},
 				Err(err) => {
-					host.error(format!("stdin: {err}"), 1);
+					host.error(fault_in("stdin", err), 1);
 					return 1;
 				},
 			}
@@ -126,7 +129,7 @@ fn spawn_and_pump(host: &mut Host, command: &[OsString], first: Option<u8>) -> i
 	{
 		Ok(child) => child,
 		Err(err) => {
-			host.error(format!("{}: {err}", command[0].to_string_lossy()), 127);
+			host.error(fault_in(command[0].to_string_lossy(), err), 127);
 			return 127;
 		},
 	};

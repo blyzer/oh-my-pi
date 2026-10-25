@@ -14,6 +14,7 @@ mod args {
 		host::{Host, format_usage},
 		support::{
 			clap_ext::ShortcutValueParser,
+			fault::fault_in,
 			parse::{ParseSizeError, SignPrefix, parse_signed_num_max, parse_time},
 			quote::Quotable,
 		},
@@ -80,7 +81,7 @@ mod args {
 				match parse_num(arg) {
 					Ok(signum) => Self::Bytes(signum),
 					Err(e) => {
-						return Err(TailError::message(format!("invalid number of bytes: {e}")));
+						return Err(TailError::message(fault_in("invalid number of bytes", e)));
 					},
 				}
 			} else if let Some(arg) = matches.get_one::<String>(options::LINES) {
@@ -261,10 +262,9 @@ mod args {
 						settings.pid = pid;
 					},
 					Err(e) => {
-						return Err(TailError::message(format!(
-							"invalid PID: {}: {}",
-							pid_str.quote(),
-							e
+						return Err(TailError::message(fault_in(
+							format!("invalid PID: {}", pid_str.quote()),
+							e,
 						)));
 					},
 				}
@@ -1557,7 +1557,10 @@ mod follow {
 		use crate::support::sys::signals::ensure_stdout_not_broken;
 		use crate::{
 			host::{Host, ReadOpener, StreamWriter},
-			support::quote::Quotable,
+			support::{
+				fault::{fault, fault_in},
+				quote::Quotable,
+			},
 			tail::{
 				TailError, TailResult,
 				args::{FollowMode, Settings},
@@ -1624,14 +1627,14 @@ mod follow {
 				self
 					.watcher
 					.watch(path, mode)
-					.map_err(|err| TailError::message(err.to_string()))
+					.map_err(|err| TailError::message(fault(err)))
 			}
 
 			fn unwatch(&mut self, path: &Path) -> TailResult<()> {
 				self
 					.watcher
 					.unwatch(path)
-					.map_err(|err| TailError::message(err.to_string()))
+					.map_err(|err| TailError::message(fault(err)))
 			}
 		}
 
@@ -1800,7 +1803,7 @@ mod follow {
 							watcher =
 								Box::new(notify::PollWatcher::new(tx_clone, watcher_config).unwrap());
 						},
-						Err(e) => return Err(TailError::message(e.to_string())),
+						Err(e) => return Err(TailError::message(fault(e))),
 					}
 				}
 
@@ -2206,7 +2209,7 @@ mod follow {
 						}
 					},
 					Err(e) => {
-						return Err(TailError::message(format!("RecvTimeoutError: {}", e)));
+						return Err(TailError::message(fault_in("RecvTimeoutError", e)));
 					},
 				}
 
@@ -2840,7 +2843,7 @@ use thiserror::Error;
 
 use crate::{
 	host::{Host, ReadOpener, Utility, matches_parser, util},
-	support::{fsutil::sane_blksize::sane_blksize_from_metadata, quote::Quotable},
+	support::{fault::fault_in, fsutil::sane_blksize::sane_blksize_from_metadata, quote::Quotable},
 	tac::run_argv,
 };
 
@@ -2850,6 +2853,7 @@ const SIGPIPE_EXIT_CODE: i32 = 141;
 pub(crate) enum TailError {
 	#[error("{0}")]
 	Io(#[source] io::Error),
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	Message(String),
 	#[error("Broken pipe")]
@@ -3322,15 +3326,15 @@ fn tail_file(
 			},
 			Err(e) if e.kind() == ErrorKind::PermissionDenied => {
 				observer.add_bad_path(path, input.display_name.as_str(), false)?;
-				let message = format!("cannot open '{}' for reading: {e}", input.display_name);
+				let message = fault_in(format!("cannot open '{}' for reading", input.display_name), e);
 				let _ = writeln!(observer.stderr, "tail: {message}");
 				host.fail(1);
 			},
 			Err(e) => {
 				observer.add_bad_path(path, input.display_name.as_str(), false)?;
-				return Err(TailError::message(format!(
-					"cannot open '{}' for reading: {e}",
-					input.display_name
+				return Err(TailError::message(fault_in(
+					format!("cannot open '{}' for reading", input.display_name),
+					e,
 				)));
 			},
 		}

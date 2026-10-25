@@ -4,12 +4,10 @@
 # with `just lintx-ratchet-update` after migrating sites; it refuses to raise any count.
 
 [error-format]
-shell-builtins = 184
 tools = 10
 
 [error-str-payload]
 core = 1
 envd = 54
-shell-builtins = 13
 tool = 1
 tools = 27

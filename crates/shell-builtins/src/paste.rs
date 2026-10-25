@@ -18,7 +18,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, util},
-	support::quote::Quotable,
+	support::{fault::fault_in, quote::Quotable},
 };
 
 mod options {
@@ -123,7 +123,7 @@ fn paste(
 		} else {
 			let file = host
 				.open_read(&filename)
-				.map_err(|err| format!("{}: {}", filename.to_string_lossy(), strip_errno(&err)))?;
+				.map_err(|err| fault_in(filename.to_string_lossy(), strip_errno(&err)))?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
 		}
 	}

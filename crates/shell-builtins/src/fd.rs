@@ -356,9 +356,7 @@ impl FdIgnoreMatcher {
 			if let Some(err) = matcher.opener.add_ignore_file(&mut builder, &path) {
 				return Err(io::Error::other(err.to_string()));
 			}
-			let ignore = builder
-				.build()
-				.map_err(|err| io::Error::other(err.to_string()))?;
+			let ignore = builder.build().map_err(io::Error::other)?;
 			if !ignore.is_empty() {
 				matcher.global.push(ignore);
 			}
@@ -1215,7 +1213,7 @@ fn build_matcher(cli: &FdCli) -> io::Result<SearchMatcher> {
 			let glob = PatternBuilder::new(&pattern)
 				.case_insensitive(case_insensitive)
 				.build()
-				.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+				.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 			matchers.push(glob);
 		}
 		return Ok(SearchMatcher::Glob(matchers));
@@ -1236,7 +1234,7 @@ fn build_matcher(cli: &FdCli) -> io::Result<SearchMatcher> {
 		let regex = RegexBuilder::new(&pattern)
 			.case_insensitive(case_insensitive)
 			.build()
-			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 		regexes.push(regex);
 	}
 	Ok(SearchMatcher::Regex(regexes))
@@ -1249,7 +1247,7 @@ fn build_excludes(patterns: &[String]) -> io::Result<Excludes> {
 	let mut matchers = Vec::with_capacity(patterns.len());
 	for pattern in patterns {
 		let glob = CompiledPattern::new(pattern)
-			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 		matchers.push(glob);
 	}
 	Ok(Excludes(Arc::new(matchers)))
@@ -1310,7 +1308,7 @@ fn parse_size_filter(value: &str) -> io::Result<SizeFilter> {
 	}
 	let count = rest[..split]
 		.parse::<u64>()
-		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 	let unit = rest[split..].to_ascii_lowercase();
 	let multiplier = match unit.as_str() {
 		"" | "b" => 1,
@@ -1339,7 +1337,7 @@ fn parse_time_filter(value: &str) -> io::Result<SystemTime> {
 	if let Some(timestamp) = value.strip_prefix('@') {
 		let seconds = timestamp
 			.parse::<u64>()
-			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+			.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 		return Ok(UNIX_EPOCH + Duration::from_secs(seconds));
 	}
 	if let Some(duration) = parse_duration(value)? {
@@ -1361,7 +1359,7 @@ fn parse_duration(value: &str) -> io::Result<Option<Duration>> {
 	}
 	let count = trimmed[..split]
 		.parse::<u64>()
-		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 	let unit = trimmed[split..].to_ascii_lowercase();
 	let seconds = match unit.as_str() {
 		"s" | "sec" | "secs" | "second" | "seconds" => count,
@@ -1414,14 +1412,14 @@ fn parse_i32_part(value: Option<&str>, name: &str) -> io::Result<i32> {
 	value
 		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("missing {name}")))?
 		.parse::<i32>()
-		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
+		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
 }
 
 fn parse_u32_part(value: Option<&str>, name: &str) -> io::Result<u32> {
 	value
 		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("missing {name}")))?
 		.parse::<u32>()
-		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
+		.map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {

@@ -14,7 +14,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	support::fault::{fault, fault_in},
+};
 
 static OPT_DOMAIN: &str = "domain";
 static OPT_IP_ADDRESS: &str = "ip-address";
@@ -63,7 +66,7 @@ impl Utility for Hostname {
 		let _handle = match wsa::start() {
 			Ok(handle) => handle,
 			Err(err) => {
-				host.error(format!("failed to start Winsock: {err}"), 1);
+				host.error(fault_in("failed to start Winsock", err), 1);
 				return 1;
 			},
 		};
@@ -166,7 +169,7 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 		);
 	}
 	let hostname = current_hostname()
-		.map_err(|err| format!("failed to get hostname: {err}"))?
+		.map_err(|err| fault_in("failed to get hostname", err))?
 		.to_string_lossy()
 		.into_owned();
 
@@ -178,14 +181,14 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 			let hostname = hostname + ":1";
 			addresses = hostname
 				.to_socket_addrs()
-				.map_err(|err| format!("failed to resolve socket addresses: {err}"))?;
+				.map_err(|err| fault_in("failed to resolve socket addresses", err))?;
 		}
 
 		#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 		{
 			addresses = (hostname.as_str(), 0)
 				.to_socket_addrs()
-				.map_err(|err| format!("failed to lookup hostname: {err}"))?
+				.map_err(|err| fault_in("failed to lookup hostname", err))?
 				.map(|addr| addr.ip());
 		}
 
@@ -206,7 +209,7 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 		}
 		let len = output.len();
 		if len > 0 {
-			writeln!(host.stdout, "{}", &output[0..len - 1]).map_err(|err| err.to_string())?;
+			writeln!(host.stdout, "{}", &output[0..len - 1]).map_err(|err| fault(err))?;
 		}
 
 		Ok(())
@@ -215,17 +218,17 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 			let mut it = hostname.char_indices().filter(|&ci| ci.1 == '.');
 			if let Some(ci) = it.next() {
 				if matches.get_flag(OPT_SHORT) {
-					writeln!(host.stdout, "{}", &hostname[0..ci.0]).map_err(|err| err.to_string())?;
+					writeln!(host.stdout, "{}", &hostname[0..ci.0]).map_err(|err| fault(err))?;
 				} else {
-					writeln!(host.stdout, "{}", &hostname[ci.0 + 1..]).map_err(|err| err.to_string())?;
+					writeln!(host.stdout, "{}", &hostname[ci.0 + 1..]).map_err(|err| fault(err))?;
 				}
 			} else if matches.get_flag(OPT_SHORT) {
-				writeln!(host.stdout, "{hostname}").map_err(|err| err.to_string())?;
+				writeln!(host.stdout, "{hostname}").map_err(|err| fault(err))?;
 			}
 			return Ok(());
 		}
 
-		writeln!(host.stdout, "{hostname}").map_err(|err| err.to_string())?;
+		writeln!(host.stdout, "{hostname}").map_err(|err| fault(err))?;
 		Ok(())
 	}
 }

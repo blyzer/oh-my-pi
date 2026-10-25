@@ -24,6 +24,7 @@ use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
 	support::{
 		backup::{self as backup_control, BackupMode},
+		fault::{fault, fault_in},
 		fsutil::{
 			MissingHandling, ResolveMode, canonicalize, make_path_relative_to,
 			paths_refer_to_same_file,
@@ -72,6 +73,7 @@ enum LnError {
 	#[error("{}: hard link not allowed for directory", _0.to_string_lossy())]
 	FailedToCreateHardLinkDir(PathBuf),
 
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	Message(String),
 
@@ -171,7 +173,7 @@ fn ln_main(matches: &ArgMatches, host: &mut Host) -> LnResult<()> {
 	};
 
 	let backup_mode = backup_control::determine_backup_mode(matches)
-		.map_err(|error| LnError::Message(error.to_string()))?;
+		.map_err(|error| LnError::Message(fault(error)))?;
 	let backup_suffix = backup_control::determine_backup_suffix(matches);
 
 	// When we have "-L" or "-L -P", false otherwise
@@ -488,7 +490,7 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 		if let Some(p) = &backup_path {
 			host.ensure_writable(p)?;
 			fs::rename(&dst_fs, p)
-				.map_err(|e| LnError::Message(format!("cannot backup {}: {e}", dst.quote())))?;
+				.map_err(|e| LnError::Message(fault_in(format!("cannot backup {}", dst.quote()), e)))?;
 		}
 		match settings.overwrite {
 			OverwriteMode::NoClobber => {},
@@ -523,18 +525,18 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 
 	let res: LnResult<()> = if settings.symbolic {
 		make_symlink(host, &source, &dst_fs).map_err(|e| {
-			LnError::Message(format!(
-				"failed to create symbolic link {}: {}",
-				dst.quote(),
-				strip_errno(&e)
+			LnError::Message(fault_in(
+				format!("failed to create symbolic link {}", dst.quote()),
+				strip_errno(&e),
 			))
 		})
 	} else {
 		// Hard links dereference their target, so syscalls get the resolved source.
 		let source_fs = host.resolve(&source);
 		let p = if settings.logical && source_fs.is_symlink() {
-			fs::canonicalize(&source_fs)
-				.map_err(|e| LnError::Message(format!("failed to access {}: {e}", source.quote())))?
+			fs::canonicalize(&source_fs).map_err(|e| {
+				LnError::Message(fault_in(format!("failed to access {}", source.quote()), e))
+			})?
 		} else {
 			source_fs
 		};
@@ -543,11 +545,9 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 			Err(_) if p.is_dir() => {
 				Err(LnError::FailedToCreateHardLinkDir(source.to_path_buf()).into())
 			},
-			Err(e) => Err(LnError::Message(format!(
-				"failed to create hard link {} => {}: {}",
-				source.quote(),
-				dst.quote(),
-				strip_errno(&e)
+			Err(e) => Err(LnError::Message(fault_in(
+				format!("failed to create hard link {} => {}", source.quote(), dst.quote()),
+				strip_errno(&e),
 			))),
 		}
 	};
@@ -555,7 +555,7 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	if let Err(e) = res {
 		if let Some(p) = &backup_path {
 			fs::rename(p, &dst_fs)
-				.map_err(|e| LnError::Message(format!("cannot backup {}: {e}", dst.quote())))?;
+				.map_err(|e| LnError::Message(fault_in(format!("cannot backup {}", dst.quote()), e)))?;
 		}
 		return Err(e);
 	}

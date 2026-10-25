@@ -3103,7 +3103,7 @@ mod display {
 		let mut writer = StdIoWrite(out);
 		broken_down
 			.format_with_config(&TimeFormatConfig::new().lenient(true), fmt, &mut writer)
-			.map_err(|err| io::Error::other(err.to_string()))
+			.map_err(io::Error::other)
 	}
 
 	fn display_len_or_rdev(metadata: &Metadata, config: &Config) -> SizeOrDeviceId {

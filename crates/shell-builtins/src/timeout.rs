@@ -11,7 +11,10 @@ use parking_lot::Mutex;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::{
+	host::{parse_duration, quote_arg},
+	support::fault::fault,
+};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -170,7 +173,7 @@ impl builtins::Command for TimeoutCommand {
 			Err(err) => {
 				// clap reports `--help` as an error; that belongs on stdout
 				// with a success status, real usage errors exit 125.
-				let rendered = err.to_string();
+				let rendered = fault(&err);
 				if err.use_stderr() {
 					tracing::warn!(
 						builtin = "timeout",

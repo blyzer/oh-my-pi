@@ -578,17 +578,20 @@ pub mod compiler {
 
 	use omp_shell::{openfiles::OpenFile, sys::fs};
 
-	use crate::sed::{
-		command::{
-			Address, Command, CommandData, ProcessingContext, RegexMode, ReplacementPart,
-			ReplacementTemplate, Substitution, Transliteration,
+	use crate::{
+		sed::{
+			command::{
+				Address, Command, CommandData, ProcessingContext, RegexMode, ReplacementPart,
+				ReplacementTemplate, Substitution, Transliteration,
+			},
+			delimited_parser::{parse_char_escape, parse_regex, parse_transliteration},
+			error_handling::{ScriptLocation, SedError, SedResult, compilation_error, semantic_error},
+			fast_regex::Regex,
+			named_writer::NamedWriter,
+			script_char_provider::ScriptCharProvider,
+			script_line_provider::{ScriptLineProvider, ScriptValue},
 		},
-		delimited_parser::{parse_char_escape, parse_regex, parse_transliteration},
-		error_handling::{ScriptLocation, SedError, SedResult, compilation_error, semantic_error},
-		fast_regex::Regex,
-		named_writer::NamedWriter,
-		script_char_provider::ScriptCharProvider,
-		script_line_provider::{ScriptLineProvider, ScriptValue},
+		support::fault::fault_in,
 	};
 
 	const DEFAULT_OUTPUT_WIDTH: usize = 60;
@@ -1261,7 +1264,7 @@ pub mod compiler {
 
 		// Compile into engine.
 		let compiled = Regex::new(&pattern).map_err(|e| {
-			compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {e}"))
+			compilation_error::<Regex>(lines, line, fault_in(format!("invalid regex '{pattern}'"), e))
 				.unwrap_err()
 		})?;
 
@@ -5033,9 +5036,12 @@ pub mod error_handling {
 
 	use thiserror::Error;
 
-	use crate::sed::{
-		command::ProcessingContext, script_char_provider::ScriptCharProvider,
-		script_line_provider::ScriptLineProvider,
+	use crate::{
+		sed::{
+			command::ProcessingContext, script_char_provider::ScriptCharProvider,
+			script_line_provider::ScriptLineProvider,
+		},
+		support::fault::fault_in,
 	};
 
 	/// Error reported while compiling or executing a sed program.
@@ -5150,7 +5156,7 @@ pub mod error_handling {
 	impl<T> IoContext<T> for io::Result<T> {
 		fn map_err_context(self, context: impl FnOnce() -> String) -> SedResult<T> {
 			self.map_err(|source| SedError::ContextualIo {
-				message: format!("{}: {source}", context()),
+				message: fault_in(context(), &source),
 				source,
 			})
 		}
@@ -5301,6 +5307,7 @@ pub mod fast_io {
 	use crate::{
 		host::Host,
 		sed::{error_handling::SedError, named_writer::open_read},
+		support::fault::fault,
 	};
 
 	// Define two cursors for iterating over lines:
@@ -5487,7 +5494,7 @@ pub mod fast_io {
 					} else {
 						let result = str::from_utf8(content);
 						self.utf8_verified.set(true);
-						result.map_err(|e| SedError::new(2, e.to_string()))
+						result.map_err(|e| SedError::new(2, fault(e)))
 					}
 				},
 				IOChunkContent::Owned { content, .. } => Ok(content),
@@ -5516,7 +5523,7 @@ pub mod fast_io {
 						self.utf8_verified.set(true);
 						Ok(())
 					},
-					Err(e) => Err(SedError::new(2, e.to_string())),
+					Err(e) => Err(SedError::new(2, fault(e))),
 				},
 			}
 		}
@@ -6752,9 +6759,12 @@ pub mod fast_regex {
 		bytes::{CaptureMatches as ByteCaptureMatches, Captures as ByteCaptures, Regex as ByteRegex},
 	};
 
-	use crate::sed::{
-		error_handling::{SedError, SedResult},
-		fast_io::IOChunk,
+	use crate::{
+		sed::{
+			error_handling::{SedError, SedResult},
+			fast_io::IOChunk,
+		},
+		support::fault::fault,
 	};
 
 	/// REs requiring the fancy_regex capabilities rather than the
@@ -6990,8 +7000,7 @@ pub mod fast_regex {
 				Regex::Byte(re) => Ok(re.is_match(chunk.as_bytes())),
 				Regex::Fancy(re) => {
 					let text = chunk.as_str()?;
-					re.is_match(text)
-						.map_err(|e| SedError::new(2, e.to_string()))
+					re.is_match(text).map_err(|e| SedError::new(2, fault(e)))
 				},
 			}
 		}
@@ -7045,7 +7054,7 @@ pub mod fast_regex {
 					match re.captures(text) {
 						Ok(Some(caps)) => Ok(Some(Captures::Fancy(caps))),
 						Ok(None) => Ok(None),
-						Err(e) => Err(SedError::new(2, e.to_string())),
+						Err(e) => Err(SedError::new(2, fault(e))),
 					}
 				},
 			}
@@ -7067,7 +7076,7 @@ pub mod fast_regex {
 					if let Some(m) = re.find(haystack) {
 						// Attempt UTF-8 decode for the match region only
 						let text = str::from_utf8(&haystack[m.start()..m.end()])
-							.map_err(|e| SedError::new(2, e.to_string()))?;
+							.map_err(|e| SedError::new(2, fault(e)))?;
 						Ok(Some(Match { start: m.start(), end: m.end(), text }))
 					} else {
 						Ok(None)
@@ -7081,7 +7090,7 @@ pub mod fast_regex {
 							Ok(Some(Match { start: m.start(), end: m.end(), text: m.as_str() }))
 						},
 						Ok(None) => Ok(None),
-						Err(e) => Err(SedError::new(2, e.to_string())),
+						Err(e) => Err(SedError::new(2, fault(e))),
 					}
 				},
 			}
@@ -7170,8 +7179,7 @@ pub mod fast_regex {
 					Some(m) => Ok(Some(Match {
 						start: m.start(),
 						end:   m.end(),
-						text:  str::from_utf8(m.as_bytes())
-							.map_err(|e| SedError::new(1, e.to_string()))?,
+						text:  str::from_utf8(m.as_bytes()).map_err(|e| SedError::new(1, fault(e)))?,
 					})),
 					None => Ok(None),
 				},
@@ -7618,12 +7626,9 @@ pub mod in_place {
 			match temp.persist(&orig) {
 				Ok(_) => {},
 				Err(e) => {
+					let temp_path = e.file.path().quote();
 					return Err(SedError::io(
-						format!(
-							"error persisting temporary file {} to {}",
-							e.file.path().quote(),
-							orig.quote()
-						),
+						format!("error persisting temporary file {} to {}", temp_path, orig.quote()),
 						e.error,
 					));
 				},
@@ -7811,7 +7816,7 @@ pub mod named_writer {
 	use crate::{
 		host::open_resolved_read,
 		sed::error_handling::{ScriptLocation, SedResult, runtime_error},
-		support::quote::Quotable,
+		support::{fault::fault_in, quote::Quotable},
 	};
 
 	thread_local! {
@@ -7872,8 +7877,11 @@ pub mod named_writer {
 				.truncate(true)
 				.open(&path)
 				.map_err(|e| {
-					runtime_error::<()>(&location, format!("creating file {}: {}", path.quote(), e))
-						.unwrap_err()
+					runtime_error::<()>(
+						&location,
+						fault_in(format!("creating file {}", path.quote()), e),
+					)
+					.unwrap_err()
 				})?;
 
 			let writer =
@@ -7888,7 +7896,7 @@ pub mod named_writer {
 			writeln!(self.writer, "{line}").map_err(|e| {
 				runtime_error::<()>(
 					&self.location,
-					format!("writing to file {}: {e}", self.path.quote()),
+					fault_in(format!("writing to file {}", self.path.quote()), e),
 				)
 				.unwrap_err()
 			})
@@ -7899,7 +7907,7 @@ pub mod named_writer {
 			self.writer.flush().map_err(|e| {
 				runtime_error::<()>(
 					&self.location,
-					format!("writing to file {}: {}", self.path.quote(), e),
+					fault_in(format!("writing to file {}", self.path.quote()), e),
 				)
 				.unwrap_err()
 			})
@@ -7953,7 +7961,7 @@ pub mod processor {
 			in_place::InPlace,
 			named_writer,
 		},
-		support::quote::Quotable,
+		support::{fault::fault, quote::Quotable},
 	};
 
 	/// Return the specified command variant or panic.
@@ -7980,7 +7988,7 @@ pub mod processor {
 				let regex = re_or_saved_re(re.as_ref(), context, location)?;
 				match regex.is_match(pattern) {
 					Ok(result) => Ok(result),
-					Err(e) => input_runtime_error(location, context, e.to_string()),
+					Err(e) => input_runtime_error(location, context, fault(e)),
 				}
 			},
 
@@ -8222,7 +8230,7 @@ pub mod processor {
 
 		// Handle errors.
 		if let Err(e) = subst_result {
-			return input_runtime_error(&command.location, context, e.to_string());
+			return input_runtime_error(&command.location, context, fault(e));
 		}
 
 		// Handle substitution success.

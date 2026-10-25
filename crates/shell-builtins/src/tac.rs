@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
-	support::quote::Quotable,
+	support::{fault::fault, quote::Quotable},
 };
 
 mod options {
@@ -75,7 +75,7 @@ pub(crate) fn run_argv(argv: Vec<ffi::OsString>, host: &mut Host) -> i32 {
 	match <Tac as clap::Parser>::try_parse_from(argv) {
 		Ok(parsed) => parsed.run(host),
 		Err(error) => {
-			let rendered = error.to_string();
+			let rendered = fault(&error);
 			if error.use_stderr() {
 				let _ = write!(host.stderr, "{rendered}");
 				i32::from(Tac::USAGE_ERROR)

@@ -3,6 +3,7 @@
 use std::{cmp::max, str::FromStr};
 
 use super::quote::Quotable;
+use crate::support::fault::fault_in;
 
 /// An inclusive, one-based range of positions.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -54,7 +55,7 @@ impl Range {
 			.map(|item| {
 				item
 					.parse()
-					.map_err(|error| format!("range {} was invalid: {error}", item.quote()))
+					.map_err(|error| fault_in(format!("range {} was invalid", item.quote()), error))
 			})
 			.collect::<Result<Vec<_>, _>>()?;
 		Ok(Self::merge(ranges))

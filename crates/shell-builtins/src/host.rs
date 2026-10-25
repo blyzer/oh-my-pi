@@ -58,6 +58,8 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::support::fault::fault;
+
 /// A boxed dynamic-device host operation.
 ///
 /// Device discovery and invocation are cold I/O boundaries, so one boxed
@@ -1178,7 +1180,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 		Err(err) => {
 			// clap reports `--help` and `--version` as errors; those belong on
 			// stdout with a success status, everything else on stderr.
-			let rendered = err.to_string();
+			let rendered = fault(&err);
 			if err.use_stderr() {
 				tracing::warn!(
 					builtin = U::NAME,

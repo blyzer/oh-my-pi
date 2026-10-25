@@ -7,7 +7,10 @@ use std::io::Write;
 use clap::{ArgMatches, Command};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, matches_parser, os_bytes, util};
+use crate::{
+	host::{Host, Utility, matches_parser, os_bytes, util},
+	support::fault::fault_in,
+};
 
 mod platform {
 	#[cfg(unix)]
@@ -66,7 +69,7 @@ impl Utility for Whoami {
 		let username = match platform::get_username() {
 			Ok(username) => username,
 			Err(err) => {
-				host.error(format!("failed to get username: {err}"), 1);
+				host.error(fault_in("failed to get username", err), 1);
 				return 1;
 			},
 		};
@@ -80,7 +83,7 @@ impl Utility for Whoami {
 			.and_then(|()| host.stdout.write_all(b"\n"))
 			.and_then(|()| host.stdout.flush());
 		if let Err(err) = result {
-			host.error(format!("failed to print username: {err}"), 1);
+			host.error(fault_in("failed to print username", err), 1);
 			return 1;
 		}
 		0
