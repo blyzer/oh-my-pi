@@ -147,19 +147,22 @@ pub enum WebError {
 }
 
 impl WebError {
-	/// Creates a transport error from a displayable message.
-	pub fn request(message: impl Into<Str>) -> Self {
-		Self::Request(message.into())
+	/// Creates a transport error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn request(cause: impl std::fmt::Display) -> Self {
+		Self::Request(sf!("{cause}"))
 	}
 
-	/// Creates a response-decoding error from a displayable message.
-	pub fn decode(message: impl Into<Str>) -> Self {
-		Self::Decode(message.into())
+	/// Creates a response-decoding error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn decode(cause: impl std::fmt::Display) -> Self {
+		Self::Decode(sf!("{cause}"))
 	}
 
-	/// Creates a site-rendering error from a displayable message.
-	pub fn render(message: impl Into<Str>) -> Self {
-		Self::Render(message.into())
+	/// Creates a site-rendering error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn render(cause: impl std::fmt::Display) -> Self {
+		Self::Render(sf!("{cause}"))
 	}
 
 	/// Returns the stable model-facing error message.

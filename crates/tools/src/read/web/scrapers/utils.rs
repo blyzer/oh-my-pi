@@ -8,7 +8,7 @@ use crate::read::web::types::{HttpResponse, RenderResult, WebError};
 
 /// JSON-decodes a response that has already been fetched.
 pub(super) fn decode_json<T: DeserializeOwned>(response: &HttpResponse) -> Result<T, WebError> {
-	serde_json::from_slice(&response.body).map_err(|error| WebError::decode(error.to_string()))
+	serde_json::from_slice(&response.body).map_err(|error| WebError::decode(error))
 }
 /// Strictly percent-decodes one URL path component.
 ///
@@ -72,7 +72,7 @@ pub(super) fn build_result(content: &str, method: impl IntoStr) -> RenderResult 
 pub(super) fn html_to_basic_markdown(html: &str) -> Result<Str, WebError> {
 	let without_scripts = strip_element_blocks(html, b"<script", b"</script>");
 	let cleaned = strip_element_blocks(&without_scripts, b"<style", b"</style>");
-	let result = convert(&cleaned, None).map_err(|error| WebError::render(error.to_string()))?;
+	let result = convert(&cleaned, None).map_err(|error| WebError::render(error))?;
 	Ok(Str::new(result.content.unwrap_or_default().trim()))
 }
 
