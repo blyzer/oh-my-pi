@@ -47,6 +47,17 @@ impl LocalError {
 		Self { kind, message: message.into_str() }
 	}
 
+	/// Constructs a local failure in `context` caused by `cause`, rendering the
+	/// cause once at this Clone/Eq receipt boundary (ADR 0035 / PR #411
+	/// pattern).
+	pub fn caused(
+		kind: LocalErrorKind,
+		context: impl std::fmt::Display,
+		cause: impl std::fmt::Display,
+	) -> Self {
+		Self::new(kind, sf!("{context}: {cause}"))
+	}
+
 	/// Constructs a cancellation failure.
 	pub fn cancelled() -> Self {
 		Self::new(LocalErrorKind::Cancelled, "local inference was cancelled")

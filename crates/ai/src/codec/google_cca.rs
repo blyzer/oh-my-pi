@@ -670,9 +670,7 @@ impl Codec for GoogleCcaCodec {
 				))
 			},
 		}
-		.map_err(|error| {
-			cca_decode_error(format!("invalid CCA request: {error}")).into_inference(false)
-		})?;
+		.map_err(|error| cca_decode_fault("invalid CCA request", error).into_inference(false))?;
 		Ok(EncodedRequest {
 			operation:   OperationKind::Chat,
 			method:      RequestMethod::Post,
@@ -798,12 +796,12 @@ pub struct CcaWireError {
 /// traversal.
 pub fn unwrap_response(data: &[u8]) -> Result<GenerateContentResponse, GoogleCodecError> {
 	let raw: Box<RawValue> = serde_json::from_slice(data)
-		.map_err(|error| cca_decode_error(format!("invalid CCA response JSON: {error}")))?;
+		.map_err(|error| cca_decode_fault("invalid CCA response JSON", error))?;
 	if !raw.get().trim_start().starts_with('{') {
 		return Err(cca_provider_error("CCA stream event is not an object"));
 	}
 	let envelope: CcaResponseEnvelope = serde_json::from_str(raw.get())
-		.map_err(|error| cca_decode_error(format!("invalid CCA response JSON: {error}")))?;
+		.map_err(|error| cca_decode_fault("invalid CCA response JSON", error))?;
 	if let Some(error) = envelope.error {
 		if error.code == Some(429) || error.status.as_deref() == Some("RESOURCE_EXHAUSTED") {
 			return Err(GoogleCodecError::from_wire(GoogleWireError {
@@ -814,7 +812,7 @@ pub fn unwrap_response(data: &[u8]) -> Result<GenerateContentResponse, GoogleCod
 			}));
 		}
 		let encoded = serde_json::to_string(&error)
-			.map_err(|failure| cca_decode_error(format!("invalid CCA error envelope: {failure}")))?;
+			.map_err(|failure| cca_decode_fault("invalid CCA error envelope", failure))?;
 		return Err(cca_provider_error(format!("CCA in-band error: {encoded}")));
 	}
 	envelope
@@ -827,7 +825,7 @@ pub fn unwrap_response(data: &[u8]) -> Result<GenerateContentResponse, GoogleCod
 pub fn thought_signature_to_wire(signature: &Bytes) -> Result<Str, GoogleCodecError> {
 	str::from_utf8(signature)
 		.map(Str::new)
-		.map_err(|error| cca_provider_error(format!("CCA thought signature is not UTF-8: {error}")))
+		.map_err(|error| cca_provider_fault("CCA thought signature is not UTF-8", error))
 }
 
 /// Converts CCA's continuation-proof string to opaque canonical bytes.
@@ -884,7 +882,7 @@ pub struct CcaModelRecord {
 /// filtering.
 pub fn parse_cca_models(body: &[u8]) -> Result<Vec<CcaModelRecord>, GoogleCodecError> {
 	let payload: CcaDiscoveryResponse = serde_json::from_slice(body)
-		.map_err(|error| cca_decode_error(format!("invalid CCA model discovery JSON: {error}")))?;
+		.map_err(|error| cca_decode_fault("invalid CCA model discovery JSON", error))?;
 	Ok(payload
 		.models
 		.into_iter()
@@ -1363,6 +1361,24 @@ fn cca_decode_error(detail: impl IntoStr) -> GoogleCodecError {
 		code:           None,
 		retry_after_ms: 0,
 	}
+}
+
+/// Provider failure in `context` caused by `cause`; renders the cause once at
+/// this Clone/Eq wire-error boundary (ADR 0035 / PR #411 pattern).
+fn cca_provider_fault(
+	context: impl std::fmt::Display,
+	cause: impl std::fmt::Display,
+) -> GoogleCodecError {
+	cca_provider_error(sf!("{context}: {cause}"))
+}
+
+/// Decode failure in `context` caused by `cause`; renders the cause once at
+/// this Clone/Eq wire-error boundary (ADR 0035 / PR #411 pattern).
+fn cca_decode_fault(
+	context: impl std::fmt::Display,
+	cause: impl std::fmt::Display,
+) -> GoogleCodecError {
+	cca_decode_error(sf!("{context}: {cause}"))
 }
 
 #[cfg(test)]

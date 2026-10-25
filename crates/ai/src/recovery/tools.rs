@@ -493,7 +493,7 @@ impl<'a> ToolAssembler<'a> {
 							source_index,
 							reason: ToolRejection::MalformedArguments {
 								offset: 0,
-								reason: Str::new(error.to_string()),
+								reason: rejection_fault(error),
 							},
 						};
 					},
@@ -602,6 +602,12 @@ impl<'a> ToolAssembler<'a> {
 			});
 		}
 	}
+}
+
+/// Renders a rejection cause once at this model-facing fault boundary
+/// (ADR 0035 / PR #411 pattern).
+fn rejection_fault(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
 }
 
 const fn rejection_rule(rejection: &ToolRejection) -> &'static str {

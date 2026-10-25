@@ -196,17 +196,11 @@ impl KokoroAdapter {
 			move || {
 				let device = kokoro_device(config.device)?;
 				let config_bytes = fs::read(&config.config_path).map_err(|error| {
-					LocalError::new(
-						LocalErrorKind::Artifact,
-						format!("Kokoro config read failed: {error}"),
-					)
+					LocalError::caused(LocalErrorKind::Artifact, "Kokoro config read failed", error)
 				})?;
 				let model_config: ModelConfig =
 					serde_json::from_slice(&config_bytes).map_err(|error| {
-						LocalError::new(
-							LocalErrorKind::Artifact,
-							format!("Kokoro config decode failed: {error}"),
-						)
+						LocalError::caused(LocalErrorKind::Artifact, "Kokoro config decode failed", error)
 					})?;
 				if model_config.sample_rate != kokoro_catalog::SAMPLE_RATE {
 					return Err(LocalError::new(
@@ -219,10 +213,10 @@ impl KokoroAdapter {
 					VarBuilder::from_mmaped_safetensors(&[&config.weights_path], DType::F32, &device)
 				}
 				.map_err(|error| {
-					LocalError::new(LocalErrorKind::Backend, format!("Kokoro weights failed: {error}"))
+					LocalError::caused(LocalErrorKind::Backend, "Kokoro weights failed", error)
 				})?;
 				let model = KModel::load(&model_config, variables).map_err(|error| {
-					LocalError::new(LocalErrorKind::Backend, format!("Kokoro load failed: {error}"))
+					LocalError::caused(LocalErrorKind::Backend, "Kokoro load failed", error)
 				})?;
 				Ok(KokoroEngine {
 					model,
@@ -389,7 +383,7 @@ fn load_voice(engine: &mut KokoroEngine, voice: &str) -> LocalResult<Tensor> {
 			LocalError::new(LocalErrorKind::Artifact, "Kokoro manifest is missing a registered voice")
 		})?;
 		let tensors = candle_core::safetensors::load(path, &engine.device).map_err(|error| {
-			LocalError::new(LocalErrorKind::Artifact, format!("Kokoro voice load failed: {error}"))
+			LocalError::caused(LocalErrorKind::Artifact, "Kokoro voice load failed", error)
 		})?;
 		let tensor = tensors.into_values().next().ok_or_else(|| {
 			LocalError::new(LocalErrorKind::Artifact, "Kokoro voice pack contains no tensors")
@@ -406,10 +400,7 @@ fn kokoro_device(requested: KokoroDevice) -> LocalResult<Device> {
 			#[cfg(target_os = "macos")]
 			{
 				Device::new_metal(0).map_err(|error| {
-					LocalError::new(
-						LocalErrorKind::Unsupported,
-						format!("Metal is unavailable: {error}"),
-					)
+					LocalError::caused(LocalErrorKind::Unsupported, "Metal is unavailable", error)
 				})
 			}
 			#[cfg(not(target_os = "macos"))]
@@ -450,7 +441,7 @@ fn synthesize_text_streaming(
 			return Err(LocalError::cancelled());
 		}
 		let phonemes = engine.g2p.convert(chunk).map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Kokoro G2P failed: {error}"))
+			LocalError::caused(LocalErrorKind::Backend, "Kokoro G2P failed", error)
 		})?;
 		let mut encoded = [0_u8; 4];
 		let token_ids: Vec<_> = phonemes
@@ -467,7 +458,7 @@ fn synthesize_text_streaming(
 			return Ok(());
 		}
 		let pack_len = voice.dim(0).map_err(|error| {
-			LocalError::new(LocalErrorKind::Artifact, format!("Kokoro voice shape failed: {error}"))
+			LocalError::caused(LocalErrorKind::Artifact, "Kokoro voice shape failed", error)
 		})?;
 		if pack_len == 0 {
 			return Err(LocalError::new(LocalErrorKind::Artifact, "empty Kokoro voice pack"));
@@ -477,7 +468,7 @@ fn synthesize_text_streaming(
 			.and_then(|tensor| tensor.squeeze(0))
 			.and_then(|tensor| tensor.unsqueeze(0))
 			.map_err(|error| {
-				LocalError::new(LocalErrorKind::Artifact, format!("Kokoro voice style failed: {error}"))
+				LocalError::caused(LocalErrorKind::Artifact, "Kokoro voice style failed", error)
 			})?;
 		let mode = if options.deterministic {
 			SynthesisMode::Deterministic
@@ -489,7 +480,7 @@ fn synthesize_text_streaming(
 			.forward_with_mode(&token_ids, &style, options.speed, &engine.device, mode)
 			.and_then(|tensor| tensor.to_vec1::<f32>())
 			.map_err(|error| {
-				LocalError::new(LocalErrorKind::Backend, format!("Kokoro inference failed: {error}"))
+				LocalError::caused(LocalErrorKind::Backend, "Kokoro inference failed", error)
 			})?;
 		if audio.is_empty() {
 			return Ok(());

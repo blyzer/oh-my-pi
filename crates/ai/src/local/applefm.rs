@@ -813,7 +813,7 @@ async fn execute_transport(
 		transport_error(
 			ErrorKind::InvalidRequest,
 			ErrorPhase::Encoding,
-			&format!("local Apple request body could not open: {error:?}"),
+			&fault_in("local Apple request body could not open", error),
 			&request,
 			false,
 		)
@@ -849,7 +849,7 @@ async fn execute_transport(
 				transport_error(
 					ErrorKind::LocalModelUnavailable,
 					ErrorPhase::Discovery,
-					&format!("Apple Foundation Models availability probe failed: {error}"),
+					&fault_in("Apple Foundation Models availability probe failed", error),
 					&request,
 					false,
 				)
@@ -1408,6 +1408,12 @@ fn codec_route_error(
 		.route(route.to_owned())
 		.request_id(request_id.to_owned())
 		.detail(ErrorDetail::capability(sf!("apple-foundation-models"), ReasonId::new(message)))
+}
+
+/// Renders a transport fault cause once at this provider string boundary
+/// (ADR 0035 / PR #411 pattern).
+fn fault_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
 }
 
 fn transport_error(

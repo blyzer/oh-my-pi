@@ -314,10 +314,11 @@ pub enum AccountRegistrationError {
 		routing_principal: PrincipalId,
 	},
 	/// Durable account-state storage failed before registration completed.
-	#[error("{summary}")]
+	#[error("account state store failed")]
 	StateStore {
-		/// Sanitized failure summary.
-		summary: Str,
+		/// Typed storage failure.
+		#[source]
+		source: AccountStateStoreError,
 	},
 }
 
@@ -456,9 +457,7 @@ impl AccountPool {
 				store.load_account(&record.account)
 			})
 			.transpose()
-			.map_err(|error| AccountRegistrationError::StateStore {
-				summary: Str::new(error.to_string()),
-			})?;
+			.map_err(|source| AccountRegistrationError::StateStore { source })?;
 		let account = record.account.clone();
 		let event = record.clone();
 		state.accounts.insert(account.clone(), record);

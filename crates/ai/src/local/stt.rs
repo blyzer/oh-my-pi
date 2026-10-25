@@ -354,13 +354,13 @@ impl WhisperEngine {
 	fn load(config: &WhisperConfig) -> LocalResult<Self> {
 		let device = whisper_device(config.use_gpu)?;
 		let config_text = std::fs::read_to_string(&config.config_path).map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Whisper config load failed: {error}"))
+			LocalError::caused(LocalErrorKind::Backend, "Whisper config load failed", error)
 		})?;
 		let model_config: Config = serde_json::from_str(&config_text).map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Whisper config parse failed: {error}"))
+			LocalError::caused(LocalErrorKind::Backend, "Whisper config parse failed", error)
 		})?;
 		let tokenizer = Tokenizer::from_file(&config.tokenizer_path).map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Whisper tokenizer load failed: {error}"))
+			LocalError::caused(LocalErrorKind::Backend, "Whisper tokenizer load failed", error)
 		})?;
 		// SAFETY: model_path is a verified, immutable safetensors artifact held by
 		// the local artifact store for the lifetime of the loaded engine.
@@ -371,11 +371,9 @@ impl WhisperEngine {
 				&device,
 			)
 		}
-		.map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Whisper load failed: {error}"))
-		})?;
+		.map_err(|error| LocalError::caused(LocalErrorKind::Backend, "Whisper load failed", error))?;
 		let model = Whisper::load(&vb, model_config.clone()).map_err(|error| {
-			LocalError::new(LocalErrorKind::Backend, format!("Whisper load failed: {error}"))
+			LocalError::caused(LocalErrorKind::Backend, "Whisper load failed", error)
 		})?;
 		let token_id = |token: &str| whisper_token_id(&tokenizer, token);
 		let sot_token = token_id(whisper::SOT_TOKEN)?;
@@ -607,10 +605,7 @@ fn greedy_decode(
 			.tokenizer
 			.encode(prompt.as_str(), false)
 			.map_err(|error| {
-				LocalError::new(
-					LocalErrorKind::Backend,
-					format!("Whisper prompt encode failed: {error}"),
-				)
+				LocalError::caused(LocalErrorKind::Backend, "Whisper prompt encode failed", error)
 			})?;
 		tokens.extend_from_slice(prompt.get_ids());
 	}
@@ -715,7 +710,7 @@ fn segments_from_tokens(
 
 fn decode_tokens(tokenizer: &Tokenizer, tokens: &[u32]) -> LocalResult<String> {
 	tokenizer.decode(tokens, true).map_err(|error| {
-		LocalError::new(LocalErrorKind::Backend, format!("Whisper text decode failed: {error}"))
+		LocalError::caused(LocalErrorKind::Backend, "Whisper text decode failed", error)
 	})
 }
 

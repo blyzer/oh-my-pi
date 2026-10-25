@@ -53,7 +53,7 @@ use webrtc::{
 };
 
 /// Errors returned by the native live media session.
-#[derive(Clone, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum LiveMediaError {
 	/// Audio ownership could not be acquired.
 	#[error(transparent)]
@@ -61,9 +61,24 @@ pub enum LiveMediaError {
 	/// Native audio playback or capture failed.
 	#[error(transparent)]
 	Audio(#[from] AudioError),
-	/// Realtime voice transport failure.
-	#[error("realtime voice transport failed: {0}")]
-	RealtimeTransport(String),
+	/// A live WebRTC transport operation failed.
+	#[error("live WebRTC {operation} failed")]
+	WebRtc {
+		/// Transport operation that failed.
+		operation: &'static str,
+		/// Typed WebRTC failure.
+		#[source]
+		source:    webrtc::Error,
+	},
+	/// The live peer rejected an operation in its current lifecycle state.
+	#[error("native live WebRTC peer {state}")]
+	PeerState {
+		/// Lifecycle state that rejected the operation.
+		state: &'static str,
+	},
+	/// Live audio input was used after its channel closed.
+	#[error("native live audio input is closed")]
+	InputClosed,
 	/// An established native media peer reported a classified terminal failure.
 	#[error("realtime media failed: {source}")]
 	LiveMedia {
@@ -71,12 +86,6 @@ pub enum LiveMediaError {
 		#[source]
 		source: LiveMediaFailure,
 	},
-}
-
-impl From<String> for LiveMediaError {
-	fn from(message: String) -> Self {
-		Self::RealtimeTransport(message)
-	}
 }
 
 /// Backward-compatible alias for [`LiveMediaError`].
@@ -356,14 +365,10 @@ impl LivePeerCore {
 		output_device_id: Option<&str>,
 	) -> VoiceResult<String> {
 		if self.started.swap(true, Ordering::AcqRel) {
-			return Err(
-				"Native live WebRTC peer has already started"
-					.to_owned()
-					.into(),
-			);
+			return Err(LiveMediaError::PeerState { state: "has already started" });
 		}
 		if self.closing.load(Ordering::Acquire) {
-			return Err("Native live WebRTC peer is closed".to_owned().into());
+			return Err(LiveMediaError::PeerState { state: "is closed" });
 		}
 
 		let playback = PlaybackStream::start_on(OUTPUT_SAMPLE_RATE, output_device_id)?;
@@ -379,9 +384,14 @@ impl LivePeerCore {
 				},
 				RTPCodecType::Audio,
 			)
-			.map_err(|error| format!("Failed to register the live Opus codec: {error}"))?;
-		let registry = register_default_interceptors(Registry::new(), &mut media_engine)
-			.map_err(|error| format!("Failed to configure live WebRTC interceptors: {error}"))?;
+			.map_err(|source| LiveMediaError::WebRtc {
+				operation: "Opus codec registration",
+				source,
+			})?;
+		let registry =
+			register_default_interceptors(Registry::new(), &mut media_engine).map_err(|source| {
+				LiveMediaError::WebRtc { operation: "interceptor configuration", source }
+			})?;
 		let api = APIBuilder::new()
 			.with_media_engine(media_engine)
 			.with_interceptor_registry(registry)
@@ -389,7 +399,7 @@ impl LivePeerCore {
 		let peer = Arc::new(
 			api.new_peer_connection(RTCConfiguration::default())
 				.await
-				.map_err(|error| format!("Failed to create the live WebRTC peer: {error}"))?,
+				.map_err(|source| LiveMediaError::WebRtc { operation: "peer creation", source })?,
 		);
 
 		let track = Arc::new(TrackLocalStaticSample::new(
@@ -402,9 +412,9 @@ impl LivePeerCore {
 			.await
 		{
 			Ok(sender) => sender,
-			Err(error) => {
+			Err(source) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to add the live audio track: {error}").into());
+				return Err(LiveMediaError::WebRtc { operation: "audio track attachment", source });
 			},
 		};
 
@@ -412,33 +422,29 @@ impl LivePeerCore {
 		install_ice_path_callback(&peer, Arc::downgrade(self));
 		let data_channel = match peer.create_data_channel(DATA_CHANNEL_LABEL, None).await {
 			Ok(channel) => channel,
-			Err(error) => {
+			Err(source) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to create the live data channel: {error}").into());
+				return Err(LiveMediaError::WebRtc { operation: "data channel creation", source });
 			},
 		};
 		install_data_channel_callbacks(&data_channel, Arc::downgrade(self));
 
 		let offer = match peer.create_offer(None).await {
 			Ok(offer) => offer,
-			Err(error) => {
+			Err(source) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to create the live SDP offer: {error}").into());
+				return Err(LiveMediaError::WebRtc { operation: "SDP offer creation", source });
 			},
 		};
-		if let Err(error) = peer.set_local_description(offer.clone()).await {
+		if let Err(source) = peer.set_local_description(offer.clone()).await {
 			let _ = peer.close().await;
-			return Err(format!("Failed to install the live SDP offer: {error}").into());
+			return Err(LiveMediaError::WebRtc { operation: "SDP offer installation", source });
 		}
 		let mut resources_slot = self.resources.lock();
 		if self.closing.load(Ordering::Acquire) {
 			drop(resources_slot);
 			let _ = peer.close().await;
-			return Err(
-				"Native live WebRTC peer was closed while starting"
-					.to_owned()
-					.into(),
-			);
+			return Err(LiveMediaError::PeerState { state: "was closed while starting" });
 		}
 
 		let (input_tx, input_rx) = flume::unbounded();
@@ -457,13 +463,16 @@ impl LivePeerCore {
 			.lock()
 			.as_ref()
 			.map(|resources| Arc::clone(&resources.peer))
-			.ok_or_else(|| "Native live WebRTC peer has not started".to_owned())?;
+			.ok_or(LiveMediaError::PeerState { state: "has not started" })?;
 		let answer = RTCSessionDescription::answer(sdp)
-			.map_err(|error| format!("Codex returned an invalid live SDP answer: {error}"))?;
+			.map_err(|source| LiveMediaError::WebRtc { operation: "SDP answer parsing", source })?;
 		peer
 			.set_remote_description(answer)
 			.await
-			.map_err(|error| format!("Failed to install the live SDP answer: {error}"))?;
+			.map_err(|source| LiveMediaError::WebRtc {
+				operation: "SDP answer installation",
+				source,
+			})?;
 		Ok(())
 	}
 
@@ -504,7 +513,7 @@ impl LivePeerCore {
 			.lock()
 			.as_ref()
 			.map(|resources| resources.input_tx.clone())
-			.ok_or_else(|| "Native live WebRTC peer has not started".to_owned())?;
+			.ok_or(LiveMediaError::PeerState { state: "has not started" })?;
 		let sample_count = samples.len().min(MAX_QUEUED_INPUT_SAMPLES);
 		let retained = &samples[samples.len() - sample_count..];
 		let queued = self
@@ -523,7 +532,7 @@ impl LivePeerCore {
 			self
 				.queued_samples
 				.fetch_sub(sample_count, Ordering::AcqRel);
-			return Err("Native live audio input is closed".to_owned().into());
+			return Err(LiveMediaError::InputClosed);
 		}
 		Ok(())
 	}
@@ -540,7 +549,7 @@ impl LivePeerCore {
 		if let Some(input_tx) = input_tx {
 			input_tx
 				.send(InputCommand::Muted(muted))
-				.map_err(|_| "Native live audio input is closed".to_owned())?;
+				.map_err(|_| LiveMediaError::InputClosed)?;
 		}
 		Ok(())
 	}
