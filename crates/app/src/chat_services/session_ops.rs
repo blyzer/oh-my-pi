@@ -44,8 +44,8 @@ pub(super) fn rename(state: &ServiceState, id: &str, title: &str) -> ServiceResu
 			"the live session is renamed with /rename",
 		)));
 	}
-	let mut session = Session::open(&path, ComponentRegistry::standard())
-		.map_err(|error| ServiceError::Failed(Str::new(error.to_string())))?;
+	let mut session =
+		Session::open(&path, ComponentRegistry::standard()).map_err(ServiceError::failed)?;
 	let cause = session
 		.head()
 		.ok_or(ServiceError::Failed(Str::new_static("journal has no head")))?;
@@ -59,7 +59,7 @@ pub(super) fn rename(state: &ServiceState, id: &str, title: &str) -> ServiceResu
 				value: Value::Str(Str::new(title)),
 			}],
 		})
-		.map_err(|error| ServiceError::Failed(Str::new(error.to_string())))?;
+		.map_err(ServiceError::failed)?;
 	Ok(())
 }
 
@@ -170,8 +170,7 @@ pub(super) fn list_local(state: &ServiceState, suffix: &str) -> ServiceResult<Ve
 /// text previews, and live-chain membership.
 pub(super) fn journal_tree(state: &ServiceState) -> ServiceResult<Vec<TreeEntry>> {
 	let path = state.live_journal.read().clone();
-	let entries =
-		Journal::scan(&path).map_err(|error| ServiceError::Failed(Str::new(error.to_string())))?;
+	let entries = Journal::scan(&path).map_err(ServiceError::failed)?;
 	let live = omp_journal::live_chain(&entries)
 		.map(|entry| entry.id)
 		.collect::<std::collections::HashSet<_>>();
@@ -284,7 +283,7 @@ pub(super) fn btw(
 		let (mut kernel, mut session, _) = match composed {
 			Ok(composed) => composed,
 			Err(error) => {
-				let _ = tx.send(SideEvent::Error(Str::new(error.to_string())));
+				let _ = tx.send(SideEvent::Error(crate::fault(error)));
 				return;
 			},
 		};
@@ -311,7 +310,7 @@ pub(super) fn btw(
 		let _ = pump.await;
 		let _ = tx.send(match outcome {
 			Ok(_) => SideEvent::Done,
-			Err(error) => SideEvent::Error(Str::new(error.to_string())),
+			Err(error) => SideEvent::Error(crate::fault(error)),
 		});
 		drop(session);
 		let _ = fs::remove_file(ephemeral);

@@ -401,7 +401,7 @@ impl AskPresenter for ChatUiOwner {
 					))
 				})
 				.await
-				.map_err(|error| AskFault::Presenter { message: Str::new(error.to_string()) })?
+				.map_err(|error| AskFault::Presenter { message: crate::fault(error) })?
 				.ok_or_else(AskFault::cancelled)?;
 			Ok(Presentation { selections })
 		})
@@ -478,7 +478,7 @@ impl UiControlOwner for ChatUiOwner {
 			UiControlRequest::SetToolsExpanded { expanded } => {
 				omp_chat::actions::CL_TOOLS_EXPANDED
 					.set(&self.con, expanded)
-					.map_err(|error| protocol("convar", error.to_string()))?;
+					.map_err(|error| protocol("convar", crate::fault(error)))?;
 				Ok(UiControlResult::Ack)
 			},
 			UiControlRequest::Dialog { kind, fields } => self
@@ -738,7 +738,7 @@ fn finish(
 	match settled {
 		Ok(presentation) => Ok(Some(presentation.selections)),
 		Err(AskFault::Cancelled { .. }) => Ok(None),
-		Err(error) => Err(protocol("dialog_failed", error.to_string())),
+		Err(error) => Err(protocol("dialog_failed", crate::fault(error))),
 	}
 }
 

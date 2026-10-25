@@ -150,11 +150,17 @@ pub(crate) async fn collect_quota(
 				merge_fresh(&mut rows, &report);
 				reports.push(report);
 			},
-			Err(error) => refresh_errors.push(format!(
-				"usage refresh failed for {} / {}: {error}",
-				record.provider.as_str(),
-				mask(record.account.as_str())
-			)),
+			Err(error) => refresh_errors.push(
+				crate::fault_in(
+					omp_core::sf!(
+						"usage refresh failed for {} / {}",
+						record.provider.as_str(),
+						mask(record.account.as_str())
+					),
+					error,
+				)
+				.into(),
+			),
 		}
 	}
 	Ok(QuotaSnapshot { rows, reports, refresh_errors })

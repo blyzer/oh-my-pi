@@ -121,7 +121,7 @@ async fn refresh() -> miette::Result<()> {
 							%error,
 							"model discovery refresh failed"
 						);
-						failures.push(format!("{}: {error}", provider.as_str()));
+						failures.push(String::from(crate::fault_in(provider.as_str(), error)));
 						break;
 					},
 				};
@@ -247,7 +247,7 @@ async fn refresh_local_providers(
 					%error,
 					"local model discovery failed"
 				);
-				failures.push(format!("{}: {error}", provider.as_str()));
+				failures.push(String::from(crate::fault_in(provider.as_str(), error)));
 			},
 		}
 	}

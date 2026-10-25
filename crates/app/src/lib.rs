@@ -100,6 +100,21 @@ use std::path::{Path, PathBuf};
 
 pub use miette::{IntoDiagnostic, Report, Result};
 
+/// Renders an error cause once into user-facing text at this presentation
+/// boundary (ADR 0035 / PR #411 pattern).
+pub(crate) fn fault(cause: impl std::fmt::Display) -> omp_core::Str {
+	omp_core::sf!("{cause}")
+}
+
+/// Renders an error `cause` prefixed by `context` once into user-facing text
+/// at this presentation boundary (ADR 0035 / PR #411 pattern).
+pub(crate) fn fault_in(
+	context: impl std::fmt::Display,
+	cause: impl std::fmt::Display,
+) -> omp_core::Str {
+	omp_core::sf!("{context}: {cause}")
+}
+
 /// Returns the archived command-stream configuration path for the selected
 /// profile: `<config dir>/config.cfg` (`~/.o2/config.cfg` by default,
 /// `~/.o2/profiles/<profile>/config.cfg` under `--profile`/`OMP_PROFILE`,

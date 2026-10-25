@@ -112,7 +112,7 @@ pub(crate) fn run(data_dir: &Path, args: &WorktreeArgs) -> miette::Result<()> {
 						},
 						Err(error) => {
 							row.removed = Some(false);
-							row.error = Some(error.to_string());
+							row.error = Some(crate::fault(error).into());
 						},
 					}
 				}
@@ -121,7 +121,7 @@ pub(crate) fn run(data_dir: &Path, args: &WorktreeArgs) -> miette::Result<()> {
 						for row in &mut selected {
 							if row.parent_repo.as_ref() == Some(&parent) {
 								row.removed = Some(false);
-								row.error = Some(error.to_string());
+								row.error = Some(crate::fault(&error).into());
 							}
 						}
 					}

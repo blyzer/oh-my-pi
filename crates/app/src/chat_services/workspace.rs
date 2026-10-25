@@ -66,15 +66,16 @@ fn create_worktree_at(cwd: &Path, base: &Path, branch: &str) -> ServiceResult<Wo
 		.ok()
 		.map(|sha| sha.trim().to_owned());
 	git(&root, &["worktree", "add", "-b", branch, &path.to_string_lossy(), "HEAD"])
-		.map_err(|error| ServiceError::Failed(sf!("git worktree add failed: {error}")))?;
+		.map_err(|error| ServiceError::Failed(crate::fault_in("git worktree add failed", error)))?;
 	if let Some(stash) = stash.filter(|sha| !sha.is_empty())
 		&& let Err(error) = git(&path, &["stash", "apply", "--index", &stash])
 	{
 		// Index replay can fail on a pure working-tree stash; the plain apply
 		// still carries the edits.
 		tracing::debug!(%error, "stash apply --index failed; retrying without --index");
-		git(&path, &["stash", "apply", &stash])
-			.map_err(|error| ServiceError::Failed(sf!("carrying changes over failed: {error}")))?;
+		git(&path, &["stash", "apply", &stash]).map_err(|error| {
+			ServiceError::Failed(crate::fault_in("carrying changes over failed", error))
+		})?;
 	}
 	if let Ok(untracked) = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"]) {
 		for rel in untracked.split('\0').filter(|rel| !rel.is_empty()) {
@@ -131,7 +132,7 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 		.args(args)
 		.current_dir(cwd)
 		.output()
-		.map_err(|error| error.to_string())?;
+		.map_err(|error| String::from(crate::fault(error)))?;
 	if output.status.success() {
 		Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 	} else {

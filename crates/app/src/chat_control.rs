@@ -1182,7 +1182,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 
 	async fn forward_guest(&mut self, command: omp_driver::collab::session::CollabOwnerCommand) {
 		if let Err(error) = self.collab.request(command).await {
-			self.reply(Severity::Error, &format!("Collaboration request failed: {error}"));
+			self.reply(Severity::Error, crate::fault_in("Collaboration request failed", error));
 		}
 	}
 
@@ -1549,7 +1549,10 @@ impl<C: omp_agent::Inference> Controller<C> {
 			HostCommand::PlanSave { path, content } => {
 				let shown = short_plan_path(&path, &self.home.project_root);
 				if let Err(error) = atomic_plan_save(&path, content.as_str()) {
-					self.reply(Severity::Error, format!("Failed to save plan to {shown}: {error}"));
+					self.reply(
+						Severity::Error,
+						crate::fault_in(omp_core::sf!("Failed to save plan to {shown}"), error),
+					);
 					return Ok(());
 				}
 				self.director("plan", false, &[]).into_diagnostic()?;
@@ -1755,7 +1758,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 						if let Some(restored) = restored_workspace {
 							rollback_checkpoint_workspace(&self.env, &restored.undo_snapshot_id).await;
 						}
-						self.reply(Severity::Warn, format!("Rewind failed: {error}"));
+						self.reply(Severity::Warn, crate::fault_in("Rewind failed", error));
 					},
 				}
 			},
@@ -1820,7 +1823,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 						self.set_goal_continuation_armed(true)?;
 					},
 					Ok(()) => {},
-					Err(error) => self.reply(Severity::Warn, format!("{id}: {error}")),
+					Err(error) => self.reply(Severity::Warn, crate::fault_in(id, error)),
 				}
 			},
 			HostCommand::Spawn { .. } if self.is_paused() => {
@@ -1839,7 +1842,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			},
 			HostCommand::Todo(op) => {
 				if let Err(error) = self.todo(op) {
-					self.reply(Severity::Warn, format!("todo: {error}"));
+					self.reply(Severity::Warn, crate::fault_in("todo", error));
 				}
 			},
 			HostCommand::ContextReset => match self.reset_context() {
@@ -1861,21 +1864,26 @@ impl<C: omp_agent::Inference> Controller<C> {
 						),
 					);
 				},
-				Err(error) => self.reply(Severity::Warn, format!("Context reset failed: {error}")),
+				Err(error) => {
+					self.reply(Severity::Warn, crate::fault_in("Context reset failed", error))
+				},
 			},
 			HostCommand::Move { path, create } => {
 				let ready = !create
 					|| match fs::create_dir_all(&path) {
 						Ok(()) => true,
 						Err(error) => {
-							self.reply(Severity::Warn, format!("Failed to create directory: {error}"));
+							self.reply(
+								Severity::Warn,
+								crate::fault_in("Failed to create directory", error),
+							);
 							false
 						},
 					};
 				if ready {
 					match self.relocate(&path).await {
 						Ok(()) => self.reply(Severity::Info, format!("✓ Moved to {}", path.display())),
-						Err(error) => self.reply(Severity::Warn, format!("Move failed: {error}")),
+						Err(error) => self.reply(Severity::Warn, crate::fault_in("Move failed", error)),
 					}
 				}
 			},
@@ -1883,16 +1891,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 			HostCommand::Collab(op) => self.apply_collab(op).await,
 			HostCommand::Service(mutation) => self.apply_mutation(mutation),
 			HostCommand::SessionIndex { scope } => {
-				let result = self
-					.services
-					.sessions(scope)
-					.map_err(|error| Str::new(error.to_string()));
+				let result = self.services.sessions(scope).map_err(crate::fault);
 				self.post_outcome(Outcome::SessionIndex(SessionIndexOutcome { scope, result }));
 			},
 			HostCommand::Git(op) => self.apply_git(op),
 			HostCommand::Prewalk => {
 				if let Err(error) = self.arm_prewalk() {
-					self.reply(Severity::Warn, format!("Prewalk: {error}"));
+					self.reply(Severity::Warn, crate::fault_in("Prewalk", error));
 				}
 			},
 			HostCommand::Agent { id, op: AgentOp::Revive } if self.is_paused() => {
@@ -2525,7 +2530,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		if let Err(error) = std::env::set_current_dir(&target) {
 			self.reply(
 				Severity::Warn,
-				format!("Session moved, but the working directory could not change: {error}"),
+				crate::fault_in("Session moved, but the working directory could not change", error),
 			);
 		}
 		Ok(())
@@ -2824,13 +2829,16 @@ impl<C: omp_agent::Inference> Controller<C> {
 					Ok(false) => self.reply(Severity::Warn, "Nothing to compact (no messages yet)"),
 					Err(error) => self.reply(
 						Severity::Error,
-						format!(
-							"{} failed: {error}",
-							if method == CompactionMethod::Handoff {
-								"Handoff"
-							} else {
-								"Compaction"
-							}
+						crate::fault_in(
+							omp_core::sf!(
+								"{} failed",
+								if method == CompactionMethod::Handoff {
+									"Handoff"
+								} else {
+									"Compaction"
+								}
+							),
+							error,
 						),
 					),
 				}
@@ -3046,12 +3054,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 					)
 					.await
 					.map(|outcome| outcome.assistant_text)
-					.map_err(|error| error.to_string()),
-				Err(error) => Err(error.to_string()),
+					.map_err(crate::fault),
+				Err(error) => Err(crate::fault(error)),
 			};
 			let _ = done.send(match outcome {
 				Ok(answer) => TanDone { id, ok: true, answer },
-				Err(error) => TanDone { id, ok: false, answer: Str::new(error) },
+				Err(error) => TanDone { id, ok: false, answer: error },
 			});
 		});
 		Ok(())

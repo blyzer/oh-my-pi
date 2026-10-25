@@ -954,7 +954,7 @@ fn set_con(runtime: &RpcRuntime, name: &str, value: &str) -> Result<(), String> 
 	};
 	con.exec(&format!("{name} {value}"), omp_con::Source::Session)
 		.map(|_| ())
-		.map_err(|error| error.to_string())
+		.map_err(|error| crate::fault(error).into())
 }
 
 fn todo_phases(dom: &Dom) -> Vec<Value> {
@@ -1009,7 +1009,7 @@ fn rename_session(session: &mut Session, title: Str) -> Result<(), String> {
 			}],
 		})
 		.map(|_| ())
-		.map_err(|error| error.to_string())
+		.map_err(|error| crate::fault(error).into())
 }
 
 fn replace_todos(session: &mut Session, phases: &[Value]) -> Result<(), String> {
@@ -1068,7 +1068,7 @@ fn replace_todos(session: &mut Session, phases: &[Value]) -> Result<(), String> 
 	session
 		.patch(Txn { cause, label: Some(Str::new_static("rpc.set_todos")), ops })
 		.map(|_| ())
-		.map_err(|error| error.to_string())
+		.map_err(|error| crate::fault(error).into())
 }
 
 fn rpc_models(runtime: &RpcRuntime) -> Vec<Value> {
@@ -1565,7 +1565,7 @@ fn bash_response(
 		Ok(RpcResponse::error(id, COMMAND, message, Some(RpcErrorCode::new(code))))
 	};
 	if let Err(source) = result {
-		return error(id, &source.to_string(), BASH_ERROR);
+		return error(id, &crate::fault(source), BASH_ERROR);
 	}
 	let dom = session.dom();
 	let Some((handle, _)) = local_bash_element(dom) else {
@@ -1799,7 +1799,7 @@ where
 							None,
 							"transport",
 							"io_error",
-							&source.to_string(),
+							&crate::fault(source),
 						)))
 						.await;
 					break;
@@ -1842,7 +1842,7 @@ where
 								None,
 								"transport",
 								"invalid_frame",
-								&source.to_string(),
+								&crate::fault(source),
 							)))
 							.await;
 						continue;
@@ -1864,7 +1864,7 @@ where
 								None,
 								"parse",
 								"invalid_request",
-								&source.to_string(),
+								&crate::fault(source),
 							)))
 							.await;
 					},
@@ -3248,7 +3248,9 @@ async fn transition_session(
 			} else {
 				None
 			};
-			home.create(path).map_err(|source| source.to_string())
+			home
+				.create(path)
+				.map_err(|source| crate::fault(source).into())
 		},
 		"switch_session" | "open_session" => {
 			let Some(path) = params.get("sessionPath").and_then(Value::as_str) else {
@@ -3256,7 +3258,7 @@ async fn transition_session(
 			};
 			home
 				.open(Path::new(path))
-				.map_err(|source| source.to_string())
+				.map_err(|source| crate::fault(source).into())
 		},
 		"branch" => {
 			let Some(entry) = params.get("entryId").and_then(Value::as_str) else {
@@ -3264,7 +3266,7 @@ async fn transition_session(
 			};
 			let target: omp_journal::EntryId = match entry.parse() {
 				Ok(target) => target,
-				Err(source) => return Err((source.to_string(), old)),
+				Err(source) => return Err((crate::fault(source).into(), old)),
 			};
 			let source_path = old.journal_path().to_path_buf();
 			match home.fork(&source_path) {
@@ -3275,10 +3277,10 @@ async fn transition_session(
 						home.unregister(&next);
 						drop(next);
 						let _ = fs::remove_file(path);
-						Err(source.to_string())
+						Err(crate::fault(source).into())
 					},
 				},
-				Err(source) => Err(source.to_string()),
+				Err(source) => Err(crate::fault(source).into()),
 			}
 		},
 		_ => unreachable!("session transition command is matched by caller"),
@@ -3292,7 +3294,7 @@ async fn transition_session(
 			}
 			if let Err(source) = old.session_switch() {
 				home.unregister(&next);
-				return Err((source.to_string(), old));
+				return Err((crate::fault(source).into(), old));
 			}
 			// Committed: the in-process hook hosts follow the switch.
 			if let Some(lifecycle) = &lifecycle {
@@ -3383,7 +3385,7 @@ fn plain_request_input(
 		.collect::<Result<Vec<_>, String>>()?;
 	let attachments = session
 		.store_attachments(inputs)
-		.map_err(|error| error.to_string())?;
+		.map_err(|error| String::from(crate::fault(error)))?;
 	Ok(RpcTurnInput::Plain(TurnInput { text: Str::new(text), attachments }))
 }
 

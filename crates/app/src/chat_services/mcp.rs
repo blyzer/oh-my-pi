@@ -115,9 +115,10 @@ pub(super) fn run(state: &ServiceState, op: McpOp) -> ServiceResult<McpRun> {
 			state.runtime.spawn(async move {
 				let result = match mcp.reconnect(&name).await {
 					Ok(()) => Ok(sf!("Reconnected to \"{name}\".")),
-					Err(error) => Err(ServiceError::Failed(sf!(
-						"Failed to reconnect to \"{name}\": {error}. Check server status and logs."
-					))),
+					Err(error) => {
+						let rendered = crate::fault_in(sf!("Failed to reconnect to \"{name}\""), error);
+						Err(ServiceError::Failed(sf!("{rendered}. Check server status and logs.")))
+					},
 				};
 				let _ = tx.send(result);
 			});
@@ -135,7 +136,9 @@ pub(super) fn run(state: &ServiceState, op: McpOp) -> ServiceResult<McpRun> {
 						let _ = snapshot;
 						Ok(sf!("MCP reload complete\n  Connected servers: {connected}"))
 					},
-					Err(error) => Err(ServiceError::Failed(sf!("Failed to reload MCP: {error}"))),
+					Err(error) => {
+						Err(ServiceError::Failed(crate::fault_in("Failed to reload MCP", error)))
+					},
 				};
 				let _ = tx.send(result);
 			});
@@ -180,9 +183,10 @@ pub(super) fn run(state: &ServiceState, op: McpOp) -> ServiceResult<McpRun> {
 					{
 						Ok(true) => Ok(sf!("Reauthorized \"{name}\".")),
 						Ok(false) => Ok(sf!("Server \"{name}\" does not use OAuth.")),
-						Err(error) => {
-							Err(ServiceError::Failed(sf!("Failed to reauthorize server: {error}")))
-						},
+						Err(error) => Err(ServiceError::Failed(crate::fault_in(
+							"Failed to reauthorize server",
+							error,
+						))),
 					},
 				};
 				cancel_task.abort();
@@ -199,7 +203,9 @@ pub(super) fn run(state: &ServiceState, op: McpOp) -> ServiceResult<McpRun> {
 					Some(_) => match mcp.clear_authorization(&name).await {
 						Ok(true) => Ok(sf!("Cleared auth for \"{name}\".")),
 						Ok(false) => Ok(sf!("No stored auth for \"{name}\".")),
-						Err(error) => Err(ServiceError::Failed(sf!("Failed to clear auth: {error}"))),
+						Err(error) => {
+							Err(ServiceError::Failed(crate::fault_in("Failed to clear auth", error)))
+						},
 					},
 				};
 				let _ = tx.send(result);
@@ -454,7 +460,7 @@ async fn connect_smithery(
 		.unwrap_or_else(|| smithery_config_name(&result.name));
 	let server_name = available_name(store, &base_name, request.name.is_some())?;
 	validate_server_name(&server_name)
-		.map_err(|error| ServiceError::Failed(sf!("Invalid MCP server name: {error}")))?;
+		.map_err(|error| ServiceError::Failed(crate::fault_in("Invalid MCP server name", error)))?;
 	let transport = match transport {
 		SmitheryTransport::Http { url } => {
 			let connected = client
@@ -481,14 +487,17 @@ async fn connect_smithery(
 			config.args = args;
 		},
 	}
-	store
-		.add(&server_name, config)
-		.map_err(|error| ServiceError::Failed(sf!("Failed to save Smithery server: {error}")))?;
+	store.add(&server_name, config).map_err(|error| {
+		ServiceError::Failed(crate::fault_in("Failed to save Smithery server", error))
+	})?;
 	mcp.reload().await.map_err(|error| {
-		ServiceError::Failed(sf!("Smithery server saved, but MCP refresh failed: {error}"))
+		ServiceError::Failed(crate::fault_in("Smithery server saved, but MCP refresh failed", error))
 	})?;
 	mcp.reconnect(&server_name).await.map_err(|error| {
-		ServiceError::Failed(sf!("Smithery server saved, but its first connection failed: {error}"))
+		ServiceError::Failed(crate::fault_in(
+			"Smithery server saved, but its first connection failed",
+			error,
+		))
 	})?;
 	let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
 	loop {
@@ -533,7 +542,7 @@ fn apply_registry_defaults(
 		return Ok(SmitheryTransport::Stdio { command, args });
 	}
 	let encoded = serde_json::to_string(&values).map_err(|error| {
-		ServiceError::Failed(sf!("Smithery defaults could not be encoded: {error}"))
+		ServiceError::Failed(crate::fault_in("Smithery defaults could not be encoded", error))
 	})?;
 	if let Some(index) = args.iter().position(|arg| arg.as_str() == "--config") {
 		if let Some(value) = args.get_mut(index + 1) {
@@ -693,7 +702,7 @@ fn add_server(state: &ServiceState, add: &McpAdd) -> ServiceResult<Str> {
 	}
 	store
 		.add(&add.name, config)
-		.map_err(|error| ServiceError::Failed(sf!("Failed to add server: {error}")))?;
+		.map_err(|error| ServiceError::Failed(crate::fault_in("Failed to add server", error)))?;
 	schedule_reload(state);
 	Ok(added_server_report(&add.name, add.scope, store.path(), &state.project))
 }
@@ -737,7 +746,7 @@ fn remove_server(state: &ServiceState, name: &str, scope: McpScope) -> ServiceRe
 	}
 	store
 		.remove(name)
-		.map_err(|error| ServiceError::Failed(sf!("Failed to remove server: {error}")))?;
+		.map_err(|error| ServiceError::Failed(crate::fault_in("Failed to remove server", error)))?;
 	schedule_reload(state);
 	Ok(sf!("Removed MCP server \"{name}\" from {scope} config."))
 }
@@ -755,9 +764,9 @@ fn set_enabled(state: &ServiceState, name: &str, enabled: bool) -> ServiceResult
 	}
 	let (user, project, root) = stores(state)?;
 	set_server_enabled(&user, &project, Some(&root), name, enabled).map_err(|error| {
-		ServiceError::Failed(sf!(
-			"Failed to {} server: {error}",
-			if enabled { "enable" } else { "disable" }
+		ServiceError::Failed(crate::fault_in(
+			sf!("Failed to {} server", if enabled { "enable" } else { "disable" }),
+			error,
 		))
 	})?;
 	schedule_reload(state);
@@ -795,9 +804,10 @@ async fn test_server(
 		)));
 	}
 	if let Err(error) = mcp.reconnect(name).await {
+		let rendered = crate::fault(error);
 		return Err(ServiceError::Failed(sf!(
-			"Failed to connect to \"{name}\": {error}{}",
-			tip(&error.to_string())
+			"Failed to connect to \"{name}\": {rendered}{}",
+			tip(&rendered)
 		)));
 	}
 	let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
