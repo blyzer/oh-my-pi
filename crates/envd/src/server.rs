@@ -12647,9 +12647,7 @@ pub async fn run_with_registry(
 	}
 	.await;
 	listener_shutdown.cancel();
-	let interrupt_grace = interrupt_grace
-		.to_std()
-		.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
+	let interrupt_grace = interrupt_grace.to_std().map_err(EnvdError::state)?;
 	server.shutdown_managed(interrupt_grace).await;
 	signal_task.abort();
 	serve_result
@@ -12886,7 +12884,7 @@ async fn connect_or_start_docserver(
 						time::sleep(RETRY_STEP).await;
 						continue 'connect_or_serve;
 					},
-					Err(error) => return Err(EnvdError::Document(Str::from(error.to_string()))),
+					Err(error) => return Err(EnvdError::document(error)),
 				}
 			}
 			if let Ok(stream) = UnixStream::connect(socket).await {
@@ -12960,12 +12958,12 @@ async fn connect_or_start_docserver(
 	let listener = OwnerPipeListener::bind(socket)?;
 	let workspace_trust = config.workspace_trust;
 	let server_config = crate::docserver::ServerConfig::new(root)
-		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
+		.map_err(EnvdError::document)?
 		.with_server_build(server_build)
 		.with_project_binaries(lsp.project_binaries)
 		.with_workspace_trust(workspace_trust);
-	let environment = crate::docserver::Environment::new(server_config)
-		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
+	let environment =
+		crate::docserver::Environment::new(server_config).map_err(EnvdError::document)?;
 	if lsp.enabled {
 		match crate::docserver::NativeLspSupervisor::discover(
 			&environment,
