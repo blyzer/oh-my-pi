@@ -315,6 +315,9 @@ pub struct DirectorCx<'a> {
 	pub response_ordinal: u32,
 	/// Effective control plane, when composed by an interactive host.
 	pub con:              Option<&'a omp_con::Ctx>,
+	/// Whether this context drives hidden work (the compaction summarizer,
+	/// auxiliary [`ErasedInference`] calls) rather than a visible response.
+	pub hidden:           bool,
 	node:                 Option<&'a Node>,
 	director:             Option<Handle>,
 }
@@ -323,7 +326,23 @@ impl<'a> DirectorCx<'a> {
 	/// Creates context for a turn before the stack selects a Director.
 	#[must_use]
 	pub const fn new(turn: Handle, route: &'a RouteFacts) -> Self {
-		Self { turn, route, con: None, response_ordinal: 0, node: None, director: None }
+		Self {
+			turn,
+			route,
+			con: None,
+			response_ordinal: 0,
+			hidden: false,
+			node: None,
+			director: None,
+		}
+	}
+
+	/// Marks this context as hidden work; stream watchers refuse it (ADR
+	/// 0038 §6: hidden and compaction turns are never watched).
+	#[must_use]
+	pub const fn with_hidden(mut self, hidden: bool) -> Self {
+		self.hidden = hidden;
+		self
 	}
 
 	/// Associates the effective control plane for convar-aware observers.
@@ -366,6 +385,7 @@ impl<'a> DirectorCx<'a> {
 			route:            self.route,
 			con:              self.con,
 			response_ordinal: self.response_ordinal,
+			hidden:           self.hidden,
 			node:             Some(node),
 			director:         Some(director),
 		}
@@ -1066,6 +1086,12 @@ impl DirectorStack {
 		cx: &DirectorCx<'_>,
 		req: &ChatRequest,
 	) -> Vec<StreamObserver> {
+		// ADR 0038 §6: hidden and compaction work is never watched. The gate
+		// lives here so every future hidden call site inherits it instead of
+		// relying on hidden paths simply not reaching the loop's call site.
+		if cx.hidden {
+			return Vec::new();
+		}
 		self
 			.active
 			.iter()
@@ -1613,7 +1639,12 @@ fn con_write_ops(session: &Session, writes: &[(Str, BindValue)]) -> Result<Vec<O
 	Ok(ops)
 }
 
-fn developer_op(dom: &Dom, turn: Handle, text: Str) -> Op {
+/// DOM property key for one durable Director state field.
+pub(crate) fn state_key(key: &str) -> PropKey {
+	custom(&format!("{STATE_PREFIX}{key}"))
+}
+
+pub(crate) fn developer_op(dom: &Dom, turn: Handle, text: Str) -> Op {
 	Op::Ins {
 		parent: turn,
 		after:  dom.children(turn).last().copied(),

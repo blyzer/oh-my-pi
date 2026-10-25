@@ -523,6 +523,60 @@ impl Director for StreamRules {
 		vec![StateUpdate::new("responses", BindValue::Int(previous.saturating_add(current)))]
 	}
 
+	fn evaluate(
+		&self,
+		_dom: &omp_dom::Dom,
+		cx: &DirectorCx<'_>,
+		_turn: &crate::TurnView,
+	) -> crate::director::DirectorEffect {
+		// ADR 0038 §3: deferred prose reminders are delivered at the yield as
+		// a `Continue`, clearing the durable pending state in the same tick.
+		match cx.state("pending") {
+			Some(omp_dom::Value::Str(text)) if !text.is_empty() => {
+				let mut effect = crate::director::DirectorEffect::new(crate::Verdict::Continue {
+					reminder: Some(text.clone()),
+				});
+				effect
+					.updates
+					.push(StateUpdate::new("pending", BindValue::Str(Str::new_static(""))));
+				effect
+			},
+			_ => crate::director::DirectorEffect::new(crate::Verdict::Pass),
+		}
+	}
+
+	fn before_inference<'a>(
+		&'a self,
+		cx: &'a mut crate::director::MutDirectorCx<'_>,
+		_req: &ChatRequest,
+	) -> crate::director::BoxFut<'a, Result<crate::director::Prepared, crate::DirectorError>> {
+		// ADR 0038 §3: when an inner Director consumed the yield, the pending
+		// reminders are delivered as a developer aside on the next request.
+		Box::pin(std::future::ready((|| {
+			let Some(director) = cx.director else {
+				return Ok(crate::director::Prepared::Unchanged);
+			};
+			let pending = cx
+				.session
+				.dom()
+				.get(director)
+				.and_then(|node| node.prop(&crate::director::state_key("pending")))
+				.and_then(omp_dom::Value::as_str)
+				.filter(|text| !text.is_empty())
+				.map(Str::new);
+			let Some(text) = pending else {
+				return Ok(crate::director::Prepared::Unchanged);
+			};
+			let mut ops = crate::director::update_ops(director, vec![StateUpdate::new(
+				"pending",
+				BindValue::Str(Str::new_static("")),
+			)]);
+			ops.push(crate::director::developer_op(cx.session.dom(), cx.turn, text));
+			crate::director::patch(cx.session, "director.continue", ops)?;
+			Ok(crate::director::Prepared::Rebuild)
+		})()))
+	}
+
 	fn watch_stream(&self, cx: &DirectorCx<'_>, _req: &ChatRequest) -> Option<Box<dyn StreamWatch>> {
 		let set = self.set.as_ref()?.clone();
 		let con = cx.con?;
@@ -562,12 +616,17 @@ impl Director for StreamRules {
 				(disabled || exhausted).then_some(index)
 			})
 			.collect::<omp_core::FastHashSet<_>>();
+		let pending = match cx.state("pending") {
+			Some(omp_dom::Value::Str(text)) => text.clone(),
+			_ => Str::new_static(""),
+		};
 		Some(Box::new(Watch::new(
 			set,
 			exhausted,
 			interrupt,
 			context,
 			completed.saturating_add(cx.response_ordinal),
+			pending,
 		)))
 	}
 }
@@ -654,6 +713,10 @@ struct Watch {
 	interrupt:        StreamRuleInterrupt,
 	context:          StreamRuleContext,
 	response_ordinal: u32,
+	/// Deferred prose reminders (ADR 0038 §3): bodies of non-interrupting
+	/// text/thinking matches, durably staged under the `pending` state key
+	/// and delivered at the next yield or request instead of this turn.
+	pending:          Str,
 }
 
 impl Watch {
@@ -663,6 +726,7 @@ impl Watch {
 		interrupt: StreamRuleInterrupt,
 		context: StreamRuleContext,
 		response_ordinal: u32,
+		pending: Str,
 	) -> Self {
 		Self {
 			cursors: omp_core::FastHashMap::default(),
@@ -671,6 +735,7 @@ impl Watch {
 			interrupt,
 			context,
 			response_ordinal,
+			pending,
 		}
 	}
 
@@ -740,7 +805,7 @@ impl Watch {
 		Some(self.hit(rule_index, source))
 	}
 
-	fn hit(&self, index: usize, source: StreamSource<'_>) -> StreamVerdict {
+	fn hit(&mut self, index: usize, source: StreamSource<'_>) -> StreamVerdict {
 		let compiled = &self.set.rules[index];
 		let rule = &compiled.pattern;
 		let should_interrupt = interrupts(compiled.interrupt.unwrap_or(self.interrupt), source);
@@ -762,7 +827,21 @@ impl Watch {
 			if let Some(call_id) = call_id {
 				effect.call_diags.push((call_id, rule.body.clone()));
 			} else {
-				effect.developer = Some(rule.body.clone());
+				// ADR 0038 §3: a non-interrupting prose match defers its body
+				// as a durable pending reminder instead of a same-turn aside;
+				// the Director delivers it at the next yield (`Continue`) or
+				// request (`before_inference`).
+				if !self.pending.is_empty() {
+					let mut joined = omp_core::StrMut::from(self.pending.as_str());
+					joined.push_str("\n\n");
+					joined.push_str(&rule.body);
+					self.pending = joined.freeze();
+				} else {
+					self.pending = rule.body.clone();
+				}
+				effect
+					.updates
+					.push(StateUpdate::new("pending", BindValue::Str(self.pending.clone())));
 			}
 			return StreamVerdict::Note(effect);
 		}
@@ -922,7 +1001,14 @@ mod tests {
 				.set
 				.expect("valid rule compiles"),
 		);
-		Watch::new(set, omp_core::FastHashSet::default(), StreamRuleInterrupt::Always, context, 1)
+		Watch::new(
+			set,
+			omp_core::FastHashSet::default(),
+			StreamRuleInterrupt::Always,
+			context,
+			1,
+			Str::new_static(""),
+		)
 	}
 
 	/// A watch over `patterns`, each its own text-scoped rule.
@@ -950,6 +1036,7 @@ mod tests {
 			StreamRuleInterrupt::Always,
 			StreamRuleContext::Discard,
 			1,
+			Str::new_static(""),
 		)
 	}
 
@@ -1097,7 +1184,18 @@ mod tests {
 		let StreamVerdict::Note(note) = prose.block_end(0) else {
 			panic!("never policy should record a note")
 		};
-		assert_eq!(note.developer.as_deref(), Some("Follow the repository rule."));
+		// ADR 0038 §3: the prose body defers as a pending reminder instead of
+		// a same-turn developer aside.
+		assert_eq!(note.developer, None, "prose bodies defer rather than land this turn");
+		assert!(
+			note
+				.updates
+				.iter()
+				.any(|update| update.key.as_str() == "pending"
+					&& update.value == BindValue::Str(Str::new_static("Follow the repository rule."))),
+			"the pending reminder is staged durably: {:?}",
+			note.updates
+		);
 
 		let mut tool =
 			make_watch("forbidden", &["tool:edit"], &[], Some("never"), StreamRuleContext::Discard);
@@ -1223,6 +1321,7 @@ mod tests {
 			StreamRuleInterrupt::Always,
 			StreamRuleContext::Discard,
 			1,
+			Str::new_static(""),
 		);
 		assert!(matches!(
 			watch.fragment(fragment(0, StreamSource::Text, b"a dan")),
@@ -1268,6 +1367,7 @@ mod tests {
 				StreamRuleInterrupt::Always,
 				StreamRuleContext::Discard,
 				1,
+				Str::new_static(""),
 			);
 			let mut start = 0;
 			let mut matched = false;

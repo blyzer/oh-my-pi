@@ -3318,9 +3318,6 @@ impl<C: Inference> Kernel<C> {
 				if let Some((owner, interrupt)) = redirect {
 					let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
 					let director = director_family(session.dom(), owner);
-					session.assistant_end("interrupted")?;
-					self.apply_live_components(session)?;
-					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
 					let mut effect = interrupt.effect;
 					let reason = effect.notice.clone();
 					if let Some(observation) = &mut effect.observation {
@@ -3329,6 +3326,12 @@ impl<C: Inference> Kernel<C> {
 							.insert("interrupted".to_owned(), serde_json::Value::Bool(true));
 					}
 					stream_effects.push((owner, effect));
+					// ADR 0038 §4: the redirect transaction (interrupt mark,
+					// exclusion, notice, injection, fired marks) commits before
+					// the assistant end and receipt. A crash after it resumes as
+					// an ordinary mid-stream crash whose marks already hold, so
+					// the rule cannot fire twice and the exclusion is never
+					// separated from the receipted assistant.
 					let observations = commit_stream_effects(
 						session,
 						current_turn(session)?,
@@ -3336,6 +3339,9 @@ impl<C: Inference> Kernel<C> {
 						stream_effects,
 						Some((interrupt.partial, owner)),
 					)?;
+					session.assistant_end("interrupted")?;
+					self.apply_live_components(session)?;
+					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
 					self.apply_live_components(session)?;
 					self.events.publish(KernelEvent::StreamRedirected {
 						director,
