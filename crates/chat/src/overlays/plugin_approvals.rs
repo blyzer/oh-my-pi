@@ -61,9 +61,7 @@ impl PluginApprovals {
 	/// Opens the selector over the commands the application reports blocked,
 	/// filtered to `query` (a plugin id, from `/plugins approve <plugin>`).
 	pub fn open(services: &Arc<dyn Services>, query: Str, ctx: &UiContext) -> Result<Self, Str> {
-		let rows = services
-			.blocked_plugin_commands()
-			.map_err(|error| sf!("{error}"))?;
+		let rows = services.blocked_plugin_commands().map_err(crate::fault)?;
 		let mut panel = Self {
 			services: Arc::clone(services),
 			rows,
@@ -304,7 +302,9 @@ impl Panel for PluginApprovals {
 		}
 		self.settled = Some(match &outcome.result {
 			Ok(line) => Settled { line: line.clone(), failed: false },
-			Err(error) => Settled { line: sf!("Plugin approval failed: {error}"), failed: true },
+			Err(error) => {
+				Settled { line: crate::fault_in("Plugin approval failed", error), failed: true }
+			},
 		});
 		self.rebuild();
 		PanelEvent::Consumed

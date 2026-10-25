@@ -118,7 +118,7 @@ fn apply_fast(cx: &PanelCx<'_>, op: FastOp) -> PanelEvent {
 	if let Some(next) = next {
 		let script = format!("ai_fastmode {}", Value::Bool(next));
 		if let Err(error) = cx.con.exec(&script, omp_con::Source::Console) {
-			return notice(error.to_string());
+			return notice(crate::fault(error));
 		}
 		return notice(if next {
 			"Fast mode enabled."
@@ -175,7 +175,7 @@ fn dump(cx: &PanelCx<'_>) -> PanelEvent {
 			);
 			status.push(sf!("LLM request JSON: {}", path.display()));
 		},
-		Err(error) => status.push(sf!("LLM request JSON unavailable: {error}")),
+		Err(error) => status.push(crate::fault_in("LLM request JSON unavailable", error)),
 	}
 	cx.con.reply(Severity::Info, &status.join("\n"));
 	PanelEvent::Copy(Str::new(doc))
@@ -414,10 +414,7 @@ fn mcp_panel(op: McpOp) -> PanelOpener {
 			},
 		};
 		let scrollable_report = matches!(&op, McpOp::SmitherySearch(_));
-		let run = cx
-			.services
-			.mcp(op.clone())
-			.map_err(|error| sf!("{error}"))?;
+		let run = cx.services.mcp(op.clone()).map_err(crate::fault)?;
 		if scrollable_report {
 			return Ok(Box::new(PendingReportPanel::new_cancellable(
 				"mcp",

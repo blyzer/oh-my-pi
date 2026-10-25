@@ -239,7 +239,7 @@ impl AgentsHub {
 				self.notice = Some(sf!("{name} {}", outcome.mutation.verb()));
 				self.error = None;
 			},
-			Err(error) => self.error = Some(Str::new(error.to_string())),
+			Err(error) => self.error = Some(crate::fault(error)),
 		}
 		self.rebuild();
 		PanelEvent::Consumed
@@ -531,7 +531,7 @@ fn load(services: &dyn Services) -> (Vec<AgentRow>, Option<Str>) {
 			});
 			(agents, None)
 		},
-		Err(error) => (Vec::new(), Some(Str::new(error.to_string()))),
+		Err(error) => (Vec::new(), Some(crate::fault(error))),
 	}
 }
 

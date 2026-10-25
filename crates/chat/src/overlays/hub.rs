@@ -1328,7 +1328,7 @@ impl Panel for AgentHub {
 			{
 				match &outcome.result {
 					Ok(line) => PanelEvent::Notice(line.clone()),
-					Err(error) => PanelEvent::Notice(sf!("{error}")),
+					Err(error) => PanelEvent::Notice(crate::fault(error)),
 				}
 			},
 			PanelNote::Outcome(_) | PanelNote::Live(..) | PanelNote::SettingResult { .. } => {
@@ -1537,10 +1537,7 @@ impl TranscriptViewer {
 			.into_iter()
 			.find(|job| job.id.as_str() == id)
 			.ok_or_else(|| sf!("no agent \"{id}\" in this session"))?;
-		let pending = cx
-			.services
-			.agent_view(id)
-			.map_err(|error| Str::new(error.to_string()))?;
+		let pending = cx.services.agent_view(id).map_err(crate::fault)?;
 		let show_thinking = crate::settings::CL_SHOWTHINKING
 			.try_get(cx.con)
 			.unwrap_or(true);
@@ -1732,7 +1729,7 @@ impl TranscriptViewer {
 					Ok(event) => match self.dom.apply_event(&event) {
 						Ok(()) => changed = true,
 						Err(error) => {
-							self.notice = Some(sf!("agent transcript patch: {error}"));
+							self.notice = Some(crate::fault_in("agent transcript patch", error));
 							changed = true;
 						},
 					},
@@ -1847,7 +1844,7 @@ impl Panel for TranscriptViewer {
 			PanelNote::Outcome(Outcome::Agent(outcome)) if outcome.id == self.job.id => {
 				match &outcome.result {
 					Ok(line) => PanelEvent::Notice(line.clone()),
-					Err(error) => PanelEvent::Notice(sf!("{error}")),
+					Err(error) => PanelEvent::Notice(crate::fault(error)),
 				}
 			},
 			PanelNote::Outcome(_) | PanelNote::Live(..) | PanelNote::SettingResult { .. } => {

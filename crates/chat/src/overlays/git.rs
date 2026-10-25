@@ -804,9 +804,9 @@ impl GitWorkbench {
 		viewport: Size,
 	) -> Result<Self, Str> {
 		let model = GitModel::open(root, revision)
-			.map_err(|error| sf!("{error}"))?
+			.map_err(crate::fault)?
 			.ok_or_else(|| sf!("Not a git repository: {}", root.display()))?;
-		let snapshot = model.snapshot().map_err(|error| sf!("{error}"))?;
+		let snapshot = model.snapshot().map_err(crate::fault)?;
 		let selected = first_file(&snapshot).map(|file| (file.area, file.path.clone()));
 		let fingerprint = model.fingerprint(selected.as_ref().map(|(_, path)| path.as_str()));
 		let mut workbench = Self {
@@ -1220,7 +1220,7 @@ impl GitWorkbench {
 				PanelEvent::Notice(message.clone())
 			},
 			Err(error) => {
-				let message = sf!("{error}");
+				let message = crate::fault(error);
 				self.set_status(message.clone(), self.ctx.theme.err, true);
 				self.pending_discard = None;
 				self.rebuild();

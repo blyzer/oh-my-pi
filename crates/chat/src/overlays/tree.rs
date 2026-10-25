@@ -93,10 +93,7 @@ impl TreePanel {
 	/// Opens the selector over the host journal tree. Fails when the feed
 	/// is unavailable or holds no entries.
 	pub fn open(cx: &PanelCx<'_>) -> Result<Self, Str> {
-		let entries = cx
-			.services
-			.journal_tree()
-			.map_err(|error| Str::new(error.to_string()))?;
+		let entries = cx.services.journal_tree().map_err(crate::fault)?;
 		if entries.is_empty() {
 			return Err(Str::new_static(EMPTY));
 		}

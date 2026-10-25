@@ -27,6 +27,7 @@ pub enum ServiceError {
 		feed: &'static str,
 	},
 	/// The feed exists but the request failed.
+	// lintx-allow: error-str-payload type-erasure seam; the application renders the cause once
 	#[error("{0}")]
 	Failed(Str),
 }

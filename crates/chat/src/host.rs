@@ -63,6 +63,7 @@ use crate::{
 		PasteOutcome, PrefixMode, SpaceHold, SpaceHoldEvent,
 	},
 	extension_status::{ExtensionStatus, ExtensionStatuses},
+	fault, fault_in,
 	gitwatch::{GitFacts, GitWatch},
 	media::read_attachments,
 	notices::{
@@ -1885,14 +1886,14 @@ impl Presenter {
 		let dark = match self.services.theme(names[0].as_str()) {
 			Ok(theme) => theme,
 			Err(error) => {
-				self.overlays.notify(error.to_string());
+				self.overlays.notify(fault(error));
 				return false;
 			},
 		};
 		let light = match self.services.theme(names[1].as_str()) {
 			Ok(theme) => theme,
 			Err(error) => {
-				self.overlays.notify(error.to_string());
+				self.overlays.notify(fault(error));
 				return false;
 			},
 		};
@@ -2234,8 +2235,9 @@ impl Presenter {
 				},
 				Err(error) => {
 					self.composer.paste_chip(text, None);
-					self.notice(format!(
-						"Failed to save paste to a file — attached as a text chip instead ({error})"
+					let cause = fault(error);
+					self.notice(sf!(
+						"Failed to save paste to a file — attached as a text chip instead ({cause})"
 					))
 				},
 			},
@@ -2432,7 +2434,7 @@ impl Presenter {
 				}
 				let attachments = match read_attachments(&media) {
 					Ok(attachments) => attachments,
-					Err(error) => return Ok(self.notice(error.to_string())),
+					Err(error) => return Ok(self.notice(fault(error))),
 				};
 				let _ = self.commit_submission();
 				Ok(self.submit_with_attachments(text, attachments))
@@ -2441,7 +2443,7 @@ impl Presenter {
 				if !media.is_empty() {
 					let attachments = match read_attachments(&media) {
 						Ok(attachments) => attachments,
-						Err(error) => return Ok(self.notice(error.to_string())),
+						Err(error) => return Ok(self.notice(fault(error))),
 					};
 					let Some(prompt) = goal_media_prompt(statement.as_str()) else {
 						return Ok(self.notice("Slash commands do not accept media attachments"));
@@ -2466,7 +2468,7 @@ impl Presenter {
 				}
 				let attachments = match read_attachments(&media) {
 					Ok(attachments) => attachments,
-					Err(error) => return Ok(self.notice(error.to_string())),
+					Err(error) => return Ok(self.notice(fault(error))),
 				};
 				let _ = self.commit_submission();
 				Ok(self.queue_with_attachments(text, attachments))
@@ -2801,7 +2803,7 @@ impl Presenter {
 					self.composer.paste(&path.to_string_lossy());
 					Routed::Repaint
 				},
-				Err(error) => self.notice(format!("Could not stage the pasted image: {error}")),
+				Err(error) => self.notice(fault_in("Could not stage the pasted image", error)),
 			},
 			ClipboardReadOutcome::Payload(Clipboard::Paths(paths)) => {
 				let mut joined = String::new();
@@ -2854,7 +2856,7 @@ impl Presenter {
 			Ok(Some(edited)) => self.composer.replace_edited(&edited),
 			Ok(None) => {},
 			Err(error) => {
-				self.notice(error.to_string());
+				self.notice(fault(error));
 			},
 		}
 		self.composer.restore_focus();
@@ -3135,7 +3137,7 @@ impl Presenter {
 								let _ = self.commit_submission();
 								self.queue_with_attachments(text, attachments)
 							},
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						}
 					},
 					action => self.preview_composer_action(action)?,
@@ -3231,7 +3233,7 @@ impl Presenter {
 					self.pending_editor = Some(command);
 					Routed::ExternalEditor
 				},
-				Err(error) => self.notice(error.to_string()),
+				Err(error) => self.notice(fault(error)),
 			},
 			HostAction::Dequeue => self.restore_queued(false),
 			HostAction::PasteImage => {
@@ -3379,15 +3381,15 @@ impl Presenter {
 					PanelEvent::Ignored => match outcome {
 						crate::overlays::Outcome::Service(outcome) => match outcome.result {
 							Ok(line) => self.notice(line),
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						},
 						crate::overlays::Outcome::Git(outcome) => match outcome.result {
 							Ok(line) => self.notice(line),
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						},
 						crate::overlays::Outcome::Agent(outcome) => match outcome.result {
 							Ok(line) => self.notice(line),
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						},
 						crate::overlays::Outcome::Collab(outcome) => match outcome.result {
 							Ok(state) => {
@@ -3414,7 +3416,7 @@ impl Presenter {
 								};
 								self.set_collab_status(status).max(self.notice(state.line))
 							},
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						},
 						crate::overlays::Outcome::SessionIndex(outcome) => match outcome.result {
 							Ok(_) => Routed::Ignored,
@@ -3429,7 +3431,7 @@ impl Presenter {
 								Routed::Repaint
 							},
 							Ok(_) => self.notice(sf!("Failed to persist {} session", outcome.source)),
-							Err(error) => self.notice(error.to_string()),
+							Err(error) => self.notice(fault(error)),
 						},
 					},
 					event => self.apply_panel_event(event)?,
@@ -3478,7 +3480,7 @@ impl Presenter {
 						self.set_ui_context(ui);
 						Routed::RebuildProjection
 					},
-					Err(error) => self.notice(error.to_string()),
+					Err(error) => self.notice(fault(error)),
 				}
 			},
 			"cl_composer_shape" => {
@@ -3593,7 +3595,7 @@ impl Presenter {
 					routed.max(Routed::RebuildProjection)
 				},
 				Err(error) => {
-					let message = error.to_string();
+					let message = fault(error);
 					let event = self.overlays.notify_panels(PanelNote::SettingResult {
 						convar: convar.as_str(),
 						error:  Some(&message),
@@ -3765,17 +3767,17 @@ impl Presenter {
 		let var = if task { "ai_task_model" } else { "ai_model" };
 		let script = format!("{var} {}", omp_con::Value::Str(row.key.clone()));
 		if let Err(error) = self.con.exec(&script, Source::Console) {
-			return self.notice(error.to_string());
+			return self.notice(fault(error));
 		}
 		if !task {
 			self.reset_thinking_for(row);
 			self.sync_status();
 			if !session_only && let Err(error) = self.write_role(PickerRole::Default, Some(row)) {
-				return self.notice(error.to_string());
+				return self.notice(fault(error));
 			}
 		}
 		if !session_only && let Err(error) = self.con.exec("writecfg", Source::Console) {
-			return self.notice(format!("{} set for this session only: {error}", row.key));
+			return self.notice(fault_in(sf!("{} set for this session only", row.key), error));
 		}
 		let label = if row.name.is_empty() {
 			row.key.clone()
@@ -3827,7 +3829,7 @@ impl Presenter {
 		};
 		let clear = picker.holds_role(role, index);
 		if let Err(error) = self.write_role(role, (!clear).then_some(&row)) {
-			return self.notice(error.to_string());
+			return self.notice(fault(error));
 		}
 		let marks = self.role_marks();
 		if let Some(Overlay::Models(picker)) = self.overlays.active_mut() {
@@ -3840,7 +3842,7 @@ impl Presenter {
 		};
 		let role = role.name();
 		if let Err(error) = self.con.exec("writecfg", Source::Console) {
-			return self.notice(format!("{role} role set for this session only: {error}"));
+			return self.notice(fault_in(sf!("{role} role set for this session only"), error));
 		}
 		self.notice(if clear {
 			format!("{role} role cleared (saved to config.cfg)")
@@ -3952,7 +3954,7 @@ impl Presenter {
 				self.sync_status();
 				self.notice(format!("Thinking: {next}"))
 			},
-			Err(error) => self.notice(error.to_string()),
+			Err(error) => self.notice(fault(error)),
 		}
 	}
 
@@ -3979,7 +3981,7 @@ impl Presenter {
 		let row = self.models.iter().find(|row| row.key == model).cloned();
 		let script = format!("ai_model {}", omp_con::Value::Str(model.clone()));
 		if let Err(error) = self.con.exec(&script, Source::Console) {
-			return self.notice(error.to_string());
+			return self.notice(fault(error));
 		}
 		if let Some(row) = row.as_ref() {
 			self.reset_thinking_for(row);
@@ -4338,7 +4340,7 @@ impl Host {
 				},
 				Pause::Suspend => {
 					if let Err(error) = suspend_process() {
-						self.presenter.notice(error.to_string());
+						self.presenter.notice(fault(error));
 					}
 				},
 				Pause::ExternalEditor => {
@@ -4838,13 +4840,13 @@ impl Host {
 			.as_mut()
 			.is_some_and(|projection| projection.tick(now));
 		let overlay = self.presenter.tick_overlay(now).unwrap_or_else(|error| {
-			self.presenter.notice(error.to_string());
+			self.presenter.notice(fault(error));
 			true
 		});
 		let countdown = self.presenter.approval_wake().is_some() || self.presenter.retrying.is_some();
 		let hold = self.presenter.tick_space_hold(now);
 		let quota = self.presenter.tick_quota(now).unwrap_or_else(|error| {
-			self.presenter.notice(error.to_string());
+			self.presenter.notice(fault(error));
 			true
 		});
 		account_usage
@@ -5690,7 +5692,7 @@ impl NativeHost {
 	pub fn deliver_clipboard(&mut self, outcome: ClipboardReadOutcome, raw: bool) -> NativeEffect {
 		let routed = match self.presenter.deliver_clipboard(outcome, raw) {
 			Ok(routed) => routed,
-			Err(error) => self.presenter.notice(error.to_string()),
+			Err(error) => self.presenter.notice(fault(error)),
 		};
 		self.native_effect(routed)
 	}
@@ -5753,7 +5755,7 @@ impl NativeHost {
 	pub fn paste(&mut self, text: &str) -> NativeEffect {
 		let routed = match self.presenter.route_paste(text) {
 			Ok(routed) => routed,
-			Err(error) => self.presenter.notice(error.to_string()),
+			Err(error) => self.presenter.notice(fault(error)),
 		};
 		self.native_effect(routed)
 	}

@@ -108,7 +108,7 @@ fn set_var(cx: &PanelCx<'_>, name: &str, value: Value) -> Result<(), Str> {
 	cx.con
 		.exec(&format!("{name} {value}"), omp_con::Source::Console)
 		.map(|_| ())
-		.map_err(|error| Str::new(error.to_string()))
+		.map_err(crate::fault)
 }
 
 fn var_text(cx: &PanelCx<'_>, name: &str) -> Str {
@@ -304,7 +304,7 @@ const SSH_HELP: &str = "**SSH host management**\n\n`/ssh list`\n`/ssh add <alias
                         root's `hosts.toml` (`~/.o2`). Project aliases take precedence.";
 
 fn ssh_list(cx: &PanelCx<'_>) -> Result<Box<dyn crate::overlays::Panel>, Str> {
-	let hosts = cx.services.ssh_hosts().map_err(|error| sf!("{error}"))?;
+	let hosts = cx.services.ssh_hosts().map_err(crate::fault)?;
 	if hosts.is_empty() {
 		return Err(Str::new_static("No SSH hosts configured. Use `/ssh add` to add one."));
 	}

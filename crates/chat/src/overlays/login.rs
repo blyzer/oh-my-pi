@@ -534,7 +534,7 @@ impl Panel for LogoutSelector {
 				PanelEvent::Finish(sf!("echo \"Logged out {}\"", escape_quoted(account.display_name())))
 			},
 			Err(error) => {
-				self.status = Some(sf!("Logout failed: {error}"));
+				self.status = Some(crate::fault_in("Logout failed", error));
 				self.rebuild(self.width);
 				PanelEvent::Consumed
 			},
