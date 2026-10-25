@@ -347,7 +347,7 @@ fn copy_string(element: &AXUIElement, attribute: &str) -> Option<String> {
 }
 fn copy_required_string(element: &AXUIElement, attribute: &str) -> CoreResult<String> {
 	let value = copy_attribute_result(element, attribute)
-		.map_err(|error| DesktopError::ax_failed(format!("copying {attribute} failed ({error:?})")))?
+		.map_err(|error| ax_error(error, format!("copying {attribute} failed")))?
 		.ok_or_else(|| DesktopError::ax_failed(format!("copying {attribute} returned no value")))?;
 	value
 		.downcast::<CFString>()
@@ -528,10 +528,15 @@ fn truncate_chars(value: String, max: usize) -> String {
 	result
 }
 
+/// Renders an `AXError` FFI code once; `AXError` carries no source chain.
+fn ax_error(error: AXError, context: impl Into<String>) -> DesktopError {
+	DesktopError::ax_failed(format!("{} ({error:?})", context.into()))
+}
+
 fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
 	if error == AXError::Success {
 		Ok(())
 	} else {
-		Err(DesktopError::ax_failed(format!("{} ({error:?})", context.into())))
+		Err(ax_error(error, context))
 	}
 }

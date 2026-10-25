@@ -5,7 +5,7 @@ use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Setting
 use super::{
 	super::{
 		backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		keys::KeyName,
 		types::Target,
 	},
@@ -15,7 +15,9 @@ use super::{
 pub(super) fn create_global_input() -> CoreResult<Enigo> {
 	let _ = enigo::set_dpi_awareness();
 	Enigo::new(&Settings { open_prompt_to_get_permissions: false, ..Settings::default() }).map_err(
-		|error| DesktopError::input_failed(format!("Win32 input initialization failed: {error}")),
+		|error| {
+			DesktopError::caused(ErrorCode::InputFailed, "Win32 input initialization failed", &error)
+		},
 	)
 }
 

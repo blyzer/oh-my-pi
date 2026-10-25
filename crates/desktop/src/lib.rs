@@ -752,7 +752,7 @@ impl SessionCore {
 			})
 			.map_err(|e| {
 				tracing::warn!(error = %e, "desktop worker initialization failed");
-				DesktopError::internal(format!("failed to start native desktop worker: {e}"))
+				DesktopError::caused(ErrorCode::Internal, "failed to start native desktop worker", &e)
 			})?;
 		lifecycle.tx = Some(tx.clone());
 		lifecycle.done = Some(done_rx);
@@ -771,7 +771,7 @@ impl SessionCore {
 			.send(Work { request: make(txr), state: Arc::clone(&state) })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))?;
 		let result = rxr.recv_deadline(state.deadline).map_err(|e| {
-			DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
+			DesktopError::caused(ErrorCode::Timeout, "native desktop operation did not complete", &e)
 		});
 		if result.is_err() {
 			state.cancelled.store(true, Ordering::Release);
@@ -796,11 +796,11 @@ impl SessionCore {
 		})
 		.map_err(|_| DesktopError::closed())?;
 		let _ = rrx.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
-			DesktopError::timeout(format!("timed out closing native desktop worker: {e}"))
+			DesktopError::caused(ErrorCode::Timeout, "timed out closing native desktop worker", &e)
 		})?;
 		if let Some(done) = lifecycle.done.take() {
 			done.recv_timeout(CLOSE_TIMEOUT).map_err(|e| {
-				DesktopError::timeout(format!("native desktop worker did not exit: {e}"))
+				DesktopError::caused(ErrorCode::Timeout, "native desktop worker did not exit", &e)
 			})?;
 		}
 		if let Some(join) = lifecycle.join.take() {
@@ -1132,7 +1132,9 @@ impl DesktopSession {
 		let core = Arc::clone(&self.core);
 		task::spawn_blocking(move || core.close())
 			.await
-			.map_err(|error| DesktopError::internal(format!("desktop close task failed: {error}")))?
+			.map_err(|error| {
+				DesktopError::caused(ErrorCode::Internal, "desktop close task failed", &error)
+			})?
 	}
 
 	async fn operation<T, M, D>(&self, make: M, decode: D) -> CoreResult<T>
@@ -1150,7 +1152,7 @@ impl DesktopSession {
 		let result = task::spawn_blocking(move || decode(core.call(make, state)?))
 			.await
 			.map_err(|error| {
-				DesktopError::internal(format!("desktop operation task failed: {error}"))
+				DesktopError::caused(ErrorCode::Internal, "desktop operation task failed", &error)
 			})?;
 		drop(cancel);
 		result

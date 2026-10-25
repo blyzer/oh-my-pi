@@ -25,18 +25,74 @@ use spa::{
 use tokio::runtime::Runtime;
 
 use super::portal::{read_token, store_token};
-use crate::error::{CoreResult, DesktopError};
+use crate::error::{CoreResult, DesktopError, ErrorCode};
 
 const SCREENCAST_TOKEN: &str = "screencast-token";
 
-async fn open_screencast() -> Result<(u32, OwnedFd), String> {
+/// Failure while negotiating a Wayland screencast or reading a PipeWire frame;
+/// rendered once at the `capture` boundary.
+#[derive(Debug, thiserror::Error)]
+enum WaylandCaptureError {
+	#[error("ScreenCast portal")]
+	Portal(#[source] ashpd::Error),
+	#[error("ScreenCast CreateSession")]
+	CreateSession(#[source] ashpd::Error),
+	#[error("ScreenCast SelectSources")]
+	SelectSources(#[source] ashpd::Error),
+	#[error("ScreenCast Start")]
+	Start(#[source] ashpd::Error),
+	#[error("ScreenCast permission")]
+	Permission(#[source] ashpd::Error),
+	#[error("ScreenCast returned no monitor stream")]
+	NoMonitorStream,
+	#[error("ScreenCast OpenPipeWireRemote")]
+	OpenPipeWireRemote(#[source] ashpd::Error),
+	#[error("PipeWire main loop")]
+	MainLoop(#[source] pw::Error),
+	#[error("PipeWire context")]
+	Context(#[source] pw::Error),
+	#[error("PipeWire remote")]
+	Remote(#[source] pw::Error),
+	#[error("PipeWire stream")]
+	Stream(#[source] pw::Error),
+	#[error("PipeWire listener")]
+	Listener(#[source] pw::Error),
+	#[error("PipeWire format serialization")]
+	FormatSerialization(#[source] pod::serialize::GenError),
+	#[error("PipeWire rejected format parameters")]
+	InvalidFormatPod,
+	#[error("PipeWire connect")]
+	Connect(#[source] pw::Error),
+	#[error("PipeWire stream ended before producing a frame")]
+	NoFrame,
+	#[error("PipeWire negotiated an empty frame")]
+	EmptyFrame,
+	#[error("PipeWire returned unsupported frame stride {0}")]
+	UnsupportedStride(i32),
+	#[error("PipeWire frame buffer is not memory-mapped")]
+	UnmappedBuffer,
+	#[error("PipeWire frame size overflow")]
+	FrameSizeOverflow,
+	#[error("PipeWire frame offset is outside the mapped buffer")]
+	FrameOffsetOutOfBounds,
+	#[error("PipeWire negotiated unsupported pixel format {0:?}")]
+	UnsupportedPixelFormat(video::VideoFormat),
+	#[error("PipeWire row size overflow")]
+	RowSizeOverflow,
+	#[error("PipeWire frame buffer is short: {len} bytes for {width}x{height} stride {stride}")]
+	ShortFrameBuffer { len: usize, width: u32, height: u32, stride: usize },
+	#[error("failed to construct PipeWire RGBA frame")]
+	FrameConstruction,
+}
+
+async fn open_screencast() -> Result<(u32, OwnedFd), WaylandCaptureError> {
 	let portal = Screencast::new()
 		.await
-		.map_err(|err| format!("ScreenCast portal: {err}"))?;
+		.map_err(WaylandCaptureError::Portal)?;
 	let session = portal
 		.create_session()
 		.await
-		.map_err(|err| format!("ScreenCast CreateSession: {err}"))?;
+		.map_err(WaylandCaptureError::CreateSession)?;
 	let restore_token = read_token(SCREENCAST_TOKEN);
 	portal
 		.select_sources(
@@ -48,23 +104,23 @@ async fn open_screencast() -> Result<(u32, OwnedFd), String> {
 			PersistMode::ExplicitlyRevoked,
 		)
 		.await
-		.map_err(|err| format!("ScreenCast SelectSources: {err}"))?;
+		.map_err(WaylandCaptureError::SelectSources)?;
 	let response = portal
 		.start(&session, None)
 		.await
-		.map_err(|err| format!("ScreenCast Start: {err}"))?
+		.map_err(WaylandCaptureError::Start)?
 		.response()
-		.map_err(|err| format!("ScreenCast permission: {err}"))?;
+		.map_err(WaylandCaptureError::Permission)?;
 	store_token(SCREENCAST_TOKEN, response.restore_token());
 	let stream = response
 		.streams()
 		.first()
-		.ok_or_else(|| "ScreenCast returned no monitor stream".to_string())?;
+		.ok_or(WaylandCaptureError::NoMonitorStream)?;
 	let node = stream.pipe_wire_node_id();
 	let fd = portal
 		.open_pipe_wire_remote(&session)
 		.await
-		.map_err(|err| format!("ScreenCast OpenPipeWireRemote: {err}"))?;
+		.map_err(WaylandCaptureError::OpenPipeWireRemote)?;
 	Ok((node, fd))
 }
 
@@ -72,47 +128,50 @@ struct UserData {
 	format: VideoInfoRaw,
 }
 
-fn rgba_from_buffer(format: &VideoInfoRaw, data: &mut buffer::Data) -> Result<RgbaImage, String> {
+fn rgba_from_buffer(
+	format: &VideoInfoRaw,
+	data: &mut buffer::Data,
+) -> Result<RgbaImage, WaylandCaptureError> {
 	let size = format.size();
 	let width = size.width;
 	let height = size.height;
 	if width == 0 || height == 0 {
-		return Err("PipeWire negotiated an empty frame".to_string());
+		return Err(WaylandCaptureError::EmptyFrame);
 	}
 	let chunk = data.chunk();
 	let offset = chunk.offset() as usize;
 	let bytes = chunk.size() as usize;
 	let stride = chunk.stride();
 	if stride <= 0 {
-		return Err(format!("PipeWire returned unsupported frame stride {stride}"));
+		return Err(WaylandCaptureError::UnsupportedStride(stride));
 	}
 	let stride = stride as usize;
-	let source = data
-		.data()
-		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped".to_string())?;
+	let source = data.data().ok_or(WaylandCaptureError::UnmappedBuffer)?;
 	let end = offset
 		.checked_add(bytes)
-		.ok_or_else(|| "PipeWire frame size overflow".to_string())?
+		.ok_or(WaylandCaptureError::FrameSizeOverflow)?
 		.min(source.len());
 	let source = source
 		.get(offset..end)
-		.ok_or_else(|| "PipeWire frame offset is outside the mapped buffer".to_string())?;
+		.ok_or(WaylandCaptureError::FrameOffsetOutOfBounds)?;
 	let pixel_size = match format.format() {
 		video::VideoFormat::RGB | video::VideoFormat::BGR => 3,
 		video::VideoFormat::RGBA
 		| video::VideoFormat::RGBx
 		| video::VideoFormat::BGRA
 		| video::VideoFormat::BGRx => 4,
-		other => return Err(format!("PipeWire negotiated unsupported pixel format {other:?}")),
+		other => return Err(WaylandCaptureError::UnsupportedPixelFormat(other)),
 	};
 	let row_bytes = (width as usize)
 		.checked_mul(pixel_size)
-		.ok_or_else(|| "PipeWire row size overflow".to_string())?;
+		.ok_or(WaylandCaptureError::RowSizeOverflow)?;
 	if stride < row_bytes || source.len() < stride.saturating_mul(height as usize) {
-		return Err(format!(
-			"PipeWire frame buffer is short: {} bytes for {width}x{height} stride {stride}",
-			source.len()
-		));
+		return Err(WaylandCaptureError::ShortFrameBuffer {
+			len: source.len(),
+			width,
+			height,
+			stride,
+		});
 	}
 	let mut rgba = vec![
 		0;
@@ -151,25 +210,24 @@ fn rgba_from_buffer(format: &VideoInfoRaw, data: &mut buffer::Data) -> Result<Rg
 			}
 		}
 	}
-	RgbaImage::from_raw(width, height, rgba)
-		.ok_or_else(|| "failed to construct PipeWire RGBA frame".to_string())
+	RgbaImage::from_raw(width, height, rgba).ok_or(WaylandCaptureError::FrameConstruction)
 }
 
-fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
+fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, WaylandCaptureError> {
 	pw::init();
-	let mainloop = MainLoopRc::new(None).map_err(|err| format!("PipeWire main loop: {err}"))?;
-	let context =
-		ContextRc::new(&mainloop, None).map_err(|err| format!("PipeWire context: {err}"))?;
+	let mainloop = MainLoopRc::new(None).map_err(WaylandCaptureError::MainLoop)?;
+	let context = ContextRc::new(&mainloop, None).map_err(WaylandCaptureError::Context)?;
 	let core = context
 		.connect_fd_rc(fd, None)
-		.map_err(|err| format!("PipeWire remote: {err}"))?;
+		.map_err(WaylandCaptureError::Remote)?;
 	let stream = StreamBox::new(&core, "omp-computer-capture", properties! {
 		*pw::keys::MEDIA_TYPE => "Video",
 		*pw::keys::MEDIA_CATEGORY => "Capture",
 		*pw::keys::MEDIA_ROLE => "Screen",
 	})
-	.map_err(|err| format!("PipeWire stream: {err}"))?;
-	let result: Rc<RefCell<Option<Result<RgbaImage, String>>>> = Rc::new(RefCell::new(None));
+	.map_err(WaylandCaptureError::Stream)?;
+	let result: Rc<RefCell<Option<Result<RgbaImage, WaylandCaptureError>>>> =
+		Rc::new(RefCell::new(None));
 	let callback_result = Rc::clone(&result);
 	let callback_loop = mainloop.clone();
 	let _listener = stream
@@ -193,7 +251,7 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 			callback_loop.quit();
 		})
 		.register()
-		.map_err(|err| format!("PipeWire listener: {err}"))?;
+		.map_err(WaylandCaptureError::Listener)?;
 	let object = spa::pod::object!(
 		spa::utils::SpaTypes::ObjectParamFormat,
 		spa::param::pw::spa::param::ParamType::EnumFormat,
@@ -231,11 +289,10 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 		)
 	);
 	let values = PodSerializer::serialize(io::Cursor::new(Vec::new()), &pod::Value::Object(object))
-		.map_err(|err| format!("PipeWire format serialization: {err}"))?
+		.map_err(WaylandCaptureError::FormatSerialization)?
 		.0
 		.into_inner();
-	let param = pod::Pod::from_bytes(&values)
-		.ok_or_else(|| "PipeWire rejected format parameters".to_string())?;
+	let param = pod::Pod::from_bytes(&values).ok_or(WaylandCaptureError::InvalidFormatPod)?;
 	stream
 		.connect(
 			utils::Direction::Input,
@@ -243,18 +300,19 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 			StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
 			&mut [param],
 		)
-		.map_err(|err| format!("PipeWire connect: {err}"))?;
+		.map_err(WaylandCaptureError::Connect)?;
 	mainloop.run();
 	result
 		.borrow_mut()
 		.take()
-		.unwrap_or_else(|| Err("PipeWire stream ended before producing a frame".to_string()))
+		.unwrap_or(Err(WaylandCaptureError::NoFrame))
 }
 
 pub(super) fn capture(runtime: &Runtime) -> CoreResult<RgbaImage> {
 	let (node, fd) = runtime.block_on(open_screencast()).map_err(|err| {
-		DesktopError::capture_failed(format!("wayland screencast unavailable: {err}"))
+		DesktopError::caused(ErrorCode::CaptureFailed, "wayland screencast unavailable", &err)
 	})?;
-	grab_pipewire_frame(node, fd)
-		.map_err(|err| DesktopError::capture_failed(format!("wayland screencast failed: {err}")))
+	grab_pipewire_frame(node, fd).map_err(|err| {
+		DesktopError::caused(ErrorCode::CaptureFailed, "wayland screencast failed", &err)
+	})
 }

@@ -16,7 +16,7 @@ use x11rb::{
 };
 
 use crate::{
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::FrameGeometry,
 	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
@@ -71,9 +71,11 @@ pub struct X11Capture {
 impl X11Capture {
 	pub(crate) fn new(selector: DisplaySelector) -> CoreResult<Self> {
 		let (conn, screen_num) = x11rb::connect(None).map_err(|error| {
-			DesktopError::capture_failed(format!(
-				"X11 connection failed; ensure DISPLAY points at a reachable X server: {error}"
-			))
+			DesktopError::caused(
+				ErrorCode::CaptureFailed,
+				"X11 connection failed; ensure DISPLAY points at a reachable X server",
+				&error,
+			)
 		})?;
 		let conn = Arc::new(conn);
 		let screen = conn
@@ -120,7 +122,11 @@ impl X11Capture {
 			.map_err(request_failed)?
 			.reply()
 			.map_err(|error| {
-				DesktopError::capture_failed(format!("RandR monitor enumeration failed: {error}"))
+				DesktopError::caused(
+					ErrorCode::CaptureFailed,
+					"RandR monitor enumeration failed",
+					&error,
+				)
 			})?;
 		let mut displays = Vec::with_capacity(reply.monitors.len().max(1));
 		for monitor in reply.monitors {
