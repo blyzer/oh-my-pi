@@ -1023,6 +1023,9 @@ impl WalkRequest {
 				size:     entry.size,
 			})
 		})
+		// The public walk API keeps its `E = String` contract (#408); the
+		// callback fault renders once here.
+		// lintx-allow: error-format walk API E=String contract
 		.map_err(|err| interrupted(err.to_string()))?;
 		Ok(outcome.stats)
 	}

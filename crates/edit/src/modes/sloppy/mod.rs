@@ -17,7 +17,7 @@ use self::{
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
-	error::EditError,
+	error::{EditError, fault},
 	files::FileSource,
 	store::EditStore,
 	stream_json::ArgSnapshot,
@@ -52,6 +52,14 @@ impl SloppyEngine {
 			.as_deref()
 			.is_some_and(|input| !input.trim().is_empty() && split_sloppy_sections(input).is_empty())
 	}
+}
+
+/// Renders a per-section failure once into the model-facing atomic-apply
+/// message (ADR 0035 / PR #411 pattern).
+fn section_fault(path: &str, cause: impl std::fmt::Display) -> EditError {
+	EditError::matched(format!(
+		"[{path}]: {cause}\nNo files were modified — sections apply atomically."
+	))
 }
 
 impl ModeEngine for SloppyEngine {
@@ -92,7 +100,7 @@ impl ModeEngine for SloppyEngine {
 					Err(error) => {
 						return Some(PreviewFile {
 							display: section.path,
-							error: Some(error.to_string()),
+							error: Some(fault(error)),
 							..PreviewFile::default()
 						});
 					},
@@ -121,7 +129,7 @@ impl ModeEngine for SloppyEngine {
 					Err(_) if streaming && index == last => None,
 					Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
-						error: Some(error.to_string()),
+						error: Some(fault(error)),
 						op: Some(FileOp::Update),
 						..PreviewFile::default()
 					}),
@@ -149,10 +157,7 @@ impl ModeEngine for SloppyEngine {
 		for section in sections {
 			let read = files.read(&section.path).map_err(|error| {
 				if multi_file {
-					EditError::matched(format!(
-						"[{}]: {error}\nNo files were modified — sections apply atomically.",
-						section.path
-					))
+					section_fault(&section.path, error)
 				} else {
 					error
 				}
@@ -166,10 +171,7 @@ impl ModeEngine for SloppyEngine {
 			})
 			.map_err(|error| {
 				if multi_file {
-					EditError::matched(format!(
-						"[{}]: {error}\nNo files were modified — sections apply atomically.",
-						read.resolved.display
-					))
+					section_fault(&read.resolved.display, error)
 				} else {
 					error
 				}

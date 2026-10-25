@@ -110,9 +110,15 @@ fn pre_exec_take_foreground() -> Result<(), io::Error> {
 	Ok(())
 }
 
+/// Renders the setsid failure once into the `io::Error` that `pre_exec`
+/// reports (ADR 0035 / PR #411 pattern).
+fn session_leader_fault(cause: impl std::fmt::Display) -> io::Error {
+	io::Error::other(format!("failed to become session leader: {cause}"))
+}
+
 fn pre_exec_lead_session() -> Result<(), io::Error> {
 	if let Err(e) = nix::unistd::setsid() {
-		return Err(io::Error::other(format!("failed to become session leader: {e}")));
+		return Err(session_leader_fault(e));
 	}
 
 	#[cfg(not(target_os = "macos"))]

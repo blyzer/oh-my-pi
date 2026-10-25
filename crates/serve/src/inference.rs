@@ -76,6 +76,28 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot};
 use tonic::{Request, Response, Status};
 
+/// Renders a failure once into an `invalid_argument` status at this gRPC wire
+/// boundary (ADR 0035 / PR #411 pattern).
+fn invalid(cause: impl std::fmt::Display) -> Status {
+	Status::invalid_argument(cause.to_string())
+}
+
+/// As [`invalid`], prefixed with the rejected field or context.
+fn invalid_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Status {
+	Status::invalid_argument(format!("{context}: {cause}"))
+}
+
+/// Renders a failure once into a `failed_precondition` status at this gRPC
+/// wire boundary (ADR 0035 / PR #411 pattern).
+fn precondition(cause: impl std::fmt::Display) -> Status {
+	Status::failed_precondition(cause.to_string())
+}
+
+/// As [`precondition`], for causes that expose only `Debug`.
+fn precondition_debug(context: impl std::fmt::Display, cause: impl std::fmt::Debug) -> Status {
+	Status::failed_precondition(format!("{context}: {cause:?}"))
+}
+
 // env/v1/turn carries no per-model projection caps; this bounded text-only
 // fallback is valid for every transport and never silently exposes media.
 const RPC_HISTORY_CAPS_BASE: CapsBase = CapsBase {
@@ -501,7 +523,7 @@ impl InferenceRpc {
 					.ok_or_else(|| Status::invalid_argument("Seed.thread is required"))?;
 				let projected =
 					project_thread_history(thread, &self.tool_registry, &RPC_HISTORY_CAPS_BASE)
-						.map_err(|error| Status::invalid_argument(error.to_string()))?;
+						.map_err(|error| invalid(error))?;
 				let messages = thread_messages(&projected)?;
 				if seed.context_id.is_empty() {
 					return Ok(ResolvedTurn {
@@ -578,7 +600,7 @@ impl InferenceRpc {
 					&self.tool_registry,
 					&RPC_HISTORY_CAPS_BASE,
 				)
-				.map_err(|error| Status::invalid_argument(error.to_string()))?;
+				.map_err(|error| invalid(error))?;
 				let appended = thread_messages(&projected)?;
 				let mut committed_messages = held
 					.messages
@@ -873,9 +895,7 @@ impl pb::inference_server::Inference for InferenceRpc {
 				};
 				if let Err(error) = input_session.send(input).await {
 					let _ = input_errors
-						.send_async(Status::failed_precondition(format!(
-							"realtime input was rejected: {error:?}"
-						)))
+						.send_async(precondition_debug("realtime input was rejected", error))
 						.await;
 					break;
 				}
@@ -1591,9 +1611,7 @@ impl pb::inference_server::Inference for InferenceRpc {
 			.map_err(|_| {
 				Status::failed_precondition("generation cancellation acknowledgement closed")
 			})?
-			.map_err(|error| {
-				Status::failed_precondition(format!("generation cancellation failed: {error:?}"))
-			})?;
+			.map_err(|error| precondition_debug("generation cancellation failed", error))?;
 		let status = generation.status.lock().clone();
 		Ok(Response::new(status))
 	}
@@ -1677,10 +1695,9 @@ impl pb::inference_server::Inference for InferenceRpc {
 		};
 		let maximum = request.max_response_bytes.max(1);
 		let payload = match request.payload {
-			Some(native_request::Payload::Json(bytes)) => Some(NativePayload::Json(
-				RawJson::new(bytes, maximum)
-					.map_err(|error| Status::invalid_argument(error.to_string()))?,
-			)),
+			Some(native_request::Payload::Json(bytes)) => {
+				Some(NativePayload::Json(RawJson::new(bytes, maximum).map_err(|error| invalid(error))?))
+			},
 			Some(native_request::Payload::Bytes(bytes)) => Some(NativePayload::Bytes(bytes)),
 			None => None,
 		};
@@ -2290,7 +2307,7 @@ pub fn project_provider_turn_for_test(
 	tool_registry: &ToolRegistry,
 ) -> Result<(thread_pb::Thread, omp_ai::call::ChatRequest), Status> {
 	let projected = project_thread_history(thread, tool_registry, &RPC_HISTORY_CAPS_BASE)
-		.map_err(|error| Status::invalid_argument(error.to_string()))?;
+		.map_err(|error| invalid(error))?;
 	let request = chat_request(thread_messages(&projected)?, params, tool_registry)?;
 	Ok((projected, request))
 }
@@ -2307,17 +2324,17 @@ fn thread_messages(thread: &thread_pb::Thread) -> Result<Vec<Message>, Status> {
 /// assistant turn's parallel tool calls into a single provider message) belong
 /// to the codecs, never to this projection.
 fn items_messages(items: &[thread_pb::Item]) -> Result<Vec<Message>, Status> {
-	Message::from_thread_items(items).map_err(|error| Status::invalid_argument(error.to_string()))
+	Message::from_thread_items(items).map_err(|error| invalid(error))
 }
 
 fn media_input(blob: &thread_pb::Blob) -> Result<MediaInput, Status> {
-	call::media_from_thread(blob).map_err(|error| Status::invalid_argument(error.to_string()))
+	call::media_from_thread(blob).map_err(|error| invalid(error))
 }
 
 fn opaque_json(bytes: &[u8], field: &'static str) -> Result<OpaqueJson, Status> {
 	serde_json::from_slice(bytes)
 		.map(OpaqueJson::new)
-		.map_err(|error| Status::invalid_argument(format!("{field} is invalid JSON: {error}")))
+		.map_err(|error| invalid_in(format!("{field} is invalid JSON"), error))
 }
 
 fn tool_definition(tool: &pb::ToolDef) -> Result<ToolDefinition, Status> {
@@ -2401,7 +2418,7 @@ fn chat_request(
 				},
 				&selected,
 			)
-			.map_err(|error| Status::failed_precondition(error.to_string()))?
+			.map_err(|error| precondition(error))?
 			.into_iter()
 			.map(|tool| tool.definition)
 			.collect()
@@ -3599,7 +3616,7 @@ fn realtime_input(frame: pb::RealtimeFrame) -> Result<RealtimeInput, Status> {
 				.iter()
 				.map(ToolResultContent::from_thread_part)
 				.collect::<Result<Vec<_>, _>>()
-				.map_err(|error| Status::invalid_argument(error.to_string()))?
+				.map_err(|error| invalid(error))?
 				.into(),
 			is_error: result.is_error,
 		}),

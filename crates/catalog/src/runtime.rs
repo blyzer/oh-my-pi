@@ -100,7 +100,7 @@ impl RuntimeBehavior {
 	fn parse(text: &str) -> Result<Self, CascadeError> {
 		let document: KdlDocument = text.parse().map_err(|error: kdl::KdlError| {
 			tracing::warn!(file = FILE, "catalog runtime KDL failed to parse");
-			CascadeError::Parse { file: FILE.to_str(), message: error.to_string().to_str() }
+			CascadeError::parse_fault(FILE, error)
 		})?;
 		let [root] = document.nodes() else {
 			return malformed("behavior");

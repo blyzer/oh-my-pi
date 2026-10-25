@@ -12,7 +12,7 @@ use crate::{
 		EditMode, FileOp, FileOpIntent, HeaderKind, Inspection, ModeEngine, PreviewFile, Resolved,
 		StagedFile,
 	},
-	error::EditError,
+	error::{EditError, fault},
 	files::{FileRead, FileSource, persist_new},
 	fuzzy::{
 		ContextLineResult, ContextMatchStrategy, FindMatchOptions, SequenceMatchStrategy,
@@ -1477,7 +1477,7 @@ pub fn preview_patch(
 			rename:             staged.move_to.map(|value| value.display),
 		},
 		Err(error) => {
-			PreviewFile { display, error: Some(error.to_string()), rename, ..PreviewFile::default() }
+			PreviewFile { display, error: Some(fault(error)), rename, ..PreviewFile::default() }
 		},
 	}
 }

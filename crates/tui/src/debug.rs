@@ -344,10 +344,16 @@ pub enum DebugRequest {
 	Resize,
 	Quit,
 }
+/// Renders a malformed-payload failure once into the debug-socket error reply
+/// (ADR 0035 / PR #411 pattern).
+fn malformed(what: &str, cause: impl std::fmt::Display) -> String {
+	format!("malformed {what}: {cause}")
+}
+
 /// Parses one request line into a [`DebugRequest`].
 pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
 	let value: serde_json::Value =
-		serde_json::from_slice(line).map_err(|error| format!("malformed request: {error}"))?;
+		serde_json::from_slice(line).map_err(|error| malformed("request", error))?;
 	let op = value
 		.get("op")
 		.and_then(serde_json::Value::as_str)
@@ -398,7 +404,7 @@ pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
 			} else {
 				serde_json::from_value::<TerminalEvent>(payload.clone()).map(|event| vec![event])
 			}
-			.map_err(|error| format!("malformed terminal event: {error}"))?;
+			.map_err(|error| malformed("terminal event", error))?;
 			Ok(DebugRequest::Events(events))
 		},
 		"resize" => Ok(DebugRequest::Resize),

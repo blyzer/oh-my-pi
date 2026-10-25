@@ -945,11 +945,17 @@ fn write_index_tree(
 	write_tree_node(repo, root)
 }
 
+/// Renders a rejected tree-entry mode once into the backend diagnostic
+/// (ADR 0035 / PR #411 pattern).
+fn invalid_mode_fault(mode: impl std::fmt::Octal) -> Error {
+	Error::backend("git write-tree", format!("invalid mode {mode:o}"))
+}
+
 fn write_tree_node(repo: &gix::Repository, node: TreeNode) -> Result<gix::hash::ObjectId> {
 	let mut entries = Vec::with_capacity(node.files.len() + node.dirs.len());
 	for (name, mode, oid) in node.files {
-		let mode = gix::objs::tree::EntryMode::try_from(mode.bits())
-			.map_err(|m| Error::backend("git write-tree", format!("invalid mode {m:o}")))?;
+		let mode =
+			gix::objs::tree::EntryMode::try_from(mode.bits()).map_err(|m| invalid_mode_fault(m))?;
 		entries.push(gix::objs::tree::Entry { mode, filename: name, oid });
 	}
 	for (name, child) in node.dirs {

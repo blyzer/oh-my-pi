@@ -3421,14 +3421,7 @@ impl<C: Inference> Kernel<C> {
 				}
 				// A trailer/read failure does not discard already-complete calls.
 				// They remain a valid tool-use turn and execute below.
-				append_notice(
-					session,
-					current_turn(session)?,
-					Str::new(format!(
-						"inference stream ended after complete tool calls: {}",
-						error_chain(&error)
-					)),
-				)?;
+				append_notice(session, current_turn(session)?, stream_trailer_notice(&error))?;
 				stop_reason = Str::new_static("tool_calls");
 			},
 		}
@@ -4708,6 +4701,12 @@ enum Fold {
 	/// A Director stopped one provider response and requested an in-turn
 	/// resample.
 	Redirect(Handle, StreamInterrupt),
+}
+
+/// Renders a stream-trailer failure once into the model-facing notice
+/// (ADR 0035 / PR #411 pattern).
+fn stream_trailer_notice(cause: &dyn std::error::Error) -> Str {
+	Str::new(format!("inference stream ended after complete tool calls: {}", error_chain(cause)))
 }
 
 /// Renders an error with its full `source()` chain, one cause per line.

@@ -1140,6 +1140,14 @@ pub enum CompileError {
 	},
 }
 
+impl CompileError {
+	/// Renders an invariant violation and its cause once into this compile
+	/// diagnostic (ADR 0035 / PR #411 pattern).
+	fn invariant_fault(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::Invariant { invariant: Str::from(format!("{context}: {cause}")) }
+	}
+}
+
 /// Parses the two checked-in oracle source formats into typed records.
 #[tracing::instrument(
 	name = "catalog_oracle_parse",
@@ -3496,12 +3504,12 @@ fn compile_model_routes(
 				operations.insert_kind(OperationKind::Embed);
 			}
 			if !row.headers.is_empty() {
-				let profile =
-					compile_headers(&row.headers).map_err(|error| CompileError::Invariant {
-						invariant: Str::from(format!(
-							"source model `{provider}/{model}` has invalid headers: {error}"
-						)),
-					})?;
+				let profile = compile_headers(&row.headers).map_err(|error| {
+					CompileError::invariant_fault(
+						format!("source model `{provider}/{model}` has invalid headers"),
+						error,
+					)
+				})?;
 				route.headers = profile.id.clone();
 				if !header_profiles
 					.iter()
@@ -4755,9 +4763,7 @@ fn compile_thinking(
 	if let Some(profile) = &profile {
 		profile
 			.validate()
-			.map_err(|error| CompileError::Invariant {
-				invariant: Str::from(format!("invalid thinking profile: {error}")),
-			})?;
+			.map_err(|error| CompileError::invariant_fault("invalid thinking profile", error))?;
 	}
 	let mut routing = ThinkingRouting::default();
 	if !tier_collapsed && let Some(thinking) = source {
@@ -4876,9 +4882,7 @@ fn compile_thinking(
 		});
 		routing
 			.validate(profile)
-			.map_err(|error| CompileError::Invariant {
-				invariant: Str::from(format!("invalid thinking routing: {error}")),
-			})?;
+			.map_err(|error| CompileError::invariant_fault("invalid thinking routing", error))?;
 	} else if !routing.effort_map.is_empty() || !routing.effort_routing.is_empty() {
 		return Err(CompileError::Invariant {
 			invariant: Str::from(format!(
@@ -5502,11 +5506,10 @@ fn compile_pricing(
 	let mut authored_long_context = authored_long_context
 		.map(|value| {
 			serde_json::from_value::<SourceLongContextCost>(value.clone()).map_err(|error| {
-				CompileError::Invariant {
-					invariant: Str::from(format!(
-						"invalid authored long-context cost for `{provider}/{model}`: {error}"
-					)),
-				}
+				CompileError::invariant_fault(
+					format!("invalid authored long-context cost for `{provider}/{model}`"),
+					error,
+				)
 			})
 		})
 		.transpose()?;
@@ -5545,9 +5548,8 @@ fn compile_pricing(
 			.into_boxed_slice(),
 		});
 	}
-	Pricing::new(components, tiers).map_err(|error| CompileError::Invariant {
-		invariant: Str::from(format!("invalid pricing schedule: {error}")),
-	})
+	Pricing::new(components, tiers)
+		.map_err(|error| CompileError::invariant_fault("invalid pricing schedule", error))
 }
 
 fn multiply_number(value: &Number, multiplier: &Number) -> Result<Number, CompileError> {
@@ -5866,9 +5868,8 @@ fn compile_headers(headers: &BTreeMap<Str, Str>) -> Result<HeaderProfile, Compil
 	let entries = headers
 		.iter()
 		.map(|(name, value)| StaticHeader { name: name.clone(), value: value.clone() });
-	HeaderProfile::try_new(entries).map_err(|error| CompileError::Invariant {
-		invariant: Str::from(format!("invalid static header profile: {error}")),
-	})
+	HeaderProfile::try_new(entries)
+		.map_err(|error| CompileError::invariant_fault("invalid static header profile", error))
 }
 
 fn compile_discovery(source: &SourceDiscovery) -> Result<DiscoverySpec, CompileError> {

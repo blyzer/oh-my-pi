@@ -161,10 +161,9 @@ impl ThemeCatalog {
 				Ok(files) => files,
 				Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
 				Err(error) => {
-					catalog.warnings.push(ThemeWarning {
-						path:    dir.clone(),
-						message: Str::new(format!("cannot read theme directory: {error}")),
-					});
+					catalog
+						.warnings
+						.push(ThemeWarning { path: dir.clone(), message: directory_fault(error) });
 					continue;
 				},
 			};
@@ -236,6 +235,12 @@ fn theme_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
 		.collect::<Vec<_>>();
 	files.sort();
 	Ok(files)
+}
+
+/// Renders a theme-directory read failure once into the user-facing warning
+/// (ADR 0035 / PR #411 pattern).
+fn directory_fault(cause: impl std::fmt::Display) -> Str {
+	Str::new(format!("cannot read theme directory: {cause}"))
 }
 
 fn error_chain(error: &dyn std::error::Error) -> String {

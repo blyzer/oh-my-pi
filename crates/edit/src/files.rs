@@ -51,7 +51,7 @@ impl FileRead {
 				after_lf,
 				&self.resolved.display,
 			)
-			.map_err(|err| EditError::apply(err.to_string()));
+			.map_err(|err| EditError::apply(err));
 		}
 		let mut out = String::with_capacity(self.bom.len() + after_lf.len());
 		out.push_str(self.bom);
@@ -64,7 +64,7 @@ impl FileRead {
 pub fn persist_new(resolved: &Resolved, after_lf: &str) -> EditResult<String> {
 	if notebook::is_notebook_path(&resolved.absolute) {
 		return notebook::serialize_edited_notebook_text(None, after_lf, &resolved.display)
-			.map_err(|err| EditError::apply(err.to_string()));
+			.map_err(|err| EditError::apply(err));
 	}
 	Ok(after_lf.to_owned())
 }
@@ -143,7 +143,7 @@ impl FileCache {
 		let is_notebook = notebook::is_notebook_path(&resolved.absolute);
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
-				.map_err(|err| EditError::apply(err.to_string()))?;
+				.map_err(|err| EditError::apply(err))?;
 			("", normalize_to_lf(&editable).into_owned())
 		} else {
 			let (bom, body) = strip_bom(&raw);

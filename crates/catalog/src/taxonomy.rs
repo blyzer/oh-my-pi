@@ -431,7 +431,7 @@ impl Taxonomy {
 			}
 			let document: KdlDocument = text.parse().map_err(|error: kdl::KdlError| {
 				tracing::warn!(file, "catalog taxonomy KDL failed to parse");
-				CascadeError::Parse { file: file.to_str(), message: error.to_string().to_str() }
+				CascadeError::parse_fault(file, error)
 			})?;
 			for node in document.nodes() {
 				match node.name().value() {

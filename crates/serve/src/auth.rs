@@ -740,13 +740,7 @@ impl pb::auth_server::Auth for AuthRpc {
 					Instant::now().checked_add(Duration::from_secs(30)),
 				)
 				.await
-				.map_err(|error| {
-					Status::failed_precondition(format!(
-						"provider usage query failed for {}: {error}; verify its console usage backend \
-						 and credential configuration",
-						record.provider
-					))
-				})?;
+				.map_err(|error| usage_fault(&record.provider, error))?;
 			reports.push(usage_report(report));
 		}
 		Ok(Response::new(pb::GetUsageResponse { reports }))
@@ -1426,6 +1420,14 @@ const fn error_class(error: &InferenceError) -> credential_health::ErrorClass {
 }
 fn inference_status(error: omp_ai::Error) -> Status {
 	Status::failed_precondition(error.to_string())
+}
+/// Renders a provider usage-query failure once into a `failed_precondition`
+/// status at this gRPC wire boundary (ADR 0035 / PR #411 pattern).
+fn usage_fault(provider: impl std::fmt::Display, cause: impl std::fmt::Display) -> Status {
+	Status::failed_precondition(format!(
+		"provider usage query failed for {provider}: {cause}; verify its console usage backend and \
+		 credential configuration"
+	))
 }
 #[cfg(test)]
 mod tests {

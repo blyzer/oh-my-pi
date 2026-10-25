@@ -33,9 +33,7 @@ use crate::openfiles::OpenFile;
 ///
 /// Returns an error if polling fails or the file descriptor cannot be borrowed.
 pub fn poll_for_input(file: &OpenFile, timeout: Duration) -> io::Result<bool> {
-	let fd = file
-		.try_borrow_as_fd()
-		.map_err(|e| io::Error::other(e.to_string()))?;
+	let fd = file.try_borrow_as_fd().map_err(io::Error::other)?;
 
 	// Regular files are always ready - timeout has no effect (bash behavior).
 	if is_regular_file(fd) {
