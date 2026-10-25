@@ -150,15 +150,17 @@ pub fn normalize_distribution_name(name: &str) -> String {
 /// Evaluates a PEP 440 specifier set against one exact version.
 pub fn version_satisfies(version: &str, specifiers: &str) -> Result<bool, ExtensionError> {
 	let version = Version::from_str(version).map_err(|error| {
-		ExtensionError::new(
+		ExtensionError::caused_by(
 			ExtensionCode::EManifestParse,
-			format!("invalid PEP 440 version {version:?}: {error}"),
+			format_args!("invalid PEP 440 version {version:?}"),
+			error,
 		)
 	})?;
 	let specifiers = VersionSpecifiers::from_str(specifiers).map_err(|error| {
-		ExtensionError::new(
+		ExtensionError::caused_by(
 			ExtensionCode::EManifestParse,
-			format!("invalid PEP 440 specifier {specifiers:?}: {error}"),
+			format_args!("invalid PEP 440 specifier {specifiers:?}"),
+			error,
 		)
 	})?;
 	Ok(specifiers.contains(&version))
@@ -167,15 +169,17 @@ pub fn version_satisfies(version: &str, specifiers: &str) -> Result<bool, Extens
 /// Compares two exact PEP 440 versions.
 pub fn compare_versions(left: &str, right: &str) -> Result<std::cmp::Ordering, ExtensionError> {
 	let left = Version::from_str(left).map_err(|error| {
-		ExtensionError::new(
+		ExtensionError::caused_by(
 			ExtensionCode::EManifestParse,
-			format!("invalid PEP 440 version {left:?}: {error}"),
+			format_args!("invalid PEP 440 version {left:?}"),
+			error,
 		)
 	})?;
 	let right = Version::from_str(right).map_err(|error| {
-		ExtensionError::new(
+		ExtensionError::caused_by(
 			ExtensionCode::EManifestParse,
-			format!("invalid PEP 440 version {right:?}: {error}"),
+			format_args!("invalid PEP 440 version {right:?}"),
+			error,
 		)
 	})?;
 	Ok(left.cmp(&right))
@@ -280,9 +284,10 @@ impl FrozenRequirement {
 			None
 		} else {
 			VersionSpecifiers::from_str(remainder).map_err(|error| {
-				ExtensionError::new(
+				ExtensionError::caused_by(
 					ExtensionCode::EFrozenConflict,
-					format!("invalid PEP 508 requirement {requirement:?}: {error}"),
+					format_args!("invalid PEP 508 requirement {requirement:?}"),
+					error,
 				)
 			})?;
 			Some(remainder.to_owned())
@@ -520,7 +525,7 @@ pub async fn resolve_system_with(
 	let output = command
 		.output()
 		.await
-		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EUnsat, error))?;
 	if !output.status.success() {
 		return Err(ExtensionError::new(
 			ExtensionCode::EUnsat,
@@ -529,7 +534,7 @@ pub async fn resolve_system_with(
 	}
 	let stdout = tokio::fs::read(&request.output_file)
 		.await
-		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EUnsat, error))?;
 	let _ = tokio::fs::remove_file(&request.output_file).await;
 	Ok(ResolveOutcome { argv, stdout, stderr: output.stderr })
 }
@@ -544,7 +549,7 @@ pub fn resolve_with<R: UvRunner>(
 	let argv = request.argv();
 	let output = runner
 		.run(request)
-		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EUnsat, error))?;
 	if !output.status.success() {
 		return Err(ExtensionError::new(
 			ExtensionCode::EUnsat,

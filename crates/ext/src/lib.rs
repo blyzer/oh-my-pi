@@ -18,7 +18,7 @@ pub mod trust;
 pub mod upgrade;
 pub mod workspace_trust;
 
-use omp_core::Str;
+use omp_core::{Str, sf};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
@@ -219,6 +219,22 @@ impl ExtensionError {
 	/// Creates a typed diagnostic.
 	pub fn new(code: ExtensionCode, detail: impl AsRef<str>) -> Self {
 		Self { code, detail: Str::new(detail) }
+	}
+
+	/// Creates a diagnostic from an underlying failure, rendering the cause
+	/// once at this model-facing fault boundary.
+	pub fn caused(code: ExtensionCode, cause: impl std::fmt::Display) -> Self {
+		Self { code, detail: sf!("{cause}") }
+	}
+
+	/// Creates a diagnostic with leading context, rendering the cause once at
+	/// this model-facing fault boundary.
+	pub fn caused_by(
+		code: ExtensionCode,
+		context: impl std::fmt::Display,
+		cause: impl std::fmt::Display,
+	) -> Self {
+		Self { code, detail: sf!("{context}: {cause}") }
 	}
 }
 

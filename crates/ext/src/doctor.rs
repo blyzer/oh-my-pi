@@ -5,7 +5,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Str, encoding::hex};
+use omp_core::{Str, encoding::hex, sf};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -336,7 +336,7 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 }
 
 fn verify_artifact(path: &Path, locked: &LockedExtension) -> Result<(), Str> {
-	let bytes = fs::read(path).map_err(|error| Str::new(error.to_string()))?;
+	let bytes = fs::read(path).map_err(read_fault)?;
 	if bytes.len() as u64 != locked.wheel.size {
 		return Err(Str::new_static("artifact byte length differs from lock"));
 	}
@@ -356,6 +356,11 @@ fn verify_artifact(path: &Path, locked: &LockedExtension) -> Result<(), Str> {
 		locked.signature.as_str(),
 	)
 	.map_err(|error| error.detail)
+}
+
+/// Renders an artifact-read failure once at this model-facing fault boundary.
+fn read_fault(cause: impl std::fmt::Display) -> Str {
+	sf!("{cause}")
 }
 
 fn inspect_site(request: &DoctorRequest<'_>, findings: &mut Vec<DoctorFinding>) {

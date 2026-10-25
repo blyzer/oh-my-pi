@@ -1028,10 +1028,10 @@ impl RevocationsFile {
 	)]
 	pub fn read(path: &Path) -> Result<Self, ExtensionError> {
 		let result = fs::read(path)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ERevoked, error.to_string()))
+			.map_err(|error| ExtensionError::caused(ExtensionCode::ERevoked, error))
 			.and_then(|data| {
 				serde_json::from_slice::<Self>(&data)
-					.map_err(|error| ExtensionError::new(ExtensionCode::ERevoked, error.to_string()))
+					.map_err(|error| ExtensionError::caused(ExtensionCode::ERevoked, error))
 			});
 		if let Ok(revocations) = &result {
 			tracing::debug!(
@@ -1065,7 +1065,7 @@ impl RevocationsFile {
 			valid_until: &self.valid_until,
 			revoked:     &self.revoked,
 		})
-		.map_err(|error| ExtensionError::new(ExtensionCode::ESig, error.to_string()))
+		.map_err(|error| ExtensionError::caused(ExtensionCode::ESig, error))
 		.and_then(|payload| verify_signature(index_key, &payload, self.signature.as_str()))
 	}
 
@@ -1220,9 +1220,8 @@ fn read_toml_or_default<T: for<'de> Deserialize<'de> + Default>(
 		return Ok(T::default());
 	}
 	let text = fs::read_to_string(path)
-		.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))?;
-	toml::from_str(&text)
-		.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))
+		.map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))?;
+	toml::from_str(&text).map_err(|error| ExtensionError::caused(ExtensionCode::EIntegrity, error))
 }
 
 #[cfg(test)]
