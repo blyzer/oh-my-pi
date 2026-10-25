@@ -84,7 +84,7 @@ impl UsageDashboard {
 	pub fn open(cx: &PanelCx<'_>) -> Result<Self, Str> {
 		let state = match cx.services.usage() {
 			Ok(pending) => State::Loading(pending),
-			Err(error) => State::Failed(Str::new(error.to_string())),
+			Err(error) => State::Failed(crate::fault(error)),
 		};
 		Ok(Self::with_state(state, cx.ui, cx.viewport.width, unix_now_ms()))
 	}

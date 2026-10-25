@@ -71,7 +71,7 @@ pub struct ExtensionsDashboard {
 impl ExtensionsDashboard {
 	/// Opens the dashboard over the current extension roster.
 	pub fn open(services: &Arc<dyn Services>, ctx: &UiContext) -> Result<Self, Str> {
-		let rows = services.extensions().map_err(|error| sf!("{error}"))?;
+		let rows = services.extensions().map_err(crate::fault)?;
 		let mut panel = Self {
 			services:  Arc::clone(services),
 			rows:      Vec::new(),
@@ -243,7 +243,7 @@ impl ExtensionsDashboard {
 		};
 		let line = match &outcome.result {
 			Ok(line) => line.clone(),
-			Err(error) => return PanelEvent::Notice(sf!("{error}")),
+			Err(error) => return PanelEvent::Notice(crate::fault(error)),
 		};
 		self.refresh();
 		if let Some(row) = self

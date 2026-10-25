@@ -232,7 +232,7 @@ pub fn open_debug(
 			appearance: Str::new(format!("{:?}", cx.ui.appearance)),
 		},
 	};
-	match cx.services.debug(request).map_err(|error| sf!("{error}"))? {
+	match cx.services.debug(request).map_err(crate::fault)? {
 		DebugOutput::Report { title, body } => {
 			Ok(Box::new(ReportPanel::new("debug-report", title, body, cx.ui)))
 		},
@@ -338,7 +338,7 @@ impl Panel for RawSsePanel {
 			Key::Char('d' | 'D') => {
 				self.status = Some(match self.services.dump_raw_sse() {
 					Ok(path) => sf!("Saved {}", path.display()),
-					Err(error) => sf!("Dump failed: {error}"),
+					Err(error) => crate::fault_in("Dump failed", error),
 				});
 				self.rebuild();
 				PanelEvent::Consumed

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use omp_con::{Arg, ConError, ConResult, Ctx, DynamicCmdSpec, Severity};
-use omp_core::Str;
+use omp_core::{Str, sf};
 
 use super::CommandAction;
 
@@ -54,7 +54,7 @@ pub fn register(ctx: &Ctx, expander: Arc<dyn PromptExpander>) -> Vec<Str> {
 			Err(error) => {
 				ctx.reply(
 					Severity::Warn,
-					&format!("prompt template `{name}` was not registered: {error}"),
+					&crate::fault_in(sf!("prompt template `{name}` was not registered"), error),
 				);
 			},
 		}
@@ -78,7 +78,7 @@ pub fn register_skills(ctx: &Ctx, expander: Arc<dyn SkillExpander>) -> Vec<Str> 
 			Err(error) => {
 				ctx.reply(
 					Severity::Warn,
-					&format!("skill command `{command}` was not registered: {error}"),
+					&crate::fault_in(sf!("skill command `{command}` was not registered"), error),
 				);
 			},
 		}

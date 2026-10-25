@@ -364,7 +364,7 @@ fn set_dirs(cx: &PanelCx<'_>, dirs: &[Str]) -> Result<(), Str> {
 	cx.con
 		.exec(&format!("sv_workspace_dirs {value}"), omp_con::Source::Console)
 		.map(|_| ())
-		.map_err(|error| Str::new(error.to_string()))
+		.map_err(crate::fault)
 }
 
 /// Formats workspace directories.

@@ -145,7 +145,7 @@ impl ForeignSessionPicker {
 		let rows = cx
 			.services
 			.foreign_sessions(source)
-			.map_err(|error| sf!("Failed to list {source} sessions: {error}"))?;
+			.map_err(|error| crate::fault_in(sf!("Failed to list {source} sessions"), error))?;
 		Self::from_rows(source, rows, TimeZone::system(), cx.viewport, cx.ui)
 	}
 
@@ -391,7 +391,7 @@ impl Panel for ForeignSessionPicker {
 				PanelEvent::FinishCommand(HostCommand::SessionOpen { path: path.clone() })
 			},
 			Ok(_) => PanelEvent::CloseNotice(sf!("Failed to persist {} session", self.source)),
-			Err(error) => PanelEvent::CloseNotice(Str::new(error.to_string())),
+			Err(error) => PanelEvent::CloseNotice(crate::fault(error)),
 		}
 	}
 
@@ -460,7 +460,7 @@ impl SessionPicker {
 		let rows = cx
 			.services
 			.sessions(SessionScope::Project)
-			.map_err(|error| Str::new(error.to_string()))?;
+			.map_err(crate::fault)?;
 		let mut picker = Self::from_rows(rows, TimeZone::system(), cx.viewport, cx.ui)?;
 		picker.history = Some(Arc::clone(cx.services));
 		Ok(picker)

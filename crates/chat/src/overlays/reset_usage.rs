@@ -30,10 +30,7 @@ pub struct ResetUsageSelector {
 impl ResetUsageSelector {
 	/// Starts loading the redeemable account roster from the controller feed.
 	pub fn open(cx: &PanelCx<'_>) -> Result<Self, Str> {
-		let pending = cx
-			.services
-			.reset_accounts()
-			.map_err(|error| sf!("{error}"))?;
+		let pending = cx.services.reset_accounts().map_err(crate::fault)?;
 		Ok(Self::new(pending, cx.ui))
 	}
 
@@ -156,7 +153,7 @@ impl Panel for ResetUsageSelector {
 				}
 				self.status = Some(line.clone());
 			},
-			Err(error) => self.status = Some(sf!("Reset failed: {error}")),
+			Err(error) => self.status = Some(crate::fault_in("Reset failed", error)),
 		}
 		self.rebuild();
 		PanelEvent::Consumed

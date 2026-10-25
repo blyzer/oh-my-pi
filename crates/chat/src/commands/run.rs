@@ -237,7 +237,7 @@ impl Presenter {
 					let events = cx
 						.services
 						.btw(question_for_panel.as_str(), context.as_str())
-						.map_err(|error| Str::new(error.to_string()))?;
+						.map_err(crate::fault)?;
 					Ok(Box::new(SidePanel::btw(question_for_panel.clone(), events, cx)) as Box<_>)
 				})))?
 			},
@@ -321,7 +321,7 @@ impl Presenter {
 							worktree.branch
 						))
 					},
-					Err(error) => self.notice(format!("Worktree creation failed: {error}")),
+					Err(error) => self.notice(crate::fault_in("Worktree creation failed", error)),
 				}
 			},
 		})
@@ -770,7 +770,7 @@ impl Presenter {
 				let body = todo_markdown(&self.replica);
 				match std::fs::write(&path, body.as_bytes()) {
 					Ok(()) => Ok(self.notice(format!("Exported todos to {}", path.display()))),
-					Err(error) => Ok(self.notice(format!("Export failed: {error}"))),
+					Err(error) => Ok(self.notice(crate::fault_in("Export failed", error))),
 				}
 			},
 			other => {

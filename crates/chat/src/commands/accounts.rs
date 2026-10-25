@@ -58,7 +58,7 @@ fn boxed(panel: impl Panel + 'static) -> Box<dyn Panel> {
 /// with stored accounts.
 fn provider_picker(cx: &PanelCx<'_>, mode: ProviderMode) -> Result<Box<dyn Panel>, Str> {
 	let providers = match mode {
-		ProviderMode::Login => cx.services.providers().map_err(|error| sf!("{error}"))?,
+		ProviderMode::Login => cx.services.providers().map_err(crate::fault)?,
 		ProviderMode::Logout => logout_providers(cx)?,
 	};
 	Ok(boxed(ProviderPicker::open(providers, mode, cx.ui)))
@@ -66,7 +66,7 @@ fn provider_picker(cx: &PanelCx<'_>, mode: ProviderMode) -> Result<Box<dyn Panel
 
 /// Providers that hold at least one stored account, in catalog order.
 fn logout_providers(cx: &PanelCx<'_>) -> Result<Vec<ProviderRow>, Str> {
-	let accounts = cx.services.accounts().map_err(|error| sf!("{error}"))?;
+	let accounts = cx.services.accounts().map_err(crate::fault)?;
 	let mut providers: Vec<ProviderRow> = Vec::new();
 	for account in &accounts {
 		if providers
@@ -88,7 +88,7 @@ fn logout_providers(cx: &PanelCx<'_>) -> Result<Vec<ProviderRow>, Str> {
 /// Opens the account selector for `provider`, or the provider picker when
 /// more than one provider has stored accounts.
 fn logout_panel(cx: &PanelCx<'_>, provider: Option<&str>) -> Result<Box<dyn Panel>, Str> {
-	let accounts = cx.services.accounts().map_err(|error| sf!("{error}"))?;
+	let accounts = cx.services.accounts().map_err(crate::fault)?;
 	let Some(provider) = provider else {
 		let providers = logout_providers(cx)?;
 		return match providers.as_slice() {
@@ -139,12 +139,12 @@ fn pin_session(cx: &PanelCx<'_>, id: Option<&str>) -> PanelEvent {
 		Some(id) => Str::new(id),
 		None => match cx.services.live_session_id() {
 			Ok(id) => id,
-			Err(error) => return PanelEvent::Notice(sf!("{error}")),
+			Err(error) => return PanelEvent::Notice(crate::fault(error)),
 		},
 	};
 	let rows = match cx.services.sessions(SessionScope::Project) {
 		Ok(rows) => rows,
-		Err(error) => return PanelEvent::Notice(sf!("{error}")),
+		Err(error) => return PanelEvent::Notice(crate::fault(error)),
 	};
 	let Some(row) = rows.iter().find(|row| {
 		row.id == id
@@ -177,7 +177,7 @@ fn choose_account<'a>(
 fn pin_account(cx: &PanelCx<'_>, provider: &str, account: Option<&str>) -> PanelEvent {
 	let accounts = match cx.services.accounts() {
 		Ok(accounts) => accounts,
-		Err(error) => return PanelEvent::Notice(sf!("{error}")),
+		Err(error) => return PanelEvent::Notice(crate::fault(error)),
 	};
 	let candidates: Vec<&AccountRow> = accounts
 		.iter()

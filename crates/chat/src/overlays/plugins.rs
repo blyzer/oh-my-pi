@@ -61,7 +61,7 @@ impl PluginSelector {
 		mode: PluginMode,
 		ctx: &UiContext,
 	) -> Result<Self, Str> {
-		let report = services.plugins().map_err(|error| sf!("{error}"))?;
+		let report = services.plugins().map_err(crate::fault)?;
 		let mut panel = Self {
 			services: Arc::clone(services),
 			report,
@@ -309,7 +309,7 @@ impl Panel for PluginSelector {
 		self.rebuild();
 		match &outcome.result {
 			Ok(line) => PanelEvent::Notice(line.clone()),
-			Err(error) => PanelEvent::Notice(sf!("Marketplace error: {error}")),
+			Err(error) => PanelEvent::Notice(crate::fault_in("Marketplace error", error)),
 		}
 	}
 }
