@@ -46,10 +46,7 @@ pub(super) fn convert(
 		Some(
 			decode_xml_bytes(&mimetype)
 				.map_err(|error| {
-					MarkitError::conversion(
-						format_name,
-						format!("mimetype is not valid UTF text: {error}"),
-					)
+					MarkitError::conversion_in(format_name, "mimetype is not valid UTF text", error)
 				})?
 				.trim()
 				.to_owned(),

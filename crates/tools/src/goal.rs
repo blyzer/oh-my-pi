@@ -275,8 +275,13 @@ impl<C: GoalControl> Tool for GoalTool<C> {
 pub fn model_output(view: Result<&Payload, &Fault>) -> Str {
 	match view {
 		Ok(payload) => render_payload(payload),
-		Err(fault) => Str::new(fault.to_string()),
+		Err(fault) => fault_text(fault),
 	}
+}
+
+/// Renders a goal fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
 }
 
 fn render_payload(payload: &Payload) -> Str {

@@ -249,7 +249,7 @@ fn read_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<String>, 
 		return Ok(None);
 	};
 	let text = decode_xml_bytes(&bytes).map_err(|error| {
-		MarkitError::conversion(FORMAT, format!("{path} is not valid UTF text: {error}"))
+		MarkitError::conversion_in(FORMAT, format!("{path} is not valid UTF text"), error)
 	})?;
 	Ok(Some(text))
 }
@@ -484,9 +484,9 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			Ok(Event::Text(event)) => {
 				let decoded = event
 					.xml_content(XmlVersion::Implicit1_0)
-					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+					.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 				let text = quick_xml::escape::unescape(&decoded)
-					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+					.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 				count_xml_content_node(&mut content_nodes)?;
 				stack
 					.last_mut()
@@ -507,7 +507,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			Ok(Event::CData(event)) => {
 				let text = event
 					.decode()
-					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+					.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 				count_xml_content_node(&mut content_nodes)?;
 				stack
 					.last_mut()
@@ -517,7 +517,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::Eof) => break,
 			Ok(_) => {},
-			Err(error) => return Err(MarkitError::conversion(FORMAT, error.to_string())),
+			Err(error) => return Err(MarkitError::conversion_from(FORMAT, error)),
 		}
 	}
 	if stack.len() != 1 {
@@ -545,12 +545,11 @@ fn event_node(
 	let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
 	let mut attrs = HashMap::new();
 	for attribute in event.attributes().with_checks(false) {
-		let attribute =
-			attribute.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+		let attribute = attribute.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 		let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
 		let value = attribute
 			.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-			.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?
+			.map_err(|error| MarkitError::conversion_from(FORMAT, error))?
 			.into_owned();
 		attrs.insert(key.clone(), value.clone());
 		attrs.entry(local(&key).to_owned()).or_insert(value);

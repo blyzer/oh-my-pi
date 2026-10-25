@@ -423,9 +423,23 @@ pub enum Fault {
 }
 
 impl Fault {
-	/// Constructs a source failure.
-	pub fn source(message: impl Into<Str>) -> Self {
-		Self::Source { message: message.into() }
+	/// Constructs an invalid-target failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn invalid(cause: impl std::fmt::Display) -> Self {
+		Self::Invalid { message: sf!("{cause}") }
+	}
+
+	/// Constructs a source failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn source(cause: impl std::fmt::Display) -> Self {
+		Self::Source { message: sf!("{cause}") }
+	}
+
+	/// Constructs a source failure with identifying context ahead of the
+	/// inner error, rendering the cause once at this model-facing fault
+	/// boundary.
+	pub fn source_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::Source { message: sf!("{context}: {cause}") }
 	}
 
 	/// Returns the exact model-facing diagnostic.
@@ -695,9 +709,7 @@ pub fn classify_target(target: &str) -> Result<TargetClass<'_>, Fault> {
 	})? {
 		return Ok(TargetClass::Web(target));
 	}
-	let Some(uri) = selector::parse_uri(target)
-		.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?
-	else {
+	let Some(uri) = selector::parse_uri(target).map_err(Fault::invalid)? else {
 		return Ok(TargetClass::Local);
 	};
 	Ok(match uri.scheme {
@@ -1015,6 +1027,8 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				},
 				Err(fault) if multiple => {
 					push_payload_part(&mut parts, PayloadPart::Text {
+						// lintx-allow: error-format per-target failures render inline in multi-target
+						// output
 						text: sf!("[Could not read {}: {}]", target, fault.message()),
 					});
 				},
@@ -1063,13 +1077,11 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		if self.sources.stat(Str::new(authored)).await.is_ok() {
 			return Ok(vec![Str::new(authored)]);
 		}
-		if let Some(paths) = selector::parse_json_path_array(authored)
-			.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?
-		{
+		if let Some(paths) = selector::parse_json_path_array(authored).map_err(Fault::invalid)? {
 			return Ok(paths);
 		}
 		if selector::parse_uri(authored)
-			.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?
+			.map_err(Fault::invalid)?
 			.is_some()
 			|| !matches!(web::parse_target(authored), Ok(None))
 		{
@@ -1235,8 +1247,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			}
 		}
 
-		let parsed = selector::parse_selector(split.selector)
-			.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+		let parsed = selector::parse_selector(split.selector).map_err(Fault::invalid)?;
 
 		if !literal_wins {
 			for candidate in sqlite::parse_path_candidates(authored) {
@@ -1292,7 +1303,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 					.map_err(|_| Fault::Source {
 						message: Str::new_static("PDF image raster task failed"),
 					})?
-					.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
+					.map_err(Fault::source)?;
 				let blob = self.blobs.store(raster.data, raster.media_type).await?;
 				return Ok(ReadSection::new(vec![
 					PayloadPart::Text {
@@ -1613,10 +1624,10 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				Err(archive::ArchiveError::Io { .. }) => {
 					let bytes = self.sources.read_bytes(stat.canonical_path.clone()).await?;
 					archive::read_archive_bytes(bytes, archive::ArchiveFormat::Asar, target)
-						.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?
+						.map_err(Fault::source)?
 				},
 				Err(error) => {
-					return Err(Fault::Source { message: Str::new(error.to_string()) });
+					return Err(Fault::source(error));
 				},
 			}
 		} else {
@@ -1624,8 +1635,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			let archive_format = hinted_format
 				.or_else(|| archive::sniff_archive_format(&bytes))
 				.ok_or_else(|| Fault::source(format!("Unsupported archive format: {archive_path}")))?;
-			archive::read_archive_bytes(bytes, archive_format, target)
-				.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?
+			archive::read_archive_bytes(bytes, archive_format, target).map_err(Fault::source)?
 		};
 		let section = match result.content {
 			archive::ArchiveContent::Directory(listing) => ReadSection::rendered(listing.render()),
@@ -1686,8 +1696,8 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		let result = operation.await;
 		interrupt_on_drop.disarm();
 		let rendered = result
-			.map_err(|error| Fault::source(format!("SQLite read task failed: {error}")))?
-			.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
+			.map_err(|error| Fault::source_in("SQLite read task failed", error))?
+			.map_err(Fault::source)?;
 		Ok(ReadSection::rendered(rendered).recovered(suffix_from, &stat.display_path))
 	}
 
@@ -1711,7 +1721,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		let png = task::spawn_blocking(move || image::rasterize_svg(&source, gzip))
 			.await
 			.map_err(|_| Fault::Source { message: Str::new_static("SVG image raster task failed") })?
-			.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
+			.map_err(Fault::source)?;
 		let loaded = Self::process_image_async(png, false)
 			.await?
 			.expect("SVG rasterizer always returns PNG bytes");

@@ -492,7 +492,7 @@ impl<C: LspControl> Tool for LspTool<C> {
 	fn prompt(&self, view: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> {
 		let text = match view {
 			Ok(payload) => payload.output.clone(),
-			Err(fault) => Str::new(fault.to_string()),
+			Err(fault) => fault_text(fault),
 		};
 		vec![Part::Text { text }]
 	}
@@ -500,6 +500,11 @@ impl<C: LspControl> Tool for LspTool<C> {
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 		lift_legacy_call(from, call)
 	}
+}
+
+/// Renders an lsp fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
 }
 
 /// Lifts durable `lsp@1`, `lsp@2`, and `lsp@3` calls onto `lsp@4` only when

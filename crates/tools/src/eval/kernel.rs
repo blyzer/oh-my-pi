@@ -1317,10 +1317,7 @@ impl EmbeddedPython {
 		thread::Builder::new()
 			.name(format!("omp-eval-py-{label}"))
 			.spawn(move || worker_main(&engine, &state, receiver, installer.as_ref()))
-			.map_err(|error| Fault::Resource {
-				operation: sf!("open_session"),
-				message:   Str::new(error.to_string()),
-			})?;
+			.map_err(|error| Fault::resource("open_session", error))?;
 		Ok(worker)
 	}
 }
@@ -1522,7 +1519,7 @@ impl IdleSigint {
 				{
 					let _ = set_sigint_action(&original);
 				}
-				return Err(PyOSError::new_err(error.to_string()));
+				return Err(py_os_error(error));
 			}
 		}
 		Ok(Self {
@@ -1966,7 +1963,7 @@ fn execute_cell(
 	let result_json = get_optional_string(result, "result_json")?
 		.map(|json| serde_json::from_str::<Value>(&json))
 		.transpose()
-		.map_err(|error| PyValueError::new_err(error.to_string()))?;
+		.map_err(py_value_error)?;
 	let cell_value = result_text.map(|text| CellValue { text: Str::new(text), json: result_json });
 	let error_name = get_optional_string(result, "error_name")?;
 	let exception = if let Some(name) = error_name {
@@ -2036,7 +2033,17 @@ fn python_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<V
 	};
 	serde_json::from_str(&encoded)
 		.map(Some)
-		.map_err(|error| PyValueError::new_err(error.to_string()))
+		.map_err(py_value_error)
+}
+
+/// Renders a kernel failure once at this Python-facing fault boundary.
+fn py_os_error(cause: impl std::fmt::Display) -> PyErr {
+	PyOSError::new_err(cause.to_string())
+}
+
+/// Renders a kernel failure once at this Python-facing fault boundary.
+fn py_value_error(cause: impl std::fmt::Display) -> PyErr {
+	PyValueError::new_err(cause.to_string())
 }
 
 fn fail_worker(commands: &Receiver<Command>, message: Str) {

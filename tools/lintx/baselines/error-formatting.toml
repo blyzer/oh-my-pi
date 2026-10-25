@@ -7,7 +7,6 @@
 agent = 1
 ai = 66
 app = 84
-audio = 9
 catalog = 9
 chat = 69
 desktop = 86
@@ -21,7 +20,7 @@ rpc = 6
 serve = 12
 shell = 5
 shell-builtins = 184
-tools = 76
+tools = 13
 tui = 4
 vcs = 2
 walker = 2

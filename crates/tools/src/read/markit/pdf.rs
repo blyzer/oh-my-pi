@@ -16,7 +16,7 @@ pub(super) fn convert(bytes: &[u8]) -> Result<Conversion, MarkitError> {
 	let markdown = MarkdownOptions { include_page_numbers: true, ..MarkdownOptions::default() };
 	let options = PdfOptions::new().markdown(markdown);
 	let result = process_pdf_mem_with_options(bytes, options)
-		.map_err(|error| MarkitError::conversion("pdf", error.to_string()))?;
+		.map_err(|error| MarkitError::conversion_from("pdf", error))?;
 
 	let scanned = matches!(result.pdf_type, PdfType::Scanned | PdfType::ImageBased);
 	let note = if scanned {

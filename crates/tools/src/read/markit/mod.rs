@@ -3,7 +3,7 @@
 use std::{path::Path, str};
 
 use bytes::Bytes;
-use omp_core::{Hash32, IntoStr, Str};
+use omp_core::{Hash32, IntoStr, Str, sf};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr};
 
@@ -158,6 +158,22 @@ impl MarkitError {
 		Self::Conversion { format, message: message.into_str() }
 	}
 
+	/// Build a converter failure from an inner error, rendering the cause
+	/// once at this model-facing fault boundary.
+	pub fn conversion_from(format: &'static str, cause: impl std::fmt::Display) -> Self {
+		Self::Conversion { format, message: sf!("{cause}") }
+	}
+
+	/// Build a converter failure with identifying context ahead of the inner
+	/// error, rendering the cause once at this model-facing fault boundary.
+	pub fn conversion_in(
+		format: &'static str,
+		context: impl std::fmt::Display,
+		cause: impl std::fmt::Display,
+	) -> Self {
+		Self::Conversion { format, message: sf!("{context}: {cause}") }
+	}
+
 	/// Stable name of the converter that failed.
 	pub const fn format(&self) -> &'static str {
 		match self {
@@ -180,7 +196,7 @@ fn convert_with_anydoc(
 ) -> Result<Str, MarkitError> {
 	anydoc::to_markdown_bytes(bytes, format)
 		.map(Str::new)
-		.map_err(|error| MarkitError::conversion(format_name, error.to_string()))
+		.map_err(|error| MarkitError::conversion_from(format_name, error))
 }
 
 fn format_from_extension(extension: &str) -> Option<Format> {
@@ -346,9 +362,9 @@ fn convert_format(
 		},
 		Format::Html | Format::Xml => {
 			let source = str::from_utf8(bytes)
-				.map_err(|error| MarkitError::conversion("html/xml", error.to_string()))?;
+				.map_err(|error| MarkitError::conversion_from("html/xml", error))?;
 			let converted = html_to_markdown_rs::convert(source, None)
-				.map_err(|error| MarkitError::conversion("html/xml", error.to_string()))?;
+				.map_err(|error| MarkitError::conversion_from("html/xml", error))?;
 			let text = Str::new(converted.content.unwrap_or_default());
 			Conversion::plain(text)
 		},

@@ -834,6 +834,11 @@ fn project_authored_text(kind: FreeformKind, input: &str) -> Vec<StreamMatchText
 	segments
 }
 
+/// Renders a patch parse failure once at this model-facing fault boundary.
+fn parse_fault(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
+}
+
 fn parse_operations(kind: FreeformKind, input: &str) -> Result<Vec<AuthoredOperation>, String> {
 	match kind {
 		FreeformKind::PatchLegacy | FreeformKind::Patch | FreeformKind::ApplyPatch => {
@@ -844,7 +849,7 @@ fn parse_operations(kind: FreeformKind, input: &str) -> Result<Vec<AuthoredOpera
 						.map(AuthoredOperation::Foreign)
 						.collect()
 				})
-				.map_err(|error| error.to_string())
+				.map_err(parse_fault)
 		},
 		FreeformKind::Sloppy => {
 			let mut merged = Vec::<AuthoredOperation>::new();
