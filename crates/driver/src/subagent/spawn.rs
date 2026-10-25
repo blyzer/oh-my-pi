@@ -123,12 +123,12 @@ impl SubagentSpawner for DriverSubagentSpawner {
 		let started = Instant::now();
 		let request = request.into_batch();
 		admit_batch(&self.parent_ctx, &self.jobs, &request.tasks)
-			.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?;
+			.map_err(|source| TaskFault { message: crate::fault(source) })?;
 		let mut pending = Vec::with_capacity(request.tasks.len());
 		for child in request.tasks {
 			let child = admit_child(self.hooks.as_ref(), &self.parent_ctx, child, &self.model)
 				.await
-				.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?;
+				.map_err(|source| TaskFault { message: crate::fault(source) })?;
 			let announced = child
 				.name
 				.clone()
@@ -154,7 +154,7 @@ impl SubagentSpawner for DriverSubagentSpawner {
 				child,
 				workspace_trust: &self.workspace_trust,
 			})
-			.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?;
+			.map_err(|source| TaskFault { message: crate::fault(source) })?;
 			let handle = prepared.handle;
 			let id = prepared.id.clone();
 			let fallback = ChildResult {
@@ -187,13 +187,13 @@ impl SubagentSpawner for DriverSubagentSpawner {
 					.jobs
 					.wait(&mut parent, Some(std::slice::from_ref(&id)))
 					.await
-					.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?;
+					.map_err(|source| TaskFault { message: crate::fault(source) })?;
 				let output = record
 					.as_ref()
 					.and_then(|record| record.output.as_deref())
 					.map(|output| omp_agent::resolve_output(&parent, output))
 					.transpose()
-					.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?
+					.map_err(|source| TaskFault { message: crate::fault(source) })?
 					.flatten();
 				(record, output)
 			};
@@ -293,9 +293,8 @@ impl SessionTool for TaskSessionTool {
 				return Ok(CallOutcome::Faulted(fault));
 			}
 			if let Err(source) = admit_batch(&self.parent_ctx, cx.jobs, &request.tasks) {
-				let fault = serde_json::value::to_raw_value(&TaskFault {
-					message: Str::new(source.to_string()),
-				})?;
+				let fault =
+					serde_json::value::to_raw_value(&TaskFault { message: crate::fault(source) })?;
 				return Ok(CallOutcome::Faulted(fault));
 			}
 			let mut jobs = Vec::with_capacity(request.tasks.len());
@@ -303,9 +302,8 @@ impl SessionTool for TaskSessionTool {
 				let child = match admit_child(cx.hooks, &self.parent_ctx, child, &self.model).await {
 					Ok(child) => child,
 					Err(source) => {
-						let fault = serde_json::value::to_raw_value(&TaskFault {
-							message: Str::new(source.to_string()),
-						})?;
+						let fault =
+							serde_json::value::to_raw_value(&TaskFault { message: crate::fault(source) })?;
 						return Ok(CallOutcome::Faulted(fault));
 					},
 				};
@@ -328,9 +326,8 @@ impl SessionTool for TaskSessionTool {
 				}) {
 					Ok(prepared) => prepared,
 					Err(source) => {
-						let fault = serde_json::value::to_raw_value(&TaskFault {
-							message: Str::new(source.to_string()),
-						})?;
+						let fault =
+							serde_json::value::to_raw_value(&TaskFault { message: crate::fault(source) })?;
 						return Ok(CallOutcome::Faulted(fault));
 					},
 				};
@@ -382,11 +379,22 @@ pub enum SpawnError {
 	/// Environment isolation or merge failed.
 	#[error("subagent workspace operation failed")]
 	Environment(#[from] omp_env::ClientError),
-	/// Environment returned an invalid isolated workspace.
-	#[error("subagent workspace response was invalid: {message}")]
+	/// Environment returned an invalid isolated workspace or settlement.
+	#[error("subagent workspace response was invalid: {defect}")]
 	Workspace {
 		/// Stable protocol defect.
-		message: Str,
+		defect: &'static str,
+	},
+	/// The settled child result payload was not valid `ChildResult` JSON.
+	#[error("subagent result payload was invalid: {0}")]
+	InvalidResult(#[source] serde_json::Error),
+	/// The child job settled with a failure instead of a result payload.
+	#[error("subagent `{id}` failed: {error}")]
+	ChildFailed {
+		/// Stable child session identity.
+		id:    Str,
+		/// The child's settled failure text.
+		error: Str,
 	},
 	/// System clock is unavailable.
 	#[error("system clock predates the Unix epoch")]
@@ -426,7 +434,9 @@ pub enum SpawnError {
 	/// A `subagent_spawn` hook refused the child.
 	#[error("subagent spawn denied by extension: {reason}")]
 	Denied {
-		/// Stable extension-supplied reason.
+		/// Closed gate event that refused the child.
+		event:  HookEventId,
+		/// Stable extension-supplied denial reason.
 		reason: Str,
 	},
 	/// The `subagent_spawn` gate itself failed (malformed transform, approval
@@ -467,7 +477,9 @@ pub async fn admit_child(
 		.await
 	{
 		Ok(effective) => child_from_spec(child, &payload, &effective),
-		Err(LifecycleHookError::Denied { reason, .. }) => Err(SpawnError::Denied { reason }),
+		Err(LifecycleHookError::Denied { event, reason }) => {
+			Err(SpawnError::Denied { event, reason })
+		},
 		Err(error) => Err(SpawnError::Hook(error)),
 	}
 }
@@ -660,9 +672,7 @@ pub async fn spawn_child(
 	let record = jobs
 		.wait(parent, Some(std::slice::from_ref(&id)))
 		.await?
-		.ok_or_else(|| SpawnError::Workspace {
-			message: Str::new_static("subagent job disappeared before settlement"),
-		})?;
+		.ok_or(SpawnError::Workspace { defect: "subagent job disappeared before settlement" })?;
 	if let Some(output) = record
 		.output
 		.as_deref()
@@ -670,13 +680,11 @@ pub async fn spawn_child(
 		.transpose()?
 		.flatten()
 	{
-		return serde_json::from_str(output.get())
-			.map_err(|source| SpawnError::Workspace { message: Str::new(source.to_string()) });
+		return serde_json::from_str(output.get()).map_err(SpawnError::InvalidResult);
 	}
-	Err(SpawnError::Workspace {
-		message: record
-			.error
-			.unwrap_or_else(|| Str::new_static("subagent job settled without output")),
+	Err(match record.error {
+		Some(error) => SpawnError::ChildFailed { id, error },
+		None => SpawnError::Workspace { defect: "subagent job settled without output" },
 	})
 }
 
@@ -876,7 +884,7 @@ fn spawn_child_task(
 			Err(source) => JobSettlement {
 				status:     Str::new_static("failed"),
 				output:     None,
-				error:      Some(Str::new(source.to_string())),
+				error:      Some(crate::fault(source)),
 				completion: None,
 			},
 		}
@@ -991,14 +999,13 @@ pub(crate) async fn create_isolation(
 			props:     None,
 		})
 		.await?;
-	let worktree = result.worktree.ok_or_else(|| SpawnError::Workspace {
-		message: Str::new_static("create omitted worktree metadata"),
-	})?;
-	let url = url::Url::parse(&worktree.root_uri).map_err(|_| SpawnError::Workspace {
-		message: Str::new_static("worktree root is not a URL"),
-	})?;
+	let worktree = result
+		.worktree
+		.ok_or(SpawnError::Workspace { defect: "create omitted worktree metadata" })?;
+	let url = url::Url::parse(&worktree.root_uri)
+		.map_err(|_| SpawnError::Workspace { defect: "worktree root is not a URL" })?;
 	let root = url.to_file_path().map_err(|()| SpawnError::Workspace {
-		message: Str::new_static("worktree root is not a local filesystem URL"),
+		defect: "worktree root is not a local filesystem URL",
 	})?;
 	Ok(IsolationRun { id: Str::new(worktree.id), root })
 }
@@ -1248,7 +1255,7 @@ fn structured_output(
 		Ok(Some(schema)) => schema,
 		Ok(None) => return (None, terminal_yield_error(session)),
 		Err(error) => {
-			let error = Str::new(error.to_string());
+			let error = crate::fault(error);
 			return (
 				Some(StructuredOutput {
 					mode,
@@ -1313,7 +1320,7 @@ fn structured_output(
 			)
 		},
 		Err(source) => {
-			let error = Str::new(source.to_string());
+			let error = crate::fault(source);
 			(
 				Some(StructuredOutput {
 					mode,
@@ -1586,7 +1593,7 @@ mod tests {
 			.await
 			.expect_err("denied spawn");
 		assert!(
-			matches!(&error, SpawnError::Denied { reason } if reason.as_str() == "no scouts today")
+			matches!(&error, SpawnError::Denied { reason, .. } if reason.as_str() == "no scouts today")
 		);
 		assert_eq!(error.to_string(), "subagent spawn denied by extension: no scouts today");
 	}

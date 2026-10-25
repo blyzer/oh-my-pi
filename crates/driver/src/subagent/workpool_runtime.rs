@@ -165,7 +165,7 @@ impl HostToolExecutor for EvalForwardExecutor {
 					cancellation,
 				)
 				.await
-				.map_err(|error| Str::new(error.to_string()))?;
+				.map_err(crate::fault)?;
 			Ok(HostToolResult { result: result.value, is_error: result.is_error })
 		})
 	}
@@ -367,7 +367,7 @@ async fn run_kernel_worker(run: KernelWorkerRun) -> JobSettlement {
 				.events
 				.send_async(WorkerEvent::Dead {
 					worker: run.request.id.clone(),
-					error:  Str::new(source.to_string()),
+					error:  crate::fault(&source),
 				})
 				.await;
 			JobSettlement {
@@ -377,7 +377,7 @@ async fn run_kernel_worker(run: KernelWorkerRun) -> JobSettlement {
 					"failed"
 				}),
 				output:     None,
-				error:      Some(Str::new(source.to_string())),
+				error:      Some(crate::fault(&source)),
 				completion: None,
 			}
 		},

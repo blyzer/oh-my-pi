@@ -103,7 +103,7 @@ impl PromptTemplates {
 				}),
 				Err(error) => out.warnings.push(Warning {
 					path,
-					message: Str::new(format!("cannot inspect prompt template path: {error}")),
+					message: crate::fault_in("cannot inspect prompt template path", error),
 				}),
 			}
 		}
@@ -147,7 +147,7 @@ impl PromptTemplates {
 			Err(error) => {
 				self.warnings.push(Warning {
 					path:    dir.to_path_buf(),
-					message: Str::new(format!("cannot read prompt template directory: {error}")),
+					message: crate::fault_in("cannot read prompt template directory", error),
 				});
 				return;
 			},
@@ -191,7 +191,7 @@ impl PromptTemplates {
 			Err(error) => {
 				self.warnings.push(Warning {
 					path:    path.to_path_buf(),
-					message: Str::new(format!("cannot read prompt template: {error}")),
+					message: crate::fault_in("cannot read prompt template", error),
 				});
 				return;
 			},
@@ -201,7 +201,7 @@ impl PromptTemplates {
 			Err(error) => {
 				self.warnings.push(Warning {
 					path:    canonical,
-					message: Str::new(format!("cannot read prompt template: {error}")),
+					message: crate::fault_in("cannot read prompt template", error),
 				});
 				return;
 			},
@@ -225,7 +225,7 @@ impl PromptTemplates {
 			Err(error) => {
 				self.warnings.push(Warning {
 					path:    canonical,
-					message: Str::new(format!("failed to parse prompt template frontmatter: {error}")),
+					message: crate::fault_in("failed to parse prompt template frontmatter", error),
 				});
 				return;
 			},

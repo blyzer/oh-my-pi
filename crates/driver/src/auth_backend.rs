@@ -142,9 +142,7 @@ impl ControlAuthorityFactory for CredentialSecretControlFactory {
 			self.base_rules.iter().cloned(),
 			self.placeholder_key.as_ref(),
 		)
-		.map_err(|error| {
-			ControlCompositionError::unavailable("credentials", Str::from(error.to_string()))
-		})?;
+		.map_err(|error| ControlCompositionError::unavailable("credentials", crate::fault(error)))?;
 		Ok(Arc::new(CredentialSecretControlAuthority {
 			identity,
 			control: self.control.clone(),
@@ -695,9 +693,7 @@ impl ControlAuthorityFactory for GatewayCredentialSecretControlFactory {
 			self.base_rules.iter().cloned(),
 			self.placeholder_key.as_ref(),
 		)
-		.map_err(|error| {
-			ControlCompositionError::unavailable("credentials", Str::from(error.to_string()))
-		})?;
+		.map_err(|error| ControlCompositionError::unavailable("credentials", crate::fault(error)))?;
 		Ok(Arc::new(GatewayCredentialSecretControlAuthority {
 			identity,
 			client: AuthClient::new(self.channel.clone()),

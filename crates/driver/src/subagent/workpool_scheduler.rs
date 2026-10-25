@@ -702,7 +702,7 @@ impl SchedulerRegistry {
 		let result = self
 			.bridge_call(args)
 			.await
-			.map_err(|error| omp_envd::eval::BridgeHostError::message(error.to_string()))?;
+			.map_err(omp_envd::eval::BridgeHostError::caused)?;
 		progress.progress(json!({
 			"op": "workpool",
 			"action": op,

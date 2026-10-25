@@ -653,7 +653,7 @@ fn skill_files(root: &Path, warnings: &mut Vec<SkillWarning>) -> Vec<PathBuf> {
 		Err(error) => {
 			warnings.push(SkillWarning {
 				path:    root.to_path_buf(),
-				message: Str::new(format!("Failed to read skills directory: {error}")),
+				message: crate::fault_in("Failed to read skills directory", error),
 			});
 			return Vec::new();
 		},
@@ -707,7 +707,7 @@ fn load_skill(
 		Err(error) => {
 			warnings.push(SkillWarning {
 				path:    path.to_path_buf(),
-				message: Str::new(format!("Failed to read skill file: {error}")),
+				message: crate::fault_in("Failed to read skill file", error),
 			});
 			return None;
 		},
@@ -732,7 +732,7 @@ fn load_skill(
 		Err(error) => {
 			warnings.push(SkillWarning {
 				path:    canonical,
-				message: Str::new(format!("Failed to read skill file: {error}")),
+				message: crate::fault_in("Failed to read skill file", error),
 			});
 			return None;
 		},
@@ -770,9 +770,7 @@ fn load_skill(
 			Err(error) => {
 				warnings.push(SkillWarning {
 					path:    canonical,
-					message: Str::new(format!(
-						"failed to parse Agent Plugin skill frontmatter: {error}"
-					)),
+					message: crate::fault_in("failed to parse Agent Plugin skill frontmatter", error),
 				});
 				return None;
 			},
@@ -783,7 +781,7 @@ fn load_skill(
 			Err(error) => {
 				warnings.push(SkillWarning {
 					path:    canonical,
-					message: Str::new(format!("failed to parse SKILL.md frontmatter: {error}")),
+					message: crate::fault_in("failed to parse SKILL.md frontmatter", error),
 				});
 				return None;
 			},
@@ -1041,7 +1039,7 @@ impl ContentResolver for SkillResolver {
 			CowBytes::from(text.into_bytes())
 		} else {
 			CowBytes::from(fs::read(&target).map_err(|error| Fault::Source {
-				message: Str::new(format!("File not found: {} ({error})", target.display())),
+				message: crate::fault_in(format_args!("File not found: {}", target.display()), error),
 			})?)
 		};
 		let ParsedSelector::Lines { ranges, .. } = selector else {
@@ -1052,7 +1050,7 @@ impl ContentResolver for SkillResolver {
 			let piece = self
 				.lines
 				.slice(resource, &bytes, *range)
-				.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+				.map_err(|error| Fault::Invalid { message: crate::fault(error) })?;
 			output.extend_from_slice(&piece);
 		}
 		Ok(CowBytes::from(output))
@@ -1094,7 +1092,7 @@ impl ContentResolver for SkillResolver {
 		let prefix = resource.trim_end_matches('/');
 		let mut children = fs::read_dir(&directory)
 			.map_err(|error| Fault::Source {
-				message: Str::new(format!("Failed to list {}: {error}", directory.display())),
+				message: crate::fault_in(format_args!("Failed to list {}", directory.display()), error),
 			})?
 			.filter_map(Result::ok)
 			.map(|entry| {
