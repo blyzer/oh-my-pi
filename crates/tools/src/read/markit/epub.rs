@@ -8,7 +8,7 @@ use quick_xml::{Reader, XmlVersion, events::Event};
 
 use super::{
 	MarkitError,
-	ooxml::{Archive, decode_xml_bytes},
+	ooxml::{Archive, OoxmlError, decode_xml_bytes},
 };
 
 const FORMAT: &str = "epub";
@@ -558,18 +558,27 @@ fn read_xml_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<Strin
 		.transpose()
 }
 
-fn decode_epub_xml_bytes(bytes: &[u8]) -> Result<String, String> {
+/// Why an EPUB part could not be decoded into XML text.
+#[derive(Debug, thiserror::Error)]
+enum EpubDecodeError {
+	#[error(transparent)]
+	Decode(#[from] OoxmlError),
+	#[error("unsupported declared encoding '{label}'")]
+	UnsupportedEncoding { label: String },
+}
+
+fn decode_epub_xml_bytes(bytes: &[u8]) -> Result<String, EpubDecodeError> {
 	match decode_xml_bytes(bytes) {
 		Ok(text) => Ok(text),
 		Err(utf_error) => {
 			let Some(label) = declared_xml_encoding(bytes) else {
-				return Err(utf_error);
+				return Err(utf_error.into());
 			};
 			let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) else {
-				return Err(format!("unsupported declared encoding '{label}'"));
+				return Err(EpubDecodeError::UnsupportedEncoding { label });
 			};
 			if encoding == encoding_rs::UTF_8 {
-				return Err(utf_error);
+				return Err(utf_error.into());
 			}
 			let (decoded, ..) = encoding.decode(bytes);
 			Ok(decoded.into_owned())

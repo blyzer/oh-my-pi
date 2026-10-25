@@ -5,17 +5,86 @@ use std::{
 	io::Cursor,
 	path::{Component, Path, PathBuf},
 	str,
+	string::FromUtf8Error,
 };
 
 use omp_ar::{Archive as ArArchive, Format, Limits};
 use quick_xml::{
-	Reader, XmlVersion,
-	escape::{resolve_predefined_entity, unescape},
-	events::{BytesRef, BytesStart, BytesText},
+	Error as XmlError, Reader, XmlVersion,
+	encoding::EncodingError,
+	escape::{EscapeError, resolve_predefined_entity, unescape},
+	events::{BytesRef, BytesStart, BytesText, attributes::AttrError},
 };
 
 const MAX_ARCHIVE_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTITY_EXPANSIONS: usize = 1_000_000;
+
+/// Internal OOXML package and XML failure, kept typed until the model-facing
+/// [`MarkitError`](super::MarkitError) boundary renders it once.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum OoxmlError {
+	#[error("invalid ZIP container: {source}")]
+	InvalidContainer {
+		#[source]
+		source: omp_ar::Error,
+	},
+	#[error(
+		"Archive member '{path}' is too large to extract in memory ({size} bytes > {limit} byte \
+		 limit)"
+	)]
+	MemberTooLarge { path: String, size: u64, limit: u64 },
+	#[error("could not read {path}: {source}")]
+	UnreadableMember {
+		path:   String,
+		#[source]
+		source: omp_ar::Error,
+	},
+	#[error("invalid XML: entity expansion count exceeds {limit}")]
+	EntityExpansionCap { limit: usize },
+	#[error(transparent)]
+	InvalidUtf8 {
+		#[from]
+		source: str::Utf8Error,
+	},
+	#[error(transparent)]
+	InvalidDecodedUtf8 {
+		#[from]
+		source: FromUtf8Error,
+	},
+	#[error("invalid XML: {source}")]
+	InvalidXml {
+		#[source]
+		source: XmlError,
+	},
+	#[error("invalid XML: {source}")]
+	InvalidAttribute {
+		#[source]
+		source: AttrError,
+	},
+	#[error("invalid XML: {source}")]
+	InvalidEncoding {
+		#[source]
+		source: EncodingError,
+	},
+	#[error("invalid XML: {source}")]
+	InvalidEscape {
+		#[source]
+		source: EscapeError,
+	},
+	#[error("invalid XML: unknown entity '&{name};'")]
+	UnknownEntity { name: String },
+}
+
+/// Bridge into the XLSX and PPTX pipelines, which still carry their own
+/// parse failures as rendered text.
+///
+/// shortcut: renders `OoxmlError` for the untyped XLSX and PPTX paths;
+/// delete it once those pipelines carry typed errors of their own.
+impl From<OoxmlError> for String {
+	fn from(error: OoxmlError) -> Self {
+		error.to_string()
+	}
+}
 
 pub(super) struct Archive<'a> {
 	archive: ArArchive<Cursor<&'a [u8]>>,
@@ -23,19 +92,18 @@ pub(super) struct Archive<'a> {
 }
 
 impl<'a> Archive<'a> {
-	pub(super) fn open(bytes: &'a [u8]) -> Result<Self, String> {
+	pub(super) fn open(bytes: &'a [u8]) -> Result<Self, OoxmlError> {
 		let limits = Limits::DEFAULT.with_max_member_size(MAX_ARCHIVE_MEMBER_BYTES);
 		let archive = ArArchive::from_bytes_with_format_and_limits(bytes, Format::Zip, limits)
-			.map_err(|error| format!("invalid ZIP container: {error}"))?;
+			.map_err(|source| OoxmlError::InvalidContainer { source })?;
 		let mut entries = BTreeMap::new();
 		for entry in archive.entries().filter(|entry| !entry.is_directory()) {
 			if entry.size() > MAX_ARCHIVE_MEMBER_BYTES {
-				return Err(format!(
-					"Archive member '{}' is too large to extract in memory ({} bytes > {} byte limit)",
-					entry.path(),
-					entry.size(),
-					MAX_ARCHIVE_MEMBER_BYTES
-				));
+				return Err(OoxmlError::MemberTooLarge {
+					path:  entry.path().to_owned(),
+					size:  entry.size(),
+					limit: MAX_ARCHIVE_MEMBER_BYTES,
+				});
 			}
 			let Some(path) = normalize_part_name(entry.path()) else {
 				continue;
@@ -53,7 +121,7 @@ impl<'a> Archive<'a> {
 		self.entries.contains_key(path)
 	}
 
-	pub(super) fn read(&mut self, path: &str) -> Result<Option<Vec<u8>>, String> {
+	pub(super) fn read(&mut self, path: &str) -> Result<Option<Vec<u8>>, OoxmlError> {
 		let Some(source_path) = self.entries.get(path) else {
 			return Ok(None);
 		};
@@ -61,10 +129,10 @@ impl<'a> Archive<'a> {
 			.archive
 			.read(source_path)
 			.map(Some)
-			.map_err(|error| format!("could not read {path}: {error}"))
+			.map_err(|source| OoxmlError::UnreadableMember { path: path.to_owned(), source })
 	}
 
-	pub(super) fn read_xml(&mut self, path: &str) -> Result<Option<Vec<u8>>, String> {
+	pub(super) fn read_xml(&mut self, path: &str) -> Result<Option<Vec<u8>>, OoxmlError> {
 		let Some(bytes) = self.read(path)? else {
 			return Ok(None);
 		};
@@ -161,7 +229,7 @@ fn normalize_path(path: &Path) -> Option<String> {
 	(!normalized.is_empty()).then_some(normalized)
 }
 
-fn validate_entity_expansion_cap(xml: &[u8]) -> Result<(), String> {
+fn validate_entity_expansion_cap(xml: &[u8]) -> Result<(), OoxmlError> {
 	let mut expansions = 0usize;
 	let mut index = 0usize;
 	while let Some(relative) = xml[index..].iter().position(|byte| *byte == b'&') {
@@ -171,24 +239,22 @@ fn validate_entity_expansion_cap(xml: &[u8]) -> Result<(), String> {
 		};
 		expansions += 1;
 		if expansions > MAX_ENTITY_EXPANSIONS {
-			return Err(format!(
-				"invalid XML: entity expansion count exceeds {MAX_ENTITY_EXPANSIONS}"
-			));
+			return Err(OoxmlError::EntityExpansionCap { limit: MAX_ENTITY_EXPANSIONS });
 		}
 		index = start + end + 2;
 	}
 	Ok(())
 }
 
-pub(super) fn decode_xml_bytes(bytes: &[u8]) -> Result<String, String> {
+pub(super) fn decode_xml_bytes(bytes: &[u8]) -> Result<String, OoxmlError> {
 	let (bom, skip) = xutf::detect_bom(bytes);
 	match bom {
 		xutf::Bom::None | xutf::Bom::Utf8 => str::from_utf8(&bytes[skip..])
 			.map(str::to_owned)
-			.map_err(|error| error.to_string()),
+			.map_err(|source| OoxmlError::InvalidUtf8 { source }),
 		_ => {
 			let decoded = xutf::from_bytes::<xutf::Utf8>(bytes);
-			String::from_utf8(decoded).map_err(|error| error.to_string())
+			String::from_utf8(decoded).map_err(|source| OoxmlError::InvalidDecodedUtf8 { source })
 		},
 	}
 }
@@ -203,41 +269,41 @@ pub(super) fn attribute(
 	reader: &Reader<&[u8]>,
 	start: &BytesStart<'_>,
 	wanted: &[u8],
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, OoxmlError> {
 	for attribute in start.attributes().with_checks(false) {
-		let attribute = attribute.map_err(|error| format!("invalid XML: {error}"))?;
+		let attribute = attribute.map_err(|source| OoxmlError::InvalidAttribute { source })?;
 		if local_name(attribute.key.as_ref()) == local_name(wanted) {
 			return attribute
 				.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
 				.map(|value| Some(value.into_owned()))
-				.map_err(|error| format!("invalid XML: {error}"));
+				.map_err(|source| OoxmlError::InvalidXml { source });
 		}
 	}
 	Ok(None)
 }
 
-pub(super) fn decode_text(text: &BytesText<'_>) -> Result<String, String> {
+pub(super) fn decode_text(text: &BytesText<'_>) -> Result<String, OoxmlError> {
 	let decoded = text
 		.decode()
-		.map_err(|error| format!("invalid XML: {error}"))?;
+		.map_err(|source| OoxmlError::InvalidEncoding { source })?;
 	unescape(&decoded)
 		.map(|text| text.into_owned())
-		.map_err(|error| format!("invalid XML: {error}"))
+		.map_err(|source| OoxmlError::InvalidEscape { source })
 }
 
-pub(super) fn decode_reference(reference: &BytesRef<'_>) -> Result<String, String> {
+pub(super) fn decode_reference(reference: &BytesRef<'_>) -> Result<String, OoxmlError> {
 	if let Some(character) = reference
 		.resolve_char_ref()
-		.map_err(|error| format!("invalid XML: {error}"))?
+		.map_err(|source| OoxmlError::InvalidXml { source })?
 	{
 		return Ok(character.to_string());
 	}
 	let name = reference
 		.decode()
-		.map_err(|error| format!("invalid XML: {error}"))?;
+		.map_err(|source| OoxmlError::InvalidEncoding { source })?;
 	resolve_predefined_entity(&name)
 		.map(str::to_owned)
-		.ok_or_else(|| format!("invalid XML: unknown entity '&{name};'"))
+		.ok_or_else(|| OoxmlError::UnknownEntity { name: name.into_owned() })
 }
 
 pub(super) fn local_name(name: &[u8]) -> &[u8] {

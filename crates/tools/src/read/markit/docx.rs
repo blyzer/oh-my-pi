@@ -148,7 +148,7 @@ struct Context {
 /// Markdown.
 pub(super) fn convert(bytes: &[u8], extract_media: bool) -> Result<Conversion, MarkitError> {
 	let mut archive =
-		Archive::open(bytes).map_err(|error| MarkitError::conversion(FORMAT, error))?;
+		Archive::open(bytes).map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 	let root_relationships = read_member(&mut archive, "_rels/.rels")?
 		.map(|xml| parse_relationships(&xml))
 		.transpose()?
@@ -227,7 +227,7 @@ fn extract_attachments(
 		};
 		let Some(bytes) = archive
 			.read(&path)
-			.map_err(|error| MarkitError::conversion(FORMAT, error))?
+			.map_err(|error| MarkitError::conversion_from(FORMAT, error))?
 		else {
 			continue;
 		};
@@ -244,7 +244,7 @@ fn extract_attachments(
 fn read_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<String>, MarkitError> {
 	let Some(bytes) = archive
 		.read_xml(path)
-		.map_err(|error| MarkitError::conversion(FORMAT, error))?
+		.map_err(|error| MarkitError::conversion_from(FORMAT, error))?
 	else {
 		return Ok(None);
 	};
@@ -495,8 +495,8 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 					.push(Content::Text(text.into_owned()));
 			},
 			Ok(Event::GeneralRef(event)) => {
-				let text =
-					decode_reference(&event).map_err(|error| MarkitError::conversion(FORMAT, error))?;
+				let text = decode_reference(&event)
+					.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 				count_xml_content_node(&mut content_nodes)?;
 				stack
 					.last_mut()
