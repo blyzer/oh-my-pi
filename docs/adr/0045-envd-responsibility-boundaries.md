@@ -107,3 +107,16 @@ The performance scores are unmeasured estimates.
 ## Implementation gate
 
 This ADR is a proposal. **No implementation is authorized.** Work begins only after owner review accepts it. Each step then proceeds as one reversible change with its acceptance criterion from audit §14. Hot-path changes additionally need a recorded baseline that meets audit §12.3.
+
+## Status in omp
+
+**Status: Not started.** The ADR remains proposed and its implementation gate
+prohibits production changes before owner acceptance.
+
+- The containment gap is still present in `crates/env/src/partition.rs`: a
+  remote-bound send after backend closure can terminate the router and take the
+  local backend with it.
+- The W8 daemon-kill proof, P8 W1–W9 baselines, and owner answers in decision
+  item 7 are not recorded as accepted evidence.
+- `adr0045-slice-b.md` is an investigation of this gap, not an implementation
+  authorization.

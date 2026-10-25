@@ -33,10 +33,13 @@ names real paths, leads with one status label, and says "not yet implemented" or
 ## Implementation status
 
 [STATUS.md](STATUS.md) is the one-table view of how far each record is implemented, with the gap and
-the records where code departs from the decision text. Each record's `## Status in omp` section opens
-with `Status: Implemented | Partially implemented | Not started | Superseded or diverged`, then
-bullets of evidence (paths, symbols), then divergences. Update the section and its STATUS.md row in the
-same change that moves the code.
+the records where code departs from the decision text. [TASKS.md](TASKS.md) is the active queue for
+unresolved ADR work and owner decisions. Historical audits and session snapshots do not override
+either file.
+
+Each record's `## Status in omp` section opens with `Status: Implemented | Partially implemented |
+Not started | Superseded or diverged`, then bullets of evidence (paths, symbols), then divergences.
+Update the section, `STATUS.md`, and `TASKS.md` in the same change that moves the code.
 
 ## Index
 
@@ -96,3 +99,10 @@ same change that moves the code.
 ### Stack
 - [0035](0035-rust-for-the-engine.md) — Language choice is architecture; Rust for the engine
 - [0036](0036-python-for-extensions.md) — Embedded Python for extensions, `@remote`, and `Eval`
+- [0042](0042-apple-pcc-integration.md) — Apple PCC extends the existing Apple Foundation Models boundary
+- [0043](0043-native-cli-integration.md) — Native provider CLIs are delegated agent executors, not direct model transports
+- [0044](0044-presentation-surface-and-agent-boundaries.md) — Proposed presentation, surface, and inter-agent boundaries
+- [0045](0045-envd-responsibility-boundaries.md) — Proposed envd responsibility boundaries
+- [0046](0046-recover-v1-extensibility-without-centralization.md) — Recover v1 extension properties without routing every feature through envd
+- [0047](0047-agent-build-execution-model.md) — Agents build through a capability-shaped `omp-exec`
+- [0048](0048-schema-and-serialization-boundaries.md) — Schema and serialization boundaries
