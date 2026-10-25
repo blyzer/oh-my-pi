@@ -619,7 +619,7 @@ impl PushToTalk {
 				Ok(voice) => {
 					if let Err(error) = CL_LIVE_VOICE.set(ctx, voice) {
 						post_live(ctx, LiveUiEvent::Error {
-							message:     Str::new(format!("Could not save the live voice: {error}")),
+							message:     crate::fault_in("Could not save the live voice", error),
 							recoverable: true,
 						});
 					}
@@ -658,7 +658,7 @@ impl PushToTalk {
 			Ok(snapshot) => snapshot,
 			Err(error) => {
 				post_live(ctx, LiveUiEvent::Error {
-					message:     Str::new(format!("Could not enumerate audio devices: {error}")),
+					message:     crate::fault_in("Could not enumerate audio devices", error),
 					recoverable: true,
 				});
 				return;
@@ -695,7 +695,10 @@ impl PushToTalk {
 		if let Err(error) = result {
 			let direction = if input { "microphone" } else { "speaker" };
 			post_live(ctx, LiveUiEvent::Error {
-				message:     Str::new(format!("Could not save the {direction} selection: {error}")),
+				message:     crate::fault_in(
+					omp_core::sf!("Could not save the {direction} selection"),
+					error,
+				),
 				recoverable: true,
 			});
 			return;
@@ -1641,9 +1644,10 @@ fn refresh_device_selection(
 		match device::snapshot() {
 			Ok(refreshed) => next = refreshed,
 			Err(error) => post_mailbox(mailbox, LiveUiEvent::Error {
-				message:     Str::new(format!(
-					"Could not refresh audio devices after a device change: {error}"
-				)),
+				message:     crate::fault_in(
+					"Could not refresh audio devices after a device change",
+					error,
+				),
 				recoverable: true,
 			}),
 		}
@@ -1711,9 +1715,7 @@ async fn authorize_live_microphone(
 				Ok(permission) => permission,
 				Err(error) => {
 					post_mailbox(mailbox, LiveUiEvent::Error {
-						message:     Str::new(format!(
-							"Could not request microphone permission: {error}"
-						)),
+						message:     crate::fault_in("Could not request microphone permission", error),
 						recoverable: true,
 					});
 					return LiveAuthorization::Recoverable;
@@ -1836,13 +1838,13 @@ fn normalize_live_selection(
 fn persist_live_selection(ctx: &Ctx, mailbox: &HostMailbox, selected: &LiveDeviceSelection) {
 	if let Err(error) = CL_LIVE_INPUT_DEVICE.set(ctx, selected.input.clone()) {
 		post_mailbox(mailbox, LiveUiEvent::Error {
-			message:     Str::new(format!("Could not save the microphone selection: {error}")),
+			message:     crate::fault_in("Could not save the microphone selection", error),
 			recoverable: true,
 		});
 	}
 	if let Err(error) = CL_LIVE_OUTPUT_DEVICE.set(ctx, selected.output.clone()) {
 		post_mailbox(mailbox, LiveUiEvent::Error {
-			message:     Str::new(format!("Could not save the speaker selection: {error}")),
+			message:     crate::fault_in("Could not save the speaker selection", error),
 			recoverable: true,
 		});
 	}
@@ -2068,7 +2070,7 @@ async fn run_live_transport(
 			Err(error) => {
 				let failure = LiveAttemptFailure::new(
 					LiveFailureClass::Media,
-					Str::new(format!("could not enumerate audio devices: {error}")),
+					crate::fault_in("could not enumerate audio devices", error),
 				);
 				if let Some(schedule) =
 					schedule_live_reconnect(&mailbox, &mut reconnect, &failure, ever_established)
@@ -2110,9 +2112,10 @@ async fn run_live_transport(
 					&mailbox,
 					&LiveAttemptFailure::new(
 						LiveFailureClass::Media,
-						Str::new(format!(
-							"could not refresh audio devices after permission acquisition: {error}"
-						)),
+						crate::fault_in(
+							"could not refresh audio devices after permission acquisition",
+							error,
+						),
 					),
 					None,
 				);
@@ -2124,7 +2127,7 @@ async fn run_live_transport(
 			Err(error) => {
 				let failure = LiveAttemptFailure::new(
 					LiveFailureClass::Media,
-					Str::new(format!("could not monitor audio devices: {error}")),
+					crate::fault_in("could not monitor audio devices", error),
 				);
 				if let Some(schedule) =
 					schedule_live_reconnect(&mailbox, &mut reconnect, &failure, ever_established)
@@ -2187,7 +2190,7 @@ async fn run_live_transport(
 					&mailbox,
 					&LiveAttemptFailure::new(
 						classify_proxy_discovery_failure(&error),
-						Str::new(format!("could not resolve live proxy policy: {error}")),
+						crate::fault_in("could not resolve live proxy policy", error),
 					),
 					None,
 				);

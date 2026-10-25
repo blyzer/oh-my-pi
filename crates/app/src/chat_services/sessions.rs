@@ -222,7 +222,7 @@ pub fn set_agent_enabled(state: &ServiceState, name: &str, enabled: bool) -> Ser
 		SV_TASK_DISABLED_AGENTS.name(),
 		&literal,
 	)
-	.map_err(|error| ServiceError::failed(format!("{error}")))
+	.map_err(ServiceError::failed)
 }
 
 /// First leading `//` comment line as the description and the `ai_model`

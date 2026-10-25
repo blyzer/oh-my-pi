@@ -104,7 +104,7 @@ where
 		let frame: Value = match serde_json::from_slice(input.line()) {
 			Ok(frame) => frame,
 			Err(source) => {
-				write_frame(output, &error(Value::Null, -32700, &source.to_string())).await?;
+				write_frame(output, &error(Value::Null, -32700, &crate::fault(source))).await?;
 				continue;
 			},
 		};
@@ -408,7 +408,7 @@ where
 			Ok(frame) => frame,
 			Err(source) => {
 				output_tx
-					.send(error(Value::Null, -32700, &source.to_string()))
+					.send(error(Value::Null, -32700, &crate::fault(source)))
 					.into_diagnostic()?;
 				continue;
 			},
@@ -493,7 +493,7 @@ where
 						Err(source) => {
 							if let Some(id) = id {
 								output_tx
-									.send(error(id, -32000, &source.to_string()))
+									.send(error(id, -32000, &crate::fault(source)))
 									.into_diagnostic()?;
 							}
 							continue;
@@ -543,7 +543,7 @@ where
 						Err(source) => {
 							if let Some(id) = id {
 								output_tx
-									.send(error(id, -32000, &source.to_string()))
+									.send(error(id, -32000, &crate::fault(source)))
 									.into_diagnostic()?;
 							}
 							continue;
@@ -600,7 +600,7 @@ where
 						Err(source) => {
 							if let Some(id) = id {
 								output_tx
-									.send(error(id, -32000, &source.to_string()))
+									.send(error(id, -32000, &crate::fault(source)))
 									.into_diagnostic()?;
 							}
 							continue;
@@ -680,7 +680,7 @@ where
 							controller = Some((kernel, session));
 							if let Some(id) = id {
 								output_tx
-									.send(error(id, -32000, &source.to_string()))
+									.send(error(id, -32000, &crate::fault(source)))
 									.into_diagnostic()?;
 							}
 							continue;
@@ -695,7 +695,7 @@ where
 						{
 							Ok(outcome) => Ok(prompt_response(&session, &outcome)),
 							Err(source) => {
-								let text = source.to_string();
+								let text = crate::fault(source);
 								let message_id = session
 									.head()
 									.map(|entry| entry.to_string())

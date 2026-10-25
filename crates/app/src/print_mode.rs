@@ -272,7 +272,7 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		let stop = match result {
 			Ok(outcome) => outcome.stop,
 			Err(error) => {
-				let message = sanitize_text(&error.to_string());
+				let message = sanitize_text(&crate::fault(&error));
 				let cause = kernel_exit_cause(&error, launch.model.as_str());
 				session.record_exit(cause).into_diagnostic()?;
 				end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::Fatal))

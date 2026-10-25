@@ -141,7 +141,7 @@ async fn link(dir: &Path, args: &CollabLinkArgs, out: &mut impl Write) -> miette
 	let link = match resolve_link(dir, args.selector.as_str(), access, DEFAULT_QUERY_TIMEOUT).await {
 		Ok(link) => link,
 		Err(LinkError::Registry(error)) => return Err(error).into_diagnostic(),
-		Err(other) => return Err(CliUsageError::startup(other.to_string()).into()),
+		Err(other) => return Err(CliUsageError::startup(crate::fault(other)).into()),
 	};
 	if args.json {
 		let output = LinkOutput { version: REGISTRY_VERSION, link: &link };

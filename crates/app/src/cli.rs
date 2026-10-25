@@ -313,7 +313,7 @@ pub struct SelectorList(
 );
 
 fn extension_setting_override(value: &str) -> Result<omp_ext::config::CliSettingOverride, String> {
-	omp_ext::config::CliSettingOverride::parse(value).map_err(|error| error.to_string())
+	omp_ext::config::CliSettingOverride::parse(value).map_err(|error| crate::fault(error).into())
 }
 
 impl FromStr for SelectorList {
@@ -2945,9 +2945,9 @@ fn invocation_extension_root(spec: &str) -> miette::Result<PathBuf> {
 
 fn canonical_extension_root(path: &Path) -> miette::Result<PathBuf> {
 	let canonical = fs::canonicalize(path).map_err(|error| {
-		CliUsageError::new(format!(
-			"cannot resolve invocation extension `{}`: {error}",
-			path.display()
+		CliUsageError::new(crate::fault_in(
+			omp_core::sf!("cannot resolve invocation extension `{}`", path.display()),
+			error,
 		))
 	})?;
 	if canonical.is_dir() {
@@ -2986,8 +2986,11 @@ pub async fn run() -> miette::Result<()> {
 			return Ok(());
 		},
 		Err(error) => {
-			let rendered = error.to_string();
-			let message = rendered.strip_prefix("error: ").unwrap_or(&rendered);
+			let rendered = crate::fault(&error);
+			let message = rendered
+				.as_str()
+				.strip_prefix("error: ")
+				.unwrap_or(&rendered);
 			let error = if error.kind() == clap::error::ErrorKind::InvalidSubcommand
 				&& message.starts_with('`')
 			{
@@ -3312,7 +3315,7 @@ pub fn parse_from_os(arguments: impl IntoIterator<Item = OsString>) -> Result<Om
 fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpCli, clap::Error> {
 	use clap::error::ErrorKind;
 	let profile = profile_bootstrap::extract(arguments)
-		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, error.to_string()))?;
+		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, crate::fault(error)))?;
 	omp_core::dirs::set_selected_profile(profile.profile.clone());
 	let mut routed_arguments = profile.arguments;
 	// Hoist a known command before extension bootstrap so launch-only roots
@@ -3322,7 +3325,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpC
 		return Err(clap::Error::raw(ErrorKind::InvalidSubcommand, message.to_string()));
 	}
 	let mut bootstrap = bootstrap::run(routed_arguments, builtin_contribution_names())
-		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, error.to_string()))?;
+		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, crate::fault(error)))?;
 	profile_bootstrap::remove_boundaries(&mut bootstrap.arguments);
 	let mut arguments = bootstrap.arguments;
 	normalize_hidden_command(&mut arguments);
@@ -3772,7 +3775,8 @@ fn is_command(argument: &OsString) -> bool {
 }
 
 fn trusted_extension_path(value: &str) -> Result<omp_envd::site::TrustedModule, String> {
-	omp_envd::site::validate_trusted_module(Path::new(value)).map_err(|error| error.to_string())
+	omp_envd::site::validate_trusted_module(Path::new(value))
+		.map_err(|error| crate::fault(error).into())
 }
 
 /// Converts one exact operator-approved module into the deployment-owned
