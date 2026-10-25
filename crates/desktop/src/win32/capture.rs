@@ -5,7 +5,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use xcap::{Monitor, Window};
 
 use super::super::{
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::FrameGeometry,
 	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
@@ -227,10 +227,11 @@ fn capture_desktop(selector: &DisplaySelector) -> CoreResult<(RgbaImage, FrameGe
 	let mut composite = RgbaImage::new(width, height);
 	for snapshot in &snapshots {
 		let mut image = snapshot.monitor.capture_image().map_err(|error| {
-			DesktopError::capture_failed(format!(
-				"capture of display '{}' failed: {error}",
-				snapshot.display.id
-			))
+			DesktopError::caused(
+				ErrorCode::CaptureFailed,
+				format!("capture of display '{}' failed", snapshot.display.id),
+				&error,
+			)
 		})?;
 		if image.width() == 0 || image.height() == 0 {
 			return Err(DesktopError::capture_failed(format!(
@@ -281,7 +282,11 @@ fn capture_window(id: &str) -> CoreResult<(RgbaImage, FrameGeometry)> {
 		))
 	})?;
 	let image = window.capture_image().map_err(|error| {
-		DesktopError::capture_failed(format!("capture of window '{id}' failed: {error}"))
+		DesktopError::caused(
+			ErrorCode::CaptureFailed,
+			format!("capture of window '{id}' failed"),
+			&error,
+		)
 	})?;
 	if image.width() == 0 || image.height() == 0 {
 		return Err(DesktopError::capture_failed(format!(

@@ -35,7 +35,7 @@ use xkeysym::Keysym;
 
 use crate::{
 	backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
 	types::Target,
 };
@@ -59,7 +59,7 @@ impl X11Input {
 			.map_err(input_failed)?
 			.reply()
 			.map_err(|error| {
-				DesktopError::input_failed(format!("XTEST extension is unavailable: {error}"))
+				DesktopError::caused(ErrorCode::InputFailed, "XTEST extension is unavailable", &error)
 			})?;
 		let setup = conn.setup();
 		let min_keycode = setup.min_keycode;
@@ -1107,7 +1107,9 @@ impl UInputDevice {
 		let file = OpenOptions::new()
 			.write(true)
 			.open("/dev/uinput")
-			.map_err(|error| DesktopError::input_failed(format!("open /dev/uinput: {error}")))?;
+			.map_err(|error| {
+				DesktopError::caused(ErrorCode::InputFailed, "open /dev/uinput", &error)
+			})?;
 		let fd = file.as_raw_fd();
 		for event in [EV_KEY, EV_REL] {
 			ioctl_int(fd, ui_set_evbit(), event)?;
@@ -1167,7 +1169,7 @@ impl UInputDevice {
 		self
 			.file
 			.write_all(bytes)
-			.map_err(|error| DesktopError::input_failed(format!("write /dev/uinput: {error}")))
+			.map_err(|error| DesktopError::caused(ErrorCode::InputFailed, "write /dev/uinput", &error))
 	}
 
 	fn sync(&mut self) -> CoreResult<()> {

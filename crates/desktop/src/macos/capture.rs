@@ -10,7 +10,7 @@ use image::{DynamicImage, Rgba, RgbaImage, imageops::FilterType};
 use xcap::{Monitor, Window};
 
 use super::super::{
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	frame::{FrameGeometry, MAX_COMPOSITE_PIXELS},
 	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
@@ -46,7 +46,7 @@ impl MacCapture {
 			));
 		}
 		let monitors = Monitor::all().map_err(|error| {
-			DesktopError::capture_failed(format!("Quartz monitor enumeration failed: {error}"))
+			DesktopError::caused(ErrorCode::CaptureFailed, "Quartz monitor enumeration failed", &error)
 		})?;
 		let mut displays = Vec::with_capacity(monitors.len());
 		for monitor in monitors {
@@ -106,7 +106,7 @@ impl MacCapture {
 			));
 		}
 		let windows = Window::all().map_err(|error| {
-			DesktopError::capture_failed(format!("native window enumeration failed: {error}"))
+			DesktopError::caused(ErrorCode::CaptureFailed, "native window enumeration failed", &error)
 		})?;
 		let mut result = Vec::new();
 		let mut seen = HashSet::new();
@@ -285,9 +285,11 @@ fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
 		.suffix(".png")
 		.tempfile()
 		.map_err(|error| {
-			DesktopError::capture_failed(format!(
-				"failed to create temporary screenshot file: {error}"
-			))
+			DesktopError::caused(
+				ErrorCode::CaptureFailed,
+				"failed to create temporary screenshot file",
+				&error,
+			)
 		})?;
 	let mut child = Command::new("/usr/sbin/screencapture")
 		.args(args)
@@ -297,7 +299,11 @@ fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
 		.stderr(Stdio::null())
 		.spawn()
 		.map_err(|error| {
-			DesktopError::capture_failed(format!("failed to start macOS screen capture: {error}"))
+			DesktopError::caused(
+				ErrorCode::CaptureFailed,
+				"failed to start macOS screen capture",
+				&error,
+			)
 		})?;
 	let deadline = Instant::now() + CAPTURE_TIMEOUT;
 	let status = loop {
@@ -307,9 +313,11 @@ fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
 			Err(error) => {
 				let _ = child.kill();
 				let _ = child.wait();
-				return Err(DesktopError::capture_failed(format!(
-					"failed while waiting for macOS screen capture: {error}"
-				)));
+				return Err(DesktopError::caused(
+					ErrorCode::CaptureFailed,
+					"failed while waiting for macOS screen capture",
+					&error,
+				));
 			},
 		}
 		if Instant::now() >= deadline {
@@ -332,7 +340,7 @@ fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
 	}
 	image::open(file.path())
 		.map_err(|error| {
-			DesktopError::capture_failed(format!("failed to decode macOS screenshot: {error}"))
+			DesktopError::caused(ErrorCode::CaptureFailed, "failed to decode macOS screenshot", &error)
 		})
 		.map(DynamicImage::into_rgba8)
 }

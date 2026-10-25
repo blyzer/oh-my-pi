@@ -14,7 +14,7 @@ use super::{ax::ActorAx, wayland::libei::ActorLibei};
 use crate::{
 	ax::{AxHandle, AxProps},
 	backend::{AxBackend, PointerEvent},
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
 	types::DesktopWindow,
 };
@@ -47,16 +47,16 @@ struct DesktopActor {
 	tx: Sender<Command>,
 }
 
-static DESKTOP_ACTOR: LazyLock<Result<DesktopActor, String>> = LazyLock::new(|| {
+static DESKTOP_ACTOR: LazyLock<Result<DesktopActor, DesktopError>> = LazyLock::new(|| {
 	let (tx, rx) = flume::unbounded();
 	let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 	thread::Builder::new()
 		.name("omp-desktop".to_string())
 		.spawn(move || run(rx, ready_tx))
-		.map_err(|err| format!("desktop actor thread: {err}"))?;
+		.map_err(|err| DesktopError::caused(ErrorCode::Internal, "desktop actor thread", &err))?;
 	ready_rx
 		.recv()
-		.map_err(|_| "desktop actor exited during startup".to_string())??;
+		.map_err(|_| DesktopError::internal("desktop actor exited during startup"))??;
 	Ok(DesktopActor { tx })
 });
 
@@ -64,7 +64,7 @@ fn sender() -> CoreResult<&'static Sender<Command>> {
 	DESKTOP_ACTOR
 		.as_ref()
 		.map(|actor| &actor.tx)
-		.map_err(|err| DesktopError::internal(err.clone()))
+		.map_err(Clone::clone)
 }
 
 fn request<T>(make: impl FnOnce(Reply<T>) -> Command) -> CoreResult<T> {
@@ -77,11 +77,11 @@ fn request<T>(make: impl FnOnce(Reply<T>) -> Command) -> CoreResult<T> {
 		.map_err(|_| DesktopError::internal("desktop actor dropped a reply"))?
 }
 
-fn run(rx: Receiver<Command>, ready: mpsc::SyncSender<Result<(), String>>) {
+fn run(rx: Receiver<Command>, ready: mpsc::SyncSender<Result<(), DesktopError>>) {
 	let mut ax = match ActorAx::new() {
 		Ok(ax) => ax,
 		Err(err) => {
-			let _ = ready.send(Err(err.to_string()));
+			let _ = ready.send(Err(err));
 			return;
 		},
 	};

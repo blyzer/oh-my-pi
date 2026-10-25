@@ -22,7 +22,7 @@ use super::super::actor;
 use crate::{
 	CLOSE_TIMEOUT,
 	backend::{Modifiers, MouseButton, PointerEvent},
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
 };
 
@@ -75,7 +75,9 @@ impl ActorLibei {
 				let (context, session, targets) = Self::portal_context(runtime)?;
 				(context, Some(session), targets)
 			},
-			Err(err) => return Err(DesktopError::permission_denied(format!("LIBEI_SOCKET: {err}"))),
+			Err(err) => {
+				return Err(DesktopError::caused(ErrorCode::PermissionDenied, "LIBEI_SOCKET", &err));
+			},
 		};
 		let mut backend =
 			Self { context, pointer: None, keyboard: None, sequence: 1, portal_session };
@@ -85,7 +87,7 @@ impl ActorLibei {
 					.context
 					.handshake_tokio("omp-computer", handshake::ContextType::Sender),
 			)
-			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
+			.map_err(|err| DesktopError::caused(ErrorCode::InputFailed, "libei handshake", &err))?;
 		backend.discover_devices(runtime, &mut events, targets)?;
 		if backend.pointer.is_none() && backend.keyboard.is_none() {
 			return Err(DesktopError::permission_denied(
@@ -98,57 +100,78 @@ impl ActorLibei {
 	fn portal_context(
 		runtime: &runtime::Runtime,
 	) -> CoreResult<(ei::Context, PortalSession, DiscoveryTargets)> {
-		let (fd, session, targets) = runtime
-			.block_on(async {
-				let portal = RemoteDesktop::new()
+		let (fd, session, targets) = runtime.block_on(async {
+			let portal = RemoteDesktop::new().await.map_err(|err| {
+				DesktopError::caused(
+					ErrorCode::PermissionDenied,
+					"RemoteDesktop portal unavailable",
+					&err,
+				)
+			})?;
+			let session = portal.create_session().await.map_err(|err| {
+				DesktopError::caused(ErrorCode::PermissionDenied, "RemoteDesktop CreateSession", &err)
+			})?;
+			let fd = async {
+				portal
+					.select_devices(
+						&session,
+						DeviceType::Keyboard | DeviceType::Pointer,
+						None,
+						PersistMode::DoNot,
+					)
 					.await
-					.map_err(|err| format!("RemoteDesktop portal unavailable: {err}"))?;
-				let session = portal
-					.create_session()
-					.await
-					.map_err(|err| format!("RemoteDesktop CreateSession: {err}"))?;
-				let fd = async {
-					portal
-						.select_devices(
-							&session,
-							DeviceType::Keyboard | DeviceType::Pointer,
-							None,
-							PersistMode::DoNot,
+					.map_err(|err| {
+						DesktopError::caused(
+							ErrorCode::PermissionDenied,
+							"RemoteDesktop SelectDevices",
+							&err,
 						)
-						.await
-						.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-					let response = portal
-						.start(&session, None)
-						.await
-						.map_err(|err| format!("RemoteDesktop Start: {err}"))?
-						.response()
-						.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
-					let devices = response.devices();
-					let targets = DiscoveryTargets {
-						pointer:  devices.contains(DeviceType::Pointer),
-						keyboard: devices.contains(DeviceType::Keyboard),
-					};
-					portal
-						.connect_to_eis(&session)
-						.await
-						.map(|fd| (fd, targets))
-						.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
-				}
-				.await;
-				match fd {
-					Ok((fd, targets)) => Ok((fd, session, targets)),
-					Err(err) => {
-						let _ = time::timeout(CLOSE_TIMEOUT, session.close()).await;
-						Err(err)
-					},
-				}
-			})
-			.map_err(DesktopError::permission_denied)?;
+					})?;
+				let response = portal
+					.start(&session, None)
+					.await
+					.map_err(|err| {
+						DesktopError::caused(ErrorCode::PermissionDenied, "RemoteDesktop Start", &err)
+					})?
+					.response()
+					.map_err(|err| {
+						DesktopError::caused(
+							ErrorCode::PermissionDenied,
+							"RemoteDesktop permission",
+							&err,
+						)
+					})?;
+				let devices = response.devices();
+				let targets = DiscoveryTargets {
+					pointer:  devices.contains(DeviceType::Pointer),
+					keyboard: devices.contains(DeviceType::Keyboard),
+				};
+				portal
+					.connect_to_eis(&session)
+					.await
+					.map(|fd| (fd, targets))
+					.map_err(|err| {
+						DesktopError::caused(
+							ErrorCode::PermissionDenied,
+							"RemoteDesktop ConnectToEIS",
+							&err,
+						)
+					})
+			}
+			.await;
+			match fd {
+				Ok((fd, targets)) => Ok((fd, session, targets)),
+				Err(err) => {
+					let _ = time::timeout(CLOSE_TIMEOUT, session.close()).await;
+					Err(err)
+				},
+			}
+		})?;
 		let context = match ei::Context::new(UnixStream::from(fd)) {
 			Ok(context) => context,
 			Err(err) => {
 				close_session(runtime, &session);
-				return Err(DesktopError::input_failed(format!("libei portal socket: {err}")));
+				return Err(DesktopError::caused(ErrorCode::InputFailed, "libei portal socket", &err));
 			},
 		};
 		Ok((context, PortalSession { session }, targets))
@@ -182,7 +205,9 @@ impl ActorLibei {
 				.ok_or_else(|| {
 					DesktopError::input_failed("libei disconnected during device discovery")
 				})?
-				.map_err(|err| DesktopError::input_failed(format!("libei device discovery: {err}")))?;
+				.map_err(|err| {
+					DesktopError::caused(ErrorCode::InputFailed, "libei device discovery", &err)
+				})?;
 				match event {
 					EiEvent::SeatAdded(event) => {
 						event.seat.bind_capabilities(&[
@@ -193,7 +218,7 @@ impl ActorLibei {
 							DeviceCapability::Keyboard,
 						]);
 						self.context.flush().map_err(|err| {
-							DesktopError::input_failed(format!("libei bind seat: {err}"))
+							DesktopError::caused(ErrorCode::InputFailed, "libei bind seat", &err)
 						})?;
 					},
 					EiEvent::DeviceAdded(event) => {
