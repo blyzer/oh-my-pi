@@ -932,6 +932,9 @@ fn exit_fact(status: std::process::ExitStatus) -> ExitFact {
 	status.code().map_or(ExitFact::Unknown, ExitFact::Code)
 }
 
+/// The object form of `codexErrorInfo` stays `Internal` on purpose. The
+/// signed-out `-32000` shape arrives through the ACP client
+/// ([`crate::acp_client::wire::is_missing_login`]), never through this adapter.
 const fn remote_failure(info: Option<wire::ErrorInfo>) -> RemoteFailure {
 	use wire::ErrorCode;
 	let Some(wire::ErrorInfo::Code(code)) = info else {

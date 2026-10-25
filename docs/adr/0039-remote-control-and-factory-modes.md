@@ -541,11 +541,11 @@ service SessionControl {
 
 ## Status in omp
 
-**Status: Partially implemented (phase S0 done in PR #129; no R1-R4 or F1-F4 deliverable found).** Verified
-2026-10-04 against `omp2` at `083b38fe7d`. What exists, is partial, or is missing is listed in the two
-inventories in Context, which describe the tree before S0. New components still absent:
-`omp.session.v1`, `omp.fleet.v1`, driver `SessionHost` and `fleet`, `omp-serve` `session`/`fleet`
-projections, `omp-rpc` TLS + device challenge, and the proposed pure crate `omp-fleet`.
+**Status: Partially implemented (phase S0 done in PR #129; R1 part-built, no R1-R4 or F1-F4
+deliverable complete).** Verified 2026-10-25 against `omp2` at `1776c5cd25`. What exists, is
+partial, or is missing is listed in the two inventories in Context, which describe the tree before
+S0. Still absent: `omp.fleet.v1`, driver `fleet`, `omp-serve` `session`/`fleet` projections, and
+the proposed pure crate `omp-fleet`.
 
 Phase S0 (spectator proof and headless hosting) landed in commit `38c4e04ff3`: guest-mutation
 admission moved into `crates/driver/src/collab/admission.rs`; `host.rs` (`HeadlessRoom`) and
@@ -554,8 +554,17 @@ defect 1 is fixed); `crates/app/src/chat_control.rs` was changed in the same com
 `crates/e2e/tests/p11_collab_spectator.rs` over the in-process `omp_collab::test_relay`
 (`crates/collab/test_relay.rs`), gated by `just e2e-p11` and `.github/workflows/ci.yml`.
 
-Checked as still open: no `omp.session.v1` or `omp.fleet.v1` proto, no `crates/fleet`, no
-`omp attach`, and `omp_rpc::server_tls` has no caller outside `crates/rpc`.
+Three R1 parts landed after the 2026-10-04 pass and are not yet wired to each other: the
+`omp.session.v1` proto (`crates/proto/proto/omp/session/v1/session.proto`, service
+`SessionControl` with `ListSessions`, `Attach`, `Submit`, `Approve`, `AnswerUi` and `Open`,
+generated as `omp_proto::session`), the driver `SessionHost` owner-only UDS listener
+(`crates/driver/src/session_host.rs`, commit `13cfc5deca`), and the `omp-rpc` device challenge
+(`crates/rpc/src/device_auth.rs`).
+
+Checked as still open: no `omp.fleet.v1` proto, no `crates/fleet`, no `omp-serve` session
+projection, no driver `session_wire.rs`, no `omp attach`, and `omp_rpc::server_tls` has no caller
+outside `crates/rpc`. See the ADR 0039 entry in `TASKS.md` for the two files that PR #342 merged
+but never delivered to `omp2`.
 
 ### Implementation plan (PR-sized, value first)
 
