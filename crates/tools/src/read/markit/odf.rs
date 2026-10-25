@@ -5,12 +5,46 @@
 //! format frontends from growing subtly different container rules.
 
 use omp_core::Str;
-use quick_xml::events::Event;
+use quick_xml::{Error as XmlError, events::Event};
 
 use super::{
 	MarkitError, convert_with_anydoc,
 	ooxml::{Archive, attribute, decode_xml_bytes, local_name, xml_reader},
 };
+
+/// Internal validation failure before conversion reaches the model-facing
+/// [`MarkitError`] boundary.
+#[derive(Debug, thiserror::Error)]
+enum OdfError {
+	#[error("unexpected OpenDocument mimetype '{declared}'")]
+	UnexpectedMimetype { declared: String },
+	#[error("unexpected OpenDocument body '{body}'")]
+	UnexpectedBody { body: String },
+	#[error("unsupported OpenDocument format selector")]
+	UnsupportedFormat,
+	#[error("content.xml has no recognized OpenDocument body")]
+	MissingRecognizedBody,
+	#[error("content.xml has no OpenDocument body")]
+	MissingBody,
+	#[error("invalid XML: {xml_error}")]
+	InvalidXml { xml_error: String },
+	#[error("invalid content.xml: {source}")]
+	InvalidContentXml {
+		#[source]
+		source: XmlError,
+	},
+	#[error("invalid manifest XML: {source}")]
+	InvalidManifestXml {
+		#[source]
+		source: XmlError,
+	},
+}
+
+impl From<String> for OdfError {
+	fn from(xml_error: String) -> Self {
+		Self::InvalidXml { xml_error }
+	}
+}
 
 /// Converts one `OpenDocument` package after validating its declared identity.
 ///
@@ -56,7 +90,7 @@ pub(super) fn convert(
 	};
 	if let Some(declared) = declared {
 		validate_mimetype(&declared, expected_mimetype)
-			.map_err(|error| MarkitError::conversion(format_name, error))?;
+			.map_err(|error| MarkitError::conversion_from(format_name, error))?;
 	}
 	let content = archive
 		.read_xml("content.xml")
@@ -65,13 +99,13 @@ pub(super) fn convert(
 			MarkitError::conversion(format_name, "Invalid OpenDocument package: missing content.xml")
 		})?;
 	validate_content_body(&content, format)
-		.map_err(|error| MarkitError::conversion(format_name, error))?;
+		.map_err(|error| MarkitError::conversion_from(format_name, error))?;
 	drop(archive);
 
 	convert_with_anydoc(bytes, format, format_name)
 }
 
-fn validate_mimetype(declared: &str, expected: &str) -> Result<(), String> {
+fn validate_mimetype(declared: &str, expected: &str) -> Result<(), OdfError> {
 	if declared == expected
 		|| declared
 			.strip_suffix("-template")
@@ -79,18 +113,18 @@ fn validate_mimetype(declared: &str, expected: &str) -> Result<(), String> {
 	{
 		return Ok(());
 	}
-	Err(format!("unexpected OpenDocument mimetype '{declared}'"))
+	Err(OdfError::UnexpectedMimetype { declared: declared.to_owned() })
 }
 
 /// Ensures a package selected as one ODF kind does not silently render a
 /// different office body. This matters when both package identity parts are
 /// absent or stale because anydoc deliberately shares one ODF parser.
-fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), String> {
+fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), OdfError> {
 	let expected = match format {
 		anydoc::Format::Odt => b"text".as_slice(),
 		anydoc::Format::Ods => b"spreadsheet".as_slice(),
 		anydoc::Format::Odp => b"presentation".as_slice(),
-		_ => return Err("unsupported OpenDocument format selector".into()),
+		_ => return Err(OdfError::UnsupportedFormat),
 	};
 	let mut reader = xml_reader(xml);
 	let mut in_body = false;
@@ -104,10 +138,9 @@ fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), Strin
 						return Ok(());
 					}
 					if is_odf_body(name) {
-						return Err(format!(
-							"unexpected OpenDocument body '{}'",
-							String::from_utf8_lossy(name)
-						));
+						return Err(OdfError::UnexpectedBody {
+							body: String::from_utf8_lossy(name).into_owned(),
+						});
 					}
 				} else if name == b"body" {
 					in_body = true;
@@ -120,18 +153,17 @@ fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), Strin
 					return Ok(());
 				}
 				if is_odf_body(name) {
-					return Err(format!(
-						"unexpected OpenDocument body '{}'",
-						String::from_utf8_lossy(name)
-					));
+					return Err(OdfError::UnexpectedBody {
+						body: String::from_utf8_lossy(name).into_owned(),
+					});
 				}
 			},
 			Ok(Event::End(event)) if local_name(event.name().as_ref()) == b"body" => {
-				return Err("content.xml has no recognized OpenDocument body".into());
+				return Err(OdfError::MissingRecognizedBody);
 			},
-			Ok(Event::Eof) => return Err("content.xml has no OpenDocument body".into()),
+			Ok(Event::Eof) => return Err(OdfError::MissingBody),
 			Ok(_) => {},
-			Err(error) => return Err(format!("invalid content.xml: {error}")),
+			Err(error) => return Err(OdfError::InvalidContentXml { source: error }),
 		}
 	}
 }
@@ -150,7 +182,7 @@ struct ManifestInfo {
 /// Parses package-wide manifest facts without depending on namespace
 /// prefixes. It deliberately scans to EOF after finding the root entry
 /// because encryption data may occur on a later file entry.
-fn parse_manifest(xml: &[u8]) -> Result<ManifestInfo, String> {
+fn parse_manifest(xml: &[u8]) -> Result<ManifestInfo, OdfError> {
 	let mut reader = xml_reader(xml);
 	let mut info = ManifestInfo::default();
 	loop {
@@ -168,7 +200,7 @@ fn parse_manifest(xml: &[u8]) -> Result<ManifestInfo, String> {
 			},
 			Ok(Event::Eof) => return Ok(info),
 			Ok(_) => {},
-			Err(error) => return Err(format!("invalid manifest XML: {error}")),
+			Err(error) => return Err(OdfError::InvalidManifestXml { source: error }),
 		}
 	}
 }
