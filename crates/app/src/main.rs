@@ -81,7 +81,13 @@ async fn main() -> ExitCode {
 		return match omp_envd::run_eval_child_entry().await {
 			Ok(()) => ExitCode::SUCCESS,
 			Err(error) => {
-				eprintln!("omp eval child: {error}");
+				eprint!("omp eval child: {error}");
+				let mut source = std::error::Error::source(&error);
+				while let Some(cause) = source {
+					eprint!(": {cause}");
+					source = cause.source();
+				}
+				eprintln!();
 				ExitCode::FAILURE
 			},
 		};
