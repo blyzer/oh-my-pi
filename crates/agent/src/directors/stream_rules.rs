@@ -356,6 +356,8 @@ impl StreamRuleSet {
 		for rule_index in finish_state(&self.dfa, &mut cursor) {
 			let _ = record(rule_index, text.len());
 		}
+		drop(record);
+		self.release_cache(cursor.cache);
 		hits
 	}
 }
