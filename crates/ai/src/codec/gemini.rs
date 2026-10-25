@@ -571,9 +571,9 @@ impl GoogleSchema {
 	/// Parses and recursively normalizes an opaque schema for `GenerateContent`.
 	pub fn from_opaque(value: &OpaqueJson) -> Result<Self, GoogleCodecError> {
 		let raw = serde_json::value::to_raw_value(value.0.as_ref())
-			.map_err(|error| GoogleCodecError::encoding(format!("invalid JSON Schema: {error}")))?;
+			.map_err(|error| GoogleCodecError::encoding_in("invalid JSON Schema", error))?;
 		let mut schema: Self = serde_json::from_str(raw.get())
-			.map_err(|error| GoogleCodecError::encoding(format!("invalid JSON Schema: {error}")))?;
+			.map_err(|error| GoogleCodecError::encoding_in("invalid JSON Schema", error))?;
 		schema.normalize();
 		Ok(schema)
 	}
@@ -1324,7 +1324,7 @@ impl GeminiCodec {
 	pub fn encode_json(request: &GenerateContentRequest) -> Result<Bytes, GoogleCodecError> {
 		serde_json::to_vec(request)
 			.map(Bytes::from)
-			.map_err(|error| GoogleCodecError::encoding(format!("invalid Google request: {error}")))
+			.map_err(|error| GoogleCodecError::encoding_in("invalid Google request", error))
 	}
 }
 
@@ -1459,7 +1459,7 @@ fn project_media(
 
 fn opaque_raw(value: &OpaqueJson, label: &str) -> Result<Box<RawValue>, GoogleCodecError> {
 	serde_json::value::to_raw_value(value.0.as_ref())
-		.map_err(|error| GoogleCodecError::encoding(format!("invalid {label}: {error}")))
+		.map_err(|error| GoogleCodecError::encoding_in(sf!("invalid {label}"), error))
 }
 
 /// Resolves a historical continuation proof to its wire `thoughtSignature`.
@@ -1496,7 +1496,7 @@ fn proof_string(
 	str::from_utf8(&proof.value)
 		.map(|signature| Some(Str::new(signature)))
 		.map_err(|error| {
-			GoogleCodecError::encoding(format!("Google thought signature is not UTF-8: {error}"))
+			GoogleCodecError::encoding_in("Google thought signature is not UTF-8", error)
 		})
 }
 
@@ -1504,9 +1504,10 @@ fn wire_function_arguments(args: &RawValue) -> Result<(Bytes, bool), GoogleCodec
 	let raw = args.get().trim();
 	if raw.starts_with('"') {
 		let inner: Str = serde_json::from_str(raw).map_err(|error| {
-			GoogleCodecError::decode(format!(
-				"Google functionCall args string is not valid JSON text: {error}"
-			))
+			GoogleCodecError::decode_in(
+				"Google functionCall args string is not valid JSON text",
+				error,
+			)
 		})?;
 		return Ok((Bytes::copy_from_slice(inner.as_bytes()), false));
 	}
@@ -1569,7 +1570,7 @@ fn tool_response_raw(
 	let response =
 		Response { output: (!is_error).then_some(result), error: is_error.then_some(result) };
 	let raw = serde_json::value::to_raw_value(&response)
-		.map_err(|error| GoogleCodecError::encoding(format!("invalid tool response: {error}")))?;
+		.map_err(|error| GoogleCodecError::encoding_in("invalid tool response", error))?;
 	Ok((raw, parts))
 }
 
@@ -1624,7 +1625,7 @@ fn inline_tool_guidance(tools: &[ToolDefinition]) -> Result<Str, GoogleCodecErro
 		}
 		guidance.push_str("\ninput_schema: ");
 		let schema = serde_json::to_string(parameters.0.as_ref())
-			.map_err(|error| GoogleCodecError::encoding(format!("invalid tool schema: {error}")))?;
+			.map_err(|error| GoogleCodecError::encoding_in("invalid tool schema", error))?;
 		guidance.push_str(&schema);
 	}
 	Ok(Str::from(guidance))
@@ -2011,9 +2012,8 @@ impl GeminiDecoder {
 		if data == b"[DONE]" {
 			return self.finish();
 		}
-		let response: GenerateContentResponse = serde_json::from_slice(data).map_err(|error| {
-			GoogleCodecError::decode(format!("invalid Google response JSON: {error}"))
-		})?;
+		let response: GenerateContentResponse = serde_json::from_slice(data)
+			.map_err(|error| GoogleCodecError::decode_in("invalid Google response JSON", error))?;
 		self.decode_response(response)
 	}
 
@@ -2530,7 +2530,7 @@ fn encode_google_count_tokens(
 		OperationKind::CountTokens,
 		"countTokens",
 		serde_json::to_vec(&body).map_err(|error| {
-			GoogleCodecError::encoding(format!("invalid Google CountTokens request: {error}"))
+			GoogleCodecError::encoding_in("invalid Google CountTokens request", error)
 				.into_inference(false)
 		})?,
 	)?;
@@ -2600,7 +2600,7 @@ fn encode_google_embeddings(
 		OperationKind::Embed,
 		action,
 		body.map_err(|error| {
-			GoogleCodecError::encoding(format!("invalid Google embedding request: {error}"))
+			GoogleCodecError::encoding_in("invalid Google embedding request", error)
 				.into_inference(false)
 		})?,
 	)
@@ -2725,7 +2725,7 @@ impl Decoder for GoogleUnaryDecoder {
 			OperationKind::CountTokens => {
 				let response: GoogleCountTokensResponse =
 					serde_json::from_slice(&data).map_err(|error| {
-						GoogleCodecError::decode(format!("invalid Google CountTokens response: {error}"))
+						GoogleCodecError::decode_in("invalid Google CountTokens response", error)
 							.into_inference(false)
 					})?;
 				if let Some(error) = response.error {
@@ -2747,7 +2747,7 @@ impl Decoder for GoogleUnaryDecoder {
 			OperationKind::Embed => {
 				let response: GoogleEmbeddingResponse =
 					serde_json::from_slice(&data).map_err(|error| {
-						GoogleCodecError::decode(format!("invalid Google embedding response: {error}"))
+						GoogleCodecError::decode_in("invalid Google embedding response", error)
 							.into_inference(false)
 					})?;
 				if let Some(error) = response.error {
@@ -3180,6 +3180,18 @@ impl GoogleCodecError {
 			code:           None,
 			retry_after_ms: 0,
 		}
+	}
+
+	/// Encoding failure in `context` caused by `cause`; renders the cause once
+	/// at this Clone/Eq wire-error boundary (ADR 0035 / PR #411 pattern).
+	fn encoding_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::encoding(sf!("{context}: {cause}"))
+	}
+
+	/// Decode failure in `context` caused by `cause`; renders the cause once
+	/// at this Clone/Eq wire-error boundary (ADR 0035 / PR #411 pattern).
+	fn decode_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> Self {
+		Self::decode(sf!("{context}: {cause}"))
 	}
 
 	fn upstream(detail: impl IntoStr) -> Self {

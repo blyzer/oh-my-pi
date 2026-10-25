@@ -60,9 +60,10 @@ static MODEL_CATALOG: LazyLock<Result<HashMap<Str, ModelDownloadMetadata>, Strin
 
 fn model_catalog() -> LocalResult<&'static HashMap<Str, ModelDownloadMetadata>> {
 	MODEL_CATALOG.as_ref().map_err(|error| {
-		LocalError::new(
+		LocalError::caused(
 			LocalErrorKind::Backend,
-			format!("FastEmbed model provenance catalog is invalid: {error}"),
+			"FastEmbed model provenance catalog is invalid",
+			error,
 		)
 	})
 }
@@ -80,9 +81,14 @@ pub fn model_download_metadata(
 	})
 }
 
+/// Renders the catalog decode failure once at this static-storage string
+/// boundary (ADR 0035 / PR #411 pattern).
+fn catalog_fault(cause: impl std::fmt::Display) -> String {
+	cause.to_string()
+}
+
 fn parse_model_catalog() -> Result<HashMap<Str, ModelDownloadMetadata>, String> {
-	let catalog: ModelCatalog =
-		serde_json::from_str(MODEL_CATALOG_JSON).map_err(|error| error.to_string())?;
+	let catalog: ModelCatalog = serde_json::from_str(MODEL_CATALOG_JSON).map_err(catalog_fault)?;
 	if catalog.schema_version != 1 {
 		return Err(format!("unsupported schema version {}", catalog.schema_version));
 	}
@@ -211,7 +217,7 @@ impl EmbeddingAdapter {
 					.with_max_length(config.max_length)
 					.with_show_download_progress(false);
 				TextEmbedding::try_new(options).map_err(|error| {
-					LocalError::new(LocalErrorKind::Backend, format!("FastEmbed load failed: {error}"))
+					LocalError::caused(LocalErrorKind::Backend, "FastEmbed load failed", error)
 				})
 			},
 			memory,
@@ -254,7 +260,7 @@ impl EmbeddingAdapter {
 		let receipt = lease.receipt();
 		let mut embeddings = lease.with_engine(|model| {
 			model.embed(texts, options.batch_size).map_err(|error| {
-				LocalError::new(LocalErrorKind::Backend, format!("FastEmbed inference failed: {error}"))
+				LocalError::caused(LocalErrorKind::Backend, "FastEmbed inference failed", error)
 			})
 		})?;
 		if cancel.is_cancelled() {

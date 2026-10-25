@@ -149,10 +149,7 @@ impl ParakeetAdapter {
 						if cancel.is_cancelled() {
 							LocalError::cancelled()
 						} else {
-							LocalError::new(
-								LocalErrorKind::Backend,
-								format!("Parakeet inference failed: {error}"),
-							)
+							LocalError::caused(LocalErrorKind::Backend, "Parakeet inference failed", error)
 						}
 					})?;
 				let (chunk_text, language) = detokenize(&tokens);
@@ -207,10 +204,10 @@ impl ParakeetAdapter {
 
 fn load_engine(config: &ParakeetConfig) -> LocalResult<ParakeetEngine> {
 	let config_bytes = fs::read(&config.config_path).map_err(|error| {
-		LocalError::new(LocalErrorKind::Artifact, format!("Parakeet config read failed: {error}"))
+		LocalError::caused(LocalErrorKind::Artifact, "Parakeet config read failed", error)
 	})?;
 	let arguments = serde_json::from_slice::<model::TdtArgs>(&config_bytes).map_err(|error| {
-		LocalError::new(LocalErrorKind::Artifact, format!("Parakeet config decode failed: {error}"))
+		LocalError::caused(LocalErrorKind::Artifact, "Parakeet config decode failed", error)
 	})?;
 	if arguments.preprocessor.sample_rate != SAMPLE_RATE {
 		return Err(LocalError::new(
@@ -219,7 +216,7 @@ fn load_engine(config: &ParakeetConfig) -> LocalResult<ParakeetEngine> {
 		));
 	}
 	let vocabulary = fs::read_to_string(&config.vocab_path).map_err(|error| {
-		LocalError::new(LocalErrorKind::Artifact, format!("Parakeet vocabulary read failed: {error}"))
+		LocalError::caused(LocalErrorKind::Artifact, "Parakeet vocabulary read failed", error)
 	})?;
 	if vocabulary.lines().count() != arguments.joint.vocabulary.len() {
 		return Err(LocalError::new(
@@ -231,10 +228,10 @@ fn load_engine(config: &ParakeetConfig) -> LocalResult<ParakeetEngine> {
 	let variables =
 		unsafe { VarBuilder::from_mmaped_safetensors(&[&config.weights_path], DType::F32, &device) }
 			.map_err(|error| {
-				LocalError::new(LocalErrorKind::Artifact, format!("Parakeet weights failed: {error}"))
+				LocalError::caused(LocalErrorKind::Artifact, "Parakeet weights failed", error)
 			})?;
 	let model = model::Model::load(arguments, variables).map_err(|error| {
-		LocalError::new(LocalErrorKind::Backend, format!("Parakeet load failed: {error}"))
+		LocalError::caused(LocalErrorKind::Backend, "Parakeet load failed", error)
 	})?;
 	Ok(ParakeetEngine { model })
 }
@@ -243,10 +240,7 @@ fn parakeet_device() -> LocalResult<Device> {
 	#[cfg(target_os = "macos")]
 	{
 		return Device::new_metal(0).map_err(|error| {
-			LocalError::new(
-				LocalErrorKind::Unsupported,
-				format!("Parakeet Metal is unavailable: {error}"),
-			)
+			LocalError::caused(LocalErrorKind::Unsupported, "Parakeet Metal is unavailable", error)
 		});
 	}
 	#[cfg(not(target_os = "macos"))]

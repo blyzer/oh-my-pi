@@ -5,7 +5,6 @@
 
 [error-format]
 agent = 1
-ai = 66
 app = 84
 catalog = 9
 desktop = 50
@@ -24,7 +23,6 @@ webview = 1
 
 [error-str-payload]
 agent = 1
-ai = 1
 core = 1
 edit = 3
 envd = 54

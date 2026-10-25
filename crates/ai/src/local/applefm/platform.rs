@@ -103,6 +103,12 @@ impl BridgeFailure {
 	}
 }
 
+/// Renders a bridge fault cause once at this FFI string boundary (ADR 0035 /
+/// PR #411 pattern).
+fn fault_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
+}
+
 #[repr(transparent)]
 struct Runtime {
 	handle: *mut c_void,
@@ -346,7 +352,7 @@ impl SwiftValue {
 		let flags = unsafe { *witnesses.add(10) };
 		let alignment = (flags & 0xff).saturating_add(1);
 		let layout = Layout::from_size_align(size.max(1), alignment)
-			.map_err(|error| BridgeFailure::runtime(format!("Invalid Swift value layout: {error}")))?;
+			.map_err(|error| BridgeFailure::runtime(fault_in("Invalid Swift value layout", error)))?;
 		// SAFETY: layout is non-zero and valid.
 		let pointer = unsafe { alloc_zeroed(layout) }.cast::<c_void>();
 		if pointer.is_null() {
@@ -1082,7 +1088,7 @@ fn create_options(
 	let temperature_bits = temperature.unwrap_or_default().to_bits();
 	let temperature_tag = usize::from(temperature.is_none());
 	let maximum = isize::try_from(max_tokens.unwrap_or_default())
-		.map_err(|error| BridgeFailure::runtime(format!("Invalid maximum token count: {error}")))?;
+		.map_err(|error| BridgeFailure::runtime(fault_in("Invalid maximum token count", error)))?;
 	let maximum_tag = usize::from(max_tokens.is_none());
 	// SAFETY: options is uninitialized output storage. The initializer consumes
 	// the initialized Optional.none in sampling.
@@ -1148,7 +1154,7 @@ fn to_swift_string(
 	// SAFETY: CFRelease has the declared CoreFoundation ABI.
 	let release: CFRelease = unsafe { runtime.symbol(c"CFRelease")? };
 	let length = isize::try_from(value.len())
-		.map_err(|error| BridgeFailure::runtime(format!("Prompt is too large: {error}")))?;
+		.map_err(|error| BridgeFailure::runtime(fault_in("Prompt is too large", error)))?;
 	// SAFETY: value is valid UTF-8 and remains live for the call.
 	let ns_string = unsafe { create(null(), value.as_ptr(), length, UTF8, false) };
 	if ns_string.is_null() {
@@ -1192,7 +1198,7 @@ fn ns_string_to_rust_with(
 		.checked_add(1)
 		.ok_or_else(|| BridgeFailure::runtime("Generated text exceeds CFString limits"))?;
 	let capacity_usize = usize::try_from(capacity)
-		.map_err(|error| BridgeFailure::runtime(format!("Invalid CFString size: {error}")))?;
+		.map_err(|error| BridgeFailure::runtime(fault_in("Invalid CFString size", error)))?;
 	let mut bytes = vec![0_u8; capacity_usize];
 	// SAFETY: bytes has capacity bytes and value remains live for the copy.
 	if !unsafe { copy(value, bytes.as_mut_ptr().cast::<c_char>(), capacity, UTF8) } {
@@ -1204,7 +1210,7 @@ fn ns_string_to_rust_with(
 		.unwrap_or(bytes.len());
 	bytes.truncate(length);
 	String::from_utf8(bytes).map_err(|error| {
-		BridgeFailure::runtime(format!("Foundation Models returned invalid UTF-8: {error}"))
+		BridgeFailure::runtime(fault_in("Foundation Models returned invalid UTF-8", error))
 	})
 }
 
@@ -1344,9 +1350,8 @@ fn complete_request(request: *mut Request, result: result::Result<(), BridgeFail
 
 fn generation_failure(runtime: &Runtime, error: *mut c_void) -> BridgeFailure {
 	let code = classify_generation_error(runtime, error).unwrap_or("runtime_error");
-	let message = error_message(runtime, error).unwrap_or_else(|failure| {
-		format!("Foundation Models generation failed ({})", failure.message)
-	});
+	let message = error_message(runtime, error)
+		.unwrap_or_else(|failure| fault_in("Foundation Models generation failed", failure.message));
 	BridgeFailure { code, message }
 }
 

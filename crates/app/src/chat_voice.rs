@@ -1426,7 +1426,9 @@ fn classify_voice_failure(error: &NativeVoiceError) -> LiveFailureClass {
 			| AudioError::PlaybackClosed
 			| AudioError::PlaybackBackpressure { .. },
 		) => LiveFailureClass::Media,
-		NativeVoiceError::RealtimeTransport(_) => LiveFailureClass::WebRtc,
+		NativeVoiceError::WebRtc { .. }
+		| NativeVoiceError::PeerState { .. }
+		| NativeVoiceError::InputClosed => LiveFailureClass::WebRtc,
 		NativeVoiceError::Coordinator(_)
 		| NativeVoiceError::Audio(
 			AudioError::Coordinator { .. }
