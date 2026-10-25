@@ -396,6 +396,31 @@ pub enum Fault {
 	},
 }
 
+impl Fault {
+	/// An invalid selector on path entry `original`, rendering the parse cause
+	/// once at this model-facing fault boundary.
+	fn invalid_selector(original: &str, selector: &str, cause: impl std::fmt::Display) -> Self {
+		Self::InvalidSelector {
+			message: sf!(
+				"path entry \"{original}\" has an invalid selector \":{selector}\" — {cause}"
+			),
+		}
+	}
+
+	/// An invalid URL in path entry `original`, rendering the parse cause once
+	/// at this model-facing fault boundary.
+	fn invalid_url(original: &str, cause: impl std::fmt::Display) -> Self {
+		Self::InvalidSelector {
+			message: sf!("path entry \"{original}\" has an invalid URL — {cause}"),
+		}
+	}
+}
+
+/// Renders a grep fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
+}
+
 /// Zero-box workspace traversal boundary shared by `grep@1` and `glob@1`.
 pub trait WorkspaceSearch: Send + Sync + 'static {
 	/// Resolves the authored root list before search.
@@ -730,7 +755,7 @@ fn grep_projection(view: Result<&Payload, &Fault>, caps: &PromptCaps) -> PromptP
 			}));
 		},
 		Err(fault) => {
-			projection.push(&fault.to_string());
+			projection.push(&fault_text(fault));
 		},
 	}
 	PromptProjection { parts: projection.finish(), visibility }
@@ -788,11 +813,8 @@ fn parse_root(original: Str) -> Result<SearchRoot, Fault> {
 	let split = split_path_and_selector(&original);
 	let mut ranges = Box::<[LineRange]>::default();
 	if let Some(selector) = split.selector {
-		let parsed = parse_selector(Some(selector)).map_err(|error| Fault::InvalidSelector {
-			message: sf!(
-				"path entry \"{original}\" has an invalid selector \":{selector}\" — {error}"
-			),
-		})?;
+		let parsed = parse_selector(Some(selector))
+			.map_err(|error| Fault::invalid_selector(&original, selector, error))?;
 		match parsed {
 			ParsedSelector::Lines { ranges: selected, .. } => ranges = selected,
 			ParsedSelector::Raw | ParsedSelector::Conflicts | ParsedSelector::None => {},
@@ -820,9 +842,7 @@ fn parse_root(original: Str) -> Result<SearchRoot, Fault> {
 			message: sf!("Line-range selector requires a single file, not a glob: {original}"),
 		});
 	}
-	let kind = match parse_uri(clean).map_err(|error| Fault::InvalidSelector {
-		message: sf!("path entry \"{original}\" has an invalid URL — {error}"),
-	})? {
+	let kind = match parse_uri(clean).map_err(|error| Fault::invalid_url(&original, error))? {
 		Some(uri) if uri.scheme == Scheme::Http => SearchRootKind::Url,
 		Some(uri) if uri.scheme == Scheme::File => SearchRootKind::Filesystem,
 		Some(_) => SearchRootKind::Internal,

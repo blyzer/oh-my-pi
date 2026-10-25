@@ -413,7 +413,7 @@ impl<C: DebugControl> Tool for DebugTool<C> {
 	fn prompt(&self, view: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> {
 		let text = match view {
 			Ok(payload) => payload.output.clone(),
-			Err(fault) => Str::new(fault.to_string()),
+			Err(fault) => fault_text(fault),
 		};
 		vec![Part::Text { text }]
 	}
@@ -421,6 +421,11 @@ impl<C: DebugControl> Tool for DebugTool<C> {
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 		lift_legacy_call(from, call)
 	}
+}
+
+/// Renders a debug fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
 }
 
 fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {

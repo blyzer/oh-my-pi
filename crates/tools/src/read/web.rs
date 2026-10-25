@@ -80,8 +80,7 @@ pub fn parse_target(input: &str) -> Result<Option<ParsedTarget>, WebError> {
 			)));
 		}
 	}
-	let parsed_selector = selector::parse_selector(split.selector)
-		.map_err(|error| WebError::InvalidUrl(Str::new(error.to_string())))?;
+	let parsed_selector = selector::parse_selector(split.selector).map_err(WebError::invalid_url)?;
 	if matches!(parsed_selector, selector::ParsedSelector::Conflicts) {
 		return Err(WebError::InvalidUrl(sf!(
 			"The :conflicts selector is only valid for local text files",
@@ -102,8 +101,7 @@ pub fn parse_target(input: &str) -> Result<Option<ParsedTarget>, WebError> {
 	} else {
 		format!("http://{path}")
 	};
-	let url =
-		Url::parse(&normalized).map_err(|error| WebError::InvalidUrl(error.to_string().into()))?;
+	let url = Url::parse(&normalized).map_err(WebError::invalid_url)?;
 	Ok(Some(ParsedTarget { url, selector: parsed_selector }))
 }
 
@@ -208,7 +206,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 					final_url,
 					content_type,
 					response.body.len(),
-					Diag::warn(DiagKind::Fallback, sf!("markit conversion failed: {error}")),
+					fallback_warn("markit conversion failed", error),
 				));
 			},
 		}
@@ -230,7 +228,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				Diag::warn(DiagKind::Fallback, sf!("Notebook rendering failed: {}", error.message())),
+				fallback_warn("Notebook rendering failed", error),
 			)),
 		};
 	}
@@ -251,7 +249,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				Diag::warn(DiagKind::Fallback, sf!("SQLite rendering failed: {error}")),
+				fallback_warn("SQLite rendering failed", error),
 			)),
 		};
 	}
@@ -280,7 +278,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				Diag::warn(DiagKind::Fallback, sf!("Archive rendering failed: {error}")),
+				fallback_warn("Archive rendering failed", error),
 			)),
 		};
 	}
@@ -336,8 +334,7 @@ pub fn html_to_markdown(html: &str) -> Result<Str, WebError> {
 		tier_strategy: TierStrategy::Tier2,
 		..Default::default()
 	};
-	let converted = convert_html(html, Some(options))
-		.map_err(|error| WebError::render(format!("Conversion error: {error}")))?;
+	let converted = convert_html(html, Some(options)).map_err(WebError::render)?;
 	if let Some(warning) = converted
 		.warnings
 		.iter()
@@ -561,6 +558,12 @@ fn binary_fallback(final_url: Str, content_type: Str, bytes: usize, diag: Diag) 
 		final_url,
 		image: None,
 	}
+}
+
+/// Builds a fallback diagnostic, rendering the cause once at this
+/// model-facing fault boundary.
+fn fallback_warn(what: &str, cause: impl std::fmt::Display) -> Diag {
+	Diag::warn(DiagKind::Fallback, sf!("{what}: {cause}"))
 }
 
 fn render_archive(bytes: Bytes, extension: &str) -> Result<(String, usize), archive::ArchiveError> {

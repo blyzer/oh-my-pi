@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-use omp_core::{IntoStr, Str};
+use omp_core::{IntoStr, Str, sf};
 use serde_json::Value;
 
 /// A supported Jupyter notebook cell kind.
@@ -65,6 +65,12 @@ pub struct NotebookError(Str);
 impl NotebookError {
 	fn new(message: impl IntoStr) -> Self {
 		Self(message.into_str())
+	}
+
+	/// Constructs a notebook encode failure, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn encode(cause: impl std::fmt::Display) -> Self {
+		Self(sf!("Could not encode notebook: {cause}"))
 	}
 
 	/// Model-facing error text.
@@ -291,8 +297,7 @@ pub fn round_trip(original: &[u8], virtual_text: &str) -> Result<Vec<u8>, Notebo
 		.as_object_mut()
 		.expect("notebook object was validated")
 		.insert("cells".to_owned(), Value::Array(cells));
-	let mut encoded = serde_json::to_vec_pretty(&notebook)
-		.map_err(|error| NotebookError::new(format!("Could not encode notebook: {error}")))?;
+	let mut encoded = serde_json::to_vec_pretty(&notebook).map_err(NotebookError::encode)?;
 	encoded.push(b'\n');
 	Ok(encoded)
 }

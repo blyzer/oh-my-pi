@@ -44,6 +44,12 @@ impl Fault {
 	pub fn new(message: impl IntoStr) -> Self {
 		Self::Message { message: message.into_str() }
 	}
+
+	/// A JSON5 parse refusal, rendering the cause once at this model-facing
+	/// fault boundary.
+	fn invalid_json5(cause: impl std::fmt::Display) -> Self {
+		Self::new(format!("SQLite write content must be valid JSON5: {cause}"))
+	}
 }
 
 impl From<Fault> for super::Fault {
@@ -342,9 +348,7 @@ pub fn mutate_sqlite_row(
 			disposition: WriteDisposition::Overwrote,
 		}
 	} else {
-		let parsed: Value = omp_core::slopjson::from_str(content).map_err(|error| {
-			Fault::new(format!("SQLite write content must be valid JSON5: {error}"))
-		})?;
+		let parsed: Value = omp_core::slopjson::from_str(content).map_err(Fault::invalid_json5)?;
 		let object = parsed
 			.as_object()
 			.ok_or_else(|| Fault::new("SQLite write content must be a JSON object"))?;

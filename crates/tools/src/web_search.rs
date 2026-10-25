@@ -332,7 +332,7 @@ impl<B: SearchBackend> Tool for WebSearch<B> {
 	fn prompt(&self, view: Result<&Payload, &Fault>, caps: &PromptCaps) -> Vec<Part> {
 		let text = match view {
 			Ok(payload) => render_response(&payload.response),
-			Err(fault) => fault.to_string(),
+			Err(fault) => fault_text(fault),
 		};
 		(caps.maximum_parts != 0 && caps.maximum_text_bytes != 0 && !text.is_empty())
 			.then(|| Part::Text { text: Str::new(text) })
@@ -343,6 +343,11 @@ impl<B: SearchBackend> Tool for WebSearch<B> {
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 		lift_rev1(from, call)
 	}
+}
+
+/// Renders a web_search fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> String {
+	fault.to_string()
 }
 
 const MAX_QUERY_BYTES: usize = 16 * 1024;

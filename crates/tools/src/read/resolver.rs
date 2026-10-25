@@ -63,9 +63,7 @@ impl DocsArchive {
 			let mut body = Vec::new();
 			decoder
 				.read_to_end(&mut body)
-				.map_err(|source| Fault::Source {
-					message: Str::new(format!("Packaged documentation is corrupt: {source}")),
-				})?;
+				.map_err(|source| Fault::source_in("Packaged documentation is corrupt", source))?;
 			let bytes = CowBytes::from(body);
 			let cached = self
 				.inflated
@@ -82,9 +80,7 @@ impl DocsArchive {
 			Ok(root) => root,
 			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
 			Err(source) => {
-				return Err(Fault::Source {
-					message: Str::new(format!("Cannot open development documentation root: {source}")),
-				});
+				return Err(Fault::source_in("Cannot open development documentation root", source));
 			},
 		};
 		let candidate = self.dev_root.join(relative);
@@ -92,9 +88,7 @@ impl DocsArchive {
 			Ok(canonical) => canonical,
 			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
 			Err(source) => {
-				return Err(Fault::Source {
-					message: Str::new(format!("Cannot open development documentation: {source}")),
-				});
+				return Err(Fault::source_in("Cannot open development documentation", source));
 			},
 		};
 		if !canonical.starts_with(&root) {
@@ -102,9 +96,8 @@ impl DocsArchive {
 				message: Str::new_static("omp:// documentation paths cannot escape the docs root."),
 			});
 		}
-		let bytes = fs::read(canonical).map_err(|source| Fault::Source {
-			message: Str::new(format!("Cannot read development documentation: {source}")),
-		})?;
+		let bytes = fs::read(canonical)
+			.map_err(|source| Fault::source_in("Cannot read development documentation", source))?;
 		Ok(Some(CowBytes::from(bytes)))
 	}
 }

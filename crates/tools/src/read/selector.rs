@@ -7,7 +7,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::{IntoStr, Str};
+use omp_core::{IntoStr, Str, sf};
 
 use super::resolver::Scheme;
 
@@ -88,6 +88,12 @@ impl SelectorError {
 	/// Constructs a selector error with model-facing text.
 	pub fn from_message(message: impl IntoStr) -> Self {
 		Self(message.into_str())
+	}
+
+	/// Constructs a JSON path array error, rendering the cause once at this
+	/// model-facing fault boundary.
+	fn json_path_array(cause: impl std::fmt::Display) -> Self {
+		Self(sf!("Invalid JSON path array: {cause}"))
 	}
 
 	/// Model-facing error text.
@@ -518,8 +524,7 @@ pub fn parse_json_path_array(input: &str) -> Result<Option<Vec<Str>>, SelectorEr
 	if !input.starts_with('[') {
 		return Ok(None);
 	}
-	let paths: Vec<String> = serde_json::from_str(input)
-		.map_err(|error| SelectorError::from_message(format!("Invalid JSON path array: {error}")))?;
+	let paths: Vec<String> = serde_json::from_str(input).map_err(SelectorError::json_path_array)?;
 	if paths.is_empty() {
 		return Err(SelectorError::from_message("JSON path array must not be empty."));
 	}

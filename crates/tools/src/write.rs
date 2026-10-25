@@ -313,6 +313,11 @@ pub enum Fault {
 	WriteScope(#[from] omp_tool::WriteScopeDenied),
 }
 
+/// Renders a write fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
+}
+
 /// Resource failure classification for the effectful whole-file transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WriteCommitError {
@@ -1067,7 +1072,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 				output.push(&rendered);
 			},
 			Err(fault) => {
-				let rendered = fault.to_string();
+				let rendered = fault_text(fault);
 				output.push(&rendered);
 			},
 		}

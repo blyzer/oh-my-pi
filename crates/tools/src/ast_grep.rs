@@ -234,6 +234,11 @@ pub enum Fault {
 	},
 }
 
+/// Renders an ast_grep fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
+}
+
 /// Inputs resolved by the environment authority after argument commitment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRequest {
@@ -758,7 +763,7 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 
 	fn prompt(&self, view: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> {
 		let text = match view {
-			Err(error) => Str::new(error.to_string()),
+			Err(error) => fault_text(error),
 			Ok(payload) => Str::new(render_payload(payload)),
 		};
 		vec![Part::Text { text }]

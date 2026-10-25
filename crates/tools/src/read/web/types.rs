@@ -147,6 +147,12 @@ pub enum WebError {
 }
 
 impl WebError {
+	/// Creates an invalid-URL error, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub fn invalid_url(cause: impl std::fmt::Display) -> Self {
+		Self::InvalidUrl(sf!("{cause}"))
+	}
+
 	/// Creates a transport error, rendering the cause once at this
 	/// model-facing fault boundary.
 	pub fn request(cause: impl std::fmt::Display) -> Self {

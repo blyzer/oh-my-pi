@@ -715,6 +715,12 @@ impl Drop for CaptureStream {
 	}
 }
 
+/// Renders a contextualized backend fault once at this user-facing fault
+/// boundary.
+fn fault_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
+}
+
 pub struct PlaybackDevice {
 	stop:   Arc<AtomicBool>,
 	event:  Arc<OwnedEvent>,
@@ -731,7 +737,7 @@ impl PlaybackDevice {
 		let thread = thread::Builder::new()
 			.name("omp-audio-wasapi-playback".to_owned())
 			.spawn(move || playback_thread(config, fill, worker_stop, startup_tx))
-			.map_err(|error| format!("failed to spawn WASAPI playback thread: {error}"))?;
+			.map_err(|error| fault_in("failed to spawn WASAPI playback thread", error))?;
 
 		match startup_rx.recv() {
 			Ok(Ok(event)) => Ok(Self { stop, event, thread: Some(thread) }),
@@ -775,7 +781,7 @@ impl CaptureDevice {
 		let thread = thread::Builder::new()
 			.name("omp-audio-wasapi-capture".to_owned())
 			.spawn(move || capture_thread(config, sink, worker_stop, startup_tx))
-			.map_err(|error| format!("failed to spawn WASAPI capture thread: {error}"))?;
+			.map_err(|error| fault_in("failed to spawn WASAPI capture thread", error))?;
 
 		match startup_rx.recv() {
 			Ok(Ok(event)) => Ok(Self { stop, event, thread: Some(thread) }),

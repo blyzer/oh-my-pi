@@ -186,6 +186,11 @@ pub enum Fault {
 	},
 }
 
+/// Renders a glob fault once at this model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
+}
+
 fn join_strs(values: &[Str]) -> String {
 	values
 		.iter()
@@ -390,7 +395,7 @@ impl<W: WorkspaceSearch> Tool for Glob<W> {
 				}
 			},
 			Err(fault) => {
-				projection.push(&fault.to_string());
+				projection.push(&fault_text(fault));
 			},
 		}
 		projection.finish()

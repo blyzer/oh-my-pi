@@ -427,9 +427,8 @@ impl AlsaStream {
 			Ok(stream) => Ok(stream),
 			Err(AlsaOpenError::Open(error)) => Err(error),
 			Err(AlsaOpenError::Params(default_error)) => {
-				Self::open_named(api, config, direction, latency, c"plug:default").map_err(|error| {
-					format!("{default_error}; plug:default fallback failed: {}", error.message())
-				})
+				Self::open_named(api, config, direction, latency, c"plug:default")
+					.map_err(|error| alsa_fallback_fault(&default_error, error))
 			},
 		}
 	}
@@ -491,6 +490,27 @@ impl AlsaOpenError {
 			Self::Open(message) | Self::Params(message) => message,
 		}
 	}
+}
+
+/// Renders the ALSA plug:default fallback fault once at this user-facing
+/// fault boundary.
+fn alsa_fallback_fault(default_error: &str, fallback: AlsaOpenError) -> String {
+	format!("{default_error}; plug:default fallback failed: {}", fallback.message())
+}
+
+/// Renders a contextualized backend fault once at this user-facing fault
+/// boundary.
+fn fault_in(context: impl std::fmt::Display, cause: impl std::fmt::Display) -> String {
+	format!("{context}: {cause}")
+}
+
+/// Renders the no-backend fault once at this user-facing fault boundary.
+fn no_backend_fault(
+	direction: &str,
+	pulse_error: &str,
+	alsa_error: impl std::fmt::Display,
+) -> String {
+	format!("no Linux {direction} backend available; PulseAudio: {pulse_error}; ALSA: {alsa_error}")
 }
 
 /// Network-safe target for streams connected to a remote PulseAudio server.
@@ -970,14 +990,12 @@ impl PlaybackDevice {
 						}
 					},
 					Err(alsa_error) => {
-						let _ = opened_tx.send(Err(format!(
-							"no Linux playback backend available; PulseAudio: {pulse_error}; ALSA: \
-							 {alsa_error}"
-						)));
+						let _ =
+							opened_tx.send(Err(no_backend_fault("playback", &pulse_error, alsa_error)));
 					},
 				}
 			})
-			.map_err(|error| format!("could not start playback worker: {error}"))?;
+			.map_err(|error| fault_in("could not start playback worker", error))?;
 		match opened_rx.recv() {
 			Ok(Ok(())) => Ok(Self { device, thread: Some(thread), done: Some(done_rx) }),
 			Ok(Err(error)) => {
@@ -986,7 +1004,7 @@ impl PlaybackDevice {
 			},
 			Err(error) => {
 				let _ = thread.join();
-				Err(format!("playback worker exited during startup: {error}"))
+				Err(fault_in("playback worker exited during startup", error))
 			},
 		}
 	}
@@ -1079,14 +1097,12 @@ impl CaptureDevice {
 						}
 					},
 					Err(alsa_error) => {
-						let _ = opened_tx.send(Err(format!(
-							"no Linux capture backend available; PulseAudio: {pulse_error}; ALSA: \
-							 {alsa_error}"
-						)));
+						let _ =
+							opened_tx.send(Err(no_backend_fault("capture", &pulse_error, alsa_error)));
 					},
 				}
 			})
-			.map_err(|error| format!("could not start capture worker: {error}"))?;
+			.map_err(|error| fault_in("could not start capture worker", error))?;
 		match opened_rx.recv() {
 			Ok(Ok(())) => Ok(Self { device, thread: Some(thread), done: Some(done_rx) }),
 			Ok(Err(error)) => {
@@ -1095,7 +1111,7 @@ impl CaptureDevice {
 			},
 			Err(error) => {
 				let _ = thread.join();
-				Err(format!("capture worker exited during startup: {error}"))
+				Err(fault_in("capture worker exited during startup", error))
 			},
 		}
 	}

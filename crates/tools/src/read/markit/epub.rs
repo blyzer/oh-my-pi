@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use html_to_markdown_rs::{ConversionOptions, PreprocessingOptions, TierStrategy};
-use omp_core::{IntoStr, Str};
+use omp_core::Str;
 use quick_xml::{Reader, XmlVersion, events::Event};
 
 use super::{
@@ -102,7 +102,7 @@ pub(super) fn convert(bytes: &[u8]) -> Result<(Str, Option<Str>), MarkitError> {
 		readable_parts += 1;
 		let cleaned = normalize_table_cells(&strip_script_and_style(strip_xml_declaration(&xhtml)));
 		let converted = html_to_markdown_rs::convert(&cleaned, options.clone())
-			.map_err(|error| failure(format!("{path}: {error}")))?;
+			.map_err(|error| MarkitError::conversion_in(FORMAT, path, error))?;
 		let markdown = normalize_converted_markdown(&converted.content.unwrap_or_default());
 		let markdown = markdown.trim();
 		if !markdown.is_empty() {
@@ -476,9 +476,8 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 				bump_xml_nodes(&mut nodes)?;
 				let decoded = event
 					.xml_content(XmlVersion::Implicit1_0)
-					.map_err(|error| failure(error.to_string()))?;
-				let text =
-					quick_xml::escape::unescape(&decoded).map_err(|error| failure(error.to_string()))?;
+					.map_err(failure)?;
+				let text = quick_xml::escape::unescape(&decoded).map_err(failure)?;
 				stack
 					.last_mut()
 					.expect("XML root exists")
@@ -487,13 +486,10 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::GeneralRef(event)) => {
 				bump_xml_nodes(&mut nodes)?;
-				let text = if let Some(character) = event
-					.resolve_char_ref()
-					.map_err(|error| failure(error.to_string()))?
-				{
+				let text = if let Some(character) = event.resolve_char_ref().map_err(failure)? {
 					character.to_string()
 				} else {
-					let name = event.decode().map_err(|error| failure(error.to_string()))?;
+					let name = event.decode().map_err(failure)?;
 					quick_xml::escape::resolve_predefined_entity(&name)
 						.map_or_else(|| format!("&{name};"), str::to_owned)
 				};
@@ -505,7 +501,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::CData(event)) => {
 				bump_xml_nodes(&mut nodes)?;
-				let text = event.decode().map_err(|error| failure(error.to_string()))?;
+				let text = event.decode().map_err(failure)?;
 				stack
 					.last_mut()
 					.expect("XML root exists")
@@ -514,7 +510,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::Eof) => break,
 			Ok(_) => {},
-			Err(error) => return Err(failure(error.to_string())),
+			Err(error) => return Err(failure(error)),
 		}
 	}
 	if stack.len() != 1 {
@@ -538,11 +534,11 @@ fn event_node(
 	let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
 	let mut attrs = BTreeMap::new();
 	for attribute in event.attributes().with_checks(false) {
-		let attribute = attribute.map_err(|error| failure(error.to_string()))?;
+		let attribute = attribute.map_err(failure)?;
 		let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
 		let value = attribute
 			.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-			.map_err(|error| failure(error.to_string()))?
+			.map_err(failure)?
 			.into_owned();
 		attrs.insert(key.clone(), value.clone());
 		attrs.entry(local(&key).to_owned()).or_insert(value);
@@ -555,8 +551,9 @@ fn read_xml_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<Strin
 		.read_xml(path)
 		.map_err(failure)?
 		.map(|bytes| {
-			decode_epub_xml_bytes(&bytes)
-				.map_err(|error| failure(format!("'{path}' is not valid XML text: {error}")))
+			decode_epub_xml_bytes(&bytes).map_err(|error| {
+				MarkitError::conversion_in(FORMAT, format!("'{path}' is not valid XML text"), error)
+			})
 		})
 		.transpose()
 }
@@ -634,8 +631,8 @@ fn local(name: &str) -> &str {
 	name.rsplit_once(':').map_or(name, |(_, local)| local)
 }
 
-fn failure(message: impl IntoStr) -> MarkitError {
-	MarkitError::conversion(FORMAT, message)
+fn failure(cause: impl std::fmt::Display) -> MarkitError {
+	MarkitError::conversion_from(FORMAT, cause)
 }
 
 #[cfg(test)]

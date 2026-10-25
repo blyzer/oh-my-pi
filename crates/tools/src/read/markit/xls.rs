@@ -51,7 +51,7 @@ pub(super) fn convert(bytes: &[u8]) -> Result<Str, MarkitError> {
 		return Err(MarkitError::conversion(FORMAT, "document is encrypted"));
 	}
 	let markdown = anydoc::to_markdown_bytes(bytes, anydoc::Format::Excel)
-		.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+		.map_err(|error| MarkitError::conversion_from(FORMAT, error))?;
 	if markdown.len() > MAX_MARKDOWN_BYTES {
 		return Err(MarkitError::conversion(
 			FORMAT,

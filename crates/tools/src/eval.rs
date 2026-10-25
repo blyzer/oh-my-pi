@@ -630,6 +630,14 @@ pub enum Fault {
 	},
 }
 
+impl Fault {
+	/// A resource failure for `operation`, rendering the cause once at this
+	/// model-facing fault boundary.
+	pub(crate) fn resource(operation: &'static str, cause: impl std::fmt::Display) -> Self {
+		Self::Resource { operation: Str::new(operation), message: sf!("{cause}") }
+	}
+}
+
 /// Opaque handle for one persistent Python session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Session {
