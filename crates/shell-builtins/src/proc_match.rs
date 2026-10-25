@@ -31,7 +31,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::{host::ReadOpener, proc_snapshot};
+use crate::{host::ReadOpener, proc_snapshot, support::fault::fault_in};
 
 /// What a process-matching command does with the processes it selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -608,22 +608,23 @@ fn parse_proc_match_args(
 			let mut contents = String::new();
 			stdin
 				.read_to_string(&mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
+				.map_err(|err| (3, fault_in("cannot read pidfile from standard input", err)))?;
 			contents
 		} else {
 			let path = opener.resolve(file);
-			let mut pidfile = opener
-				.open(&path)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+			let mut pidfile = opener.open(&path).map_err(|err| {
+				(3, fault_in(format!("cannot read pidfile '{}'", path.display()), err))
+			})?;
 			if options.require_lock
-				&& !pidfile_is_locked(&pidfile)
-					.map_err(|err| (3, format!("cannot inspect pidfile '{}': {err}", path.display())))?
-			{
+				&& !pidfile_is_locked(&pidfile).map_err(|err| {
+					(3, fault_in(format!("cannot inspect pidfile '{}'", path.display()), err))
+				})? {
 				return Err((3, format!("pidfile '{}' is not locked", path.display())));
 			}
 			let mut contents = String::new();
-			io::Read::read_to_string(&mut pidfile, &mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+			io::Read::read_to_string(&mut pidfile, &mut contents).map_err(|err| {
+				(3, fault_in(format!("cannot read pidfile '{}'", path.display()), err))
+			})?;
 			contents
 		};
 		let pid = contents
@@ -738,7 +739,7 @@ fn select_processes(
 			RegexBuilder::new(&source)
 				.case_insensitive(options.ignore_case)
 				.build()
-				.map_err(|err| format!("invalid regular expression: {err}"))?,
+				.map_err(|err| fault_in("invalid regular expression", err))?,
 		)
 	};
 	let mut selected = Vec::new();

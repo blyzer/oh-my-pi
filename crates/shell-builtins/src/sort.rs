@@ -363,6 +363,7 @@ mod chunks {
 		GeneralBigDecimalParseResult, GlobalSettings, Line, SortError, SortMode, SortResult,
 		numeric_str_cmp::NumInfo,
 	};
+	use crate::support::fault::fault;
 
 	const ALLOC_CHUNK_SIZE: usize = 64 * 1024;
 	const MAX_TOKEN_BUFFER_BYTES: usize = 4 * 1024 * 1024;
@@ -779,7 +780,7 @@ mod chunks {
 					// retry
 				},
 				Err(e) => {
-					return Err(SortError::message(e.to_string()));
+					return Err(SortError::message(fault(e)));
 				},
 			}
 		}
@@ -2510,6 +2511,7 @@ use crate::{
 	sort::{buffer_hint::automatic_buffer_size, tmp_dir::TmpDirWrapper},
 	support::{
 		clap_ext::ShortcutValueParser,
+		fault::fault,
 		line_ending::LineEnding,
 		num::{ExtendedBigDecimal, ExtendedParser, ExtendedParserError},
 		parse::{ParseSizeError, Parser},
@@ -2642,6 +2644,7 @@ const MAX_AUTOMATIC_BUF_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
 #[derive(Debug, Error)]
 pub enum SortError {
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	Message(String),
 
@@ -4438,7 +4441,7 @@ impl Utility for Sort {
 			Ok(()) => host.exit_code(),
 			Err(err) => {
 				let code = err.code();
-				let rendered = err.to_string();
+				let rendered = fault(&err);
 				if !rendered.is_empty() {
 					let _ = writeln!(host.stderr, "sort: {rendered}");
 				}

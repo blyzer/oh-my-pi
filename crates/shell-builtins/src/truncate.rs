@@ -16,6 +16,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
 	support::{
+		fault::{fault, fault_in},
 		parse::{ParseSizeError, Parser, allow_list_with_all_suffixes},
 		quote::Quotable,
 	},
@@ -249,7 +250,7 @@ fn file_truncate(
 	}
 	let resolved = host
 		.ensure_writable(filename)
-		.map_err(|error| error.to_string())?;
+		.map_err(|error| fault(error))?;
 	let file = match OpenOptions::new()
 		.write(true)
 		.create(create)
@@ -258,13 +259,13 @@ fn file_truncate(
 		Ok(file) => file,
 		Err(error) if error.kind() == ErrorKind::NotFound && !create => return Ok(()),
 		Err(error) => {
-			return Err(format!("cannot open {} for writing: {error}", filename.quote()));
+			return Err(fault_in(format!("cannot open {} for writing", filename.quote()), error));
 		},
 	};
 
 	let file_metadata = file
 		.metadata()
-		.map_err(|error| format!("cannot fstat {}: {error}", filename.quote()))?;
+		.map_err(|error| fault_in(format!("cannot fstat {}", filename.quote()), error))?;
 
 	let mode = if io_blocks {
 		let blksize = io_blocksize(&file_metadata);
@@ -287,7 +288,7 @@ fn file_truncate(
 	};
 
 	file.set_len(truncate_size).map_err(|error| {
-		format!("failed to truncate {} at {truncate_size} bytes: {error}", filename.quote())
+		fault_in(format!("failed to truncate {} at {truncate_size} bytes", filename.quote()), error)
 	})
 }
 
@@ -310,7 +311,7 @@ fn truncate(
 					ErrorKind::NotFound => {
 						format!("cannot stat {}: No such file or directory", reference_path.quote())
 					},
-					_ => error.to_string(),
+					_ => fault(error),
 				})?;
 			Some(reference_metadata.len())
 		},
@@ -320,7 +321,7 @@ fn truncate(
 	// Omitting the mode is equivalent to extending a file by 0 bytes.
 	let mode = match size.as_deref() {
 		Some(string) => {
-			parse_mode_and_size(string).map_err(|error| format!("Invalid number: {error}"))?
+			parse_mode_and_size(string).map_err(|error| fault_in("Invalid number", error))?
 		},
 		None => TruncateMode::Extend(0),
 	};

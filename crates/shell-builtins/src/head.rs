@@ -989,7 +989,10 @@ mod take {
 
 use take::{copy_all_but_n_bytes, copy_all_but_n_lines, take_lines};
 
-use crate::support::fsutil::sane_blksize::sane_blksize_from_metadata;
+use crate::support::{
+	fault::{fault, fault_in},
+	fsutil::sane_blksize::sane_blksize_from_metadata,
+};
 
 #[derive(Error, Debug)]
 enum HeadError {
@@ -997,12 +1000,13 @@ enum HeadError {
 	#[error("error reading {}: {}", name.quote(), err)]
 	Io { name: PathBuf, err: io::Error },
 
-	#[error("{0}")]
-	ParseError(String),
+	#[error("bad argument format: {}", .token.quote())]
+	BadArgumentFormat { token: String },
 
 	#[error("number of -bytes or -lines is too large")]
 	NumTooLarge(#[from] TryFromIntError),
 
+	// lintx-allow: error-str-payload carries final uutils-pinned stderr text
 	#[error("{0}")]
 	MatchOption(String),
 }
@@ -1027,7 +1031,7 @@ impl Mode {
 	fn from(matches: &ArgMatches) -> Result<Self, String> {
 		if let Some(v) = matches.get_one::<String>(options::BYTES) {
 			let (n, all_but_last) =
-				parse::parse_num(v).map_err(|err| format!("invalid number of bytes: {err}"))?;
+				parse::parse_num(v).map_err(|err| fault_in("invalid number of bytes", err))?;
 			if all_but_last {
 				Ok(Self::AllButLastBytes(n))
 			} else {
@@ -1035,7 +1039,7 @@ impl Mode {
 			}
 		} else if let Some(v) = matches.get_one::<String>(options::LINES) {
 			let (n, all_but_last) =
-				parse::parse_num(v).map_err(|err| format!("invalid number of lines: {err}"))?;
+				parse::parse_num(v).map_err(|err| fault_in("invalid number of lines", err))?;
 			if all_but_last {
 				Ok(Self::AllButLastLines(n))
 			} else {
@@ -1099,10 +1103,7 @@ fn arg_iterate(argv: Vec<OsString>) -> HeadResult<Vec<OsString>> {
 					continue;
 				},
 				Some(Err(parse::ParseError)) => {
-					return Err(HeadError::ParseError(format!(
-						"bad argument format: {}",
-						token.quote()
-					)));
+					return Err(HeadError::BadArgumentFormat { token: token.to_string() });
 				},
 				None => {},
 			}
@@ -1387,7 +1388,7 @@ impl Utility for Head {
 	// Normalize GNU's obsolete `-NUM` syntax before clap sees argv; clap
 	// otherwise treats it as an unknown short-option cluster.
 	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
-		arg_iterate(argv).map_err(|err| err.to_string())
+		arg_iterate(argv).map_err(|err| fault(err))
 	}
 
 	fn run(self, host: &mut Host) -> i32 {
@@ -1439,7 +1440,7 @@ impl Utility for Head {
 				let mut input = match host.open_read(&resolved) {
 					Ok(input) => input,
 					Err(err) => {
-						host.error(format!("cannot open {} for reading: {err}", file.quote()), 1);
+						host.error(fault_in(format!("cannot open {} for reading", file.quote()), err), 1);
 						continue;
 					},
 				};

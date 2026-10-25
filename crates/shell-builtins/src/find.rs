@@ -2060,12 +2060,12 @@ pub mod matchers {
 		use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
 		use super::{FileType, Matcher, MatcherIO, WalkEntry, WalkError};
-		use crate::support::fsutil::display_permissions;
 		#[cfg(unix)]
 		use crate::support::{
 			entries::{gid2grp, uid2usr},
 			mounts::read_fs_list,
 		};
+		use crate::support::{fault::fault_in, fsutil::display_permissions};
 
 		const STANDARD_BLOCK_SIZE: u64 = 512;
 
@@ -2259,7 +2259,7 @@ pub mod matchers {
 					start[0..digits]
 						.parse()
 						.map(Some)
-						.map_err(|error| format!("invalid format width: {error}").into())
+						.map_err(|error| fault_in("invalid format width", error).into())
 				} else {
 					Ok(None)
 				}
@@ -3681,7 +3681,7 @@ pub mod matchers {
 		user::{NoUserMatcher, UserMatcher},
 	};
 	use super::{Config, Dependencies};
-	use crate::host::Host;
+	use crate::{host::Host, support::fault::fault_in};
 
 	/// Symlink following mode.
 	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4340,8 +4340,8 @@ pub mod matchers {
 					}
 					i += 1;
 					let path = args[i];
-					let matcher = SameFileMatcher::new(path, config.follow, host)
-						.map_err(|e| format!("{path}: {e}"))?;
+					let matcher =
+						SameFileMatcher::new(path, config.follow, host).map_err(|e| fault_in(path, e))?;
 					Some(matcher.into_box())
 				},
 				"-user" => {
@@ -4609,7 +4609,7 @@ pub mod matchers {
 		} else {
 			let mut file = host
 				.open_read(mode)
-				.map_err(|e| format!("cannot open '{}' for reading: {}", mode, e))?;
+				.map_err(|e| fault_in(format!("cannot open '{}' for reading", mode), e))?;
 			file.read_to_end(&mut buffer)?;
 		}
 

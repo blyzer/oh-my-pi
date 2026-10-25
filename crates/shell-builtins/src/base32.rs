@@ -71,7 +71,7 @@ use clap::{Arg, ArgAction, Command};
 
 use crate::{
 	host::format_usage,
-	support::{basenc::Codec, quote::Quotable},
+	support::{basenc::Codec, fault::fault_in, quote::Quotable},
 };
 const BASE_CMD_PARSE_ERROR: i32 = 1;
 
@@ -197,7 +197,7 @@ pub(crate) fn run_base(matches: &ArgMatches, format: Codec, host: &mut Host) -> 
 				let mut input = BufReader::with_capacity(DEFAULT_BUF_SIZE, file);
 				handle_input(&mut input, &mut host.stdout, format, config)
 			},
-			Err(error) => Err(BaseError::new(format!("{}: {error}", name.maybe_quote()))),
+			Err(error) => Err(BaseError::new(fault_in(name.maybe_quote(), error))),
 		}
 	} else {
 		let mut input = BufReader::with_capacity(DEFAULT_BUF_SIZE, &mut host.stdin);
@@ -320,7 +320,7 @@ mod decode {
 	use std::io::{self, BufRead, Write};
 
 	use super::{BaseError, BaseResult, format_read_error};
-	use crate::support::basenc::Codec;
+	use crate::support::{basenc::Codec, fault::fault};
 
 	// Start of helper functions
 	fn alphabet_lookup(alphabet: &[u8]) -> [bool; 256] {
@@ -342,7 +342,7 @@ mod decode {
 	) -> BaseResult<()> {
 		codec
 			.decode_into(read_buffer_filtered, decoded_buffer)
-			.map_err(|err| BaseError::new(err.to_string()))?;
+			.map_err(|err| BaseError::new(fault(err)))?;
 		Ok(())
 	}
 
@@ -490,7 +490,7 @@ mod decode {
 
 			codec
 				.decode_into(final_chunk, &mut decoded_buffer)
-				.map_err(|err| BaseError::new(err.to_string()))?;
+				.map_err(|err| BaseError::new(fault(err)))?;
 			write_to_output(&mut decoded_buffer, output)?;
 
 			if had_invalid_tail {

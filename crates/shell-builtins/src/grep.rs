@@ -23,7 +23,10 @@ use grep_searcher::{
 use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::glob::{CompiledPattern, PatternBuilder};
 
-use crate::host::{Host, Utility, util};
+use crate::{
+	host::{Host, Utility, util},
+	support::fault::{fault, fault_in},
+};
 
 /// PCRE2 JIT toggle: `OMP_PCRE2_JIT=1` forces JIT on, `0`/`false` forces it
 /// off. Unset, JIT stays on everywhere except macOS, where PCRE2's SLJIT
@@ -728,7 +731,7 @@ fn build_matcher(
 		return builder
 			.build_many(patterns)
 			.map(CompiledMatcher::Pcre)
-			.map_err(|error| error.to_string());
+			.map_err(|error| fault(error));
 	}
 
 	let mut builder = RegexMatcherBuilder::new();
@@ -747,7 +750,7 @@ fn build_matcher(
 		return builder
 			.build_many(&escaped)
 			.map(CompiledMatcher::Rust)
-			.map_err(|error| error.to_string());
+			.map_err(|error| fault(error));
 	}
 
 	if mode == MatchMode::Default {
@@ -761,7 +764,7 @@ fn build_matcher(
 	builder
 		.build_many(patterns)
 		.map(CompiledMatcher::Rust)
-		.map_err(|error| error.to_string())
+		.map_err(|error| fault(error))
 }
 
 /// A search sink that renders GNU-compatible records and tracks selection.
@@ -847,7 +850,7 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 			let Some(found) = self
 				.matcher
 				.find_at(line, at)
-				.map_err(|error| io::Error::other(error.to_string()))?
+				.map_err(|error| io::Error::other(fault(error)))?
 			else {
 				break;
 			};
@@ -855,9 +858,8 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 				at = found.end() + 1;
 				continue;
 			}
-			let match_offset = line_offset.saturating_add(
-				u64::try_from(found.start()).map_err(|error| io::Error::other(error.to_string()))?,
-			);
+			let match_offset =
+				line_offset.saturating_add(u64::try_from(found.start()).map_err(io::Error::other)?);
 			self.write_prefix(line_number, match_offset, b':')?;
 			self.write_record(&line[found.start()..found.end()])?;
 			at = found.end();
@@ -1180,7 +1182,7 @@ fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String>
 	};
 	result
 		.map(|_| bytes)
-		.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
+		.map_err(|error| fault_in(path.to_string_lossy(), error))
 }
 
 fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
@@ -1268,7 +1270,7 @@ fn compile_rules(mut specs: Vec<RuleSpec>) -> Result<Vec<PathRule>, String> {
 				.literal_separator(false)
 				.build()
 				.map(|matcher| PathRule { include: spec.include, matcher })
-				.map_err(|error| format!("{}: {error}", spec.pattern))
+				.map_err(|error| fault_in(&spec.pattern, error))
 		})
 		.collect()
 }

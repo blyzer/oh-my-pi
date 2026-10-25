@@ -20,7 +20,10 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	support::fault::fault,
+};
 
 const OPT_RELATIVE: &str = "relative";
 const OPT_INCREMENTAL: &str = "incremental";
@@ -208,8 +211,8 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 
 /// Formats an elapsed duration as seconds-since-epoch rendered in UTC.
 fn format_elapsed(nanos: i128, format: &str) -> Result<String, String> {
-	let stamp = Timestamp::from_nanosecond(nanos).map_err(|err| err.to_string())?;
-	strtime::format(format, &stamp.to_zoned(TimeZone::UTC)).map_err(|err| err.to_string())
+	let stamp = Timestamp::from_nanosecond(nanos).map_err(|err| fault(err))?;
+	strtime::format(format, &stamp.to_zoned(TimeZone::UTC)).map_err(|err| fault(err))
 }
 
 /// Resolves `TZ` from the shell environment, then the system timezone, then

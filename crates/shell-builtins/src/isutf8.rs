@@ -30,7 +30,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	support::fault::fault_in,
+};
 
 const OPT_QUIET: &str = "quiet";
 const OPT_LIST: &str = "list";
@@ -71,7 +74,7 @@ impl Utility for Isutf8 {
 		if files.is_empty() {
 			match validate(&mut host.stdin, &cancel) {
 				Err(err) => {
-					host.error(format!("{STDIN_NAME}: {err}"), 2);
+					host.error(fault_in(STDIN_NAME, err), 2);
 					io_error = true;
 				},
 				Ok(Verdict::Cancelled) => return 130,
@@ -91,7 +94,7 @@ impl Utility for Isutf8 {
 				};
 				let verdict = match result {
 					Err(err) => {
-						host.error(format!("{display}: {err}"), 2);
+						host.error(fault_in(&display, err), 2);
 						io_error = true;
 						continue;
 					},

@@ -27,6 +27,7 @@ use crate::{
 			sum::{self, Blake2b, Blake3},
 			unescape_filename,
 		},
+		fault::fault_in,
 		line_ending::LineEnding,
 		quote::{Quotable, QuotingStyle, locale_aware_escape_name},
 		sys::hardware::{HasHardwareFeatures as _, SimdPolicy},
@@ -829,7 +830,7 @@ where
 				file_buf = match host.open_read(&resolved_filepath) {
 					Ok(file) => file,
 					Err(err) => {
-						host.error(format!("{}: {err}", filepath.to_string_lossy()), 1);
+						host.error(fault_in(filepath.to_string_lossy(), err), 1);
 						continue;
 					},
 				};
@@ -842,7 +843,7 @@ where
 		// Always compute the "binary" version of the digest, i.e. on Windows,
 		// never handle CRLFs specifically.
 		let (digest_output, sz) = digest_reader(&mut digest, &mut file, ReadingMode::Binary)
-			.map_err(|error| failure(format!("failed to read input: {error}")))?;
+			.map_err(|error| failure(fault_in("failed to read input", error)))?;
 		drop(file);
 
 		// Encodes the sum if df is Base64, leaves as-is otherwise.
@@ -1473,7 +1474,7 @@ fn get_file_to_check<'a>(
 		Err(error) => {
 			if !opts.ignore_missing {
 				let escaped = locale_aware_escape_name(filename, QuotingStyle::SHELL_ESCAPE);
-				host.error(format!("{}: {error}", escaped.to_string_lossy()), 1);
+				host.error(fault_in(escaped.to_string_lossy(), error), 1);
 				write_file_report(
 					&mut host.stdout,
 					filename_bytes,
@@ -1589,7 +1590,7 @@ fn compute_and_check_digest_from_file(
 			drop(file_reader);
 			let escaped =
 				locale_aware_escape_name(&real_filename_to_check, QuotingStyle::SHELL_ESCAPE);
-			host.error(format!("{}: {error}", escaped.to_string_lossy()), 1);
+			host.error(fault_in(escaped.to_string_lossy(), error), 1);
 			write_file_report(
 				&mut host.stdout,
 				filename,

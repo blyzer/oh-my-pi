@@ -15,7 +15,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::{
+	host::{Host, Utility, matches_parser, util},
+	support::fault::{fault, fault_in},
+};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -765,10 +768,10 @@ fn process_input(
 fn parse_delimiter(s: &str) -> Result<u8, String> {
 	match s.strip_prefix('\\') {
 		Some(hex) if hex.starts_with('x') => {
-			u8::from_str_radix(&hex[1..], 16).map_err(|e| format!("Invalid hex sequence: {e}"))
+			u8::from_str_radix(&hex[1..], 16).map_err(|e| fault_in("Invalid hex sequence", e))
 		},
 		Some(oct) if oct.starts_with('0') => {
-			u8::from_str_radix(&oct[1..], 8).map_err(|e| format!("Invalid octal sequence: {e}"))
+			u8::from_str_radix(&oct[1..], 8).map_err(|e| fault_in("Invalid octal sequence", e))
 		},
 		Some(special) => match special {
 			"a" => Ok(b'\x07'),
@@ -791,7 +794,7 @@ fn validate_positive_usize(s: &str) -> Result<usize, String> {
 	match s.parse::<usize>() {
 		Ok(v) if v > 0 => Ok(v),
 		Ok(v) => Err(format!("Value must be > 0, not: {v}")),
-		Err(e) => Err(e.to_string()),
+		Err(e) => Err(fault(e)),
 	}
 }
 
@@ -1044,13 +1047,13 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 		(Some(path), Some(delimiter)) => {
 			let file = host
 				.open_read(path)
-				.map_err(|e| format!("Failed to open {path}: {e}"))?;
+				.map_err(|e| fault_in(format!("Failed to open {path}"), e))?;
 			Box::new(ByteDelimitedArgumentReader::new(file, delimiter))
 		},
 		(Some(path), None) => {
 			let file = host
 				.open_read(path)
-				.map_err(|e| format!("Failed to open {path}: {e}"))?;
+				.map_err(|e| fault_in(format!("Failed to open {path}"), e))?;
 			Box::new(WhitespaceDelimitedArgumentReader::new(file))
 		},
 		(None, Some(delimiter)) => Box::new(ByteDelimitedArgumentReader::stdin(delimiter)),

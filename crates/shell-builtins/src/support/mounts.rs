@@ -10,6 +10,9 @@ use std::{
 
 use strum::EnumString;
 
+#[cfg(unix)]
+use crate::support::fault::fault;
+
 /// Metadata timestamp selected by `ls --time` and `stat` directives.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MetadataTimeField {
@@ -573,7 +576,7 @@ impl FsMeta for StatFs {
 #[cfg(unix)]
 pub(crate) fn statfs(path: &OsStr) -> Result<StatFs, String> {
 	use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
-	let path = CString::new(path.as_bytes()).map_err(|error| error.to_string())?;
+	let path = CString::new(path.as_bytes()).map_err(|error| fault(error))?;
 	let mut stat = MaybeUninit::<StatFs>::uninit();
 	#[cfg(any(
 		target_os = "linux",

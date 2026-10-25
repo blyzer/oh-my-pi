@@ -8,6 +8,7 @@ pub(crate) mod basenc;
 pub(crate) mod checksum;
 pub(crate) mod clap_ext;
 pub(crate) mod entries;
+pub(crate) mod fault;
 pub(crate) mod fsutil;
 pub(crate) mod human;
 pub(crate) mod line_ending;

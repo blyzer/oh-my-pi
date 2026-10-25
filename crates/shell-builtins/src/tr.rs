@@ -17,7 +17,7 @@ use simd::process_input;
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, os_bytes, util},
-	support::quote::Quotable,
+	support::{fault::fault, quote::Quotable},
 };
 
 mod unicode_table {
@@ -42,6 +42,7 @@ mod simd {
 	};
 
 	use super::operation::ChunkProcessor;
+	use crate::support::fault::fault_in;
 
 	/// Helper to detect single-character operations for optimization
 	pub fn find_single_change<T, F>(table: &[T; 256], check: F) -> Option<(u8, T)>
@@ -109,7 +110,7 @@ mod simd {
 				Ok(len) => len,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
 				Err(e) => {
-					return Err(format!("read error: {e}"));
+					return Err(fault_in("read error", e));
 				},
 			};
 
@@ -129,7 +130,7 @@ mod simd {
 	pub fn write_output<W: Write>(output: &mut W, buf: &[u8]) -> Result<(), String> {
 		output
 			.write_all(buf)
-			.map_err(|e| format!("write error: {e}"))
+			.map_err(|e| fault_in("write error", e))
 	}
 }
 
@@ -144,6 +145,7 @@ mod operation {
 	};
 
 	use super::{simd::write_output, unicode_table};
+	use crate::support::fault::fault_in;
 
 	/// Common trait for operations that can process chunks of data
 	pub trait ChunkProcessor {
@@ -804,7 +806,7 @@ mod operation {
 				Ok(len) => len,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
 				Err(e) => {
-					return Err(format!("read error: {e}"));
+					return Err(fault_in("read error", e));
 				},
 			};
 
@@ -827,7 +829,7 @@ mod operation {
 	/// Platform-specific flush operation
 	#[inline]
 	pub fn flush_output<W: Write>(output: &mut W) -> Result<(), String> {
-		output.flush().map_err(|e| format!("write error: {e}"))
+		output.flush().map_err(|e| fault_in("write error", e))
 	}
 }
 
@@ -939,7 +941,7 @@ fn tr_main(matches: &clap::ArgMatches, host: &mut Host) -> Result<(), String> {
 		translating,
 		&mut host.stderr,
 	)
-	.map_err(|error| error.to_string())?;
+	.map_err(|error| fault(error))?;
 
 	let mut input = BufReader::new(&mut host.stdin);
 	let output = &mut host.stdout;
@@ -956,12 +958,12 @@ fn tr_main(matches: &clap::ArgMatches, host: &mut Host) -> Result<(), String> {
 			translate_input(&mut input, output, SqueezeOperation::new(set1))?;
 		} else {
 			let operation = TranslateOperation::new(set1, set2.clone())
-				.map_err(|error| error.to_string())?
+				.map_err(|error| fault(error))?
 				.chain(SqueezeOperation::new(set2));
 			translate_input(&mut input, output, operation)?;
 		}
 	} else {
-		let operation = TranslateOperation::new(set1, set2).map_err(|error| error.to_string())?;
+		let operation = TranslateOperation::new(set1, set2).map_err(|error| fault(error))?;
 		process_input(&mut input, output, &operation)?;
 	}
 

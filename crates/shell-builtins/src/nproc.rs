@@ -9,7 +9,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
-	support::quote::Quotable,
+	support::{fault::fault_in, quote::Quotable},
 };
 
 static OPT_ALL: &str = "all";
@@ -30,7 +30,7 @@ impl Utility for Nproc {
 			Some(numstr) => match numstr.trim().parse::<usize>() {
 				Ok(num) => num,
 				Err(error) => {
-					host.error(format!("{} is not a valid number: {error}", numstr.quote()), 1);
+					host.error(fault_in(format!("{} is not a valid number", numstr.quote()), error), 1);
 					return 1;
 				},
 			},

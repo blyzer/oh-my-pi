@@ -285,6 +285,7 @@ mod filter {
 	};
 
 	use super::{Cli, Error, ReadOpener, Val, read, runtime_cancelled, runtime_env, with_runtime};
+	use crate::support::fault::fault;
 
 	pub type Filter = jaq_core::Filter<Native<Val>>;
 
@@ -433,7 +434,7 @@ mod filter {
 		// file a builtin reads.
 		let loader = Loader::new(defs).with_read(|import: load::Import<&str, PathBuf>| {
 			let path = import.find(paths, "jq")?;
-			let code = opener.read_to_string(&path).map_err(|e| e.to_string())?;
+			let code = opener.read_to_string(&path).map_err(|e| fault(e))?;
 			Ok(File { code, path })
 		});
 		let path = path.into();
@@ -444,7 +445,7 @@ mod filter {
 		let mut vals = Vec::new();
 		import(&modules, |p| {
 			let path = p.find(paths, "json")?;
-			vals.push(read::json_array(opener, path).map_err(|e| e.to_string())?);
+			vals.push(read::json_array(opener, path).map_err(|e| fault(e))?);
 			Ok(())
 		})
 		.map_err(load_errors)?;
@@ -470,7 +471,7 @@ mod filter {
 		mut f: impl FnMut(Val) -> io::Result<()>,
 	) -> Result<Option<bool>, Error> {
 		let mut last = None;
-		let iter = iter.map(|r| r.map_err(|e| e.to_string()));
+		let iter = iter.map(|r| r.map_err(|e| fault(e)));
 
 		let iter = Box::new(iter) as Box<dyn Iterator<Item = _>>;
 		let null = Box::new(core::iter::once(Ok(Val::Null))) as Box<dyn Iterator<Item = _>>;
@@ -965,6 +966,7 @@ impl Parser for Jq {
 		T: Into<OsString> + Clone,
 	{
 		let cli = Cli::parse(itr.into_iter().map(Into::into).collect())
+			// lintx-allow: error-format jaq-pinned `Error: …\n` usage wording
 			.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, format!("Error: {error}\n")))?;
 		if cli.version {
 			return Err(

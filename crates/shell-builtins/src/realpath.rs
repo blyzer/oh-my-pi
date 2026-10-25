@@ -18,6 +18,7 @@ use omp_shell::{ShellExtensions, builtins::Registration};
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, os_bytes, util},
 	support::{
+		fault::fault_in,
 		fsutil::{MissingHandling, ResolveMode, canonicalize, make_path_relative_to},
 		line_ending::LineEnding,
 		quote::Quotable,
@@ -134,7 +135,7 @@ fn realpath_main(matches: &ArgMatches, host: &mut Host) -> i32 {
 			host,
 		) {
 			if !quiet {
-				host.error(format!("{}: {}", path.maybe_quote(), io_error_message(&err)), 1);
+				host.error(fault_in(path.maybe_quote(), io_error_message(&err)), 1);
 			} else {
 				host.fail(1);
 			}

@@ -42,15 +42,19 @@ const IEC_BASES: [u128; 11] = [
 #[derive(Debug, PartialEq, Eq, Error)]
 pub(crate) enum ParseSizeError {
 	/// The numeric prefix is followed by an unsupported suffix.
+	// lintx-allow: error-str-payload carries final GNU-pinned message fragment
 	#[error("{0}")]
 	InvalidSuffix(String),
 	/// The input does not contain a valid number.
+	// lintx-allow: error-str-payload carries final GNU-pinned message fragment
 	#[error("{0}")]
 	ParseFailure(String),
 	/// The represented size does not fit in the requested integer type.
+	// lintx-allow: error-str-payload carries final GNU-pinned message fragment
 	#[error("{0}")]
 	SizeTooBig(String),
 	/// Physical memory could not be determined for a percentage size.
+	// lintx-allow: error-str-payload carries final GNU-pinned message fragment
 	#[error("{0}")]
 	PhysicalMem(String),
 }
