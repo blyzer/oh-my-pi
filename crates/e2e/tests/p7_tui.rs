@@ -1470,18 +1470,21 @@ async fn chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit()
 	});
 	assert_surface(&ready, "ready");
 
-	const NOTICE: &str =
-		"Stream rule no-forbidden matched the text output; the response was redirected.";
+	const NOTICE_PREFIX: &str = "Stream rule no-forbidden matched the text output at byte ";
+	const NOTICE_SUFFIX: &str = "; the response was redirected.";
 	debug.keys("'use the word' enter");
 	let redirected = wait_snapshot(&mut debug, &raw_capture, "stream rule redirect", |snapshot| {
 		let surface = snapshot.combined();
-		surface.contains(NOTICE) && surface.contains("Clean answer after the rule.")
+		surface.contains(NOTICE_PREFIX)
+			&& surface.contains(NOTICE_SUFFIX)
+			&& surface.contains("excerpt: ")
+			&& surface.contains("Clean answer after the rule.")
 	});
 	assert_surface(&redirected, "redirected");
 	let card = redirected
 		.combined()
 		.lines()
-		.find(|line| line.contains(NOTICE))
+		.find(|line| line.contains(NOTICE_PREFIX))
 		.map(str::to_owned)
 		.expect("notice row");
 	assert!(card.contains('⚖'), "the stream-rule card leads with the themed rule glyph: {card:?}");
@@ -1496,7 +1499,9 @@ async fn chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit()
 		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
 	let resized = wait_snapshot(&mut debug, &raw_capture, "redirect survives resize", |snapshot| {
 		let surface = snapshot.combined();
-		surface.contains(NOTICE)
+		surface.contains(NOTICE_PREFIX)
+			&& surface.contains(NOTICE_SUFFIX)
+			&& surface.contains("excerpt: ")
 			&& surface.contains("Clean answer after the rule.")
 			&& surface.contains(COMPOSER_PROMPT)
 	});

@@ -402,3 +402,129 @@ async fn rewinding_past_a_redirect_removes_its_exclusion_injection_and_mark() {
 		"the fired mark was removed with the redirect, so the same text redirects again"
 	);
 }
+
+/// Registers the same rule with `interruptMode: never`: prose matches defer.
+fn directors_never() -> DirectorRegistry {
+	let rule = RulePattern {
+		name:           Str::new_static("guard"),
+		body:           Str::new_static("Avoid that word."),
+		pattern:        Str::new_static("danger"),
+		scope:          vec![Str::new_static("text")],
+		globs:          Vec::new(),
+		interrupt_mode: Some(Str::new_static("never")),
+	};
+	let set = StreamRuleSet::compile(vec![rule])
+		.set
+		.expect("the rule compiles");
+	let mut directors = DirectorRegistry::standard();
+	directors.register_extension(Box::new(StreamRules::new(Arc::new(set))));
+	directors
+}
+
+/// Collects `(tag, content)` for every turn child in the journaled session.
+fn node_texts(path: &Path) -> Vec<(omp_dom::Tag, Str)> {
+	let session = Session::open(path, ComponentRegistry::standard()).expect("journal reopens");
+	let dom = session.dom();
+	dom.children(dom.body())
+		.iter()
+		.flat_map(|turn| dom.children(*turn).iter())
+		.filter_map(|handle| {
+			let node = dom.get(*handle)?;
+			Some((node.tag.clone(), node.content.clone()?))
+		})
+		.collect()
+}
+
+/// ADR 0038 §3: a non-interrupting prose match defers its body. The yield
+/// returns `Continue { reminder }`, so the loop journals the body as a
+/// `<developer>` aside and resamples once; the cleared pending state keeps the
+/// second yield quiet.
+#[tokio::test]
+async fn a_never_prose_match_defers_its_reminder_to_the_yield() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let directors = directors_never();
+	let ctx = settings(&[]);
+	let path = directory.path().join("session.oms");
+	let (inference, requests) =
+		ScriptedInference::new([text_script("a danger answer"), text_script("a clean answer")]);
+	let (gate, _dispatches) = observer();
+	let mut kernel = kernel(inference, directory.path(), &directors, &ctx, &gate);
+	let mut session = fresh_session(&path);
+	DirectorStack::from_dom(session.dom(), &directors)
+		.engage_registered(&mut session, FAMILY)
+		.expect("the director engages");
+	let outcome = kernel
+		.run_turn(&mut session, turn("first"), RunControl::default())
+		.await
+		.expect("the deferred turn completes");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	// A non-interrupting match keeps the first assistant in context, so the
+	// turn text carries both responses.
+	assert_eq!(outcome.assistant_text, "a danger answera clean answer");
+	assert_eq!(requests.lock().len(), 2, "the reminder continues the turn once");
+	drop(session);
+	let developers = node_texts(&path)
+		.into_iter()
+		.filter(|(tag, content)| {
+			*tag == omp_dom::Tag::Known(omp_dom::KnownTag::Developer)
+				&& content.as_str() == "Avoid that word."
+		})
+		.count();
+	assert_eq!(developers, 1, "the deferred body lands exactly once");
+}
+
+/// ADR 0038 §4: a redirect notice names the match end offset and carries a
+/// bounded excerpt recovered from the journaled stream text.
+#[tokio::test]
+async fn a_redirect_notice_carries_the_offset_and_journal_excerpt() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let directors = directors();
+	let ctx = settings(&[]);
+	let path = first_turn_fires(directory.path(), &directors, &ctx).await;
+	let notices = node_texts(&path)
+		.into_iter()
+		.filter(|(tag, _)| *tag == omp_dom::Tag::Known(omp_dom::KnownTag::Notice))
+		.map(|(_, content)| content)
+		.collect::<Vec<_>>();
+	let notice = notices
+		.iter()
+		.find(|content| content.as_str().contains("Stream rule guard matched"))
+		.expect("the redirect notice is journaled");
+	assert!(notice.as_str().contains("at byte"), "offset named: {notice}");
+	assert!(notice.as_str().contains("\nexcerpt: "), "excerpt attached: {notice}");
+	assert!(notice.as_str().contains("danger"), "the excerpt window covers the match: {notice}");
+}
+
+/// ADR 0038 §6: a hidden context opens no stream watchers, by construction at
+/// the stack walker rather than by hidden work merely not reaching the loop.
+#[tokio::test]
+async fn a_hidden_context_opens_no_stream_watchers() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let directors = directors();
+	let ctx = settings(&[]);
+	let path = directory.path().join("session.oms");
+	let mut session = fresh_session(&path);
+	let mut stack = DirectorStack::from_dom(session.dom(), &directors);
+	stack
+		.engage_registered(&mut session, FAMILY)
+		.expect("the director engages");
+	let stack = DirectorStack::from_dom(session.dom(), &directors);
+	let turn_handle = session.dom().body();
+	let route = omp_agent::RouteFacts::default();
+	let request = support::empty_request();
+	let visible = omp_agent::DirectorCx::new(turn_handle, &route).with_con(Some(&ctx));
+	assert_eq!(
+		stack.watch_stream(session.dom(), &visible, &request).len(),
+		1,
+		"the engaged rule set watches a visible response"
+	);
+	let hidden = omp_agent::DirectorCx::new(turn_handle, &route)
+		.with_con(Some(&ctx))
+		.with_hidden(true);
+	assert!(
+		stack
+			.watch_stream(session.dom(), &hidden, &request)
+			.is_empty(),
+		"hidden work is never watched"
+	);
+}

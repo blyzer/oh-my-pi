@@ -3318,10 +3318,23 @@ impl<C: Inference> Kernel<C> {
 				if let Some((owner, interrupt)) = redirect {
 					let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
 					let director = director_family(session.dom(), owner);
-					session.assistant_end("interrupted")?;
-					self.apply_live_components(session)?;
-					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
+					let excerpt = interrupt
+						.excerpt
+						.and_then(|excerpt| stream_excerpt(session.dom(), assistant, excerpt));
 					let mut effect = interrupt.effect;
+					// ADR 0038 §4: the notice carries a bounded excerpt recovered
+					// cold from the journaled stream text, never from a parallel
+					// buffer. Tool matches run over projected text and carry none.
+					if let Some(window) = &excerpt {
+						if let Some(notice) = effect.notice.take() {
+							effect.notice = Some(sf!("{notice}\nexcerpt: {window}"));
+						}
+						if let Some(observation) = &mut effect.observation {
+							observation
+								.payload
+								.insert("excerpt".to_owned(), serde_json::Value::from(window.as_str()));
+						}
+					}
 					let reason = effect.notice.clone();
 					if let Some(observation) = &mut effect.observation {
 						observation
@@ -3329,6 +3342,12 @@ impl<C: Inference> Kernel<C> {
 							.insert("interrupted".to_owned(), serde_json::Value::Bool(true));
 					}
 					stream_effects.push((owner, effect));
+					// ADR 0038 §4: the redirect transaction (interrupt mark,
+					// exclusion, notice, injection, fired marks) commits before
+					// the assistant end and receipt. A crash after it resumes as
+					// an ordinary mid-stream crash whose marks already hold, so
+					// the rule cannot fire twice and the exclusion is never
+					// separated from the receipted assistant.
 					let observations = commit_stream_effects(
 						session,
 						current_turn(session)?,
@@ -3336,6 +3355,9 @@ impl<C: Inference> Kernel<C> {
 						stream_effects,
 						Some((interrupt.partial, owner)),
 					)?;
+					session.assistant_end("interrupted")?;
+					self.apply_live_components(session)?;
+					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
 					self.apply_live_components(session)?;
 					self.events.publish(KernelEvent::StreamRedirected {
 						director,
@@ -4150,6 +4172,39 @@ fn capture_stream_verdict(
 			None
 		},
 	}
+}
+
+/// Recovers a bounded (≤256-byte) excerpt ending at a redirect's match
+/// offset from the journaled assistant content (ADR 0038 §4).
+fn stream_excerpt(
+	dom: &omp_dom::Dom,
+	assistant: Handle,
+	excerpt: crate::director::StreamExcerptRef,
+) -> Option<Str> {
+	let kind = if excerpt.thinking { "thinking" } else { "text" };
+	let text = dom.children(assistant).iter().find_map(|handle| {
+		let node = dom.get(*handle)?;
+		if node.tag != Tag::Custom(Str::new_static(omp_session::ASSISTANT_CONTENT_TAG))
+			|| node.prop(&PropId::Kind.into()).and_then(Value::as_str) != Some(kind)
+			|| !matches!(
+				node.prop(&PropKey::Custom(Str::new_static(omp_session::PROVIDER_BLOCK_INDEX_PROP))),
+				Some(Value::Int(block)) if *block == i64::from(excerpt.block)
+			) {
+			return None;
+		}
+		node.prop(&PropId::Text.into()).and_then(Value::as_str)
+	})?;
+	let mut end = usize::try_from(excerpt.end)
+		.unwrap_or(usize::MAX)
+		.min(text.len());
+	while end > 0 && !text.is_char_boundary(end) {
+		end -= 1;
+	}
+	let mut start = end.saturating_sub(256);
+	while start < end && !text.is_char_boundary(start) {
+		start += 1;
+	}
+	(start < end).then(|| Str::new(&text[start..end]))
 }
 
 fn commit_stream_effects(

@@ -54,6 +54,7 @@ impl StreamWatch for Watch {
 		let mut payload = serde_json::Map::new();
 		payload.insert("rule".to_owned(), serde_json::Value::from("forbidden-word"));
 		StreamVerdict::Interrupt(StreamInterrupt {
+			excerpt:       None,
 			culprit:       None,
 			partial:       self.0,
 			label:         Str::new_static("stream rule forbidden-word"),
@@ -97,6 +98,7 @@ impl StreamWatch for ToolWatch {
 			return StreamVerdict::Pass;
 		}
 		StreamVerdict::Interrupt(StreamInterrupt {
+			excerpt:       None,
 			culprit:       Some(call.id.clone()),
 			partial:       PartialOutput::Discard,
 			label:         Str::new_static("stream rule no-unwrap"),
@@ -199,6 +201,7 @@ impl StreamWatch for InterruptWatch {
 		}
 		let _ = self.0.send(Up::Interrupt);
 		StreamVerdict::Interrupt(StreamInterrupt {
+			excerpt:       None,
 			culprit:       None,
 			partial:       PartialOutput::Discard,
 			label:         Str::new_static("stream rule forbidden-word"),
