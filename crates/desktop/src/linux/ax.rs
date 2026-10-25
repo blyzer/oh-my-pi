@@ -12,9 +12,31 @@ use super::actor;
 use crate::{
 	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi},
 	backend::AxBackend,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	types::DesktopWindow,
 };
+
+/// A typed AT-SPI failure, rendered once when it crosses into
+/// [`DesktopError`].
+#[derive(Debug, thiserror::Error)]
+enum AxError {
+	#[error("AT-SPI {0}")]
+	AtSpi(&'static str, #[source] atspi::AtspiError),
+	#[error("AT-SPI {0}")]
+	Bus(&'static str, #[source] atspi::zbus::Error),
+	#[error("AT-SPI object has no bus name")]
+	NoBusName,
+	#[error("application '{app}' (pid {pid:?}) not found")]
+	AppNotFound { app: String, pid: Option<u32> },
+	#[error("no frame or dialog found for '{title}'")]
+	NoFrame { title: String },
+}
+
+impl From<AxError> for DesktopError {
+	fn from(cause: AxError) -> Self {
+		Self::chained(ErrorCode::AxFailed, &cause)
+	}
+}
 
 pub(super) struct ActorAx {
 	rt:         Runtime,
@@ -26,7 +48,7 @@ impl ActorAx {
 		let rt = Builder::new_current_thread()
 			.enable_all()
 			.build()
-			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI runtime: {err}")))?;
+			.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI runtime", &err))?;
 		Ok(Self { rt, connection: None })
 	}
 
@@ -36,7 +58,9 @@ impl ActorAx {
 				self
 					.rt
 					.block_on(atspi::AccessibilityConnection::new())
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI connection: {err}")))?,
+					.map_err(|err| {
+						DesktopError::caused(ErrorCode::AxFailed, "AT-SPI connection", &err)
+					})?,
 			);
 		}
 		Ok(())
@@ -64,14 +88,11 @@ impl ActorAx {
 	pub(crate) fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
 		self.rt.block_on(async {
 			let mut windows = Vec::new();
-			for app in Self::apps(self.connection())
-				.await
-				.map_err(DesktopError::ax_failed)?
-			{
+			for app in Self::apps(self.connection()).await? {
 				let app_proxy = app
 					.as_accessible_proxy(self.connection().connection())
 					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
+					.map_err(|err| AxError::AtSpi("application proxy", err))?;
 				let app_name = app_proxy.name().await.unwrap_or_default();
 				let pid = if let Some(bus_name) = app.name() {
 					let dbus = DBusProxy::new(self.connection().connection()).await.ok();
@@ -93,7 +114,7 @@ impl ActorAx {
 					let frame_proxy = frame
 						.as_accessible_proxy(self.connection().connection())
 						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI frame: {err}")))?;
+						.map_err(|err| AxError::AtSpi("frame proxy", err))?;
 					let title = frame_proxy.name().await.unwrap_or_default();
 					let state = frame_proxy.get_state().await.ok();
 					let Ok(component) = Self::component(self.connection(), &frame).await else {
@@ -132,25 +153,28 @@ impl ActorAx {
 
 	async fn apps(
 		connection: &atspi::AccessibilityConnection,
-	) -> Result<Vec<ObjectRefOwned>, String> {
+	) -> Result<Vec<ObjectRefOwned>, AxError> {
 		let root = connection
 			.root_accessible_on_registry()
 			.await
-			.map_err(|err| err.to_string())?;
-		root.get_children().await.map_err(|err| err.to_string())
+			.map_err(|err| AxError::AtSpi("registry root", err))?;
+		root
+			.get_children()
+			.await
+			.map_err(|err| AxError::Bus("registry children", err))
 	}
 
 	async fn app_for_window(
 		connection: &atspi::AccessibilityConnection,
 		win: &DesktopWindow,
-	) -> Result<ObjectRefOwned, String> {
+	) -> Result<ObjectRefOwned, AxError> {
 		let apps = Self::apps(connection).await?;
 		let mut name_match = None;
 		for app in apps {
 			let proxy = app
 				.as_accessible_proxy(connection.connection())
 				.await
-				.map_err(|err| err.to_string())?;
+				.map_err(|err| AxError::AtSpi("application proxy", err))?;
 			let name = proxy.name().await.unwrap_or_default();
 			if name.eq_ignore_ascii_case(&win.app) || (!name.is_empty() && win.title.contains(&name)) {
 				name_match = Some(app.clone());
@@ -161,7 +185,7 @@ impl ActorAx {
 				};
 				let dbus = DBusProxy::new(connection.connection())
 					.await
-					.map_err(|err| err.to_string())?;
+					.map_err(|err| AxError::Bus("D-Bus proxy", err))?;
 				if dbus
 					.get_connection_unix_process_id(bus_name.clone().into())
 					.await
@@ -171,24 +195,27 @@ impl ActorAx {
 				}
 			}
 		}
-		name_match.ok_or_else(|| format!("application '{}' (pid {:?}) not found", win.app, win.pid))
+		name_match.ok_or_else(|| AxError::AppNotFound { app: win.app.clone(), pid: win.pid })
 	}
 
 	async fn frames(
 		connection: &atspi::AccessibilityConnection,
 		app: &ObjectRefOwned,
-	) -> Result<Vec<ObjectRefOwned>, String> {
+	) -> Result<Vec<ObjectRefOwned>, AxError> {
 		let proxy = app
 			.as_accessible_proxy(connection.connection())
 			.await
-			.map_err(|err| err.to_string())?;
-		let children = proxy.get_children().await.map_err(|err| err.to_string())?;
+			.map_err(|err| AxError::AtSpi("application proxy", err))?;
+		let children = proxy
+			.get_children()
+			.await
+			.map_err(|err| AxError::Bus("application children", err))?;
 		let mut frames = Vec::new();
 		for child in children {
 			let child_proxy = child
 				.as_accessible_proxy(connection.connection())
 				.await
-				.map_err(|err| err.to_string())?;
+				.map_err(|err| AxError::AtSpi("child proxy", err))?;
 			if matches!(child_proxy.get_role().await, Ok(Role::Frame | Role::Dialog | Role::Window)) {
 				frames.push(child);
 			}
@@ -199,51 +226,45 @@ impl ActorAx {
 	async fn component<'a>(
 		connection: &'a atspi::AccessibilityConnection,
 		object: &'a ObjectRefOwned,
-	) -> Result<ComponentProxy<'a>, String> {
-		let name = object
-			.name()
-			.ok_or_else(|| "AT-SPI object has no bus name".to_string())?
-			.clone();
+	) -> Result<ComponentProxy<'a>, AxError> {
+		let name = object.name().ok_or(AxError::NoBusName)?.clone();
 		ComponentProxy::builder(connection.connection())
 			.destination(name)
-			.map_err(|err| err.to_string())?
+			.map_err(|err| AxError::Bus("component proxy", err))?
 			.path(object.path().clone())
-			.map_err(|err| err.to_string())?
+			.map_err(|err| AxError::Bus("component proxy", err))?
 			.build()
 			.await
-			.map_err(|err| err.to_string())
+			.map_err(|err| AxError::Bus("component proxy", err))
 	}
 
 	async fn action<'a>(
 		connection: &'a atspi::AccessibilityConnection,
 		object: &'a ObjectRefOwned,
-	) -> Result<ActionProxy<'a>, String> {
-		let name = object
-			.name()
-			.ok_or_else(|| "AT-SPI object has no bus name".to_string())?
-			.clone();
+	) -> Result<ActionProxy<'a>, AxError> {
+		let name = object.name().ok_or(AxError::NoBusName)?.clone();
 		ActionProxy::builder(connection.connection())
 			.destination(name)
-			.map_err(|err| err.to_string())?
+			.map_err(|err| AxError::Bus("action proxy", err))?
 			.path(object.path().clone())
-			.map_err(|err| err.to_string())?
+			.map_err(|err| AxError::Bus("action proxy", err))?
 			.build()
 			.await
-			.map_err(|err| err.to_string())
+			.map_err(|err| AxError::Bus("action proxy", err))
 	}
 
 	async fn find_focused(
 		connection: &atspi::AccessibilityConnection,
 		root: ObjectRefOwned,
 		depth: u8,
-	) -> Result<Option<ObjectRefOwned>, String> {
+	) -> Result<Option<ObjectRefOwned>, AxError> {
 		if depth > 40 {
 			return Ok(None);
 		}
 		let proxy = root
 			.as_accessible_proxy(connection.connection())
 			.await
-			.map_err(|err| err.to_string())?;
+			.map_err(|err| AxError::AtSpi("accessible proxy", err))?;
 		if proxy
 			.get_state()
 			.await
@@ -273,16 +294,16 @@ impl AxBackend for ActorAx {
 				let proxy = frame
 					.as_accessible_proxy(self.connection().connection())
 					.await
-					.map_err(|err| err.to_string())?;
+					.map_err(|err| AxError::AtSpi("window root", err))?;
 				if proxy.name().await.unwrap_or_default() == win.title {
 					return Ok(frame);
 				}
 			}
-			first.ok_or_else(|| format!("no frame or dialog found for '{}'", win.title))
+			first.ok_or_else(|| AxError::NoFrame { title: win.title.clone() })
 		});
 		result
 			.map(AxHandle::AtSpi)
-			.map_err(|err: String| DesktopError::ax_failed(format!("AT-SPI window root: {err}")))
+			.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI window root", &err))
 	}
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
@@ -291,7 +312,7 @@ impl AxBackend for ActorAx {
 			let proxy = object
 				.as_accessible_proxy(self.connection().connection())
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI accessible: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI accessible", &err))?;
 			let title = proxy.name().await.ok().filter(|s| !s.is_empty());
 			let description = proxy.description().await.ok().filter(|s| !s.is_empty());
 			let native_role = match proxy.get_role_name().await {
@@ -374,7 +395,7 @@ impl AxBackend for ActorAx {
 			let proxy = object
 				.as_accessible_proxy(self.connection().connection())
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI children", &err))?;
 			proxy
 				.get_children()
 				.await
@@ -385,7 +406,7 @@ impl AxBackend for ActorAx {
 						.map(AxHandle::AtSpi)
 						.collect()
 				})
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI children", &err))
 		})
 	}
 
@@ -395,11 +416,11 @@ impl AxBackend for ActorAx {
 			let proxy = object
 				.as_accessible_proxy(self.connection().connection())
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI parent: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI parent", &err))?;
 			let parent = proxy
 				.parent()
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI parent: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI parent", &err))?;
 			Ok((!parent.is_null()).then_some(AxHandle::AtSpi(parent)))
 		})
 	}
@@ -409,11 +430,13 @@ impl AxBackend for ActorAx {
 		self.rt.block_on(async {
 			let proxy = Self::action(self.connection(), &object)
 				.await
-				.map_err(DesktopError::ax_failed)?;
+				.map_err(|err| {
+					DesktopError::caused(ErrorCode::AxFailed, "AT-SPI action proxy", &err)
+				})?;
 			let actions = proxy
 				.get_actions()
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI actions: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI actions", &err))?;
 			let index = if action.eq_ignore_ascii_case("press") {
 				0
 			} else {
@@ -421,18 +444,16 @@ impl AxBackend for ActorAx {
 					.iter()
 					.position(|item| item.name.eq_ignore_ascii_case(action))
 					.map(|i| i as i32)
-					.ok_or_else(|| {
-						DesktopError::ax_failed(format!("AT-SPI action '{action}' is unavailable"))
-					})?
+					.ok_or_else(|| DesktopError::ax_failed_in("AT-SPI action unavailable", action))?
 			};
 			if proxy
 				.do_action(index)
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI action: {err}")))?
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI action", &err))?
 			{
 				Ok(())
 			} else {
-				Err(DesktopError::ax_failed(format!("AT-SPI action '{action}' failed")))
+				Err(DesktopError::ax_failed_in("AT-SPI action failed", action))
 			}
 		})
 	}
@@ -447,15 +468,15 @@ impl AxBackend for ActorAx {
 			let editable = EditableTextProxy::builder(self.connection().connection())
 				.destination(name.clone())
 				.and_then(|b| b.path(object.path().clone()))
-				.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+				.map_err(|err| {
+					DesktopError::caused(ErrorCode::AxFailed, "AT-SPI editable text proxy", &err)
+				})?
 				.build()
 				.await;
 			if let Ok(editable) = editable
-				&& editable
-					.set_text_contents(value)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
-			{
+				&& editable.set_text_contents(value).await.map_err(|err| {
+					DesktopError::caused(ErrorCode::AxFailed, "AT-SPI text value", &err)
+				})? {
 				return Ok(());
 			}
 			let numeric = value.parse::<f64>().map_err(|_| {
@@ -464,14 +485,14 @@ impl AxBackend for ActorAx {
 			let proxy = ValueProxy::builder(self.connection().connection())
 				.destination(name)
 				.and_then(|b| b.path(object.path().clone()))
-				.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI value proxy", &err))?
 				.build()
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI value", &err))?;
 			proxy
 				.set_current_value(numeric)
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI value", &err))
 		})
 	}
 
@@ -480,11 +501,13 @@ impl AxBackend for ActorAx {
 		self.rt.block_on(async {
 			let component = Self::component(self.connection(), &object)
 				.await
-				.map_err(DesktopError::ax_failed)?;
+				.map_err(|err| {
+					DesktopError::caused(ErrorCode::AxFailed, "AT-SPI action proxy", &err)
+				})?;
 			if component
 				.grab_focus()
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI focus: {err}")))?
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI focus", &err))?
 			{
 				Ok(())
 			} else {
@@ -497,10 +520,9 @@ impl AxBackend for ActorAx {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
 		self.rt.block_on(async {
-			for app in Self::apps(self.connection())
-				.await
-				.map_err(DesktopError::ax_failed)?
-			{
+			for app in Self::apps(self.connection()).await.map_err(|err| {
+				DesktopError::caused(ErrorCode::AxFailed, "AT-SPI application lookup", &err)
+			})? {
 				for frame in Self::frames(self.connection(), &app)
 					.await
 					.unwrap_or_default()
@@ -519,7 +541,7 @@ impl AxBackend for ActorAx {
 						.get_accessible_at_point(x, y, CoordType::Screen)
 						.await
 						.map_err(|err| {
-							DesktopError::ax_failed(format!("AT-SPI element at point: {err}"))
+							DesktopError::caused(ErrorCode::AxFailed, "AT-SPI element at point", &err)
 						})?;
 					return Ok((!found.is_null()).then_some(AxHandle::AtSpi(found)));
 				}
@@ -530,14 +552,14 @@ impl AxBackend for ActorAx {
 
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>> {
 		self.rt.block_on(async {
-			for app in Self::apps(self.connection())
-				.await
-				.map_err(DesktopError::ax_failed)?
-			{
+			for app in Self::apps(self.connection()).await.map_err(|err| {
+				DesktopError::caused(ErrorCode::AxFailed, "AT-SPI application lookup", &err)
+			})? {
 				if let Some(found) = Self::find_focused(self.connection(), app, 0)
 					.await
-					.map_err(DesktopError::ax_failed)?
-				{
+					.map_err(|err| {
+						DesktopError::caused(ErrorCode::AxFailed, "AT-SPI focused element", &err)
+					})? {
 					return Ok(Some(AxHandle::AtSpi(found)));
 				}
 			}
@@ -551,11 +573,11 @@ impl AxBackend for ActorAx {
 			let proxy = object
 				.as_accessible_proxy(self.connection().connection())
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI attributes: {err}")))?;
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI attributes", &err))?;
 			let mut attrs: Vec<_> = proxy
 				.get_attributes()
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI attributes: {err}")))?
+				.map_err(|err| DesktopError::caused(ErrorCode::AxFailed, "AT-SPI attributes", &err))?
 				.into_iter()
 				.map(|(key, mut value)| {
 					value.truncate(200);
