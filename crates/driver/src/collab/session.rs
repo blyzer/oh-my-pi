@@ -24,15 +24,12 @@ use omp_collab::{
 };
 use omp_core::{Str, base64_url};
 use omp_dom::{Dom, Event, Snapshot, SnapshotDecodeError};
-use omp_journal::EntryId;
 use omp_proto::collab::v1::{
 	AbortRequest, AgentCommand, AgentViewCancel, AgentViewEnd, AgentViewEvent, AgentViewRequest,
 	AgentViewSnapshot, CollabFrame, ErrorMessage, Hello, ImageAttachment, JournalRecord,
 	Participant, PromptRequest, RegistrySnapshot, SessionHeader, SessionStateUpdate, SnapshotChunk,
 	UiRequest, UiResponse, VisibilityClass, Welcome, collab_frame,
 };
-use serde::Deserialize;
-use serde_json::value::RawValue;
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -1634,16 +1631,12 @@ async fn start_guest(
 							let Some(dom) = replica.as_mut() else {
 								continue;
 							};
-							match decode_event(&record).and_then(|event| {
-								dom.apply_event(&event)?;
-								Ok(event)
-							}) {
-								Ok(event) => {
-									if replica_events.try_send(event).is_err() {
-										break;
-									}
-								},
-								Err(_) => break,
+							let Ok(event) = omp_dom::decode_event(&record.transcript_v4_json) else {
+								break;
+							};
+							if dom.apply_event(&event).is_err() || replica_events.try_send(event).is_err()
+							{
+								break;
 							}
 						},
 						Some(collab_frame::Payload::Agents(registry)) => {
@@ -1733,7 +1726,7 @@ async fn start_guest(
 								cancel_remote_view(&mut relay, &mut sequence, update.request_id).await;
 								continue;
 							};
-							let Ok(event) = decode_event(record) else {
+							let Ok(event) = omp_dom::decode_event(&record.transcript_v4_json) else {
 								if let Some(view) = views.remove(&update.request_id)
 									&& let Some(reply) = view.reply
 								{
@@ -2083,57 +2076,10 @@ fn decode_snapshot_chunks(records: &[JournalRecord]) -> Result<Vec<u8>, CollabCo
 }
 
 fn event_record(revision: u64, event: Event) -> Result<JournalRecord, serde_json::Error> {
-	let value = match event {
-		Event::Patch(patch) => serde_json::json!({"kind": "patch@1", "data": patch}),
-		Event::Reset { snapshot } => serde_json::json!({
-			"kind": "snapshot@1",
-			"data": serde_json::from_slice::<serde_json::Value>(snapshot.as_bytes())?,
-		}),
-		Event::Stream { cause, sid, op, node, prop, text } => serde_json::json!({
-			"kind": "stream@1",
-			"cause": cause,
-			"sid": sid,
-			"op": op,
-			"node": node,
-			"prop": prop,
-			"text": text,
-		}),
-	};
 	Ok(JournalRecord {
 		revision,
-		transcript_v4_json: Bytes::from(serde_json::to_vec(&value)?),
+		transcript_v4_json: Bytes::from(omp_dom::encode_event(&event)?),
 		visibility_class: VisibilityClass::PublicTranscript as i32,
-	})
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind")]
-enum ReplicatedEvent {
-	#[serde(rename = "patch@1")]
-	Patch { data: omp_dom::Patch },
-	#[serde(rename = "snapshot@1")]
-	Reset { data: Box<RawValue> },
-	#[serde(rename = "stream@1")]
-	Stream {
-		cause: EntryId,
-		sid:   omp_dom::Sid,
-		op:    omp_dom::StreamOp,
-		node:  Option<omp_dom::Handle>,
-		prop:  Option<omp_dom::PropKey>,
-		text:  Option<Str>,
-	},
-}
-
-fn decode_event(record: &JournalRecord) -> Result<Event, CollabCommandFault> {
-	let event: ReplicatedEvent = serde_json::from_slice(&record.transcript_v4_json)?;
-	Ok(match event {
-		ReplicatedEvent::Patch { data } => Event::Patch(data),
-		ReplicatedEvent::Reset { data } => {
-			Event::Reset { snapshot: Snapshot::from_bytes(data.get().as_bytes())? }
-		},
-		ReplicatedEvent::Stream { cause, sid, op, node, prop, text } => {
-			Event::Stream { cause, sid, op, node, prop, text }
-		},
 	})
 }
 

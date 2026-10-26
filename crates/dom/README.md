@@ -4,4 +4,6 @@
 
 Handles are monotonic and never reused. Transactions validate against the sequential post-state through a touched-node scratch overlay before changing the live tree. Snapshots use deterministic handle order and include both handle and stream-id high-water marks. Actors receive one snapshot followed by lossless patch, stream-delta, and reset events; append-only text streams materialize their buffer only for snapshots and close, so append work is proportional to the incoming delta.
 
+Events have one canonical byte form. `wire::encode_event` and `wire::decode_event` carry the ADR 0003 `patch@1`, `snapshot@1`, and `stream@1` envelopes, so the collaboration relay and the owner-local session projection replicate identical bytes. `redact::PropPolicy` drives the bridge redaction pass: `Snapshot::redact` and `redact::redact_event` blank selected property values and text content in place, never removing a property pair and never pruning a node, so a redacted replica keeps the same handles, parents, and child order as the owner's tree.
+
 The crate depends on `omp-journal` only for `EntryId` and shares `Tag`, `PropId`, and their custom-name wrappers with terminal consumers through `omp-vocab`.
