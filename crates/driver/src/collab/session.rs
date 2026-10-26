@@ -166,9 +166,6 @@ pub enum CollabCommandFault {
 	/// A replica snapshot was malformed or internally inconsistent.
 	#[error("collaboration replica snapshot was invalid")]
 	Snapshot(#[from] SnapshotDecodeError),
-	/// A replicated DOM event could not be applied.
-	#[error("collaboration replica event was invalid")]
-	Dom(#[from] omp_dom::DomError),
 	/// The host did not complete the welcome and snapshot handshake in time.
 	#[error("collaboration host handshake timed out")]
 	HandshakeTimeout,
