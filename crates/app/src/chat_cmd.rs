@@ -1346,6 +1346,21 @@ pub(crate) async fn run(
 			Arc::clone(ctx),
 			kernel.inference().speech_rewriter(),
 		)));
+	// Owner-local attach (`omp attach --observe`). The first omp on this
+	// machine owns the socket; a later one finds it live, serves nothing, and
+	// says so only in the log, because hosting is not what the user asked for.
+	#[cfg(unix)]
+	match omp_driver::SessionWire::from_ctx(Arc::clone(live_sessions), ctx) {
+		Ok(wire) => {
+			let socket_dir = data_dir.clone();
+			tokio::spawn(async move {
+				if let Err(error) = Arc::new(wire).serve(&socket_dir).await {
+					tracing::debug!(error = %error, "session control is not hosted here");
+				}
+			});
+		},
+		Err(error) => tracing::warn!(error = %error, "session redaction table refused"),
+	}
 	let home = omp_driver::headless::kernel::SessionHome::new(
 		data_dir,
 		project,

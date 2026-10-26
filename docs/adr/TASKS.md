@@ -135,26 +135,41 @@ Units, in dependency order. Each lands as its own change with its own tests.
 
 1. **DONE** `KernelHandle` carries the session's project root, so `SessionRef.project_root` can be
    filled (PR #433).
-2. **OPEN** `omp_dom::wire` encodes and decodes `Event`, replacing the private codec in
+2. **DONE** `omp_dom::wire` encodes and decodes `Event`, replacing the private codec in
    `crates/driver/src/collab/session.rs`, and `omp_dom::redact` blanks host-local properties in
-   place without pruning nodes or moving handles.
-3. **OPEN** `ControlVisibility`: the configurable redaction table, backed by a convar so the owner
-   can change the rules without a recompile.
-4. **OPEN** `SessionBridge`: one bounded replay ring per attached session, an `(epoch, seq)`
+   place without pruning nodes or moving handles (PR #434).
+3. **DONE** `ControlVisibility`: the configurable redaction table, backed by a convar so the owner
+   can change the rules without a recompile (PR #436).
+4. **DONE** `SessionBridge`: one bounded replay ring per attached session, an `(epoch, seq)`
    cursor, `Resync` for stale or evicted cursors, ordered `Reset` entries, lossless stream-append
-   merging, and a drain task that never blocks the kernel.
-5. **OPEN** `SessionWire` in `crates/driver`: reads `SessionRegistry`, owns the bridge table, binds
+   merging, and a drain task that never blocks the kernel (PR #437).
+5. **DONE** `SessionWire` in `crates/driver`: reads `SessionRegistry`, owns the bridge table, binds
    the owner-only UDS at `<data dir>/run/session.sock`, and absorbs the permission and stale-socket
-   handling from the unused `SessionHost`.
-6. **OPEN** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
+   handling from the unused `SessionHost` (PRs #439, #440).
+6. **DONE** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
    `SessionControlAuthority` trait that driver implements, with identity taken from transport
-   extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2.
-7. **OPEN** `omp attach --observe`: connects to the owner UDS, negotiates `session.control.v1`,
-   folds frames into a local `Dom`, and renders through the existing read-only presentation path.
-   The historical `std::future::pending()` stub is not restored.
-8. **OPEN** Proofs: unit tests per crate, a driver integration test over a real UDS, and a P-proof
-   covering convergence, detach and cursor resume, eviction and `Resync`, host restart and a new
-   epoch, redaction, and the refusal of every mutation path.
+   extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2 (PR #435).
+7. **DONE** `omp attach --observe`: connects to the owner UDS, folds frames into a local `Dom`,
+   and renders it through the production transcript projection as it converges. `omp chat` hosts
+   the socket, first process wins. The historical `std::future::pending()` stub is not restored.
+   Deviation from the ADR sketch: the retained chat-actor viewer is not the R1 presentation. The
+   chat host takes a controller, services, and an editor that an observer has nothing to put
+   behind; the transcript projection is the read-only path that exists today. R2 brings the
+   observer input, and the retained viewer lands with it.
+8. **PARTLY DONE** Proofs: unit tests per crate and the driver integration test over a real UDS
+   (`crates/driver/tests/session_attach_uds.rs`, `crates/app/tests/attach_client.rs`) are in.
+   **OPEN**: the P-proof covering convergence, detach and cursor resume, eviction and `Resync`,
+   host restart and a new epoch, redaction, and the refusal of every mutation path, over a real
+   `omp chat` host on a PTY.
+9. **OPEN, blocks R1 from being usable** An idle interactive kernel never answers `Up::Subscribe`.
+   `CallControl::handle` (`crates/agent/src/dispatch.rs`) serves that message, but the kernel only
+   drains its mailbox inside a turn (`Kernel::drain_mailbox`), and between turns the chat
+   controller owns the session. Smoked against a real `omp chat` on 2026-10-26: `omp attach` lists
+   the live session from the socket, and attaching to it answers `UNAVAILABLE` until a turn runs.
+   Child sessions are unaffected — the revive loop drains continuously
+   (`crates/driver/src/subagent/revive.rs`). The fix is a host-side seam that serves a subscription
+   while idle, not a client retry: an observer must be able to attach to a session that is doing
+   nothing, which is the case it exists for.
 
 Deferred by the same decision: WebSocket, JSON, and gRPC-Web surfaces, which are adapters over
 this projection and need a named consumer first.
