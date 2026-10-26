@@ -26,7 +26,12 @@ pub mod registry;
 pub mod rules;
 pub mod secrets;
 pub mod session_bridge;
-pub mod session_host;
+pub mod session_wire;
+pub use session_wire::SessionWire;
+pub mod delegated_acp;
+pub mod delegated_host;
+pub mod delegated_policy;
+pub mod delegated_resolver;
 pub mod session_imports;
 pub mod sessions;
 pub mod settings;
@@ -34,11 +39,6 @@ pub mod share;
 pub mod subagent;
 pub mod telemetry_upload;
 pub mod v1_import;
-pub use session_host::SessionHost;
-pub mod delegated_acp;
-pub mod delegated_host;
-pub mod delegated_policy;
-pub mod delegated_resolver;
 pub mod workspace_trust;
 
 /// Renders an error cause once into model-facing fault text at this
