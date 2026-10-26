@@ -124,7 +124,7 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   because that shape arrives through the ACP client. The Codex adapter is
   correct as it stands. Do not re-apply #366.
 
-- **BLOCKED** ADR 0039 R1 implementation remains owner-gated. No production files changed in the attempted worktree because the configured Claude worker and the GPT fallback dispatch both resolved to the exhausted Claude provider. The current tree still lacks `crates/serve` session projection, `crates/driver/src/session_wire.rs`, the bridge ring/cursor/resync/redaction, and a real `omp attach` client. The historical attach command is a `std::future::pending()` stub and is not restored.
+- **OPEN** ADR 0039 R1 remains incomplete under its proposed design. The ADR describes R1 as part-built and leaves owner questions open. The current tree still lacks `crates/serve` session projection, `crates/driver/src/session_wire.rs`, the bridge ring/cursor/resync/redaction, and a real `omp attach` client. The historical attach command is a `std::future::pending()` stub and is not restored. The implementation was not attempted after the scope review because it would have produced an incomplete projection.
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
