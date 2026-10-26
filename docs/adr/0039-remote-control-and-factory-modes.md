@@ -545,21 +545,26 @@ The owner answered the questions that blocked phase R1. The answers bind R1 only
 
 1. **Wire surface.** gRPC is the R1 surface. WebSocket, JSON, and gRPC-Web are wanted where they
    are feasible, and each is an adapter over the same projection rather than a second control
-   plane. gRPC-Web is a layer on the same `SessionControlServer`. A JSON surface is one
-   `type_attribute` in `crates/proto/build.rs`, but it would base64-wrap canonical `omp_dom` JSON
-   inside protobuf JSON, so a JSON-native payload encoding is refused. WebSocket needs a listener
-   this tree does not have, because `tokio-tungstenite` is configured client-only. R1 ships gRPC.
-   The other three land when a named consumer exists, and none of them may add a second bridge or
-   a second `omp_dom` encoding.
+   plane. gRPC-Web is a layer on the same `SessionControlServer`. A JSON surface is not a
+   `build.rs` change, because `crates/proto/build.rs` already derives Rust-native serde on every
+   generated type; what is missing is a JSON transport, and a proto3-JSON mapping would need a
+   different vehicle than those derives. Either way the payload would base64-wrap canonical
+   `omp_dom` JSON inside JSON, so a JSON-native payload encoding is refused. WebSocket is a new
+   production listener and route, not a layer; `tokio-tungstenite` can serve, as
+   `crates/collab/test_relay.rs` shows, but no production WebSocket listener carries session
+   control. R1 ships gRPC. The other three land when a named consumer exists, and none of them
+   may add a second bridge or a second `omp_dom` encoding.
 2. **Observer payload.** Attached observers receive canonical `omp_dom` bytes inside the typed
    envelopes. The full protobuf `Op` vocabulary of open question 5 is rejected.
 3. **Redaction.** Host-local facts are blanked in place for observers that lack
    `observe_host_local`, exactly as A4 states, and the property table is configurable through a
-   convar so the rules change without a recompile. One gap is recorded rather than guessed: the
-   DOM carries no advisor marker, so advisor subtrees cannot be classified today. Collab learns
-   advisor-ness from a caller-supplied flag, not from the tree. Until the kernel writes a marker
-   property, advisor redaction is out of R1 and the default table covers the facts that are
-   identifiable, such as paths and raw provider metadata.
+   convar so the rules change without a recompile. One gap is recorded rather than guessed. The
+   advisor transcript card is identifiable: the advisor Director writes it as a `notice` node
+   carrying `kind = advisor`. The model-facing advisor aside is not: it is a bare `developer`
+   node with no marker, so a table keyed on tag and property cannot separate it from any other
+   developer message. Until that node carries a marker, advisor-aside redaction is out of R1, and
+   the default table covers the facts that are identifiable, such as paths and raw provider
+   metadata.
 4. **Dead `omp.control.v1` session messages.** They stay. The deletion that A2 and Consequences
    proposed is cancelled, and the "hence the deletion of the `omp.control.v1` session messages"
    clause above no longer applies. Nothing in omp2 is required to stop reading them.
