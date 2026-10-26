@@ -387,39 +387,49 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 	assert_eq!(fresh.transcript(), host_transcript, "the resynchronized replica is the host's tree");
 	drop(rewound);
 
-	// 5. A restarted host mints a new epoch, so the cursor that outlived it is
-	//    resynchronized rather than silently replayed from a different ring.
+	// 5. The host dies without unlinking its socket (what a SIGKILL leaves behind),
+	//    a new one binds the same path, and the observer that outlived it
+	//    reconnects onto a new epoch.
+	host.abort();
+	let socket = omp_driver::session_wire::socket_path(&data_dir);
+	assert!(socket.exists(), "a killed host leaves its socket behind");
 	let restarted = build_wire(&sessions)?;
+	let host = tokio::spawn({
+		let wire = Arc::clone(&restarted);
+		let data_dir = data_dir.clone();
+		async move { wire.serve(&data_dir).await }
+	});
+	let mut client = pb::session_control_client::SessionControlClient::new(dial(&data_dir).await?);
 	let (attached, served) = tokio::join!(
-		restarted.attach(
-			ControlContext::new(
-				"owner",
-				ScopeSet::from_iter([ControlScope::Observe, ControlScope::ObserveHostLocal]),
-			),
-			attach_request("p14", Some(cursor)),
-		),
+		client.attach(attach_request("p14", Some(cursor))),
 		owner.serve_one(&mut session)
 	);
 	served?;
-	let mut after_restart = attached.context("attach after restart")?;
+	let mut after_restart = attached.context("attach after restart")?.into_inner();
 	let mut survivor = Replica::default();
 	fold_frames(&mut after_restart, &mut survivor, 3).await?;
 	assert_eq!(
 		survivor.resyncs,
 		vec!["epoch".to_owned()],
-		"a bridge from a new host is a new epoch, and the old cursor is refused"
+		"a bridge from a new host is a new epoch, and the cursor that outlived the old one is \
+		 refused"
+	);
+	assert!(
+		survivor.snapshot_chunks > 0,
+		"the reconnected observer is resent a snapshot rather than replayed from a ring it never saw"
 	);
 	assert_eq!(
 		survivor.transcript(),
 		host_transcript,
 		"the observer that outlived the host converges again"
 	);
+	drop(after_restart);
 
 	// 6. Redaction. The socket grants the owner every read scope, so the caller
 	//    that lacks `observe_host_local` is exercised at the authority.
 	// This wire already holds a bridge for the session, so the attachment is
 	// served from it and asks the owner for nothing.
-	let mut blind = wire
+	let mut blind = restarted
 		.attach(
 			ControlContext::new("observer", ScopeSet::from_iter([ControlScope::Observe])),
 			attach_request("p14", None),
