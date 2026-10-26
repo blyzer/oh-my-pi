@@ -133,8 +133,8 @@ has no advisor marker to key on.
 
 Units, in dependency order. Each lands as its own change with its own tests.
 
-1. **OPEN** `KernelHandle` carries the session's project root, so `SessionRef.project_root` can be
-   filled.
+1. **DONE** `KernelHandle` carries the session's project root, so `SessionRef.project_root` can be
+   filled (PR #433).
 2. **OPEN** `omp_dom::wire` encodes and decodes `Event`, replacing the private codec in
    `crates/driver/src/collab/session.rs`, and `omp_dom::redact` blanks host-local properties in
    place without pruning nodes or moving handles.
@@ -158,6 +158,22 @@ Units, in dependency order. Each lands as its own change with its own tests.
 
 Deferred by the same decision: WebSocket, JSON, and gRPC-Web surfaces, which are adapters over
 this projection and need a named consumer first.
+
+Found while building units 2 and 4, and not part of R1:
+
+- **OPEN** `Snapshot::from_bytes` is not a fixed point. `Value`'s `Deserialize`
+  (`crates/dom/src/node.rs`) routes a map through `serde_json::Value` and `to_raw_value`, and
+  `Snapshot::build` re-serializes it, so a non-compact `Value::Json` property loses its whitespace
+  and number form on the first hop and is stable after. `Snapshot` equality is a byte compare, so
+  two structurally identical trees can compare unequal. An attached observer folding events into
+  its own replica therefore cannot prove convergence by comparing canonical bytes with the host
+  until this is fixed. Fixing it means capturing the raw value directly in `Value::deserialize`
+  rather than round-tripping through `serde_json::Value`.
+- **OPEN** `PropPolicy::redacts_content` receives only a `Tag`, so a value-conditioned rule cannot
+  be expressed. The advisor transcript card is identifiable in the DOM, as a `notice` carrying
+  `kind = advisor`, but classifying it needs a wider signature; `notice/data` alone would swallow
+  unrelated notices. ADR 0039 section A4 names advisor subtrees as host-local, so R1 ships with
+  that card unredacted.
 
 ## Superseded task snapshots
 
