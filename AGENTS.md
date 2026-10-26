@@ -556,6 +556,31 @@ clone).
 - NEVER revert/`git checkout` user edits; user edits/renames in flight —
   adapt to the tree as is.
 
+### Editing Discipline (CRITICAL)
+Source files in this repo are changed through the editing tools, never through
+a script that rewrites them.
+- Surgical change → `edit` (hashline), anchored on a tag from a fresh `read`.
+  Structural refactor → `ast_edit`. Symbol rename, import fix, quick-fix →
+  `lsp` `rename`/`code_actions`. Whole new file → `write`.
+- `python3 - <<'EOF'`, `sed -i`, `perl -pi`, `awk` redirects, and any other
+  script that rewrites a tracked file are PROHIBITED, including inside a bash
+  pipeline that also builds or tests. Bulk mechanical renames go to `sonic`
+  with `sd`/`ast_edit`, never hand-rolled Python.
+- ONE exception: a mutation-testing loop that patches a file it will revert and
+  never keep. That loop runs ONLY against already-committed work.
+  1. `git add -A && git commit` first. NEVER `git restore`/`git checkout --` a
+     file holding uncommitted work — it is unrecoverable and has cost work
+     twice.
+  2. After the loop, prove the proof survived: `grep -c '<test name>' <file>`.
+     A nextest filter reporting `0 tests run: N skipped` means the test was
+     deleted, not that the filter was wrong.
+- One concern per tool call. The edit is its own call; `cargo fmt`, `check` and
+  the test runs are separate calls. Chaining them is what makes the scripted
+  form attractive and what hides its failures.
+- This binds every role and subagent that writes files, and every agent prompt
+  or skill body authored here: none of them may demonstrate or imply a
+  script-patch recipe.
+
 ### Code Navigation
 Pick the cheapest evidence before reading source.
 - Text (exact strings, literals, config keys, errors, comments, regex, or a
