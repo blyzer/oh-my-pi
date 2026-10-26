@@ -959,6 +959,12 @@ async fn drain(shared: Arc<Shared>, events: flume::Receiver<Event>) {
 /// with no drain behind it, and a subscriber would park on a wake channel that
 /// has no sender left instead of receiving the fault [`Closure`] exists to
 /// deliver.
+///
+/// A cancelled drain also drops this guard with no closure recorded, because
+/// `JoinHandle::abort` drops the future at its await point. That is a clean
+/// detach, not a fault, and it races [`SessionBridge::drop`]'s own
+/// [`Closure::Detached`] on a multi-thread runtime, so the two cases are told
+/// apart by whether the thread is unwinding rather than by which one wins.
 struct DrainGuard {
 	shared:  Arc<Shared>,
 	closure: Option<Closure>,
@@ -966,7 +972,14 @@ struct DrainGuard {
 
 impl Drop for DrainGuard {
 	fn drop(&mut self) {
-		self.shared.close(self.closure.unwrap_or(Closure::Panicked));
+		let closure = self.closure.unwrap_or_else(|| {
+			if std::thread::panicking() {
+				Closure::Panicked
+			} else {
+				Closure::Detached
+			}
+		});
+		self.shared.close(closure);
 	}
 }
 
@@ -1659,20 +1672,53 @@ mod tests {
 		);
 	}
 
-	/// A drain that leaves by unwinding still closes the bridge. Without the
-	/// guard `closed` stays unset, and a subscriber parks on a wake channel with
-	/// no sender left instead of receiving a closure.
+	/// A drain that leaves by unwinding closes the bridge as a fault, so a
+	/// subscriber receives a closure instead of parking on a wake channel that
+	/// has no sender. A drain cancelled by `abort` drops the same guard with no
+	/// closure recorded, and must not be mistaken for that fault.
 	#[tokio::test]
-	async fn an_unwinding_drain_closes_as_a_panic() {
+	async fn an_unwinding_drain_closes_as_a_panic_and_a_cancelled_one_does_not() {
 		let (_producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
 		let mut subscriber = bridge.subscribe(None);
 		assert!(matches!(subscriber.try_next(None), Polled::Ready(Delivery::Welcome { .. })));
 
-		drop(DrainGuard { shared: Arc::clone(&bridge.shared), closure: None });
+		let shared = Arc::clone(&bridge.shared);
+		let unwound = std::thread::spawn(move || {
+			let _guard = DrainGuard { shared, closure: None };
+			panic!("the drain unwinds");
+		})
+		.join();
+		assert!(unwound.is_err(), "the probe thread panicked");
 
 		assert!(
 			matches!(subscriber.try_next(None), Polled::Closed(Closure::Panicked)),
 			"an unwinding drain names itself, so a projection can fault",
 		);
+	}
+
+	/// `JoinHandle::abort` drops the drain future at its await point, so the
+	/// guard runs with no closure recorded. That is the host detaching on its
+	/// own terms, and it races [`SessionBridge::drop`]'s own close, so both
+	/// orderings must agree.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+	async fn a_cancelled_drain_closes_as_a_detach() {
+		let (_producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		assert!(matches!(subscriber.try_next(None), Polled::Ready(Delivery::Welcome { .. })));
+
+		drop(bridge);
+
+		let closure = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				match subscriber.try_next(None) {
+					Polled::Closed(closure) => return closure,
+					Polled::Empty => tokio::task::yield_now().await,
+					Polled::Ready(delivery) => panic!("nothing was published, got {delivery:?}"),
+				}
+			}
+		})
+		.await
+		.expect("a dropped bridge closes its subscribers");
+		assert_eq!(closure, Closure::Detached, "a cancelled drain is not a fault");
 	}
 }
