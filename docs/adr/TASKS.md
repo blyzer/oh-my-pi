@@ -156,11 +156,14 @@ Units, in dependency order. Each lands as its own change with its own tests.
    chat host takes a controller, services, and an editor that an observer has nothing to put
    behind; the transcript projection is the read-only path that exists today. R2 brings the
    observer input, and the retained viewer lands with it.
-8. **PARTLY DONE** Proofs: unit tests per crate and the driver integration test over a real UDS
-   (`crates/driver/tests/session_attach_uds.rs`, `crates/app/tests/attach_client.rs`) are in.
-   **OPEN**: the P-proof covering convergence, detach and cursor resume, eviction and `Resync`,
-   host restart and a new epoch, redaction, and the refusal of every mutation path, over a real
-   `omp chat` host on a PTY.
+8. **DONE** Proofs: unit tests per crate, the driver integration test over a real UDS
+   (`crates/driver/tests/session_attach_uds.rs`), the command's own socket path
+   (`crates/app/tests/attach_client.rs`), and P14 (`crates/e2e/tests/p14_session_attach.rs`):
+   a production kernel, the owner socket with its interceptor, and the generated client prove
+   convergence from a snapshot plus ordered events, detach and cursor resume replayed from the
+   ring, a foreign epoch answered with a resync and a fresh snapshot, a restarted host minting a
+   new epoch, redaction of every host-local property under the shipped table, and the refusal of
+   all four mutating verbs. Gated in `just e2e` and in CI's Linux proofs job.
 9. **DONE** An idle interactive kernel never answered `Up::Subscribe`, because a kernel drains its
    mailbox only inside a turn. `KernelHandle` now carries `idle_subscribe`, the channel whoever
    holds the session between turns serves, and the wire asks the mailbox and that seam together,
