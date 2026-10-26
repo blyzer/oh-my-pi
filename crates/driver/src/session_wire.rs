@@ -708,6 +708,8 @@ mod tests {
 	/// client tell "current" from "hung".
 	#[tokio::test]
 	async fn a_heartbeat_reports_the_bridge_head() {
+		use futures::StreamExt as _;
+
 		let sessions = Arc::new(SessionRegistry::new());
 		let (mut kernel, _) = registered(&sessions, "live", "/workspace/live");
 		let wire = Arc::new(SessionWire::new(
@@ -726,26 +728,34 @@ mod tests {
 			})
 			.await
 			.expect("attaching succeeds");
-		let opening = ready(&mut stream).await;
 		kernel.publish("one more");
-		let frames = ready(&mut stream).await;
 
-		let head = frames
-			.iter()
-			.chain(opening.iter())
-			.find_map(|frame| match frame {
-				pb::attach_frame::Frame::Event(event) => Some(event.seq),
-				_ => None,
-			})
-			.expect("the published edit arrives");
-		let heartbeat = frames
-			.iter()
-			.find_map(|frame| match frame {
-				pb::attach_frame::Frame::Heartbeat(beat) => Some(beat.head_seq),
-				_ => None,
-			})
-			.expect("an idle stream heartbeats");
-		assert_eq!(heartbeat, head, "the heartbeat carries the head, got {frames:?}");
+		// A 50 ms heartbeat never lets the stream fall idle, so read a bounded
+		// prefix rather than draining it.
+		let mut head = None;
+		let mut heartbeat = None;
+		for _ in 0..24 {
+			let next = tokio::time::timeout(Duration::from_millis(500), stream.next())
+				.await
+				.expect("the stream produces a frame")
+				.expect("the stream does not end")
+				.expect("the stream does not fault")
+				.frame
+				.expect("a frame body");
+			match next {
+				pb::attach_frame::Frame::Event(event) => head = Some(event.seq),
+				pb::attach_frame::Frame::Heartbeat(beat) if head.is_some() => {
+					heartbeat = Some(beat.head_seq);
+					break;
+				},
+				_ => {},
+			}
+		}
+		assert_eq!(
+			heartbeat.expect("an idle stream heartbeats"),
+			head.expect("the published edit arrives"),
+			"the heartbeat carries the bridge head"
+		);
 	}
 
 	/// A cursor the bridge can serve replays events, and the proto still makes
