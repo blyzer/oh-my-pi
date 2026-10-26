@@ -8915,6 +8915,8 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "strum",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tonic",
