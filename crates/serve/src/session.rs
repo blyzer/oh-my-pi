@@ -150,8 +150,13 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::HostUnavailable`] | `unavailable` |
 	/// | [`SessionControlError::Backend`] | `internal` |
 	///
-	/// `OutOfGrant` and `MissingScope` share `permission_denied` deliberately:
-	/// the wire must not disclose whether an unreachable session exists.
+	/// The codes are diagnostic, not protective. R1 serves one principal, the
+	/// owner, over a filesystem-authenticated socket, so a caller already knows
+	/// which sessions exist and `not_found` discloses nothing it could not read
+	/// from the session directory. Once a device holds a grant over a subset of
+	/// sessions, that stops being true: `UnknownSession` and `OutOfGrant` must
+	/// then answer the same code and the same text, or the pair becomes an
+	/// oracle for session ids outside the grant.
 	fn from(error: SessionControlError) -> Self {
 		let message = error.to_string();
 		match error {
