@@ -99,25 +99,14 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 
 Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
 
-- **STILL OPEN** ADR 0039 phase R1 (read-only attach over the owner UDS). PR
-  #342, titled "ADR 0039 A5", reports merged (`3c2695eb8e`), but it targeted
-  `feat/session-host`, not `omp2`. Only the base commits under that merge
-  (`de39d50718` and earlier) reached `omp2`, and `origin/feat/session-host`
-  still points at the merge itself. Two of its nine paths never arrived:
-  `crates/app/src/attach_cmd.rs` (the CLI command) and
-  `crates/driver/src/session_wire.rs` (the driver-side gRPC projection). The
-  attach wiring the merge added to `crates/app/src/cli.rs` and
-  `crates/app/src/lib.rs` is absent with them. The top-level `Command` enum
-  has no `Attach` variant, and the `JobsCommand::Attach` in `cli.rs` is the
-  unrelated `omp jobs attach`. The merge's other content is on `omp2` through
-  separate commits (`session.proto` and `omp_proto::session`,
-  `crates/rpc/src/device_auth.rs` and its `ring` dependency, and the
-  `device_load_or_generate` block in `crates/app/src/daemon.rs`). Both lost
-  files live in `561583c686`, the merge's second parent, reachable from
-  `origin/feat/session-host` or after `git fetch origin refs/pull/342/head`.
-  `attach_cmd::run` parks on `std::future::pending()`, so it is not restored
-  on its own. It lands with the real R1 gRPC projection. ADR 0039's `Status
-  in omp` and its `STATUS.md` row are corrected in the same change.
+- **RESOLVED** ADR 0039 phase R1 (read-only attach over the owner UDS). The orphaned PR #342
+  is superseded, not recovered: its two lost files were rebuilt against the real projection
+  rather than restored, and its `attach_cmd::run` stub that parked on
+  `std::future::pending()` was never reinstated. R1 landed as PRs #433 through #442 and the
+  P14 proof: `omp_dom::wire`/`redact`, `ControlVisibility`, `SessionBridge`, `SessionWire`
+  on the owner socket, `SessionControlRpc` with its four `UNIMPLEMENTED` verbs, the
+  `omp attach --observe` client, and the idle-session subscription seam. The unit queue and
+  what each unit carries are below; `origin/feat/session-host` holds nothing `omp2` needs.
 - **NO ACTION** Codex `auth_required` object-form classification. PR #366
   classified a signed-out `-32000` inside `codex_app_server`; `286ff0945b`
   reverted it and moved the rule to `acp_client::wire::is_missing_login`,
@@ -152,15 +141,22 @@ Units, in dependency order. Each lands as its own change with its own tests.
 7. **DONE** `omp attach --observe`: connects to the owner UDS, folds frames into a local `Dom`,
    and renders it through the production transcript projection as it converges. `omp chat` hosts
    the socket, first process wins. The historical `std::future::pending()` stub is not restored.
-   Deviation from the ADR sketch: the retained chat-actor viewer is not the R1 presentation. The
+   **OPEN, deferred by decision:** the retained chat-actor viewer is not the R1 presentation. The
    chat host takes a controller, services, and an editor that an observer has nothing to put
    behind; the transcript projection is the read-only path that exists today. R2 brings the
-   observer input, and the retained viewer lands with it.
-8. **PARTLY DONE** Proofs: unit tests per crate and the driver integration test over a real UDS
-   (`crates/driver/tests/session_attach_uds.rs`, `crates/app/tests/attach_client.rs`) are in.
-   **OPEN**: the P-proof covering convergence, detach and cursor resume, eviction and `Resync`,
-   host restart and a new epoch, redaction, and the refusal of every mutation path, over a real
-   `omp chat` host on a PTY.
+   observer input, and the retained viewer lands with it. Concretely, `TranscriptViewer`
+   (`crates/chat/src/overlays/hub.rs`) takes `(Snapshot, Receiver<Event>)` — which an
+   attachment already has — but it is a full-screen retained overlay keyed on a parent
+   session's subagent `JobRow`, while `omp attach` is a pipeable stdout tail. Hosting it
+   needs a standalone panel loop in `crates/app` and a session-shaped row, not a wrapper.
+8. **DONE** Proofs: unit tests per crate, the driver integration test over a real UDS
+   (`crates/driver/tests/session_attach_uds.rs`), the command's own socket path
+   (`crates/app/tests/attach_client.rs`), and P14 (`crates/e2e/tests/p14_session_attach.rs`):
+   a production kernel, the owner socket with its interceptor, and the generated client prove
+   convergence from a snapshot plus ordered events, detach and cursor resume replayed from the
+   ring, a foreign epoch answered with a resync and a fresh snapshot, a restarted host minting a
+   new epoch, redaction of every host-local property under the shipped table, and the refusal of
+   all four mutating verbs. Gated in `just e2e` and in CI's Linux proofs job.
 9. **DONE** An idle interactive kernel never answered `Up::Subscribe`, because a kernel drains its
    mailbox only inside a turn. `KernelHandle` now carries `idle_subscribe`, the channel whoever
    holds the session between turns serves, and the wire asks the mailbox and that seam together,

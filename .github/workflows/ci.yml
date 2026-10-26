@@ -662,13 +662,14 @@ jobs:
       # `--profile ci` gives e2e tests the whole machine one at a time
       # (`threads-required = "num-cpus"` in .config/nextest.toml), so these
       # proofs never race for sockets or the shared embedded interpreter.
-      - name: Run proofs P9, P10 and P11
+      - name: Run proofs P9, P10, P11 and P14
         run: |
           cargo nextest run --profile ci -p omp-e2e --locked \
             --test p9_isolation \
             --test p9_extension_control \
             --test p10_lift_idempotence \
-            --test p11_collab_spectator
+            --test p11_collab_spectator \
+            --test p14_session_attach
 
       - name: Run tool source routing check
         run: cargo nextest run --profile ci -p omp-e2e --test tool_sources --locked
