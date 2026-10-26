@@ -38,7 +38,7 @@ that no implementation is authorized before acceptance.
   `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
   (`crates/e2e/tests/p12_daemon_approvals.rs`, macOS, real daemon). Both pin
   the gap; the containment fix inverts them into acceptance tests.
-- **OPEN** P8 baselines for workloads W1–W9 in attached and embedded modes.
+- **OPEN** P8 baselines for workloads W1–W9 in attached and embedded modes. The current workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996) records only the synthetic `omp-e2e` recorder on self-hosted macOS arm64; it does not satisfy the W1–W9 attached/embedded baseline requirement.
 - **OPEN after acceptance** containment fixes in `crates/env/src/partition.rs`:
   typed terminal errors for pending remote routes and local-backend survival
   after remote closure.
@@ -64,17 +64,11 @@ Completed implementation items:
 
 Active items:
 
-- **OPEN** B4. `validate_worker_frame` is used for the Ping probe, but the
-  normal worker decode path does not call it, and `validate_host_frame` has no
-  production caller. Call the validators before prost decode or delete the
-  dead validators and their tests.
-- **PARTIAL** B5. The golden journal harness exists with two fixture pairs.
-  Decide whether the ADR's “each kind or field addition” wording requires
-  fixtures for `compaction`, `tool.update`, and `patch`, then add the missing
-  fixtures if required.
-- **BLOCKED** owner acceptance. Confirm the Buf ignore list, choose the B1
-  lenient-decode versus revision-bump variant, and run the required local Buf
-  breaking proof.
+- **BLOCKED** B4 pending owner acceptance. `validate_worker_frame` is used only for the Ping probe, and `validate_host_frame` has no production caller. The current tree has no normal `HostFrame` decode path, while the worker path already preflights its only `WorkerFrame` decode in `crates/envd/src/exec.rs::take_worker_frame`. Do not add a second or speculative decode path before the owner accepts ADR 0048.
+- **BLOCKED** B5 pending owner acceptance and a corpus decision. The committed harness in `crates/session/tests/golden_journals.rs` has two fixture pairs, `chat-stream` and `tool-calls-and-rewind`, and passes its replay proof. It does not cover `compaction`, `tool.update`, or `patch` as separate corpus builders. Add those fixtures only after the owner decides that the ADR's “each kind or field addition” wording requires them.
+- **BLOCKED** owner acceptance. Confirm the Buf ignore list, choose the B1 lenient-decode versus revision-bump variant, and run the required local Buf breaking proof.
+
+`just proto-breaking` passes on the current tree. `just e2e-p8` passes. The latest non-gating P8 artifact is workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996), but it measures the synthetic recorder workload, not ADR 0045 workloads W1–W9.
 
 `adr0048-slice-c` is a **HISTORICAL** audit, not the live state. Its B8 and B9
 labels are stale relative to the current tree. Use this section, the ADR, and
@@ -130,6 +124,7 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   because that shape arrives through the ACP client. The Codex adapter is
   correct as it stands. Do not re-apply #366.
 
+- **OPEN** ADR 0039 R1 remains incomplete under its proposed design. The ADR describes R1 as part-built and leaves owner questions open. The current tree still lacks `crates/serve` session projection, `crates/driver/src/session_wire.rs`, the bridge ring/cursor/resync/redaction, and a real `omp attach` client. The historical attach command is a `std::future::pending()` stub and is not restored. The implementation was not attempted after the scope review because it would have produced an incomplete projection.
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
