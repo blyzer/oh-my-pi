@@ -311,8 +311,16 @@ fn restrict_socket(path: &Path) -> Result<(), SessionWireError> {
 
 /// Asks a live kernel for a DOM subscription within [`SUBSCRIBE_BUDGET`].
 async fn subscribe(handle: &KernelHandle) -> Result<DomSubscription, SessionControlError> {
-	let (reply, subscription) = flume::bounded(1);
-	if handle.up.send(Up::Subscribe(reply)).is_err() {
+	// A session is held by its kernel inside a turn and by its owner between
+	// turns, and only the holder can subscribe to the DOM. Ask both and take
+	// whichever answers; the loser's subscription is dropped unused.
+	let (reply, subscription) = flume::bounded(2);
+	let mailbox = handle.up.send(Up::Subscribe(reply.clone())).is_ok();
+	let idle = handle
+		.idle_subscribe
+		.as_ref()
+		.is_some_and(|idle| idle.send(reply).is_ok());
+	if !(mailbox || idle) {
 		return Err(SessionControlError::SessionNotLive { session_id: handle.id.clone().into() });
 	}
 	match tokio::time::timeout(SUBSCRIBE_BUDGET, subscription.recv_async()).await {
@@ -631,6 +639,7 @@ mod tests {
 			topology: omp_agent::SessionTopology::main(Str::new(id)),
 			relay: IrcRelayPolicy::default(),
 			autoreply: None,
+			idle_subscribe: None,
 			project_root: Arc::from(Path::new(root)),
 		});
 		(FakeKernel { dom, drain, to, _serve: serve }, detached)

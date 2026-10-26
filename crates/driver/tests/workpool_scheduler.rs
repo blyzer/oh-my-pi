@@ -79,6 +79,7 @@ impl WorkpoolLauncher for Launcher {
 			topology:     SessionTopology::child(request.owner.clone(), self.main.clone()),
 			relay:        IrcRelayPolicy::fixed(true),
 			autoreply:    None,
+			idle_subscribe: None,
 			project_root: Arc::from(std::path::Path::new("/workspace")),
 		});
 		let id = request.id.clone();
@@ -195,6 +196,7 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 		topology:     SessionTopology::main(sf!("owner")),
 		relay:        IrcRelayPolicy::fixed(true),
 		autoreply:    None,
+		idle_subscribe: None,
 		project_root: Arc::from(std::path::Path::new("/workspace")),
 	});
 	let authority: Arc<dyn omp_agent::SessionAuthority> = sessions.clone();

@@ -618,6 +618,8 @@ pub(crate) struct Controller<C = ComposedInference> {
 	/// Abnormal process boundary that requested shutdown. Ordinary actor quit
 	/// leaves this empty and records a silent clean exit.
 	exit_cause:     Option<omp_session::ExitCause>,
+	/// Subscription requests from observers, served while no turn runs.
+	idle_subscribe: flume::Receiver<flume::Sender<omp_agent::steering::DomSubscription>>,
 	tan_tx:         flume::Sender<TanDone>,
 	tan_rx:         flume::Receiver<TanDone>,
 	/// Agents the controller revived from the hub and still running: their
@@ -674,6 +676,11 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let collab_status =
 			spawn_collab_status(collab.clone(), Arc::clone(&ctx), catalog.clone(), home.model.clone());
 		let (tan_tx, tan_rx) = flume::unbounded();
+		// An observer attaching between turns cannot be served by the kernel:
+		// it drains its mailbox only inside one. The session is held here
+		// while idle, so the idle loop answers from it.
+		let (idle_tx, idle_subscribe) = flume::unbounded();
+		let home = home.with_idle_subscribe(idle_tx);
 		let controller = Self {
 			kernel,
 			lifecycle,
@@ -704,6 +711,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			),
 			pending: Vec::new(),
 			exit_cause: None,
+			idle_subscribe,
 			tan_tx,
 			tan_rx,
 			revived: Vec::new(),
@@ -737,6 +745,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 					Err(_) => Flow::Quit,
 				},
 				() = input_gate.changed() => Flow::Idle,
+				request = self.idle_subscribe.recv_async() => {
+					if let Ok(reply) = request {
+						let _ = reply.send(self.session.subscribe());
+					}
+					Flow::Idle
+				},
 				done = self.tan_rx.recv_async() => {
 					if let Ok(done) = done {
 						self.settle_tan(done)?;
@@ -2498,6 +2512,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		}
 		let home = SessionHome {
 			sessions_dir,
+			idle_subscribe: None,
 			project_root: target.clone(),
 			model: self.home.model.clone(),
 			prompt: self.home.prompt.clone(),
@@ -3886,6 +3901,7 @@ mod tests {
 			let live = Arc::new(omp_driver::sessions::SessionRegistry::new());
 			let home = SessionHome {
 				sessions_dir:    dir.path().join("sessions"),
+				idle_subscribe: None,
 				project_root:    dir.path().to_path_buf(),
 				model:           Str::new_static("test/model"),
 				prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4245,6 +4261,7 @@ mod tests {
 		.with_session_observer(Arc::new(OrderBridge { order: order_tx.clone() }));
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
+			idle_subscribe: None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4402,6 +4419,7 @@ mod tests {
 		);
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
+			idle_subscribe: None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4791,6 +4809,7 @@ mod tests {
 				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
 				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:    None,
+				idle_subscribe: None,
 				project_root: Arc::from(std::path::Path::new("/workspace")),
 			});
 		harness
@@ -4928,6 +4947,7 @@ mod tests {
 				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
 				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:    None,
+				idle_subscribe: None,
 				project_root: Arc::from(std::path::Path::new("/workspace")),
 			});
 		let mailbox = harness.mailbox();

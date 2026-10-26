@@ -3125,6 +3125,7 @@ pub async fn compose_kernel(
 		topology,
 		relay,
 		autoreply,
+		idle_subscribe: None,
 		project_root: Arc::from(project_root.as_path()),
 	});
 	if tools_enabled {
@@ -3229,6 +3230,11 @@ pub struct SessionHome {
 	/// are scoped to the agent class journaled on it (a resumed child keeps
 	/// its own rules) instead of copying [`Self::facts`]' rule rows.
 	pub rules:           Option<Arc<crate::discovery::rules::RuleScope>>,
+	/// Serves DOM subscriptions to observers while the session is idle.
+	///
+	/// Set by the owner that runs an idle loop over the session; a headless
+	/// composition that has none leaves it `None`.
+	pub idle_subscribe:  Option<flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>>,
 	/// The workspace trust decision the kernel was composed under; every
 	/// session this home creates or opens journals it once. `None` journals
 	/// nothing (a home over another workspace, whose trust nobody decided).
@@ -3266,7 +3272,18 @@ impl SessionHome {
 			up,
 			rules: None,
 			workspace_trust: None,
+			idle_subscribe: None,
 		})
+	}
+
+	/// Installs the channel an idle owner serves DOM subscriptions on.
+	#[must_use]
+	pub fn with_idle_subscribe(
+		mut self,
+		idle: flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>,
+	) -> Self {
+		self.idle_subscribe = Some(idle);
+		self
 	}
 
 	/// Records the discovered prompt material so sessions created in-chat
@@ -3435,6 +3452,7 @@ impl SessionHome {
 				topology,
 				relay,
 				autoreply,
+				idle_subscribe: self.idle_subscribe.clone(),
 				project_root: Arc::from(self.project_root.as_path()),
 			});
 	}
@@ -5295,6 +5313,7 @@ mod tests {
 		};
 		let home = SessionHome {
 			sessions_dir:    sessions_dir.clone(),
+			idle_subscribe: None,
 			project_root:    scratch.path().to_path_buf(),
 			model:           Str::new_static("provider/model"),
 			prompt:          PromptOverrides::default(),

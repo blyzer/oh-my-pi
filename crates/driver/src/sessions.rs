@@ -8,6 +8,7 @@ use std::{
 };
 
 use omp_agent::{
+	steering::DomSubscription,
 	PeerAutoreply, SessionAuthority, SessionEndpoint, SessionRole, SessionTopology, Up,
 };
 use omp_core::{FastHashMap, Str};
@@ -66,6 +67,14 @@ pub struct KernelHandle {
 	pub relay:        IrcRelayPolicy,
 	/// Recipient-owned automatic peer reply actor.
 	pub autoreply:    Option<Arc<dyn PeerAutoreply>>,
+	/// Serves DOM subscriptions while the kernel is between turns.
+	///
+	/// A kernel drains its mailbox only inside a turn, so `Up::Subscribe` on
+	/// an idle session goes unanswered until the next one. Whoever holds the
+	/// session between turns serves this channel instead; a handle whose
+	/// owner has no idle loop leaves it `None` and is reachable only through
+	/// the mailbox.
+	pub idle_subscribe: Option<flume::Sender<flume::Sender<DomSubscription>>>,
 	/// Canonical project root the kernel was composed over.
 	///
 	/// An `Arc<Path>` because the registry clones a handle on every lookup

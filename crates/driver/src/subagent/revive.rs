@@ -318,6 +318,7 @@ async fn drive(
 		topology: composed.topology,
 		relay: composed.relay,
 		autoreply,
+		idle_subscribe: None,
 		project_root: Arc::clone(&composed.project_root),
 	};
 	child.sessions.register(child.id.clone(), live.clone());

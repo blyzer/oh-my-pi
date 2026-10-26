@@ -1909,6 +1909,7 @@ mod tests {
 				topology:     omp_agent::SessionTopology::main(Str::new_static(id)),
 				relay:        crate::sessions::IrcRelayPolicy::default(),
 				autoreply:    None,
+				idle_subscribe: None,
 				project_root: Arc::from(temp.path()),
 			});
 		};

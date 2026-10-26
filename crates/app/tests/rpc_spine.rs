@@ -104,6 +104,7 @@ fn scripted_kernel_with_start_signal(
 fn session_home(temp: &tempfile::TempDir, kernel: &Kernel<ScriptedInference>) -> SessionHome {
 	SessionHome {
 		sessions_dir:    temp.path().join("sessions"),
+		idle_subscribe: None,
 		project_root:    temp.path().to_path_buf(),
 		model:           Str::new_static("scripted/test"),
 		prompt:          Default::default(),
