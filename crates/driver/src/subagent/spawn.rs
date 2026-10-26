@@ -1902,13 +1902,14 @@ mod tests {
 		let register = |id: &'static str| {
 			let (up, _) = flume::unbounded();
 			registry.register(Str::new_static(id), crate::sessions::KernelHandle {
-				id:        crate::sessions::SessionId::new(Str::new_static(id)),
-				name:      Str::new_static(id),
-				up:        up.clone(),
-				snapshot:  Arc::new(parking_lot::RwLock::new(session.dom().snapshot())),
-				topology:  omp_agent::SessionTopology::main(Str::new_static(id)),
-				relay:     crate::sessions::IrcRelayPolicy::default(),
-				autoreply: None,
+				id:           crate::sessions::SessionId::new(Str::new_static(id)),
+				name:         Str::new_static(id),
+				up:           up.clone(),
+				snapshot:     Arc::new(parking_lot::RwLock::new(session.dom().snapshot())),
+				topology:     omp_agent::SessionTopology::main(Str::new_static(id)),
+				relay:        crate::sessions::IrcRelayPolicy::default(),
+				autoreply:    None,
+				project_root: Arc::from(temp.path()),
 			});
 		};
 		register("kept");
