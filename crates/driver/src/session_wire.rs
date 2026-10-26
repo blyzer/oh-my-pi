@@ -259,6 +259,14 @@ fn owner_identity(mut request: tonic::Request<()>) -> Result<tonic::Request<()>,
 #[cfg(unix)]
 const OWNER_PRINCIPAL: &str = "owner";
 
+/// The owner socket a session host binds under `data_dir`.
+///
+/// The client dials this path, so both sides read it from here.
+#[must_use]
+pub fn socket_path(data_dir: &Path) -> PathBuf {
+	data_dir.join("run").join("session.sock")
+}
+
 /// An owner-only socket path this process has claimed.
 #[cfg(unix)]
 struct OwnerSocket {
@@ -276,7 +284,7 @@ async fn bind_owner_socket(data_dir: &Path) -> Result<OwnerSocket, SessionWireEr
 	fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
 		.map_err(|source| SessionWireError::RunDirectory { path: run.clone(), source })?;
 
-	let path = run.join("session.sock");
+	let path = socket_path(data_dir);
 	if path.exists() {
 		// A socket whose owner is gone refuses the connection; one a live host
 		// still answers must not be stolen.

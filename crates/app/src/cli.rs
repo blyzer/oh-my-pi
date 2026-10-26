@@ -1105,6 +1105,8 @@ pub enum Command {
 	Share(ShareArgs),
 	/// Discover local collaboration hosts and retrieve their links.
 	Collab(CollabArgs),
+	/// Attach to a session this machine already runs, read-only.
+	Attach(AttachArgs),
 	/// Run a single prompt and stream its response to standard output.
 	#[command(alias = "p")]
 	Print(PrintArgs),
@@ -1520,6 +1522,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "join", aliases: &[] },
 	CommandSpec { name: "share", aliases: &[] },
 	CommandSpec { name: "collab", aliases: &[] },
+	CommandSpec { name: "attach", aliases: &[] },
 	CommandSpec { name: "models", aliases: &["model"] },
 	CommandSpec { name: "worktree", aliases: &["wt"] },
 	CommandSpec { name: "stats", aliases: &[] },
@@ -2534,6 +2537,32 @@ pub enum AuthGatewayCommand {
 	},
 }
 
+/// Read-only attachment to a session this machine runs.
+///
+/// With no session, lists what the local host serves. The attachment folds
+/// the host's snapshot and events into a local replica and renders it; it
+/// steers nothing.
+#[derive(Clone, Debug, Args)]
+pub struct AttachArgs {
+	/// Session to observe; omitted lists the sessions this host serves.
+	pub session: Option<Str>,
+	/// Confirm the attachment is read-only. This build serves no other mode.
+	#[arg(long)]
+	pub observe: bool,
+	/// Owner socket to dial; defaults to the one under the data directory.
+	#[arg(long, value_name = "PATH")]
+	pub socket:  Option<PathBuf>,
+	/// Resume a prior attachment from `<epoch>:<seq>`.
+	#[arg(long, value_name = "EPOCH:SEQ")]
+	pub resume:  Option<Str>,
+	/// Print each frame as a JSON line instead of rendering the transcript.
+	#[arg(long)]
+	pub json:    bool,
+	/// Restrict the listing to sessions under this project root.
+	#[arg(long, value_name = "PATH")]
+	pub project: Option<PathBuf>,
+}
+
 /// Execution-job inspection and reattach options.
 #[derive(Clone, Debug, Args)]
 pub struct JobsArgs {
@@ -2667,6 +2696,7 @@ enum DispatchTarget {
 	Complete,
 	Compress,
 	Jobs,
+	Attach,
 }
 
 const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
@@ -2675,6 +2705,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Join(_)) => DispatchTarget::Join,
 		Some(Command::Share(_)) => DispatchTarget::Share,
 		Some(Command::Collab(_)) => DispatchTarget::Collab,
+		Some(Command::Attach(_)) => DispatchTarget::Attach,
 		Some(Command::BrowserRelay(_)) => DispatchTarget::BrowserRelay,
 		Some(Command::Commit(_)) => DispatchTarget::Commit,
 		Some(Command::Print(_)) => DispatchTarget::Print,
@@ -3214,6 +3245,9 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			crate::share_cmd::run(args).await
 		},
 		Command::Collab(args) => crate::collab_cmd::run(args).await,
+		Command::Attach(args) => {
+			crate::attach_cmd::run(args, &omp_core::dirs::data_dir(None).into_diagnostic()?).await
+		},
 		Command::Print(mut args) => {
 			args.launch.extension_launch = launch_extensions;
 			print_mode::run(args, piped_input).await

@@ -1017,7 +1017,11 @@ mod tests {
 				continue;
 			}
 			if used + len > budget {
-				break;
+				// Stop at the budget only when nothing smaller can follow:
+				// breaking here made the sample size depend on which files the
+				// stride happened to land on, so adding one large source
+				// elsewhere in the tree shrank it below the evidence floor.
+				continue;
 			}
 			used += len;
 			picked.push(path.clone());
