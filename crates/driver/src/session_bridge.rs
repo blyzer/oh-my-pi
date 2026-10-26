@@ -5,8 +5,14 @@
 //! without ever blocking the kernel actor:
 //!
 //! - a drain task owns the `flume::Receiver<Event>` handed back by
-//!   `Up::Subscribe` and never awaits anything but that receiver, so the
-//!   kernel's unbounded subscription channel stays drained;
+//!   `Up::Subscribe` and never awaits anything but that receiver. That channel
+//!   is **bounded**: `Dom::subscribe` opens `flume::bounded(512)` and
+//!   `Dom::publish` fans out with `retain(|s| s.try_send(..).is_ok())`, so a
+//!   kernel that cannot place an event drops the subscriber instead of blocking
+//!   on it. Draining promptly is therefore not an optimization but the only
+//!   thing that keeps this bridge subscribed, and a disconnect is an arbitrary
+//!   truncation rather than an end of stream. [`Closure`] names the two exits
+//!   apart so a projection can fault instead of reporting success;
 //! - every drained event is appended to a **bounded replay ring**, bounded both
 //!   by an event count ([`SV_CONTROL_REPLAY_EVENTS`]) and by a byte total
 //!   ([`SV_CONTROL_REPLAY_BYTES`]), evicted from the front;
@@ -16,7 +22,8 @@
 //! - each subscriber has a bounded outbound queue
 //!   ([`SV_CONTROL_SUBSCRIBER_BYTES`]). Consecutive `Stream` appends for one
 //!   `sid` merge losslessly while queued; past the bound the subscriber is
-//!   resynced rather than silently gapped.
+//!   resynced rather than silently gapped. A merged append is encoded only on
+//!   the way out, so merging costs one text copy and no re-encode.
 //!
 //! [`Event::Reset`] is an ordinary ring entry, never a resync: a client that
 //! resumes before a reset replays the reset in position.
@@ -28,16 +35,36 @@
 //! it is a later state, so a node removed after the event no longer resolves
 //! and its values are blanked. Redaction therefore only ever over-blanks on
 //! replay, and never leaks.
+//!
+//! That no-leak property rests on an `omp_dom` invariant neither crate states:
+//! **a handle must name the same node in the base as it did in the event**,
+//! because redaction resolves a handle against the base to find the tag whose
+//! policy applies. `omp_dom` mints handles from a monotonic high-water mark,
+//! which holds within one replica generation. `Dom::reset` adopts the incoming
+//! snapshot's mark, and a snapshot of a shorter branch carries a lower one, so
+//! a handle minted before a reset can be reissued to an unrelated node after
+//! it. A ring entry older than such a reset, replayed to a redacting
+//! subscriber, is projected against a base in which its handles may resolve to
+//! differently tagged nodes, and can be under-blanked. The exposure is bounded
+//! to entries that predate a mark-lowering reset and are still replayable;
+//! closing it needs a per-entry redaction base, which `omp_dom` has no API to
+//! materialize incrementally.
+//!
+//! Materializing the base is also why a redacting subscriber is the expensive
+//! one: every admitted event invalidates it, so the next redacted delivery
+//! pays one `Dom::snapshot` under the bridge lock. Redaction and encoding
+//! themselves run with the lock released.
 
 use std::{collections::VecDeque, sync::Arc};
 
 use bytes::Bytes;
 use omp_agent::DomSubscription;
-use omp_core::{FastHashMap, StrMut};
+use omp_core::{FastHashMap, Str, StrMut};
 use omp_dom::{
-	Dom, Event, PropPolicy, Snapshot, StreamOp, redact_event,
+	Dom, Event, PropPolicy, Sid, Snapshot, StreamOp, redact_event,
 	wire::{self, encode_event},
 };
+use omp_journal::EntryId;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -148,6 +175,14 @@ impl Epoch {
 ///
 /// Monotonic from [`Seq::START`] within one [`Epoch`]. Sequence zero names
 /// the state before the bridge's first event.
+///
+/// **Delivered sequences increase but are not contiguous.** Consecutive
+/// stream appends queued for one subscriber merge into a single delivery that
+/// carries the later sequence and the concatenated text, so that subscriber
+/// observes 1, 2, 5 where another observed 1, 2, 3, 4, 5. No content is lost:
+/// the merged delivery carries every byte the skipped sequences carried. A
+/// client must therefore check `seq > last` and never `seq == last + 1`:
+/// arithmetic gap detection resyncs forever on a healthy stream.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Seq(u64);
 
@@ -176,6 +211,12 @@ impl Seq {
 
 /// A resume position: the session, the bridge start, and the last sequence
 /// the client observed.
+///
+/// Resuming from `seq` replays `(seq, head]`, so a cursor is valid whether or
+/// not its sequence was itself delivered: merging skips sequences, and a
+/// skipped sequence names a position inside a delivery the client already
+/// holds. See [`Seq`] for why a client must not test delivered sequences for
+/// contiguity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cursor {
 	/// Session the cursor belongs to.
@@ -200,7 +241,7 @@ pub enum ResyncReason {
 	Evicted,
 	/// The subscriber's outbound queue exceeded its byte budget.
 	Lagging,
-	/// The subscriber's redacted projection could not be encoded.
+	/// The subscriber's projection of an event could not be produced.
 	Projection,
 }
 
@@ -239,22 +280,113 @@ pub enum BridgeFault {
 	Encode(#[from] serde_json::Error),
 }
 
+impl BridgeFault {
+	/// Returns the closure this fault ends the bridge with.
+	const fn closure(&self) -> Closure {
+		match self {
+			Self::Replica(_) => Closure::Replica,
+			Self::Encode(_) => Closure::Encode,
+		}
+	}
+}
+
+/// Why a bridge stopped delivering.
+///
+/// Only [`Closure::Detached`] is a clean end of stream. Every other variant
+/// means delivery stopped mid-session after an arbitrary prefix, so a
+/// projection serving a remote client must end its RPC with a fault rather
+/// than with success: the client's cursor is still valid, but this bridge can
+/// no longer honour it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum Closure {
+	/// The bridge was dropped. The attach ended on the host's own terms and
+	/// the stream is complete up to the last delivery.
+	Detached,
+	/// The kernel's subscription channel disconnected. The kernel drops a
+	/// subscriber whose bounded channel it cannot place an event in, so the
+	/// stream is truncated at an arbitrary point unless the session itself
+	/// ended.
+	SubscriptionLost,
+	/// The bridge replica rejected an event the kernel published.
+	Replica,
+	/// An event the kernel published could not be encoded canonically.
+	Encode,
+}
+
 /// One admitted event.
 ///
 /// `bytes` is the single canonical encoding every unredacted subscriber
-/// shares; `event` is retained so a redacting subscriber can project it
-/// without decoding.
+/// shares, and the only full representation retained. A redacting subscriber
+/// decodes it, which costs no more than the clone that redaction's by-value
+/// signature forces anyway, and keeps the ring's byte accounting equal to what
+/// the ring actually holds.
 struct Entry {
-	seq:   Seq,
-	event: Event,
-	bytes: Bytes,
+	seq:    Seq,
+	bytes:  Bytes,
+	/// Set when the entry is a stream append, so a queued merge needs neither
+	/// a decode nor a re-encode. Its text is retained beside `bytes` and is
+	/// charged as such.
+	append: Option<Appended>,
+}
+
+/// The mergeable payload of one stream append.
+struct Appended {
+	cause: EntryId,
+	sid:   Sid,
+	text:  Str,
+}
+
+impl Entry {
+	/// Bytes this entry keeps resident: the canonical encoding plus an
+	/// append's separately retained text.
+	fn cost(&self) -> usize {
+		self
+			.bytes
+			.len()
+			.saturating_add(self.append.as_ref().map_or(0, |append| append.text.len()))
+	}
+}
+
+/// Extracts the mergeable payload of an event, if it has one.
+fn appended(event: &Event) -> Option<Appended> {
+	let Event::Stream { cause, sid, op: StreamOp::Append, text: Some(text), .. } = event else {
+		return None;
+	};
+	Some(Appended { cause: *cause, sid: *sid, text: text.clone() })
 }
 
 /// One item queued for a single subscriber.
 enum Queued {
 	Resync(ResyncReason),
-	Welcome { seq: Seq, snapshot: Arc<Snapshot> },
+	Welcome {
+		seq:      Seq,
+		snapshot: Arc<Snapshot>,
+	},
 	Event(Arc<Entry>),
+	/// Consecutive appends for one stream, concatenated while queued and
+	/// encoded only on the way out.
+	///
+	/// Charged by accumulated text length, which undercounts the one envelope
+	/// this variant will grow by at most once per subscriber: only the tail of
+	/// a queue is ever an `Append`.
+	Append {
+		seq:   Seq,
+		cause: EntryId,
+		sid:   Sid,
+		text:  StrMut,
+	},
+}
+
+impl Queued {
+	/// Bytes this item charges against its subscriber's budget.
+	fn cost(&self) -> usize {
+		match self {
+			Self::Resync(_) | Self::Welcome { .. } => 0,
+			Self::Event(entry) => entry.cost(),
+			Self::Append { text, .. } => text.len(),
+		}
+	}
 }
 
 /// One subscriber's bounded outbound queue.
@@ -272,29 +404,62 @@ impl Outbound {
 	/// Queues one event, merging it into a queued append for the same stream
 	/// when it is itself an append. Returns whether the queue is now over
 	/// budget.
-	fn push_event(&mut self, entry: Arc<Entry>, limits: &BridgeLimits) -> bool {
-		let merged = match self.queue.back() {
-			Some(Queued::Event(tail)) => {
-				merge_appends(tail, &entry).map(|merged| (tail.bytes.len(), merged))
-			},
-			_ => None,
-		};
-		match merged {
-			Some((replaced, merged)) => {
-				self.bytes = self
-					.bytes
-					.saturating_sub(replaced)
-					.saturating_add(merged.bytes.len());
-				if let Some(slot) = self.queue.back_mut() {
-					*slot = Queued::Event(Arc::new(merged));
-				}
-			},
-			None => {
-				self.bytes = self.bytes.saturating_add(entry.bytes.len());
-				self.queue.push_back(Queued::Event(entry));
-			},
+	fn push_event(&mut self, entry: &Arc<Entry>, limits: &BridgeLimits) -> bool {
+		match entry.append.as_ref() {
+			Some(next) => self.push_append(entry, next),
+			None => self.push_back(Queued::Event(Arc::clone(entry))),
 		}
 		self.bytes > limits.subscriber_bytes
+	}
+
+	fn push_back(&mut self, item: Queued) {
+		self.bytes = self.bytes.saturating_add(item.cost());
+		self.queue.push_back(item);
+	}
+
+	/// Queues one stream append, extending a queued append for the same
+	/// stream rather than queueing a second item.
+	///
+	/// Merging concatenates text and nothing else: the canonical encoding is
+	/// built once, in `pop`, with the bridge lock released. A run of `n`
+	/// appends therefore costs one copy of the text each rather than
+	/// re-encoding the whole accumulation `n` times.
+	fn push_append(&mut self, entry: &Arc<Entry>, next: &Appended) {
+		match self.queue.pop_back() {
+			Some(Queued::Append { sid, mut text, .. }) if sid == next.sid => {
+				text.push_str(next.text.as_str());
+				self.bytes = self.bytes.saturating_add(next.text.len());
+				self
+					.queue
+					.push_back(Queued::Append { seq: entry.seq, cause: next.cause, sid, text });
+			},
+			tail => {
+				if let Some(Queued::Event(head)) = &tail
+					&& let Some(queued) = head.append.as_ref()
+					&& queued.sid == next.sid
+				{
+					let mut text =
+						StrMut::with_capacity(queued.text.len().saturating_add(next.text.len()));
+					text.push_str(queued.text.as_str());
+					text.push_str(next.text.as_str());
+					self.bytes = self
+						.bytes
+						.saturating_sub(head.cost())
+						.saturating_add(text.len());
+					self.queue.push_back(Queued::Append {
+						seq: entry.seq,
+						cause: next.cause,
+						sid: next.sid,
+						text,
+					});
+					return;
+				}
+				if let Some(tail) = tail {
+					self.queue.push_back(tail);
+				}
+				self.push_back(Queued::Event(Arc::clone(entry)));
+			},
+		}
 	}
 
 	/// Queues a snapshot without a preceding resync, for a fresh subscriber.
@@ -320,36 +485,6 @@ impl Outbound {
 	}
 }
 
-/// Merges two consecutive stream appends for one `sid`.
-///
-/// Lossless: appends concatenate. The merged entry takes the later entry's
-/// sequence and cause, so a client that resumes from it has observed both.
-fn merge_appends(tail: &Entry, next: &Entry) -> Option<Entry> {
-	let (
-		Event::Stream { sid: queued, op: StreamOp::Append, text: Some(head), .. },
-		Event::Stream { cause, sid, op: StreamOp::Append, text: Some(more), .. },
-	) = (&tail.event, &next.event)
-	else {
-		return None;
-	};
-	if queued != sid {
-		return None;
-	}
-	let mut text = StrMut::with_capacity(head.len().saturating_add(more.len()));
-	text.push_str(head.as_str());
-	text.push_str(more.as_str());
-	let event = Event::Stream {
-		cause: *cause,
-		sid:   *sid,
-		op:    StreamOp::Append,
-		node:  None,
-		prop:  None,
-		text:  Some(text.freeze()),
-	};
-	let bytes = Bytes::from(encode_event(&event).ok()?);
-	Some(Entry { seq: next.seq, event, bytes })
-}
-
 /// Everything behind the bridge's single lock.
 struct State {
 	replica:     Dom,
@@ -359,7 +494,8 @@ struct State {
 	head:        Seq,
 	subscribers: FastHashMap<u64, Outbound>,
 	next_id:     u64,
-	closed:      bool,
+	/// Set once, by whichever exit closed the bridge first.
+	closed:      Option<Closure>,
 }
 
 impl State {
@@ -376,7 +512,7 @@ impl State {
 
 	fn drop_front(&mut self) {
 		if let Some(entry) = self.ring.pop_front() {
-			self.ring_bytes = self.ring_bytes.saturating_sub(entry.bytes.len());
+			self.ring_bytes = self.ring_bytes.saturating_sub(entry.cost());
 		}
 	}
 
@@ -395,7 +531,7 @@ impl State {
 		let mut lagging: SmallVec<u64, 4> = SmallVec::new();
 		let mut gone: SmallVec<u64, 4> = SmallVec::new();
 		for (&id, out) in &mut self.subscribers {
-			if out.push_event(Arc::clone(entry), limits) {
+			if out.push_event(entry, limits) {
 				lagging.push(id);
 			}
 			if !out.wake() {
@@ -425,11 +561,43 @@ impl State {
 	}
 }
 
-/// What a pop found in a subscriber's queue.
-enum Pop {
+/// What a non-blocking poll of a [`Subscriber`] found.
+#[derive(Debug)]
+pub enum Polled {
+	/// One delivery, in order.
+	Ready(Delivery),
+	/// Nothing is queued and the bridge is still live. A later poll may
+	/// return a delivery.
+	Empty,
+	/// The bridge has closed and its queue is drained. No later poll returns
+	/// a delivery.
+	Closed(Closure),
+}
+
+/// What a pop removed from a subscriber's queue, carrying everything the
+/// projection needs so redaction and encoding run with the lock released.
+enum Taken {
 	Ready(Delivery),
 	Empty,
-	Closed,
+	Closed(Closure),
+	/// A snapshot, still to be redacted.
+	Welcome {
+		seq:      Seq,
+		snapshot: Arc<Snapshot>,
+	},
+	/// A shared canonical entry, with the redaction base when the subscriber
+	/// redacts.
+	Entry {
+		seq:   Seq,
+		bytes: Bytes,
+		base:  Option<Arc<Snapshot>>,
+	},
+	/// A merged append, still to be encoded.
+	Append {
+		seq:   Seq,
+		event: Event,
+		base:  Option<Arc<Snapshot>>,
+	},
 }
 
 struct Shared {
@@ -445,24 +613,31 @@ impl Shared {
 	}
 
 	/// Appends one drained event to the ring and fans it out.
+	///
+	/// Encoding happens before the lock is taken, and merging defers its own
+	/// encoding to `pop`, so the drain's critical section is bounded by the
+	/// replica apply and one text copy per queued append.
 	fn admit(&self, event: Event) -> Result<(), BridgeFault> {
 		let bytes = Bytes::from(encode_event(&event)?);
+		let append = appended(&event);
 		let mut state = self.state.lock();
 		state.replica.apply_event(&event)?;
 		state.base = None;
 		let seq = state.head.next();
 		state.head = seq;
-		let entry = Arc::new(Entry { seq, event, bytes });
-		state.ring_bytes = state.ring_bytes.saturating_add(entry.bytes.len());
+		let entry = Arc::new(Entry { seq, bytes, append });
+		state.ring_bytes = state.ring_bytes.saturating_add(entry.cost());
 		state.ring.push_back(Arc::clone(&entry));
 		state.evict(&self.limits);
 		state.fanout(&entry, &self.limits);
 		Ok(())
 	}
 
-	fn close(&self) {
+	/// Closes the bridge. The first closure wins: a drain that already
+	/// reported a truncation is not overwritten by the bridge's own drop.
+	fn close(&self, closure: Closure) {
 		let mut state = self.state.lock();
-		state.closed = true;
+		state.closed.get_or_insert(closure);
 		state.wake_all();
 	}
 
@@ -486,62 +661,110 @@ impl Shared {
 		}
 	}
 
-	fn pop(&self, id: u64, policy: Option<&dyn PropPolicy>) -> Pop {
+	/// Removes the next queued item, with the lock held for exactly that.
+	fn take(&self, id: u64, redacts: bool) -> Taken {
 		let mut state = self.state.lock();
-		let Some(out) = state.subscribers.get_mut(&id) else {
-			return Pop::Closed;
+		let closed = state.closed;
+		let item = {
+			let Some(out) = state.subscribers.get_mut(&id) else {
+				return Taken::Closed(closed.unwrap_or(Closure::Detached));
+			};
+			let Some(item) = out.queue.pop_front() else {
+				return match closed {
+					Some(closure) => Taken::Closed(closure),
+					None => Taken::Empty,
+				};
+			};
+			out.bytes = out.bytes.saturating_sub(item.cost());
+			item
 		};
-		let item = out.queue.pop_front();
-		if let Some(Queued::Event(entry)) = item.as_ref() {
-			out.bytes = out.bytes.saturating_sub(entry.bytes.len());
-		}
 		match item {
-			None => {
-				if state.closed {
-					Pop::Closed
-				} else {
-					Pop::Empty
-				}
+			Queued::Resync(reason) => Taken::Ready(Delivery::Resync { reason }),
+			Queued::Welcome { seq, snapshot } => Taken::Welcome { seq, snapshot },
+			Queued::Event(entry) => Taken::Entry {
+				seq:   entry.seq,
+				bytes: entry.bytes.clone(),
+				base:  redacts.then(|| state.base()),
 			},
-			Some(Queued::Resync(reason)) => Pop::Ready(Delivery::Resync { reason }),
-			Some(Queued::Welcome { seq, snapshot }) => {
+			Queued::Append { seq, cause, sid, text } => Taken::Append {
+				seq,
+				event: Event::Stream {
+					cause,
+					sid,
+					op: StreamOp::Append,
+					node: None,
+					prop: None,
+					text: Some(text.freeze()),
+				},
+				base: redacts.then(|| state.base()),
+			},
+		}
+	}
+
+	/// Restarts one subscriber from a fresh snapshot, returning the resync
+	/// that heads the restarted stream.
+	fn restart(&self, id: u64, reason: ResyncReason) -> Polled {
+		let mut state = self.state.lock();
+		let closed = state.closed;
+		let head = state.head;
+		let base = state.base();
+		let Some(out) = state.subscribers.get_mut(&id) else {
+			return Polled::Closed(closed.unwrap_or(Closure::Detached));
+		};
+		out.restart(reason, head, base);
+		out.queue.pop_front();
+		Polled::Ready(Delivery::Resync { reason })
+	}
+
+	fn pop(&self, id: u64, policy: Option<&dyn PropPolicy>) -> Polled {
+		// Everything below the `take` runs with the lock released: redaction
+		// deep-clones, and encoding a reset walks a whole snapshot.
+		let (seq, event, base) = match self.take(id, policy.is_some()) {
+			Taken::Ready(delivery) => return Polled::Ready(delivery),
+			Taken::Empty => return Polled::Empty,
+			Taken::Closed(closure) => return Polled::Closed(closure),
+			Taken::Welcome { seq, snapshot } => {
 				let snapshot = match policy {
 					Some(policy) => Arc::new(snapshot.redact(policy)),
 					None => snapshot,
 				};
-				Pop::Ready(Delivery::Welcome { cursor: self.cursor(seq), snapshot })
+				return Polled::Ready(Delivery::Welcome { cursor: self.cursor(seq), snapshot });
 			},
-			Some(Queued::Event(entry)) => {
-				let Some(policy) = policy else {
-					return Pop::Ready(Delivery::Event {
-						cursor: self.cursor(entry.seq),
-						bytes:  entry.bytes.clone(),
-					});
+			Taken::Entry { seq, bytes, base } => {
+				let Some(base) = base else {
+					return Polled::Ready(Delivery::Event { cursor: self.cursor(seq), bytes });
 				};
-				let base = state.base();
-				let projected = redact_event(entry.event.clone(), &base, policy);
-				match encode_event(&projected) {
-					Ok(bytes) => Pop::Ready(Delivery::Event {
-						cursor: self.cursor(entry.seq),
-						bytes:  Bytes::from(bytes),
-					}),
+				match wire::decode_event(&bytes) {
+					Ok(event) => (seq, event, Some(base)),
 					Err(error) => {
 						tracing::error!(
 							session = %self.session,
-							seq = entry.seq.get(),
+							seq = seq.get(),
 							?error,
-							"redacted session projection could not be encoded",
+							"session bridge could not decode its own canonical bytes",
 						);
-						let head = state.head;
-						let base = state.base();
-						let Some(out) = state.subscribers.get_mut(&id) else {
-							return Pop::Closed;
-						};
-						out.restart(ResyncReason::Projection, head, base);
-						out.queue.pop_front();
-						Pop::Ready(Delivery::Resync { reason: ResyncReason::Projection })
+						return self.restart(id, ResyncReason::Projection);
 					},
 				}
+			},
+			Taken::Append { seq, event, base } => (seq, event, base),
+		};
+		let projected = match (base, policy) {
+			(Some(base), Some(policy)) => redact_event(event, &base, policy),
+			_ => event,
+		};
+		match encode_event(&projected) {
+			Ok(bytes) => {
+				Polled::Ready(Delivery::Event { cursor: self.cursor(seq), bytes: Bytes::from(bytes) })
+			},
+			Err(error) => {
+				tracing::error!(
+					session = %self.session,
+					seq = seq.get(),
+					?error,
+					"session projection could not be encoded",
+				);
+				self.restart(id, ResyncReason::Projection)
 			},
 		}
 	}
@@ -575,7 +798,7 @@ impl SessionBridge {
 				head:        Seq::ZERO,
 				subscribers: FastHashMap::default(),
 				next_id:     0,
-				closed:      false,
+				closed:      None,
 			}),
 		});
 		let drain = tokio::spawn(drain(Arc::clone(&shared), events));
@@ -626,7 +849,7 @@ impl SessionBridge {
 			(Some(cursor), None) => {
 				let mut over = false;
 				for entry in state.ring.iter().filter(|entry| entry.seq > cursor.seq) {
-					over |= out.push_event(Arc::clone(entry), limits);
+					over |= out.push_event(entry, limits);
 				}
 				if over {
 					let head = state.head;
@@ -654,29 +877,46 @@ impl SessionBridge {
 impl Drop for SessionBridge {
 	fn drop(&mut self) {
 		self.drain.abort();
-		self.shared.close();
+		self.shared.close(Closure::Detached);
 	}
 }
 
 /// Drains the kernel subscription into the ring.
 ///
 /// The loop awaits only the subscription receiver; every other step is
-/// non-blocking, so a slow subscriber can never stall the kernel.
+/// non-blocking, so a slow subscriber can never stall the kernel. That is
+/// load-bearing: the kernel's channel is bounded and its fan-out drops a
+/// subscriber it cannot place an event in, so falling behind costs the
+/// subscription itself.
 async fn drain(shared: Arc<Shared>, events: flume::Receiver<Event>) {
-	while let Ok(event) = events.recv_async().await {
-		if let Err(fault) = shared.admit(event) {
-			tracing::error!(
-				session = %shared.session,
-				error = ?fault,
-				"session bridge stopped draining its kernel subscription",
-			);
-			break;
+	let closure = loop {
+		match events.recv_async().await {
+			Ok(event) => {
+				if let Err(fault) = shared.admit(event) {
+					tracing::error!(
+						session = %shared.session,
+						error = ?fault,
+						"session bridge stopped draining its kernel subscription",
+					);
+					break fault.closure();
+				}
+			},
+			Err(flume::RecvError::Disconnected) => {
+				tracing::warn!(
+					session = %shared.session,
+					"kernel DOM subscription disconnected; attached streams are truncated here",
+				);
+				break Closure::SubscriptionLost;
+			},
 		}
-	}
-	shared.close();
+	};
+	shared.close(closure);
 }
 
 /// One attached reader of a [`SessionBridge`].
+///
+/// Deliveries are strictly ordered, so both readers take `&mut self`: two
+/// tasks sharing one subscriber could otherwise interleave the stream.
 pub struct Subscriber {
 	shared: Arc<Shared>,
 	id:     u64,
@@ -686,25 +926,31 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Returns the next delivery without waiting, projecting through
 	/// `policy` when one is supplied.
+	///
+	/// [`Polled::Empty`] and [`Polled::Closed`] are distinct: only the second
+	/// ends the stream, and its [`Closure`] says whether the end was clean.
 	#[must_use]
-	pub fn try_next(&self, policy: Option<&dyn PropPolicy>) -> Option<Delivery> {
-		match self.shared.pop(self.id, policy) {
-			Pop::Ready(delivery) => Some(delivery),
-			Pop::Empty | Pop::Closed => None,
-		}
+	pub fn try_next(&mut self, policy: Option<&dyn PropPolicy>) -> Polled {
+		self.shared.pop(self.id, policy)
 	}
 
 	/// Awaits the next delivery, projecting through `policy` when one is
-	/// supplied. Returns `None` once the bridge has closed and the queue is
-	/// drained.
-	pub async fn next(&self, policy: Option<&dyn PropPolicy>) -> Option<Delivery> {
+	/// supplied.
+	///
+	/// Returns the [`Closure`] once the bridge has closed and the queue is
+	/// drained. Only [`Closure::Detached`] is a clean end of stream; every
+	/// other closure means the stream was truncated and a projection serving
+	/// it must fault.
+	pub async fn next(&mut self, policy: Option<&dyn PropPolicy>) -> Result<Delivery, Closure> {
 		loop {
 			match self.shared.pop(self.id, policy) {
-				Pop::Ready(delivery) => return Some(delivery),
-				Pop::Closed => return None,
-				Pop::Empty => {
+				Polled::Ready(delivery) => return Ok(delivery),
+				Polled::Closed(closure) => return Err(closure),
+				Polled::Empty => {
+					// The wake sender lives in this subscriber's own queue
+					// slot, which only this subscriber's drop removes.
 					if self.wake.recv_async().await.is_err() {
-						return None;
+						return Err(Closure::Detached);
 					}
 				},
 			}
@@ -731,7 +977,7 @@ mod tests {
 	use std::time::Duration;
 
 	use omp_core::Str;
-	use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, Sid, Txn, Value};
+	use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Sid, Tag, Txn, Value};
 	use omp_journal::EntryId;
 
 	use super::*;
@@ -848,10 +1094,13 @@ mod tests {
 		.expect("drain task admits every published event");
 	}
 
-	fn drain_ready(subscriber: &Subscriber) -> Vec<Delivery> {
+	fn drain_ready(subscriber: &mut Subscriber) -> Vec<Delivery> {
 		let mut out = Vec::new();
-		while let Some(delivery) = subscriber.try_next(None) {
-			out.push(delivery);
+		loop {
+			match subscriber.try_next(None) {
+				Polled::Ready(delivery) => out.push(delivery),
+				Polled::Empty | Polled::Closed(_) => break,
+			}
 		}
 		out
 	}
@@ -887,12 +1136,12 @@ mod tests {
 	/// can be stated exactly rather than approximated.
 	async fn event_sizes(turns: u8) -> Vec<usize> {
 		let (mut producer, bridge) = Producer::start(limits(usize::MAX, usize::MAX, usize::MAX));
-		let reader = bridge.subscribe(None);
+		let mut reader = bridge.subscribe(None);
 		for index in 0..turns {
 			producer.turn(&format!("turn {index}"));
 		}
 		settle(&bridge, Seq::from_wire(u64::from(turns))).await;
-		drain_ready(&reader)
+		drain_ready(&mut reader)
 			.iter()
 			.filter_map(|delivery| match delivery {
 				Delivery::Event { bytes, .. } => Some(bytes.len()),
@@ -921,13 +1170,13 @@ mod tests {
 	#[tokio::test]
 	async fn reset_replays_in_position_without_a_resync() {
 		let (mut producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
-		let subscriber = bridge.subscribe(None);
+		let mut subscriber = bridge.subscribe(None);
 		producer.turn("before");
 		producer.reset();
 		producer.turn("after");
 		settle(&bridge, Seq::from_wire(3)).await;
 
-		let delivered = drain_ready(&subscriber);
+		let delivered = drain_ready(&mut subscriber);
 		assert!(
 			!delivered
 				.iter()
@@ -955,8 +1204,8 @@ mod tests {
 			epoch:   bridge.epoch(),
 			seq:     Seq::from_wire(1),
 		};
-		let subscriber = bridge.subscribe(Some(&cursor));
-		let delivered = drain_ready(&subscriber);
+		let mut subscriber = bridge.subscribe(Some(&cursor));
+		let delivered = drain_ready(&mut subscriber);
 
 		assert_eq!(delivered.len(), 2, "replay is (1, 3]");
 		assert!(matches!(event_of(&delivered[0]), Event::Reset { .. }));
@@ -975,7 +1224,7 @@ mod tests {
 			epoch:   Epoch::from_wire(bridge.epoch().get() ^ 1),
 			seq:     Seq::START,
 		};
-		let delivered = drain_ready(&bridge.subscribe(Some(&cursor)));
+		let delivered = drain_ready(&mut bridge.subscribe(Some(&cursor)));
 
 		assert_eq!(delivered.len(), 2);
 		assert!(matches!(delivered[0], Delivery::Resync { reason: ResyncReason::Epoch }));
@@ -1001,7 +1250,7 @@ mod tests {
 
 		let cursor =
 			Cursor { session: bridge.session().clone(), epoch: bridge.epoch(), seq: Seq::START };
-		let delivered = drain_ready(&bridge.subscribe(Some(&cursor)));
+		let delivered = drain_ready(&mut bridge.subscribe(Some(&cursor)));
 
 		assert_eq!(delivered.len(), 2);
 		assert!(matches!(delivered[0], Delivery::Resync { reason: ResyncReason::Evicted }));
@@ -1012,8 +1261,8 @@ mod tests {
 	#[tokio::test]
 	async fn queued_stream_appends_merge_into_exactly_the_unmerged_text() {
 		let (mut producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
-		let eager = bridge.subscribe(None);
-		let lazy = bridge.subscribe(None);
+		let mut eager = bridge.subscribe(None);
+		let mut lazy = bridge.subscribe(None);
 		let node = producer.assistant();
 		let sid = producer.open_stream(node);
 
@@ -1039,7 +1288,7 @@ mod tests {
 		}
 		settle(&bridge, Seq::from_wire(5)).await;
 
-		let delivered = drain_ready(&lazy);
+		let delivered = drain_ready(&mut lazy);
 		let appends: Vec<Event> = delivered
 			.iter()
 			.filter(|delivery| matches!(delivery, Delivery::Event { .. }))
@@ -1062,18 +1311,25 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_subscriber_past_its_byte_bound_resyncs_without_a_sequence_gap() {
-		let one = event_sizes(1).await[0];
+		// Three events of budget, six published: the fourth overflows and
+		// resyncs, and the last two stay queued behind the recovery pair, so
+		// the contiguity check below has deliveries to walk.
+		let sizes = event_sizes(6).await;
+		let budget = sizes[0] + sizes[1] + sizes[2];
 
-		let (mut producer, bridge) = Producer::start(limits(16, usize::MAX, one));
-		let subscriber = bridge.subscribe(None);
-		producer.turn("turn 0");
-		producer.turn("turn 1");
-		settle(&bridge, Seq::from_wire(2)).await;
-		producer.turn("turn 2");
-		producer.turn("turn 3");
+		let (mut producer, bridge) = Producer::start(limits(16, usize::MAX, budget));
+		let mut subscriber = bridge.subscribe(None);
+		for index in 0..4u8 {
+			producer.turn(&format!("turn {index}"));
+		}
 		settle(&bridge, Seq::from_wire(4)).await;
+		for index in 4..6u8 {
+			producer.turn(&format!("turn {index}"));
+		}
+		settle(&bridge, Seq::from_wire(6)).await;
 
-		let delivered = drain_ready(&subscriber);
+		let delivered = drain_ready(&mut subscriber);
+		assert_eq!(delivered.len(), 4, "a resync, a welcome, and the two events behind them");
 		assert!(matches!(delivered[0], Delivery::Resync { reason: ResyncReason::Lagging }));
 		let Delivery::Welcome { cursor: welcome, .. } = &delivered[1] else {
 			panic!("a resync is followed by a welcome");
@@ -1135,5 +1391,162 @@ mod tests {
 		settle(&bridge, Seq::from_wire(512)).await;
 		assert_eq!(bridge.head(), Seq::from_wire(512));
 		assert_eq!(bridge.oldest(), Some(Seq::from_wire(512)), "the newest entry is retained");
+	}
+
+	#[tokio::test]
+	async fn a_lost_kernel_subscription_closes_as_a_truncation() {
+		let (producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		// The kernel drops a subscriber it cannot place an event in, so a
+		// disconnect is indistinguishable from a truncation at the receiver.
+		drop(producer);
+
+		let welcome = tokio::time::timeout(Duration::from_secs(5), subscriber.next(None))
+			.await
+			.expect("the welcome is already queued");
+		assert!(matches!(welcome, Ok(Delivery::Welcome { .. })));
+		let closure = tokio::time::timeout(Duration::from_secs(5), subscriber.next(None))
+			.await
+			.expect("a disconnected subscription closes the bridge");
+		assert_eq!(
+			closure.expect_err("the stream ends"),
+			Closure::SubscriptionLost,
+			"a lost subscription must not look like a clean end of stream",
+		);
+	}
+
+	#[tokio::test]
+	async fn a_dropped_bridge_closes_cleanly() {
+		let (_producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		// `_producer` keeps the subscription alive, so this is the host's own
+		// detach and nothing was truncated.
+		drop(bridge);
+
+		let welcome = tokio::time::timeout(Duration::from_secs(5), subscriber.next(None))
+			.await
+			.expect("the welcome is already queued");
+		assert!(matches!(welcome, Ok(Delivery::Welcome { .. })));
+		let closure = tokio::time::timeout(Duration::from_secs(5), subscriber.next(None))
+			.await
+			.expect("a dropped bridge closes its subscribers");
+		assert_eq!(closure.expect_err("the stream ends"), Closure::Detached);
+	}
+
+	#[tokio::test]
+	async fn try_next_separates_an_empty_queue_from_a_closed_bridge() {
+		let (producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+
+		assert!(matches!(subscriber.try_next(None), Polled::Ready(Delivery::Welcome { .. })));
+		assert!(
+			matches!(subscriber.try_next(None), Polled::Empty),
+			"a live bridge with nothing queued is empty, not closed",
+		);
+
+		drop(producer);
+		let closure = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				match subscriber.try_next(None) {
+					Polled::Empty => tokio::task::yield_now().await,
+					Polled::Closed(closure) => return closure,
+					Polled::Ready(delivery) => panic!("nothing was published, got {delivery:?}"),
+				}
+			}
+		})
+		.await
+		.expect("the bridge closes once its subscription disconnects");
+		assert_eq!(closure, Closure::SubscriptionLost);
+	}
+
+	/// A policy that parks inside the first redaction it is asked for, so a
+	/// test can observe what the bridge can still do while it is parked.
+	struct ParkingPolicy {
+		entered: flume::Sender<()>,
+		release: Mutex<Option<flume::Receiver<()>>>,
+	}
+
+	impl ParkingPolicy {
+		fn park(&self) {
+			let Some(release) = self.release.lock().take() else {
+				return;
+			};
+			let _ = self.entered.send(());
+			let _ = release.recv();
+		}
+	}
+
+	impl PropPolicy for ParkingPolicy {
+		fn redacts(&self, _tag: &Tag, _prop: &PropKey) -> bool {
+			self.park();
+			false
+		}
+
+		fn redacts_content(&self, _tag: &Tag) -> bool {
+			self.park();
+			false
+		}
+	}
+
+	/// Redaction is the most expensive thing a subscriber does, and the drain
+	/// task must not wait behind it. Every other test in this module runs on a
+	/// current-thread runtime and so can never contend the bridge lock; this
+	/// one does, by parking inside redaction and then requiring the drain to
+	/// admit an event and the head to stay readable.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+	async fn redaction_runs_with_the_bridge_lock_released() {
+		let (mut producer, bridge) = Producer::start(limits(64, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		producer.turn("redacted under a parked policy");
+		settle(&bridge, Seq::START).await;
+
+		let (entered, parked) = flume::bounded(1);
+		let (release, released) = flume::bounded(1);
+		let policy = Arc::new(ParkingPolicy { entered, release: Mutex::new(Some(released)) });
+		// `dyn PropPolicy` is not `Sync`, so the reader cannot be a tokio
+		// task: it drives the subscriber from its own thread, which is what
+		// contends the bridge lock in the first place.
+		let reader = {
+			let policy = Arc::clone(&policy);
+			std::thread::spawn(move || {
+				let mut seen = Vec::new();
+				while seen.len() < 3 {
+					match subscriber.try_next(Some(policy.as_ref())) {
+						Polled::Ready(delivery) => seen.push(delivery),
+						Polled::Empty => std::thread::yield_now(),
+						Polled::Closed(closure) => panic!("the bridge closed early: {closure}"),
+					}
+				}
+				seen
+			})
+		};
+
+		tokio::time::timeout(Duration::from_secs(5), parked.recv_async())
+			.await
+			.expect("redaction starts")
+			.expect("the policy signals before it parks");
+
+		producer.turn("admitted while redaction is parked");
+		let probe = tokio::spawn(async move {
+			settle(&bridge, Seq::from_wire(2)).await;
+			bridge
+		});
+		let bridge = tokio::time::timeout(Duration::from_secs(10), probe)
+			.await
+			.expect("the drain admits and the head stays readable while a subscriber redacts")
+			.expect("the probe task");
+
+		release.send(()).expect("the parked redaction is released");
+		let seen = tokio::time::timeout(
+			Duration::from_secs(5),
+			tokio::task::spawn_blocking(move || reader.join()),
+		)
+		.await
+		.expect("the released reader finishes")
+		.expect("the join task")
+		.expect("the reader thread");
+		assert_eq!(seen.len(), 3, "a welcome and both events");
+		assert_eq!(seq_of(&seen[2]), Seq::from_wire(2));
+		assert_eq!(bridge.head(), Seq::from_wire(2));
 	}
 }
