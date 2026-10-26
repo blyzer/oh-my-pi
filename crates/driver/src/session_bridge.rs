@@ -239,6 +239,11 @@ pub enum ResyncReason {
 	Unknown,
 	/// The requested sequence has been evicted from the replay ring.
 	Evicted,
+	/// A reset lowered the replica's handle high-water mark, so handles minted
+	/// before it may now name differently tagged nodes. The ring is dropped and
+	/// every subscriber restarts, because redaction resolves a handle against
+	/// the base and would otherwise fail open.
+	Rewound,
 	/// The subscriber's outbound queue exceeded its byte budget.
 	Lagging,
 	/// The subscriber's projection of an event could not be produced.
@@ -312,6 +317,9 @@ pub enum Closure {
 	Replica,
 	/// An event the kernel published could not be encoded canonically.
 	Encode,
+	/// The drain task left by unwinding. The bridge has no drain behind it,
+	/// and delivery stopped wherever the panic landed.
+	Panicked,
 }
 
 /// One admitted event.
@@ -367,9 +375,11 @@ enum Queued {
 	/// Consecutive appends for one stream, concatenated while queued and
 	/// encoded only on the way out.
 	///
-	/// Charged by accumulated text length, which undercounts the one envelope
-	/// this variant will grow by at most once per subscriber: only the tail of
-	/// a queue is ever an `Append`.
+	/// Charged by accumulated text length. That undercounts the envelope the
+	/// variant is encoded into on the way out, once per stream run queued at the
+	/// same time: a second stream's append pushes the first off the tail, so a
+	/// queue can hold an `Append` per concurrent `sid`. The charge still tracks
+	/// residency exactly, because the variant holds only its text.
 	Append {
 		seq:   Seq,
 		cause: EntryId,
@@ -527,6 +537,29 @@ impl State {
 		}
 	}
 
+	/// Contains a rewind: the applied reset lowered the replica's handle mark,
+	/// so every entry already in the ring or in a subscriber's queue may carry
+	/// a handle that now names a different node. Both are dropped, the reset
+	/// becomes the ring's new base, and every subscriber restarts from a fresh
+	/// snapshot taken at the same head.
+	fn rewind(&mut self, entry: Arc<Entry>) {
+		self.ring.clear();
+		self.ring_bytes = entry.cost();
+		self.ring.push_back(entry);
+		let head = self.head;
+		let base = self.base();
+		let mut gone: SmallVec<u64, 4> = SmallVec::new();
+		for (&id, out) in &mut self.subscribers {
+			out.restart(ResyncReason::Rewound, head, Arc::clone(&base));
+			if !out.wake() {
+				gone.push(id);
+			}
+		}
+		for id in gone {
+			self.subscribers.remove(&id);
+		}
+	}
+
 	fn fanout(&mut self, entry: &Arc<Entry>, limits: &BridgeLimits) {
 		let mut lagging: SmallVec<u64, 4> = SmallVec::new();
 		let mut gone: SmallVec<u64, 4> = SmallVec::new();
@@ -621,11 +654,17 @@ impl Shared {
 		let bytes = Bytes::from(encode_event(&event)?);
 		let append = appended(&event);
 		let mut state = self.state.lock();
+		let before = state.replica.high_water();
 		state.replica.apply_event(&event)?;
+		let rewound = state.replica.high_water() < before;
 		state.base = None;
 		let seq = state.head.next();
 		state.head = seq;
 		let entry = Arc::new(Entry { seq, bytes, append });
+		if rewound {
+			state.rewind(entry);
+			return Ok(());
+		}
 		state.ring_bytes = state.ring_bytes.saturating_add(entry.cost());
 		state.ring.push_back(Arc::clone(&entry));
 		state.evict(&self.limits);
@@ -889,12 +928,13 @@ impl Drop for SessionBridge {
 /// subscriber it cannot place an event in, so falling behind costs the
 /// subscription itself.
 async fn drain(shared: Arc<Shared>, events: flume::Receiver<Event>) {
+	let mut guard = DrainGuard { shared, closure: None };
 	let closure = loop {
 		match events.recv_async().await {
 			Ok(event) => {
-				if let Err(fault) = shared.admit(event) {
+				if let Err(fault) = guard.shared.admit(event) {
 					tracing::error!(
-						session = %shared.session,
+						session = %guard.shared.session,
 						error = ?fault,
 						"session bridge stopped draining its kernel subscription",
 					);
@@ -903,14 +943,31 @@ async fn drain(shared: Arc<Shared>, events: flume::Receiver<Event>) {
 			},
 			Err(flume::RecvError::Disconnected) => {
 				tracing::warn!(
-					session = %shared.session,
+					session = %guard.shared.session,
 					"kernel DOM subscription disconnected; attached streams are truncated here",
 				);
 				break Closure::SubscriptionLost;
 			},
 		}
 	};
-	shared.close(closure);
+	guard.closure = Some(closure);
+}
+
+/// Closes the bridge however the drain leaves it, including by unwinding.
+///
+/// Without this a panic inside [`Shared::admit`] would leave the bridge open
+/// with no drain behind it, and a subscriber would park on a wake channel that
+/// has no sender left instead of receiving the fault [`Closure`] exists to
+/// deliver.
+struct DrainGuard {
+	shared:  Arc<Shared>,
+	closure: Option<Closure>,
+}
+
+impl Drop for DrainGuard {
+	fn drop(&mut self) {
+		self.shared.close(self.closure.unwrap_or(Closure::Panicked));
+	}
 }
 
 /// One attached reader of a [`SessionBridge`].
@@ -1003,7 +1060,12 @@ mod tests {
 				ops:   vec![Op::Ins {
 					parent: body,
 					after:  None,
-					node:   NodeSpec::new(KnownTag::Turn),
+					// A property on the seed, so a welcome snapshot carries
+					// something a policy is asked about: `blank` short-circuits
+					// on an empty node, which would leave the welcome's
+					// redaction path uncovered.
+					node:   NodeSpec::new(KnownTag::Turn)
+						.with_prop(PropId::Text, Value::Str(Str::new_static("seeded turn"))),
 				}],
 			})
 			.expect("a turn inserts under the body");
@@ -1074,6 +1136,18 @@ mod tests {
 
 		fn reset(&mut self) {
 			let snapshot = self.dom.snapshot();
+			self.publish(|dom| dom.reset(snapshot));
+		}
+
+		/// Snapshots the producer, so a later [`Producer::rewind_to`] can reset
+		/// onto a shorter branch.
+		fn mark(&self) -> Snapshot {
+			self.dom.snapshot()
+		}
+
+		/// Resets onto an earlier snapshot, which carries a lower handle
+		/// high-water mark than anything published since it.
+		fn rewind_to(&mut self, snapshot: Snapshot) {
 			self.publish(|dom| dom.reset(snapshot));
 		}
 	}
@@ -1548,5 +1622,57 @@ mod tests {
 		assert_eq!(seen.len(), 3, "a welcome and both events");
 		assert_eq!(seq_of(&seen[2]), Seq::from_wire(2));
 		assert_eq!(bridge.head(), Seq::from_wire(2));
+	}
+
+	/// A reset onto a shorter branch lowers the replica's handle high-water
+	/// mark, so a handle minted before it can be reissued to an unrelated node.
+	/// Redaction resolves handles against the base, so replaying such an entry
+	/// would classify it by the wrong node's tag and fail open. The bridge
+	/// drops the ring and restarts every subscriber instead.
+	#[tokio::test]
+	async fn a_mark_lowering_reset_rewinds_every_subscriber() {
+		let (mut producer, bridge) = Producer::start(limits(64, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		let shorter = producer.mark();
+		producer.turn("minted after the mark");
+		producer.turn("minted after the mark as well");
+		settle(&bridge, Seq::from_wire(2)).await;
+		let before = drain_ready(&mut subscriber);
+		assert_eq!(before.len(), 3, "a welcome and both turns");
+
+		producer.rewind_to(shorter);
+		settle(&bridge, Seq::from_wire(3)).await;
+
+		let after = drain_ready(&mut subscriber);
+		assert!(
+			matches!(after.first(), Some(Delivery::Resync { reason: ResyncReason::Rewound })),
+			"a mark-lowering reset restarts the stream, got {after:?}",
+		);
+		assert!(
+			matches!(after.get(1), Some(Delivery::Welcome { .. })),
+			"the resync is followed by a fresh snapshot, got {after:?}",
+		);
+		assert_eq!(
+			bridge.oldest(),
+			Some(Seq::from_wire(3)),
+			"entries minted under the higher mark leave the ring with it",
+		);
+	}
+
+	/// A drain that leaves by unwinding still closes the bridge. Without the
+	/// guard `closed` stays unset, and a subscriber parks on a wake channel with
+	/// no sender left instead of receiving a closure.
+	#[tokio::test]
+	async fn an_unwinding_drain_closes_as_a_panic() {
+		let (_producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
+		let mut subscriber = bridge.subscribe(None);
+		assert!(matches!(subscriber.try_next(None), Polled::Ready(Delivery::Welcome { .. })));
+
+		drop(DrainGuard { shared: Arc::clone(&bridge.shared), closure: None });
+
+		assert!(
+			matches!(subscriber.try_next(None), Polled::Closed(Closure::Panicked)),
+			"an unwinding drain names itself, so a projection can fault",
+		);
 	}
 }
