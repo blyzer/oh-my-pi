@@ -172,8 +172,18 @@ impl SessionWire {
 		&self,
 		handle: &KernelHandle,
 	) -> Result<Arc<SessionBridge>, SessionControlError> {
-		if let Some(bridge) = self.bridges.lock().get(&handle.id) {
-			return Ok(Arc::clone(bridge));
+		{
+			let mut bridges = self.bridges.lock();
+			match bridges.get(&handle.id) {
+				// A bridge whose kernel dropped its subscription is cached but
+				// dead: every later attach would fault on a session that is
+				// still live. Evict it and subscribe again.
+				Some(bridge) if bridge.closed().is_some() => {
+					bridges.remove(&handle.id);
+				},
+				Some(bridge) => return Ok(Arc::clone(bridge)),
+				None => {},
+			}
 		}
 		let subscription = subscribe(handle).await?;
 		let bridge =
@@ -210,10 +220,11 @@ impl SessionWire {
 
 		let socket = bind_owner_socket(data_dir).await?;
 		let authority: Arc<dyn SessionControlAuthority> = self;
-		let service =
+		let inner =
 			pb::session_control_server::SessionControlServer::new(SessionControlRpc::new(authority))
 				.max_decoding_message_size(CONTROL_MESSAGE_MAX_BYTES)
 				.max_encoding_message_size(CONTROL_MESSAGE_MAX_BYTES);
+		let service = tonic::service::interceptor::InterceptedService::new(inner, owner_identity);
 		let incoming = omp_rpc::uds::listen(&socket.path)
 			.await
 			.map_err(|source| SessionWireError::Listen { path: socket.path.clone(), source })?;
@@ -226,6 +237,27 @@ impl SessionWire {
 			.map_err(|source| SessionWireError::Serve { source })
 	}
 }
+
+/// Establishes the caller's identity for a request on the owner socket.
+///
+/// The socket is the authenticator: its directory is 0700 and the socket 0600,
+/// so only the owning OS user can have reached this point. R1 therefore grants
+/// the whole read-only scope set and inserts it where handlers read identity
+/// from, which no request field can reach.
+#[cfg(unix)]
+fn owner_identity(mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
+	request.extensions_mut().insert(ControlContext::new(
+		OWNER_PRINCIPAL,
+		[ControlScope::Observe, ControlScope::ObserveHostLocal]
+			.into_iter()
+			.collect(),
+	));
+	Ok(request)
+}
+
+/// Principal every caller on the owner socket speaks for.
+#[cfg(unix)]
+const OWNER_PRINCIPAL: &str = "owner";
 
 /// An owner-only socket path this process has claimed.
 #[cfg(unix)]
@@ -254,8 +286,9 @@ async fn bind_owner_socket(data_dir: &Path) -> Result<OwnerSocket, SessionWireEr
 		fs::remove_file(&path)
 			.map_err(|source| SessionWireError::BindSocket { path: path.clone(), source })?;
 	}
-	// `uds::listen` binds; the mode is applied before any peer can connect
-	// because nothing dials a path that does not exist yet.
+	// `uds::listen` binds and `restrict_socket` chmods immediately after, so
+	// the socket exists briefly at the process umask. The 0700 directory above
+	// is the defense during that window: no other user can traverse to it.
 	Ok(OwnerSocket { path })
 }
 
@@ -367,13 +400,19 @@ fn closure_status(closure: Closure) -> Option<Status> {
 /// Pumps one subscriber into attach frames until the bridge closes.
 fn attach_stream(
 	mut subscriber: Subscriber,
+	bridge: Arc<SessionBridge>,
 	policy: Option<Arc<ControlVisibility>>,
 	label: Str,
 	context: ControlContext,
 	heartbeat: Duration,
+	opening: Option<pb::WelcomeFrame>,
 ) -> RpcStream<pb::AttachFrame> {
 	let scopes = granted_scopes(&context);
 	Box::pin(async_stream::stream! {
+		// The synthesized welcome is emitted lazily: a cursor the bridge
+		// refuses is answered with a resync and a welcome of its own, and the
+		// client must not see two headers for one attachment.
+		let mut opening = opening;
 		let mut idle = tokio::time::interval(heartbeat);
 		idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		idle.tick().await;
@@ -392,6 +431,7 @@ fn attach_stream(
 			};
 			match polled {
 				Polled::Ready(Delivery::Welcome { cursor, snapshot }) => {
+					opening = None;
 					let epoch = cursor.epoch.get();
 					let seq = cursor.seq.get();
 					yield Ok(frame(pb::attach_frame::Frame::Welcome(pb::WelcomeFrame {
@@ -403,6 +443,9 @@ fn attach_stream(
 					pending.extend(snapshot_frames(epoch, seq, snapshot.as_bytes()));
 				},
 				Polled::Ready(Delivery::Event { cursor, bytes }) => {
+					if let Some(welcome) = opening.take() {
+						yield Ok(frame(pb::attach_frame::Frame::Welcome(welcome)));
+					}
 					yield Ok(frame(pb::attach_frame::Frame::Event(pb::EventFrame {
 						epoch: cursor.epoch.get(),
 						seq:   cursor.seq.get(),
@@ -410,6 +453,7 @@ fn attach_stream(
 					})));
 				},
 				Polled::Ready(Delivery::Resync { reason }) => {
+					opening = None;
 					yield Ok(frame(pb::attach_frame::Frame::Resync(pb::ResyncFrame {
 						reason: reason.to_string(),
 					})));
@@ -428,8 +472,11 @@ fn attach_stream(
 							continue;
 						},
 						_ = idle.tick() => {
+							if let Some(welcome) = opening.take() {
+								yield Ok(frame(pb::attach_frame::Frame::Welcome(welcome)));
+							}
 							yield Ok(frame(pb::attach_frame::Frame::Heartbeat(
-								pb::HeartbeatFrame { head_seq: 0 },
+								pb::HeartbeatFrame { head_seq: bridge.head().get() },
 							)));
 						},
 					}
@@ -447,7 +494,7 @@ impl SessionControlAuthority for SessionWire {
 		request: pb::ListSessionsRequest,
 	) -> Result<pb::SessionList, SessionControlError> {
 		let root = request.project_root.trim();
-		let sessions = self
+		let mut sessions = self
 			.sessions
 			.list()
 			.into_iter()
@@ -456,7 +503,11 @@ impl SessionControlAuthority for SessionWire {
 				let epoch = self.epoch_of(&handle.id);
 				session_ref(&handle, epoch)
 			})
-			.collect();
+			.collect::<Vec<_>>();
+		// The registry is a hash map, so its iteration order is arbitrary. A
+		// session id is a ULID, whose lexical order is its mint order, so
+		// sorting descending is most-recent first as the wire promises.
+		sessions.sort_unstable_by(|left, right| right.session_id.cmp(&left.session_id));
 		Ok(pb::SessionList { sessions })
 	}
 
@@ -475,12 +526,24 @@ impl SessionControlAuthority for SessionWire {
 		let bridge = self.bridge_for(&handle).await?;
 		let cursor = resume_cursor(&handle.id, &request);
 		let subscriber = bridge.subscribe(cursor.as_ref());
+		// A served cursor replays events and nothing else, but the proto makes
+		// the welcome the first frame of every attachment: it is where a client
+		// learns the session header and its granted scopes. Synthesize it here
+		// rather than make the bridge resend a snapshot the client already has.
+		let opening = cursor.is_some().then(|| pb::WelcomeFrame {
+			epoch:          bridge.epoch().get(),
+			head_seq:       bridge.head().get(),
+			label:          handle.name.as_str().to_owned(),
+			granted_scopes: granted_scopes(&context),
+		});
 		Ok(attach_stream(
 			subscriber,
+			Arc::clone(&bridge),
 			self.policy_for(&context),
 			handle.name.clone(),
 			context,
 			self.heartbeat,
+			opening,
 		))
 	}
 }
@@ -502,7 +565,7 @@ mod tests {
 	struct FakeKernel {
 		dom:    Dom,
 		drain:  flume::Receiver<omp_dom::Event>,
-		to:     Vec<flume::Sender<omp_dom::Event>>,
+		to:     Arc<parking_lot::Mutex<Vec<flume::Sender<omp_dom::Event>>>>,
 		_serve: tokio::task::JoinHandle<()>,
 	}
 
@@ -536,12 +599,18 @@ mod tests {
 		.expect("an assistant inserts under the turn");
 		let (snapshot, drain) = dom.subscribe();
 		let (up, mailbox) = flume::unbounded();
-		let (to, events) = flume::unbounded();
+		let to: Arc<parking_lot::Mutex<Vec<flume::Sender<omp_dom::Event>>>> =
+			Arc::new(parking_lot::Mutex::new(Vec::new()));
+		let fanout = Arc::clone(&to);
 		let seeded = snapshot.clone();
+		// One channel per subscription, as a real kernel hands out: dropping
+		// the senders is how a test makes a bridge lose its subscription.
 		let serve = tokio::spawn(async move {
 			while let Ok(message) = mailbox.recv_async().await {
 				if let Up::Subscribe(reply) = message {
-					let _ = reply.send((seeded.clone(), events.clone()));
+					let (sender, events) = flume::unbounded();
+					fanout.lock().push(sender);
+					let _ = reply.send((seeded.clone(), events));
 				}
 			}
 		});
@@ -556,7 +625,7 @@ mod tests {
 			autoreply: None,
 			project_root: Arc::from(Path::new(root)),
 		});
-		(FakeKernel { dom, drain, to: vec![to], _serve: serve }, detached)
+		(FakeKernel { dom, drain, to, _serve: serve }, detached)
 	}
 
 	impl FakeKernel {
@@ -583,10 +652,15 @@ mod tests {
 				})
 				.expect("edit applies");
 			for event in self.drain.try_iter() {
-				for sender in &self.to {
+				for sender in self.to.lock().iter() {
 					let _ = sender.send(event.clone());
 				}
 			}
+		}
+
+		/// Drops every subscription this kernel has handed out.
+		fn drop_subscribers(&self) {
+			self.to.lock().clear();
 		}
 	}
 
@@ -628,6 +702,199 @@ mod tests {
 			);
 		}
 		out
+	}
+
+	/// The heartbeat carries the bridge's head, which is what lets an idle
+	/// client tell "current" from "hung".
+	#[tokio::test]
+	async fn a_heartbeat_reports_the_bridge_head() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (mut kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let wire = Arc::new(SessionWire::new(
+			Arc::clone(&sessions),
+			BridgeLimits::default(),
+			Arc::new(
+				ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+			),
+			Duration::from_millis(50),
+		));
+
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("attaching succeeds");
+		let opening = ready(&mut stream).await;
+		kernel.publish("one more");
+		let frames = ready(&mut stream).await;
+
+		let head = frames
+			.iter()
+			.chain(opening.iter())
+			.find_map(|frame| match frame {
+				pb::attach_frame::Frame::Event(event) => Some(event.seq),
+				_ => None,
+			})
+			.expect("the published edit arrives");
+		let heartbeat = frames
+			.iter()
+			.find_map(|frame| match frame {
+				pb::attach_frame::Frame::Heartbeat(beat) => Some(beat.head_seq),
+				_ => None,
+			})
+			.expect("an idle stream heartbeats");
+		assert_eq!(heartbeat, head, "the heartbeat carries the head, got {frames:?}");
+	}
+
+	/// A cursor the bridge can serve replays events, and the proto still makes
+	/// the welcome the first frame of the attachment.
+	#[tokio::test]
+	async fn a_served_cursor_still_opens_with_a_welcome() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (mut kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let wire = wire(Arc::clone(&sessions));
+
+		let mut first = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("attaching succeeds");
+		let opening = ready(&mut first).await;
+		let (epoch, head) = opening
+			.iter()
+			.find_map(|frame| match frame {
+				pb::attach_frame::Frame::Welcome(welcome) => Some((welcome.epoch, welcome.head_seq)),
+				_ => None,
+			})
+			.expect("the first attachment opens with a welcome");
+		drop(first);
+		kernel.publish("after the detach");
+
+		let mut resumed = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				resume_epoch: epoch,
+				resume_seq: head,
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("attaching succeeds");
+		let frames = ready(&mut resumed).await;
+		assert!(
+			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
+			"a served cursor opens with a welcome, got {frames:?}"
+		);
+		assert!(
+			frames
+				.iter()
+				.any(|frame| matches!(frame, pb::attach_frame::Frame::Event(_))),
+			"the replayed event follows it, got {frames:?}"
+		);
+		assert_eq!(
+			frames
+				.iter()
+				.filter(|frame| matches!(frame, pb::attach_frame::Frame::Welcome(_)))
+				.count(),
+			1,
+			"one header per attachment, got {frames:?}"
+		);
+		assert!(
+			!frames
+				.iter()
+				.any(|frame| matches!(frame, pb::attach_frame::Frame::SnapshotChunk(_))),
+			"a served cursor resends no snapshot, got {frames:?}"
+		);
+	}
+
+	/// A bridge that lost its subscription is dead; caching it would kill
+	/// every later attach to a session that is still live.
+	#[tokio::test]
+	async fn a_closed_bridge_is_evicted_rather_than_reused() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let wire = wire(Arc::clone(&sessions));
+		let request =
+			|| pb::AttachRequest { session_id: "live".to_owned(), ..pb::AttachRequest::default() };
+
+		let mut first = wire
+			.attach(owner(), request())
+			.await
+			.expect("attaching succeeds");
+		assert!(!ready(&mut first).await.is_empty(), "the first attachment is served");
+		let cached = {
+			let bridges = wire.bridges.lock();
+			Arc::as_ptr(
+				bridges
+					.get(&SessionId::new("live"))
+					.expect("the bridge is cached"),
+			)
+		};
+
+		let mut second = wire
+			.attach(owner(), request())
+			.await
+			.expect("attaching succeeds");
+		assert!(!ready(&mut second).await.is_empty(), "the second attachment is served");
+		assert_eq!(
+			{
+				let bridges = wire.bridges.lock();
+				Arc::as_ptr(
+					bridges
+						.get(&SessionId::new("live"))
+						.expect("the bridge is cached"),
+				)
+			},
+			cached,
+			"a live bridge is shared, not rebuilt"
+		);
+
+		drop(first);
+		drop(second);
+		kernel.drop_subscribers();
+		let closed = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				let bridge = {
+					let bridges = wire.bridges.lock();
+					Arc::clone(
+						bridges
+							.get(&SessionId::new("live"))
+							.expect("the bridge is cached"),
+					)
+				};
+				if bridge.closed().is_some() {
+					return;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		assert!(closed.is_ok(), "the bridge notices its lost subscription");
+
+		let mut third = wire
+			.attach(owner(), request())
+			.await
+			.expect("attaching succeeds");
+		let frames = ready(&mut third).await;
+		assert!(
+			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
+			"the session is still live, so a fresh bridge serves it, got {frames:?}"
+		);
+		assert_ne!(
+			{
+				let bridges = wire.bridges.lock();
+				Arc::as_ptr(
+					bridges
+						.get(&SessionId::new("live"))
+						.expect("the bridge is cached"),
+				)
+			},
+			cached,
+			"the dead bridge was evicted"
+		);
 	}
 
 	#[tokio::test]

@@ -862,6 +862,15 @@ impl SessionBridge {
 		self.shared.state.lock().head
 	}
 
+	/// Returns the closure that ended this bridge, if it has ended.
+	///
+	/// A bridge closes on its own when the kernel drops its subscription, so a
+	/// cached bridge is not necessarily a usable one.
+	#[must_use]
+	pub fn closed(&self) -> Option<Closure> {
+		self.shared.state.lock().closed
+	}
+
 	/// Returns the oldest sequence still replayable from the ring.
 	#[must_use]
 	pub fn oldest(&self) -> Option<Seq> {

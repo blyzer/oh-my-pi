@@ -120,7 +120,9 @@ message WelcomeFrame {
 message SnapshotChunk {
   // Bridge epoch this snapshot belongs to.
   uint64 epoch = 1;
-  // Monotonic sequence number of this chunk within the snapshot.
+  // Bridge sequence the snapshot was taken at. Equal to the welcome's
+  // head_seq and identical on every chunk of one snapshot; `index` is what
+  // orders the chunks.
   uint64 seq = 2;
   // Zero-based chunk index within the snapshot.
   uint32 index = 3;
