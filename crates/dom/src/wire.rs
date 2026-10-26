@@ -338,8 +338,12 @@ mod tests {
 		);
 	}
 
+	/// The decoder hands the producer's own envelope bytes to `Snapshot`
+	/// untouched. It is not a byte round trip: `Snapshot::from_bytes`
+	/// canonicalizes, so the fixture's uncompacted JSON compacts on both sides
+	/// of the comparison. See `crates/dom/README.md` for that bound.
 	#[test]
-	fn snapshot_decode_adds_no_normalization_of_its_own() {
+	fn snapshot_decode_equals_validating_the_producers_bytes() {
 		let snapshot = uncanonical();
 		let bytes = encode_event(&Event::Reset { snapshot: snapshot.clone() }).expect("encodes");
 		let Event::Reset { snapshot: decoded } = decode_event(&bytes).expect("decodes") else {
