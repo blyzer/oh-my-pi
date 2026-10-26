@@ -852,9 +852,12 @@ mod tests {
 			.await
 			.expect("attaching succeeds");
 		assert!(!ready(&mut first).await.is_empty(), "the first attachment is served");
+		// Hold the Arc, do not record its address: once the evicted bridge is
+		// dropped the allocator is free to hand the same address back, and the
+		// identity check below would then compare two different bridges equal.
 		let cached = {
 			let bridges = wire.bridges.lock();
-			Arc::as_ptr(
+			Arc::clone(
 				bridges
 					.get(&SessionId::new("live"))
 					.expect("the bridge is cached"),
@@ -866,16 +869,15 @@ mod tests {
 			.await
 			.expect("attaching succeeds");
 		assert!(!ready(&mut second).await.is_empty(), "the second attachment is served");
-		assert_eq!(
-			{
+		assert!(
+			Arc::ptr_eq(&cached, &{
 				let bridges = wire.bridges.lock();
-				Arc::as_ptr(
+				Arc::clone(
 					bridges
 						.get(&SessionId::new("live"))
 						.expect("the bridge is cached"),
 				)
-			},
-			cached,
+			}),
 			"a live bridge is shared, not rebuilt"
 		);
 
@@ -910,18 +912,18 @@ mod tests {
 			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
 			"the session is still live, so a fresh bridge serves it, got {frames:?}"
 		);
-		assert_ne!(
-			{
+		assert!(
+			!Arc::ptr_eq(&cached, &{
 				let bridges = wire.bridges.lock();
-				Arc::as_ptr(
+				Arc::clone(
 					bridges
 						.get(&SessionId::new("live"))
 						.expect("the bridge is cached"),
 				)
-			},
-			cached,
+			}),
 			"the dead bridge was evicted"
 		);
+		assert!(cached.closed().is_some(), "the evicted bridge is the dead one");
 	}
 
 	#[tokio::test]
