@@ -5636,6 +5636,54 @@ mod tests {
 		));
 	}
 
+	/// The session is registered before its owner exists, so installing the
+	/// seam has to patch the live handle rather than wait for a re-register.
+	#[test]
+	fn installing_the_idle_seam_patches_the_live_handle_in_place() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let sessions_dir = scratch.path().join("sessions");
+		std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+		let live = std::sync::Arc::new(crate::sessions::SessionRegistry::new());
+		let (up, _mailbox) = flume::unbounded();
+		live.register(omp_core::Str::new_static("main"), crate::sessions::KernelHandle {
+			id:             crate::sessions::SessionId::new("main"),
+			name:           omp_core::Str::new_static("main"),
+			up:             up.clone(),
+			snapshot:       std::sync::Arc::new(parking_lot::RwLock::new(
+				omp_dom::Dom::new().snapshot(),
+			)),
+			topology:       omp_agent::SessionTopology::main(omp_core::Str::new_static("main")),
+			relay:          crate::sessions::IrcRelayPolicy::default(),
+			autoreply:      None,
+			idle_subscribe: None,
+			project_root:   std::sync::Arc::from(scratch.path()),
+		});
+		let home = super::SessionHome {
+			sessions_dir,
+			idle_subscribe: None,
+			project_root: scratch.path().to_path_buf(),
+			model: omp_core::Str::new_static("provider/model"),
+			prompt: super::PromptOverrides::default(),
+			facts: crate::discovery::PromptFacts::default(),
+			live: std::sync::Arc::clone(&live),
+			tools_enabled: false,
+			up,
+			rules: None,
+			workspace_trust: None,
+		};
+
+		let (idle_tx, _idle_rx) = flume::unbounded();
+		let home = home.with_idle_subscribe(idle_tx);
+
+		assert_eq!(live.list().len(), 1, "the handle is patched, not duplicated");
+		let patched = live
+			.lookup(crate::sessions::SessionId::from_ref("main"))
+			.expect("the session is still registered under its id");
+		assert!(patched.idle_subscribe.is_some(), "the live handle carries the seam");
+		assert_eq!(patched.name.as_str(), "main", "the routing name is unchanged");
+		assert!(home.idle_subscribe.is_some(), "later registrations carry it too");
+	}
+
 	#[test]
 	fn malformed_child_schema_fails_kernel_composition() {
 		let result = install_yield_contract(
