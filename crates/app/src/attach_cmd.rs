@@ -11,9 +11,8 @@
 //! which is what makes a reprint correct rather than a duplicate.
 
 use std::{
-	io::{self, Write as _},
+	io::{self, Write},
 	path::{Path, PathBuf},
-	time::Duration,
 };
 
 use miette::{Context as _, IntoDiagnostic as _, miette};
@@ -102,7 +101,7 @@ async fn observe(
 		.into_inner();
 
 	let mut replica = Replica::default();
-	let mut view = Tail::default();
+	let mut view = Tail::new(io::stdout().lock());
 	while let Some(frame) = stream.next().await {
 		let frame = frame
 			.into_diagnostic()
@@ -115,7 +114,10 @@ async fn observe(
 			continue;
 		}
 		match replica.fold(body)? {
-			Folded::Quiet => {},
+			// A welcome, a partial chunk, or a heartbeat changes nothing the
+			// reader can see. Re-projecting the transcript for one would copy
+			// the whole thing once per streaming token.
+			Folded::Quiet => continue,
 			Folded::Reset => view.reset(),
 			Folded::Changed => {},
 		}
@@ -188,10 +190,18 @@ impl Replica {
 				let decoded = omp_dom::wire::decode_event(&event.bytes)
 					.into_diagnostic()
 					.wrap_err("the host sent an event this build cannot read")?;
+				// `Event::Reset` is an ordinary ring entry, not a resync: a
+				// rewind or a session switch arrives this way and replaces the
+				// tree, so what was already printed no longer describes it.
+				let reset = matches!(decoded, omp_dom::Event::Reset { .. });
 				dom.apply_event(&decoded)
 					.into_diagnostic()
 					.wrap_err("the replica refused an event the host published")?;
-				Ok(Folded::Changed)
+				Ok(if reset {
+					Folded::Reset
+				} else {
+					Folded::Changed
+				})
 			},
 			pb::attach_frame::Frame::Resync(resync) => {
 				eprintln!("resynchronizing: {}", resync.reason);
@@ -204,18 +214,28 @@ impl Replica {
 	}
 }
 
-/// The rendered prefix already written to standard output.
-#[derive(Default)]
-struct Tail {
+/// The rendered prefix already written to the attachment's output.
+struct Tail<W> {
+	/// Where settled lines go.
+	out:     W,
 	/// Lines printed so far.
 	printed: usize,
 	/// The last rendering, held so the final line can be flushed at the end.
 	last:    String,
 }
 
-impl Tail {
-	/// Forgets the printed frontier after a resync, so the fresh replica
-	/// reprints in full under its own heading.
+impl<W: Write> Tail<W> {
+	/// Builds a tail over one sink.
+	const fn new(out: W) -> Self {
+		Self { out, printed: 0, last: String::new() }
+	}
+
+	/// Forgets the printed frontier, so the replacement tree reprints in full.
+	///
+	/// A resync and a reset both replace the replica, and what was printed
+	/// describes a tree that no longer exists. Standard output stays pure
+	/// transcript, so the marker that explains the repetition is on standard
+	/// error, where the welcome and the resync reason already are.
 	fn reset(&mut self) {
 		self.printed = 0;
 		self.last.clear();
@@ -227,12 +247,14 @@ impl Tail {
 	/// token, and standard output cannot take a line back.
 	fn advance(&mut self, rendered: String) -> miette::Result<()> {
 		let settled = rendered.lines().count().saturating_sub(1);
+		// A tree that shrank without a reset would strand the frontier above
+		// its own end; printing resumes from wherever the text now ends.
+		self.printed = self.printed.min(settled);
 		if settled > self.printed {
-			let mut out = io::stdout().lock();
 			for line in rendered.lines().take(settled).skip(self.printed) {
-				writeln!(out, "{line}").into_diagnostic()?;
+				writeln!(self.out, "{line}").into_diagnostic()?;
 			}
-			out.flush().into_diagnostic()?;
+			self.out.flush().into_diagnostic()?;
 			self.printed = settled;
 		}
 		self.last = rendered;
@@ -241,11 +263,10 @@ impl Tail {
 
 	/// Flushes the line held back by the last advance.
 	fn finish(&mut self) -> miette::Result<()> {
-		let mut out = io::stdout().lock();
 		for line in self.last.lines().skip(self.printed) {
-			writeln!(out, "{line}").into_diagnostic()?;
+			writeln!(self.out, "{line}").into_diagnostic()?;
 		}
-		out.flush().into_diagnostic()?;
+		self.out.flush().into_diagnostic()?;
 		Ok(())
 	}
 }
@@ -308,10 +329,6 @@ fn parse_cursor(cursor: Option<&str>) -> miette::Result<(u64, u64)> {
 		.map_err(|_| miette!("a resume cursor is <epoch>:<seq>, got {cursor}"))?;
 	Ok((epoch, seq))
 }
-
-/// Idle period the host's heartbeat guarantees, used by callers that bound a
-/// silent attachment.
-pub const HEARTBEAT_GRACE: Duration = Duration::from_secs(45);
 
 #[cfg(test)]
 mod tests {
@@ -470,18 +487,117 @@ mod tests {
 	}
 
 	#[test]
-	fn the_tail_holds_the_last_line_until_it_settles() {
-		let mut tail = Tail::default();
+	fn the_tail_prints_each_settled_line_once_and_flushes_the_rest_at_the_end() {
+		let mut tail = Tail::new(Vec::new());
 		tail
 			.advance("one\ntwo\n".to_owned())
 			.expect("the tail prints");
-		assert_eq!(tail.printed, 1, "the last line is held back");
+		assert_eq!(
+			String::from_utf8(tail.out.clone()).expect("utf8"),
+			"one\n",
+			"the last line is held back while it may still change"
+		);
 		tail
 			.advance("one\ntwo\nthree\n".to_owned())
 			.expect("the tail prints");
-		assert_eq!(tail.printed, 2, "a settled line prints exactly once");
+		assert_eq!(
+			String::from_utf8(tail.out.clone()).expect("utf8"),
+			"one\ntwo\n",
+			"a settled line prints exactly once"
+		);
+		tail.finish().expect("the tail flushes");
+		assert_eq!(
+			String::from_utf8(tail.out.clone()).expect("utf8"),
+			"one\ntwo\nthree\n",
+			"the held line is flushed when the attachment ends"
+		);
+	}
+
+	#[test]
+	fn a_replaced_tree_reprints_from_its_own_start() {
+		let mut tail = Tail::new(Vec::new());
+		tail
+			.advance("a\nb\nc\n".to_owned())
+			.expect("the tail prints");
 		tail.reset();
-		assert_eq!(tail.printed, 0, "a resync forgets the frontier");
+		tail
+			.advance("x\ny\nz\n".to_owned())
+			.expect("the tail prints the replacement");
+		tail.finish().expect("the tail flushes");
+		assert_eq!(
+			String::from_utf8(tail.out).expect("utf8"),
+			"a\nb\nx\ny\nz\n",
+			"the replacement tree is printed in full, not spliced onto the old frontier"
+		);
+	}
+
+	#[test]
+	fn a_shrunk_tree_without_a_reset_resumes_at_its_new_end() {
+		let mut tail = Tail::new(Vec::new());
+		tail
+			.advance("a\nb\nc\nd\n".to_owned())
+			.expect("the tail prints");
+		tail
+			.advance("a\nb\n".to_owned())
+			.expect("the shorter tree is accepted");
+		tail
+			.advance("a\nb\nq\n".to_owned())
+			.expect("the regrown line prints");
+		tail.finish().expect("the tail flushes");
+		assert_eq!(
+			String::from_utf8(tail.out).expect("utf8"),
+			"a\nb\nc\nb\nq\n",
+			"a shrink reprints from its new end rather than swallowing what follows"
+		);
+	}
+
+	#[test]
+	fn a_reset_event_replaces_the_tree_and_the_printed_frontier() {
+		let (mut dom, events) = seeded();
+		let mut replica = Replica::default();
+		for frame in chunks(&dom) {
+			replica.fold(frame).expect("the snapshot folds");
+		}
+		// A rewind or a session switch publishes `Event::Reset` as an ordinary
+		// ring entry, carrying a tree that replaces the one in hand.
+		let mut replacement = Dom::new();
+		let body = replacement.body();
+		replacement
+			.apply(&Txn {
+				cause: EntryId::default(),
+				label: None,
+				ops:   vec![Op::Ins {
+					parent: body,
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Turn),
+				}],
+			})
+			.expect("a turn inserts under the body");
+		dom.reset(replacement.snapshot());
+		let folded = events
+			.try_iter()
+			.map(|event| {
+				let bytes = omp_dom::wire::encode_event(&event).expect("the event encodes");
+				replica
+					.fold(pb::attach_frame::Frame::Event(pb::EventFrame {
+						epoch: 1,
+						seq:   2,
+						bytes: bytes.into(),
+					}))
+					.expect("the reset folds")
+			})
+			.last()
+			.expect("the reset reached the client");
+		assert_eq!(
+			folded,
+			Folded::Reset,
+			"a reset event tells the renderer its printed prefix is stale"
+		);
+		assert_eq!(
+			crate::print_mode::transcript_text(replica.dom().expect("the replica exists")),
+			crate::print_mode::transcript_text(&dom),
+			"the replica adopted the replacement tree"
+		);
 	}
 
 	#[test]
