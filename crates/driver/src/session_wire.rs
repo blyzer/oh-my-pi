@@ -31,8 +31,7 @@ use omp_proto::session::v1 as pb;
 use omp_serve::{
 	inference::RpcStream,
 	session::{
-		ControlContext, ControlScope, SessionControlAuthority, SessionControlError,
-		SessionControlRpc,
+		ControlContext, ControlScope, SessionControlAuthority, SessionControlError, SessionControlRpc,
 	},
 };
 use parking_lot::Mutex;
@@ -483,5 +482,317 @@ impl SessionControlAuthority for SessionWire {
 			context,
 			self.heartbeat,
 		))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use omp_core::Str;
+	use omp_dom::{Dom, KnownTag, NodeSpec, Op, PropId, Txn, Value};
+	use omp_journal::EntryId;
+	use omp_serve::session::ScopeSet;
+	use parking_lot::RwLock;
+
+	use super::*;
+	use crate::sessions::IrcRelayPolicy;
+
+	/// A kernel that answers `Up::Subscribe` from a DOM the test drives.
+	struct FakeKernel {
+		dom:    Dom,
+		drain:  flume::Receiver<omp_dom::Event>,
+		to:     Vec<flume::Sender<omp_dom::Event>>,
+		_serve: tokio::task::JoinHandle<()>,
+	}
+
+	/// Registers one session whose kernel answers subscriptions, and returns
+	/// the producer side.
+	fn registered(
+		sessions: &SessionRegistry,
+		id: &'static str,
+		root: &'static str,
+	) -> (FakeKernel, Arc<RwLock<omp_dom::Snapshot>>) {
+		let mut dom = Dom::new();
+		let body = dom.body();
+		dom.apply(&Txn {
+			cause: EntryId::default(),
+			label: None,
+			ops:   vec![Op::Ins {
+				parent: body,
+				after:  None,
+				node:   NodeSpec::new(KnownTag::Assistant)
+					.with_prop(PropId::Provider, Value::Str(Str::new_static("secret-provider")))
+					.with_prop(PropId::Text, Value::Str(Str::new_static("visible"))),
+			}],
+		})
+		.expect("seed applies");
+		let (snapshot, drain) = dom.subscribe();
+		let (up, mailbox) = flume::unbounded();
+		let (to, events) = flume::unbounded();
+		let seeded = snapshot.clone();
+		let serve = tokio::spawn(async move {
+			while let Ok(message) = mailbox.recv_async().await {
+				if let Up::Subscribe(reply) = message {
+					let _ = reply.send((seeded.clone(), events.clone()));
+				}
+			}
+		});
+		let detached = Arc::new(RwLock::new(snapshot));
+		sessions.register(Str::new(id), KernelHandle {
+			id: SessionId::new(id),
+			name: Str::new(id),
+			up,
+			snapshot: Arc::clone(&detached),
+			topology: omp_agent::SessionTopology::main(Str::new(id)),
+			relay: IrcRelayPolicy::default(),
+			autoreply: None,
+			project_root: Arc::from(Path::new(root)),
+		});
+		(FakeKernel { dom, drain, to: vec![to], _serve: serve }, detached)
+	}
+
+	impl FakeKernel {
+		/// Publishes an edit to every attached bridge.
+		fn publish(&mut self, text: &'static str) {
+			let body = self.dom.body();
+			self
+				.dom
+				.apply(&Txn {
+					cause: EntryId::default(),
+					label: None,
+					ops:   vec![Op::Ins {
+						parent: body,
+						after:  None,
+						node:   NodeSpec::new(KnownTag::User)
+							.with_prop(PropId::Text, Value::Str(Str::new(text))),
+					}],
+				})
+				.expect("edit applies");
+			for event in self.drain.try_iter() {
+				for sender in &self.to {
+					let _ = sender.send(event.clone());
+				}
+			}
+		}
+	}
+
+	fn wire(sessions: Arc<SessionRegistry>) -> Arc<SessionWire> {
+		Arc::new(SessionWire::new(
+			sessions,
+			BridgeLimits::default(),
+			Arc::new(
+				ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+			),
+			Duration::from_secs(60),
+		))
+	}
+
+	fn observer() -> ControlContext {
+		ControlContext::new("owner", ScopeSet::from_iter([ControlScope::Observe]))
+	}
+
+	fn owner() -> ControlContext {
+		ControlContext::new(
+			"owner",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::ObserveHostLocal]),
+		)
+	}
+
+	/// Drains the frames already queued on an attachment.
+	async fn ready(stream: &mut RpcStream<pb::AttachFrame>) -> Vec<pb::attach_frame::Frame> {
+		use futures::StreamExt as _;
+
+		let mut out = Vec::new();
+		while let Ok(Some(frame)) =
+			tokio::time::timeout(Duration::from_millis(250), stream.next()).await
+		{
+			out.push(
+				frame
+					.expect("the stream does not fault")
+					.frame
+					.expect("a frame body"),
+			);
+		}
+		out
+	}
+
+	#[tokio::test]
+	async fn list_filters_by_project_root_and_fills_every_reference() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (_here, _) = registered(&sessions, "here", "/workspace/here");
+		let (_elsewhere, _) = registered(&sessions, "elsewhere", "/workspace/elsewhere");
+		let wire = wire(Arc::clone(&sessions));
+
+		let all = wire
+			.list(owner(), pb::ListSessionsRequest::default())
+			.await
+			.expect("listing succeeds");
+		assert_eq!(all.sessions.len(), 2);
+
+		let scoped = wire
+			.list(owner(), pb::ListSessionsRequest { project_root: "/workspace/here".to_owned() })
+			.await
+			.expect("listing succeeds");
+		let [only] = scoped.sessions.as_slice() else {
+			panic!("one session lives under that root, got {scoped:?}");
+		};
+		assert_eq!(only.session_id, "here");
+		assert_eq!(only.label, "here");
+		assert_eq!(only.project_root, "/workspace/here");
+		assert!(only.is_live);
+		assert_eq!(only.epoch, 0, "no bridge has started for it yet");
+	}
+
+	#[tokio::test]
+	async fn attach_emits_a_welcome_then_a_final_snapshot_chunk_then_events() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (mut kernel, _) = registered(&sessions, "live", "/workspace");
+		let wire = wire(Arc::clone(&sessions));
+
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("attach succeeds");
+
+		let opening = ready(&mut stream).await;
+		let [pb::attach_frame::Frame::Welcome(welcome), rest @ ..] = opening.as_slice() else {
+			panic!("an attachment opens with a welcome, got {opening:?}");
+		};
+		assert_eq!(welcome.label, "live");
+		assert!(welcome.epoch != 0, "a started bridge has an epoch");
+		let chunks = rest
+			.iter()
+			.map(|frame| match frame {
+				pb::attach_frame::Frame::SnapshotChunk(chunk) => chunk,
+				other => panic!("the welcome is followed by snapshot chunks, got {other:?}"),
+			})
+			.collect::<Vec<_>>();
+		assert!(!chunks.is_empty(), "a snapshot always produces at least one chunk");
+		assert!(chunks.last().expect("a chunk").r#final, "the last chunk is marked final");
+		assert!(
+			chunks.iter().rev().skip(1).all(|chunk| !chunk.r#final),
+			"only the last chunk is final",
+		);
+		assert!(
+			chunks
+				.iter()
+				.all(|chunk| chunk.bytes.len() <= SNAPSHOT_CHUNK_BYTES),
+			"no chunk exceeds the frame bound",
+		);
+
+		kernel.publish("after the snapshot");
+		let live = ready(&mut stream).await;
+		let [pb::attach_frame::Frame::Event(event)] = live.as_slice() else {
+			panic!("a published edit arrives as one event, got {live:?}");
+		};
+		assert_eq!(event.epoch, welcome.epoch);
+		assert!(event.seq > welcome.head_seq, "an event advances the cursor");
+	}
+
+	#[tokio::test]
+	async fn an_observer_without_host_local_scope_sees_provider_metadata_blanked() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (_kernel, _) = registered(&sessions, "live", "/workspace");
+		let wire = wire(Arc::clone(&sessions));
+
+		let snapshot_of = async |context: ControlContext| {
+			let mut stream = wire
+				.attach(context, pb::AttachRequest {
+					session_id: "live".to_owned(),
+					..pb::AttachRequest::default()
+				})
+				.await
+				.expect("attach succeeds");
+			let frames = ready(&mut stream).await;
+			frames
+				.into_iter()
+				.filter_map(|frame| match frame {
+					pb::attach_frame::Frame::SnapshotChunk(chunk) => Some(chunk.bytes),
+					_ => None,
+				})
+				.fold(Vec::new(), |mut all, chunk| {
+					all.extend_from_slice(&chunk);
+					all
+				})
+		};
+
+		let unredacted = String::from_utf8(snapshot_of(owner()).await).expect("utf-8 snapshot");
+		assert!(
+			unredacted.contains("secret-provider"),
+			"a caller holding observe_host_local sees provider metadata",
+		);
+
+		let redacted = String::from_utf8(snapshot_of(observer()).await).expect("utf-8 snapshot");
+		assert!(
+			!redacted.contains("secret-provider"),
+			"a caller without observe_host_local does not, got {redacted}",
+		);
+		assert!(redacted.contains("visible"), "redaction blanks the property, not the node");
+	}
+
+	#[tokio::test]
+	async fn a_stale_cursor_resyncs_before_its_fresh_snapshot() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (_kernel, _) = registered(&sessions, "live", "/workspace");
+		let wire = wire(Arc::clone(&sessions));
+
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id:   "live".to_owned(),
+				resume_epoch: 1,
+				resume_seq:   9_999,
+			})
+			.await
+			.expect("attach succeeds");
+
+		let frames = ready(&mut stream).await;
+		let [pb::attach_frame::Frame::Resync(resync), pb::attach_frame::Frame::Welcome(_), rest @ ..] =
+			frames.as_slice()
+		else {
+			panic!("a stale cursor resyncs before its welcome, got {frames:?}");
+		};
+		assert!(!resync.reason.is_empty(), "a resync says why");
+		assert!(
+			rest
+				.iter()
+				.any(|frame| matches!(frame, pb::attach_frame::Frame::SnapshotChunk(_))),
+			"the welcome is followed by a fresh snapshot",
+		);
+	}
+
+	#[tokio::test]
+	async fn attaching_to_an_unknown_session_is_not_found() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let wire = wire(Arc::clone(&sessions));
+
+		let refusal = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "absent".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.err()
+			.expect("an unknown session cannot be attached");
+		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+	}
+
+	#[tokio::test]
+	async fn a_truncated_stream_faults_and_a_detached_one_does_not() {
+		assert!(
+			closure_status(Closure::Detached).is_none(),
+			"the host detaching on its own terms ends the stream successfully",
+		);
+		for truncated in
+			[Closure::SubscriptionLost, Closure::Replica, Closure::Encode, Closure::Panicked]
+		{
+			assert!(
+				closure_status(truncated).is_some(),
+				"{truncated} truncated the stream, so the client must learn it faulted",
+			);
+		}
 	}
 }
