@@ -539,6 +539,34 @@ service SessionControl {
   - the coordinator is a single point of scheduling. Its failure pauses dispatch but loses nothing
     (fold + rebuild).
 
+## Amendment (2026-10-26)
+
+The owner answered the questions that blocked phase R1. The answers bind R1 only.
+
+1. **Wire surface.** gRPC is the R1 surface. WebSocket, JSON, and gRPC-Web are wanted where they
+   are feasible, and each is an adapter over the same projection rather than a second control
+   plane. gRPC-Web is a layer on the same `SessionControlServer`. A JSON surface is one
+   `type_attribute` in `crates/proto/build.rs`, but it would base64-wrap canonical `omp_dom` JSON
+   inside protobuf JSON, so a JSON-native payload encoding is refused. WebSocket needs a listener
+   this tree does not have, because `tokio-tungstenite` is configured client-only. R1 ships gRPC.
+   The other three land when a named consumer exists, and none of them may add a second bridge or
+   a second `omp_dom` encoding.
+2. **Observer payload.** Attached observers receive canonical `omp_dom` bytes inside the typed
+   envelopes. The full protobuf `Op` vocabulary of open question 5 is rejected.
+3. **Redaction.** Host-local facts are blanked in place for observers that lack
+   `observe_host_local`, exactly as A4 states, and the property table is configurable through a
+   convar so the rules change without a recompile. One gap is recorded rather than guessed: the
+   DOM carries no advisor marker, so advisor subtrees cannot be classified today. Collab learns
+   advisor-ness from a caller-supplied flag, not from the tree. Until the kernel writes a marker
+   property, advisor redaction is out of R1 and the default table covers the facts that are
+   identifiable, such as paths and raw provider metadata.
+4. **Dead `omp.control.v1` session messages.** They stay. The deletion that A2 and Consequences
+   proposed is cancelled, and the "hence the deletion of the `omp.control.v1` session messages"
+   clause above no longer applies. Nothing in omp2 is required to stop reading them.
+5. **Multiple controllers.** R1 is owner-local and read-only, so it grants no mutation verb and
+   needs no controller arbitration. `Submit`, `Approve`, `AnswerUi`, and `Open` answer
+   `UNIMPLEMENTED` with a reason until R2 builds mutation. Open question 3 stays open for R2.
+
 ## Status in omp
 
 **Status: Partially implemented (phase S0 done in PR #129; R1 part-built, no R1-R4 or F1-F4

@@ -124,7 +124,41 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   because that shape arrives through the ACP client. The Codex adapter is
   correct as it stands. Do not re-apply #366.
 
-- **OPEN** ADR 0039 R1 remains incomplete under its proposed design. The ADR describes R1 as part-built and leaves owner questions open. The current tree still lacks `crates/serve` session projection, `crates/driver/src/session_wire.rs`, the bridge ring/cursor/resync/redaction, and a real `omp attach` client. The historical attach command is a `std::future::pending()` stub and is not restored. The implementation was not attempted after the scope review because it would have produced an incomplete projection.
+## ADR 0039 R1 — decided and queued
+
+The owner answered R1's blocking questions on 2026-10-26, recorded as the ADR 0039 amendment of
+the same date. R1 is gRPC, owner-local, read-only, and carries canonical `omp_dom` bytes. The
+`omp.control.v1` session messages are kept. Advisor-subtree redaction is out of R1 because the DOM
+has no advisor marker to key on.
+
+Units, in dependency order. Each lands as its own change with its own tests.
+
+1. **OPEN** `KernelHandle` carries the session's project root, so `SessionRef.project_root` can be
+   filled.
+2. **OPEN** `omp_dom::wire` encodes and decodes `Event`, replacing the private codec in
+   `crates/driver/src/collab/session.rs`, and `omp_dom::redact` blanks host-local properties in
+   place without pruning nodes or moving handles.
+3. **OPEN** `ControlVisibility`: the configurable redaction table, backed by a convar so the owner
+   can change the rules without a recompile.
+4. **OPEN** `SessionBridge`: one bounded replay ring per attached session, an `(epoch, seq)`
+   cursor, `Resync` for stale or evicted cursors, ordered `Reset` entries, lossless stream-append
+   merging, and a drain task that never blocks the kernel.
+5. **OPEN** `SessionWire` in `crates/driver`: reads `SessionRegistry`, owns the bridge table, binds
+   the owner-only UDS at `<data dir>/run/session.sock`, and absorbs the permission and stale-socket
+   handling from the unused `SessionHost`.
+6. **OPEN** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
+   `SessionControlAuthority` trait that driver implements, with identity taken from transport
+   extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2.
+7. **OPEN** `omp attach --observe`: connects to the owner UDS, negotiates `session.control.v1`,
+   folds frames into a local `Dom`, and renders through the existing read-only presentation path.
+   The historical `std::future::pending()` stub is not restored.
+8. **OPEN** Proofs: unit tests per crate, a driver integration test over a real UDS, and a P-proof
+   covering convergence, detach and cursor resume, eviction and `Resync`, host restart and a new
+   epoch, redaction, and the refusal of every mutation path.
+
+Deferred by the same decision: WebSocket, JSON, and gRPC-Web surfaces, which are adapters over
+this projection and need a named consumer first.
+
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
