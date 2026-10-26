@@ -3125,6 +3125,7 @@ pub async fn compose_kernel(
 		topology,
 		relay,
 		autoreply,
+		idle_subscribe: None,
 		project_root: Arc::from(project_root.as_path()),
 	});
 	if tools_enabled {
@@ -3229,6 +3230,11 @@ pub struct SessionHome {
 	/// are scoped to the agent class journaled on it (a resumed child keeps
 	/// its own rules) instead of copying [`Self::facts`]' rule rows.
 	pub rules:           Option<Arc<crate::discovery::rules::RuleScope>>,
+	/// Serves DOM subscriptions to observers while the session is idle.
+	///
+	/// Set by the owner that runs an idle loop over the session; a headless
+	/// composition that has none leaves it `None`.
+	pub idle_subscribe:  Option<flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>>,
 	/// The workspace trust decision the kernel was composed under; every
 	/// session this home creates or opens journals it once. `None` journals
 	/// nothing (a home over another workspace, whose trust nobody decided).
@@ -3266,7 +3272,32 @@ impl SessionHome {
 			up,
 			rules: None,
 			workspace_trust: None,
+			idle_subscribe: None,
 		})
+	}
+
+	/// Installs the channel an idle owner serves DOM subscriptions on.
+	///
+	/// The session is registered by `compose_kernel` before its owner exists,
+	/// so the live handle is patched here as well as every later one: an
+	/// observer looks the handle up, and a handle without the seam is only
+	/// reachable while a turn runs.
+	#[must_use]
+	pub fn with_idle_subscribe(
+		mut self,
+		idle: flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>,
+	) -> Self {
+		for live in self.live.list() {
+			if live.up.same_channel(&self.up) {
+				let name = live.name.clone();
+				self.live.register(name, crate::sessions::KernelHandle {
+					idle_subscribe: Some(idle.clone()),
+					..live
+				});
+			}
+		}
+		self.idle_subscribe = Some(idle);
+		self
 	}
 
 	/// Records the discovered prompt material so sessions created in-chat
@@ -3435,6 +3466,7 @@ impl SessionHome {
 				topology,
 				relay,
 				autoreply,
+				idle_subscribe: self.idle_subscribe.clone(),
 				project_root: Arc::from(self.project_root.as_path()),
 			});
 	}
@@ -5295,6 +5327,7 @@ mod tests {
 		};
 		let home = SessionHome {
 			sessions_dir:    sessions_dir.clone(),
+			idle_subscribe:  None,
 			project_root:    scratch.path().to_path_buf(),
 			model:           Str::new_static("provider/model"),
 			prompt:          PromptOverrides::default(),
@@ -5601,6 +5634,54 @@ mod tests {
 			installed.live_spec("yield").expect("yield").constraint,
 			omp_tool::Constraint::None
 		));
+	}
+
+	/// The session is registered before its owner exists, so installing the
+	/// seam has to patch the live handle rather than wait for a re-register.
+	#[test]
+	fn installing_the_idle_seam_patches_the_live_handle_in_place() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let sessions_dir = scratch.path().join("sessions");
+		std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+		let live = std::sync::Arc::new(crate::sessions::SessionRegistry::new());
+		let (up, _mailbox) = flume::unbounded();
+		live.register(omp_core::Str::new_static("main"), crate::sessions::KernelHandle {
+			id:             crate::sessions::SessionId::new("main"),
+			name:           omp_core::Str::new_static("main"),
+			up:             up.clone(),
+			snapshot:       std::sync::Arc::new(parking_lot::RwLock::new(
+				omp_dom::Dom::new().snapshot(),
+			)),
+			topology:       omp_agent::SessionTopology::main(omp_core::Str::new_static("main")),
+			relay:          crate::sessions::IrcRelayPolicy::default(),
+			autoreply:      None,
+			idle_subscribe: None,
+			project_root:   std::sync::Arc::from(scratch.path()),
+		});
+		let home = super::SessionHome {
+			sessions_dir,
+			idle_subscribe: None,
+			project_root: scratch.path().to_path_buf(),
+			model: omp_core::Str::new_static("provider/model"),
+			prompt: super::PromptOverrides::default(),
+			facts: crate::discovery::PromptFacts::default(),
+			live: std::sync::Arc::clone(&live),
+			tools_enabled: false,
+			up,
+			rules: None,
+			workspace_trust: None,
+		};
+
+		let (idle_tx, _idle_rx) = flume::unbounded();
+		let home = home.with_idle_subscribe(idle_tx);
+
+		assert_eq!(live.list().len(), 1, "the handle is patched, not duplicated");
+		let patched = live
+			.lookup(crate::sessions::SessionId::from_ref("main"))
+			.expect("the session is still registered under its id");
+		assert!(patched.idle_subscribe.is_some(), "the live handle carries the seam");
+		assert_eq!(patched.name.as_str(), "main", "the routing name is unchanged");
+		assert!(home.idle_subscribe.is_some(), "later registrations carry it too");
 	}
 
 	#[test]

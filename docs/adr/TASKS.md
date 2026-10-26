@@ -161,15 +161,25 @@ Units, in dependency order. Each lands as its own change with its own tests.
    **OPEN**: the P-proof covering convergence, detach and cursor resume, eviction and `Resync`,
    host restart and a new epoch, redaction, and the refusal of every mutation path, over a real
    `omp chat` host on a PTY.
-9. **OPEN, blocks R1 from being usable** An idle interactive kernel never answers `Up::Subscribe`.
-   `CallControl::handle` (`crates/agent/src/dispatch.rs`) serves that message, but the kernel only
-   drains its mailbox inside a turn (`Kernel::drain_mailbox`), and between turns the chat
-   controller owns the session. Smoked against a real `omp chat` on 2026-10-26: `omp attach` lists
-   the live session from the socket, and attaching to it answers `UNAVAILABLE` until a turn runs.
-   Child sessions are unaffected — the revive loop drains continuously
-   (`crates/driver/src/subagent/revive.rs`). The fix is a host-side seam that serves a subscription
-   while idle, not a client retry: an observer must be able to attach to a session that is doing
-   nothing, which is the case it exists for.
+9. **DONE** An idle interactive kernel never answered `Up::Subscribe`, because a kernel drains its
+   mailbox only inside a turn. `KernelHandle` now carries `idle_subscribe`, the channel whoever
+   holds the session between turns serves, and the wire asks the mailbox and that seam together,
+   taking whichever answers. The chat controller serves it from its idle loop; `SessionHome`
+   installs the seam and patches the handle `compose_kernel` registered before the controller
+   existed. Smoked against a real `omp chat` sitting idle: welcome, a two-chunk snapshot, and a
+   heartbeat.
+
+   Found while fixing it, and left as it stands. The arm must be **first** in the controller's
+   `biased` idle `select!`: placed third, behind `command_rx` and the pending-input gate, the host
+   did not answer an attach within the 5 s subscribe budget, reproducibly, and moving it to the
+   front fixed it just as reproducibly (three failures, three successes, same build otherwise).
+   The mechanism is unexplained: `command_rx` carries only discrete user commands, so an idle chat
+   should not feed it. Open question, with a real defect found next to it — the `REVIVED_POLL` and
+   `GOAL_CONTINUATION_DELAY` arms construct their `tokio::time::sleep` inside the loop, so every
+   iteration discards the timer and starts a new one, and neither fires while any other arm fires
+   more often than 500 ms / 800 ms. The subscription arm is one such arm, so an observer
+   re-attaching in a tight loop postpones goal continuation indefinitely. Both belong to the
+   controller's loop, not to R1.
 
 Deferred by the same decision: WebSocket, JSON, and gRPC-Web surfaces, which are adapters over
 this projection and need a named consumer first.

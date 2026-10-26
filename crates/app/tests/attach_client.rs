@@ -30,6 +30,7 @@ fn registered(sessions: &SessionRegistry, id: &'static str, root: &Path) {
 		topology: omp_agent::SessionTopology::main(Str::new(id)),
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
+		idle_subscribe: None,
 		project_root: Arc::from(root),
 	});
 }

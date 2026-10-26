@@ -1892,6 +1892,7 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 	);
 	let home = SessionHome {
 		sessions_dir:    sessions_dir.clone(),
+		idle_subscribe:  None,
 		project_root:    root.clone(),
 		model:           Str::new_static("scripted/test"),
 		prompt:          Default::default(),

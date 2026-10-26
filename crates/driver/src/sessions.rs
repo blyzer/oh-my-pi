@@ -9,6 +9,7 @@ use std::{
 
 use omp_agent::{
 	PeerAutoreply, SessionAuthority, SessionEndpoint, SessionRole, SessionTopology, Up,
+	steering::DomSubscription,
 };
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Op, PropId, Snapshot};
@@ -53,25 +54,33 @@ impl Default for IrcRelayPolicy {
 #[derive(Clone)]
 pub struct KernelHandle {
 	/// Stable session identity.
-	pub id:           SessionId,
+	pub id:             SessionId,
 	/// Display and routing name.
-	pub name:         Str,
+	pub name:           Str,
 	/// The kernel's sole upward mailbox.
-	pub up:           flume::Sender<Up>,
+	pub up:             flume::Sender<Up>,
 	/// Latest detached DOM projection.
-	pub snapshot:     Arc<RwLock<Snapshot>>,
+	pub snapshot:       Arc<RwLock<Snapshot>>,
 	/// Authenticated role, parent, and main-session relationship.
-	pub topology:     SessionTopology,
+	pub topology:       SessionTopology,
 	/// Current host policy for relaying third-party traffic to this root.
-	pub relay:        IrcRelayPolicy,
+	pub relay:          IrcRelayPolicy,
 	/// Recipient-owned automatic peer reply actor.
-	pub autoreply:    Option<Arc<dyn PeerAutoreply>>,
+	pub autoreply:      Option<Arc<dyn PeerAutoreply>>,
+	/// Serves DOM subscriptions while the kernel is between turns.
+	///
+	/// A kernel drains its mailbox only inside a turn, so `Up::Subscribe` on
+	/// an idle session goes unanswered until the next one. Whoever holds the
+	/// session between turns serves this channel instead; a handle whose
+	/// owner has no idle loop leaves it `None` and is reachable only through
+	/// the mailbox.
+	pub idle_subscribe: Option<flume::Sender<flume::Sender<DomSubscription>>>,
 	/// Canonical project root the kernel was composed over.
 	///
 	/// An `Arc<Path>` because the registry clones a handle on every lookup
 	/// and listing, and the root is immutable for the kernel's lifetime: a
 	/// `PathBuf` would copy the bytes on each of those clones.
-	pub project_root: Arc<Path>,
+	pub project_root:   Arc<Path>,
 }
 
 impl KernelHandle {

@@ -72,14 +72,15 @@ impl WorkpoolLauncher for Launcher {
 		let cancel = CancellationToken::new();
 		let (mailbox, mailbox_rx) = flume::unbounded::<Up>();
 		self.sessions.register(request.id.clone(), KernelHandle {
-			id:           SessionId::new(request.id.clone()),
-			name:         request.id.clone(),
-			up:           mailbox,
-			snapshot:     Arc::clone(&self.snapshot),
-			topology:     SessionTopology::child(request.owner.clone(), self.main.clone()),
-			relay:        IrcRelayPolicy::fixed(true),
-			autoreply:    None,
-			project_root: Arc::from(std::path::Path::new("/workspace")),
+			id:             SessionId::new(request.id.clone()),
+			name:           request.id.clone(),
+			up:             mailbox,
+			snapshot:       Arc::clone(&self.snapshot),
+			topology:       SessionTopology::child(request.owner.clone(), self.main.clone()),
+			relay:          IrcRelayPolicy::fixed(true),
+			autoreply:      None,
+			idle_subscribe: None,
+			project_root:   Arc::from(std::path::Path::new("/workspace")),
 		});
 		let id = request.id.clone();
 		let child_cancel = cancel.clone();
@@ -188,14 +189,15 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 	let sessions = Arc::new(SessionRegistry::new());
 	let (mailbox, owner_inbox) = flume::unbounded();
 	sessions.register(sf!("owner"), KernelHandle {
-		id:           SessionId::new(sf!("owner")),
-		name:         sf!("owner"),
-		up:           mailbox.clone(),
-		snapshot:     Arc::clone(&snapshot),
-		topology:     SessionTopology::main(sf!("owner")),
-		relay:        IrcRelayPolicy::fixed(true),
-		autoreply:    None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		id:             SessionId::new(sf!("owner")),
+		name:           sf!("owner"),
+		up:             mailbox.clone(),
+		snapshot:       Arc::clone(&snapshot),
+		topology:       SessionTopology::main(sf!("owner")),
+		relay:          IrcRelayPolicy::fixed(true),
+		autoreply:      None,
+		idle_subscribe: None,
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	let authority: Arc<dyn omp_agent::SessionAuthority> = sessions.clone();
 	let producers = Arc::new(WorkpoolRegistry::new(authority));

@@ -311,8 +311,16 @@ fn restrict_socket(path: &Path) -> Result<(), SessionWireError> {
 
 /// Asks a live kernel for a DOM subscription within [`SUBSCRIBE_BUDGET`].
 async fn subscribe(handle: &KernelHandle) -> Result<DomSubscription, SessionControlError> {
-	let (reply, subscription) = flume::bounded(1);
-	if handle.up.send(Up::Subscribe(reply)).is_err() {
+	// A session is held by its kernel inside a turn and by its owner between
+	// turns, and only the holder can subscribe to the DOM. Ask both and take
+	// whichever answers; the loser's subscription is dropped unused.
+	let (reply, subscription) = flume::bounded(2);
+	let mailbox = handle.up.send(Up::Subscribe(reply.clone())).is_ok();
+	let idle = handle
+		.idle_subscribe
+		.as_ref()
+		.is_some_and(|idle| idle.send(reply).is_ok());
+	if !(mailbox || idle) {
 		return Err(SessionControlError::SessionNotLive { session_id: handle.id.clone().into() });
 	}
 	match tokio::time::timeout(SUBSCRIBE_BUDGET, subscription.recv_async()).await {
@@ -631,6 +639,7 @@ mod tests {
 			topology: omp_agent::SessionTopology::main(Str::new(id)),
 			relay: IrcRelayPolicy::default(),
 			autoreply: None,
+			idle_subscribe: None,
 			project_root: Arc::from(Path::new(root)),
 		});
 		(FakeKernel { dom, drain, to, _serve: serve }, detached)
@@ -843,9 +852,12 @@ mod tests {
 			.await
 			.expect("attaching succeeds");
 		assert!(!ready(&mut first).await.is_empty(), "the first attachment is served");
+		// Hold the Arc, do not record its address: once the evicted bridge is
+		// dropped the allocator is free to hand the same address back, and the
+		// identity check below would then compare two different bridges equal.
 		let cached = {
 			let bridges = wire.bridges.lock();
-			Arc::as_ptr(
+			Arc::clone(
 				bridges
 					.get(&SessionId::new("live"))
 					.expect("the bridge is cached"),
@@ -857,16 +869,15 @@ mod tests {
 			.await
 			.expect("attaching succeeds");
 		assert!(!ready(&mut second).await.is_empty(), "the second attachment is served");
-		assert_eq!(
-			{
+		assert!(
+			Arc::ptr_eq(&cached, &{
 				let bridges = wire.bridges.lock();
-				Arc::as_ptr(
+				Arc::clone(
 					bridges
 						.get(&SessionId::new("live"))
 						.expect("the bridge is cached"),
 				)
-			},
-			cached,
+			}),
 			"a live bridge is shared, not rebuilt"
 		);
 
@@ -901,18 +912,18 @@ mod tests {
 			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
 			"the session is still live, so a fresh bridge serves it, got {frames:?}"
 		);
-		assert_ne!(
-			{
+		assert!(
+			!Arc::ptr_eq(&cached, &{
 				let bridges = wire.bridges.lock();
-				Arc::as_ptr(
+				Arc::clone(
 					bridges
 						.get(&SessionId::new("live"))
 						.expect("the bridge is cached"),
 				)
-			},
-			cached,
+			}),
 			"the dead bridge was evicted"
 		);
+		assert!(cached.closed().is_some(), "the evicted bridge is the dead one");
 	}
 
 	#[tokio::test]
@@ -1060,6 +1071,56 @@ mod tests {
 				.any(|frame| matches!(frame, pb::attach_frame::Frame::SnapshotChunk(_))),
 			"the welcome is followed by a fresh snapshot",
 		);
+	}
+
+	/// A kernel drains its mailbox only inside a turn, so an idle session is
+	/// served by whoever holds it between turns.
+	#[tokio::test]
+	async fn an_idle_kernel_is_served_through_the_owner_seam() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let (idle_tx, idle_rx) = flume::unbounded::<flume::Sender<DomSubscription>>();
+		// Replace the handle with one whose mailbox nobody drains: that is an
+		// interactive session sitting between turns.
+		let (stalled, stalled_mailbox) = flume::unbounded();
+		let handle = sessions
+			.lookup(SessionId::from_ref("live"))
+			.expect("the session is registered");
+		sessions.register(Str::new("live"), KernelHandle {
+			up: stalled,
+			idle_subscribe: Some(idle_tx),
+			..handle
+		});
+		let seam = {
+			let snapshot = kernel.dom.snapshot();
+			let drain = kernel.drain.clone();
+			tokio::spawn(async move {
+				// A real owner answers from the session it holds; this one
+				// answers from the same tree and event stream.
+				while let Ok(reply) = idle_rx.recv_async().await {
+					let _ = reply.send((snapshot.clone(), drain.clone()));
+				}
+			})
+		};
+		let wire = wire(Arc::clone(&sessions));
+
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("the owner seam serves the attachment");
+		let frames = ready(&mut stream).await;
+		assert!(
+			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
+			"the attachment opens even though the kernel never answered, got {frames:?}"
+		);
+		assert!(
+			stalled_mailbox.try_recv().is_ok(),
+			"the mailbox was asked too, so a session mid-turn is still served"
+		);
+		seam.abort();
 	}
 
 	#[tokio::test]
