@@ -518,15 +518,22 @@ mod tests {
 		dom.apply(&Txn {
 			cause: EntryId::default(),
 			label: None,
+			ops:   vec![Op::Ins { parent: body, after: None, node: NodeSpec::new(KnownTag::Turn) }],
+		})
+		.expect("a turn inserts under the body");
+		let turn = dom.children(body).last().copied().expect("the seeded turn");
+		dom.apply(&Txn {
+			cause: EntryId::default(),
+			label: None,
 			ops:   vec![Op::Ins {
-				parent: body,
+				parent: turn,
 				after:  None,
 				node:   NodeSpec::new(KnownTag::Assistant)
 					.with_prop(PropId::Provider, Value::Str(Str::new_static("secret-provider")))
 					.with_prop(PropId::Text, Value::Str(Str::new_static("visible"))),
 			}],
 		})
-		.expect("seed applies");
+		.expect("an assistant inserts under the turn");
 		let (snapshot, drain) = dom.subscribe();
 		let (up, mailbox) = flume::unbounded();
 		let (to, events) = flume::unbounded();
@@ -556,13 +563,19 @@ mod tests {
 		/// Publishes an edit to every attached bridge.
 		fn publish(&mut self, text: &'static str) {
 			let body = self.dom.body();
+			let turn = self
+				.dom
+				.children(body)
+				.last()
+				.copied()
+				.expect("the seeded turn");
 			self
 				.dom
 				.apply(&Txn {
 					cause: EntryId::default(),
 					label: None,
 					ops:   vec![Op::Ins {
-						parent: body,
+						parent: turn,
 						after:  None,
 						node:   NodeSpec::new(KnownTag::User)
 							.with_prop(PropId::Text, Value::Str(Str::new(text))),
