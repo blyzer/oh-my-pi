@@ -1,7 +1,12 @@
 //! End-to-end execution tests for the omp shell.
 use std::process::Command;
 #[cfg(unix)]
-use std::{fs, process::Stdio, thread, time::Duration};
+use std::{
+	fs,
+	process::Stdio,
+	thread,
+	time::{Duration, Instant},
+};
 
 struct Case {
 	script: &'static str,
@@ -356,7 +361,21 @@ fn disown_modes_allow_external_process_to_outlive_shell() {
 			.expect("execute omp-sh");
 		assert!(status.success(), "omp-sh exited with {status}");
 
-		thread::sleep(Duration::from_millis(400));
-		assert_eq!(fs::read_to_string(marker).expect("disowned process wrote marker"), "done");
+		// The child outlives the shell by design, so the only sound wait is on
+		// the marker itself. A fixed sleep raced it: the shell exits in about
+		// 100-700 ms here and the child's write landed anywhere from 240 ms to
+		// 1.7 s after that on a loaded machine, so a 400 ms budget failed
+		// whenever the box was busy.
+		let deadline = Instant::now() + Duration::from_secs(20);
+		let written = loop {
+			match fs::read_to_string(&marker) {
+				Ok(text) => break text,
+				Err(error) if Instant::now() >= deadline => {
+					panic!("disowned process never wrote {}: {error}", marker.display())
+				},
+				Err(_) => thread::sleep(Duration::from_millis(10)),
+			}
+		};
+		assert_eq!(written, "done", "the disowned process wrote its marker in full");
 	}
 }
