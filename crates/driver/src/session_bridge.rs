@@ -1026,6 +1026,21 @@ impl Subscriber {
 			}
 		}
 	}
+
+	/// Waits until this subscriber may have another delivery, reporting
+	/// `false` once the bridge can wake it no more.
+	///
+	/// [`Subscriber::next`] is the whole loop; this is its wait half, so a
+	/// caller can poll with [`Subscriber::try_next`] and await here instead.
+	/// That split is what lets an async projection redact: `dyn PropPolicy`
+	/// is not `Sync`, so a future holding one across an await is not `Send`
+	/// and could not be served from a tonic stream. Polling with the policy
+	/// and awaiting without it keeps the reference off every await point.
+	pub async fn idle(&self) -> bool {
+		// The wake sender lives in this subscriber's own queue slot, which
+		// only this subscriber's drop removes.
+		self.wake.recv_async().await.is_ok()
+	}
 }
 
 impl Drop for Subscriber {

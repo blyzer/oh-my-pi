@@ -1,0 +1,487 @@
+//! Driver-side session-control authority and its owner-only UDS listener
+//! (ADR 0039 R1).
+//!
+//! [`SessionWire`] is the one component that knows both the DOM and the wire.
+//! It reads [`SessionRegistry`] for what exists, owns one [`SessionBridge`] per
+//! attached session, and implements [`SessionControlAuthority`], which
+//! `omp-serve` projects over gRPC. Serve never names a driver type, because
+//! driver already depends on serve.
+//!
+//! R1 is read-only and owner-local. The socket is the authenticator: the `run`
+//! directory is 0700 and the socket 0600, so no other OS user can connect.
+//! Mutation, device authentication and TCP belong to later phases, and the
+//! projection answers their verbs `UNIMPLEMENTED` until then.
+//!
+//! Redaction is a property of the caller, not of the bridge: a context without
+//! [`ControlScope::ObserveHostLocal`] is served through [`ControlVisibility`],
+//! and one that holds it is served unredacted. The policy is polled, never
+//! held across an await, because `dyn PropPolicy` is not `Sync` and a tonic
+//! stream must be `Send`. [`Subscriber::idle`] exists for exactly that split.
+
+use std::{
+	path::{Path, PathBuf},
+	sync::Arc,
+	time::Duration,
+};
+
+use omp_agent::{Up, steering::DomSubscription};
+use omp_core::{FastHashMap, Str};
+use omp_dom::redact::PropPolicy;
+use omp_proto::session::v1 as pb;
+use omp_serve::{
+	inference::RpcStream,
+	session::{
+		ControlContext, ControlScope, SessionControlAuthority, SessionControlError,
+		SessionControlRpc,
+	},
+};
+use parking_lot::Mutex;
+use tonic::Status;
+
+use crate::{
+	control_visibility::ControlVisibility,
+	session_bridge::{BridgeLimits, Closure, Cursor, Delivery, Polled, SessionBridge, Subscriber},
+	sessions::{KernelHandle, SessionId, SessionRegistry},
+};
+
+omp_con::var! {
+	/// Idle interval, in milliseconds, between heartbeat frames on an
+	/// attachment that has nothing else to deliver.
+	pub static SV_CONTROL_HEARTBEAT_MS = sv_control_heartbeat_ms: u32 {
+		default: 15_000,
+		min: 1,
+		flags: archive,
+	};
+}
+
+/// Largest snapshot payload carried by one [`pb::SnapshotChunk`].
+///
+/// A snapshot is split at this boundary so one frame never approaches the
+/// transport's message limit, which the listener sets explicitly below.
+const SNAPSHOT_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Largest encoded message the session listener accepts or produces.
+const CONTROL_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// How long a kernel has to answer [`Up::Subscribe`] before the authority
+/// reports it unavailable.
+///
+/// A kernel mid-turn answers from its mailbox as soon as the turn yields, so
+/// this bounds a wedged kernel rather than a busy one.
+const SUBSCRIBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Failure to bind or serve the owner-only session socket.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionWireError {
+	/// The owner-only `run` directory could not be created or restricted.
+	#[error("could not create owner-only run directory {path}")]
+	RunDirectory {
+		/// Directory the listener owns.
+		path:   PathBuf,
+		/// Underlying filesystem failure.
+		#[source]
+		source: std::io::Error,
+	},
+	/// Another process already serves this socket.
+	#[error("a session host already listens on {path}")]
+	AlreadyListening {
+		/// Socket a live host holds.
+		path: PathBuf,
+	},
+	/// The socket could not be bound or restricted to its owner.
+	#[error("could not bind session socket {path}")]
+	BindSocket {
+		/// Socket the listener owns.
+		path:   PathBuf,
+		/// Underlying filesystem or socket failure.
+		#[source]
+		source: std::io::Error,
+	},
+	/// The transport refused to listen on the owner socket.
+	#[error("could not listen on session socket {path}")]
+	Listen {
+		/// Socket the listener owns.
+		path:   PathBuf,
+		/// Underlying transport failure.
+		#[source]
+		source: omp_rpc::Error,
+	},
+	/// The gRPC server stopped with an error.
+	#[error("the session control server failed")]
+	Serve {
+		/// Underlying transport failure.
+		#[source]
+		source: tonic::transport::Error,
+	},
+}
+
+/// Reads the live session registry, owns one bridge per attached session, and
+/// answers the read-only session-control verbs.
+pub struct SessionWire {
+	sessions:  Arc<SessionRegistry>,
+	bridges:   Mutex<FastHashMap<SessionId, Arc<SessionBridge>>>,
+	limits:    BridgeLimits,
+	redaction: Arc<ControlVisibility>,
+	heartbeat: Duration,
+}
+
+impl SessionWire {
+	/// Builds an authority over a live registry.
+	///
+	/// `redaction` is the table applied to a caller that lacks
+	/// [`ControlScope::ObserveHostLocal`].
+	#[must_use]
+	pub fn new(
+		sessions: Arc<SessionRegistry>,
+		limits: BridgeLimits,
+		redaction: Arc<ControlVisibility>,
+		heartbeat: Duration,
+	) -> Self {
+		Self { sessions, bridges: Mutex::default(), limits, redaction, heartbeat }
+	}
+
+	/// Builds an authority with every bound read from `ctx`.
+	///
+	/// # Errors
+	/// Returns the table error when `sv_control_host_local_props` holds an
+	/// entry this build cannot parse.
+	pub fn from_ctx(
+		sessions: Arc<SessionRegistry>,
+		ctx: &omp_con::Ctx,
+	) -> Result<Self, crate::control_visibility::VisibilityTableError> {
+		let heartbeat = Duration::from_millis(u64::from(SV_CONTROL_HEARTBEAT_MS.get(ctx)));
+		Ok(Self::new(
+			sessions,
+			BridgeLimits::from_con(ctx),
+			Arc::new(ControlVisibility::from_ctx(ctx)?),
+			heartbeat,
+		))
+	}
+
+	/// The epoch of this session's bridge, or zero when none has started.
+	fn epoch_of(&self, id: &SessionId) -> u64 {
+		self
+			.bridges
+			.lock()
+			.get(id)
+			.map_or(0, |bridge| bridge.epoch().get())
+	}
+
+	/// Returns this session's bridge, starting one over a fresh kernel
+	/// subscription when none is live.
+	async fn bridge_for(
+		&self,
+		handle: &KernelHandle,
+	) -> Result<Arc<SessionBridge>, SessionControlError> {
+		if let Some(bridge) = self.bridges.lock().get(&handle.id) {
+			return Ok(Arc::clone(bridge));
+		}
+		let subscription = subscribe(handle).await?;
+		let bridge =
+			Arc::new(SessionBridge::start(handle.id.clone(), subscription, self.limits.clone()));
+		// Another attach may have started one while this task awaited the
+		// kernel; the first insertion wins and the loser's bridge is dropped.
+		Ok(Arc::clone(
+			self
+				.bridges
+				.lock()
+				.entry(handle.id.clone())
+				.or_insert(bridge),
+		))
+	}
+
+	/// The redaction policy this caller is served through, if any.
+	fn policy_for(&self, context: &ControlContext) -> Option<Arc<ControlVisibility>> {
+		(!context.scopes().contains(ControlScope::ObserveHostLocal))
+			.then(|| Arc::clone(&self.redaction))
+	}
+
+	/// Serves session control on the owner-only socket under `data_dir`.
+	///
+	/// The `run` directory is created 0700 and the socket 0600, and a socket
+	/// left by a dead host is replaced rather than refused. A socket a live
+	/// host still answers is refused.
+	///
+	/// # Errors
+	/// Returns [`SessionWireError`] when the socket cannot be owned, or when
+	/// the server stops with a transport failure.
+	#[cfg(unix)]
+	pub async fn serve(self: Arc<Self>, data_dir: &Path) -> Result<(), SessionWireError> {
+		use tonic::transport::Server;
+
+		let socket = bind_owner_socket(data_dir).await?;
+		let authority: Arc<dyn SessionControlAuthority> = self;
+		let service =
+			pb::session_control_server::SessionControlServer::new(SessionControlRpc::new(authority))
+				.max_decoding_message_size(CONTROL_MESSAGE_MAX_BYTES)
+				.max_encoding_message_size(CONTROL_MESSAGE_MAX_BYTES);
+		let incoming = omp_rpc::uds::listen(&socket.path)
+			.await
+			.map_err(|source| SessionWireError::Listen { path: socket.path.clone(), source })?;
+		restrict_socket(&socket.path)?;
+		tracing::info!(socket = %socket.path.display(), "session control listening");
+		Server::builder()
+			.add_service(service)
+			.serve_with_incoming(incoming)
+			.await
+			.map_err(|source| SessionWireError::Serve { source })
+	}
+}
+
+/// An owner-only socket path this process has claimed.
+#[cfg(unix)]
+struct OwnerSocket {
+	path: PathBuf,
+}
+
+/// Claims `<data_dir>/run/session.sock` for this process.
+#[cfg(unix)]
+async fn bind_owner_socket(data_dir: &Path) -> Result<OwnerSocket, SessionWireError> {
+	use std::{fs, os::unix::fs::PermissionsExt as _};
+
+	let run = data_dir.join("run");
+	fs::create_dir_all(&run)
+		.map_err(|source| SessionWireError::RunDirectory { path: run.clone(), source })?;
+	fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
+		.map_err(|source| SessionWireError::RunDirectory { path: run.clone(), source })?;
+
+	let path = run.join("session.sock");
+	if path.exists() {
+		// A socket whose owner is gone refuses the connection; one a live host
+		// still answers must not be stolen.
+		if tokio::net::UnixStream::connect(&path).await.is_ok() {
+			return Err(SessionWireError::AlreadyListening { path });
+		}
+		fs::remove_file(&path)
+			.map_err(|source| SessionWireError::BindSocket { path: path.clone(), source })?;
+	}
+	// `uds::listen` binds; the mode is applied before any peer can connect
+	// because nothing dials a path that does not exist yet.
+	Ok(OwnerSocket { path })
+}
+
+/// Restricts a bound socket to its owner.
+#[cfg(unix)]
+fn restrict_socket(path: &Path) -> Result<(), SessionWireError> {
+	use std::{fs, os::unix::fs::PermissionsExt as _};
+
+	fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+		.map_err(|source| SessionWireError::BindSocket { path: path.to_path_buf(), source })
+}
+
+/// Asks a live kernel for a DOM subscription within [`SUBSCRIBE_BUDGET`].
+async fn subscribe(handle: &KernelHandle) -> Result<DomSubscription, SessionControlError> {
+	let (reply, subscription) = flume::bounded(1);
+	if handle.up.send(Up::Subscribe(reply)).is_err() {
+		return Err(SessionControlError::SessionNotLive { session_id: handle.id.clone().into() });
+	}
+	match tokio::time::timeout(SUBSCRIBE_BUDGET, subscription.recv_async()).await {
+		Ok(Ok(subscription)) => Ok(subscription),
+		Ok(Err(_)) => {
+			Err(SessionControlError::SessionNotLive { session_id: handle.id.clone().into() })
+		},
+		Err(_) => Err(SessionControlError::HostUnavailable),
+	}
+}
+
+/// Projects one live handle into its wire reference.
+fn session_ref(handle: &KernelHandle, epoch: u64) -> pb::SessionRef {
+	pb::SessionRef {
+		session_id: handle.id.as_str().to_owned(),
+		label: handle.name.as_str().to_owned(),
+		is_live: true,
+		epoch,
+		project_root: handle.project_root.to_string_lossy().into_owned(),
+	}
+}
+
+/// The resume cursor a request carries, if it carries one this bridge could
+/// possibly serve.
+fn resume_cursor(session: &SessionId, request: &pb::AttachRequest) -> Option<Cursor> {
+	(request.resume_epoch != 0).then(|| Cursor {
+		session: session.clone(),
+		epoch:   crate::session_bridge::Epoch::from_wire(request.resume_epoch),
+		seq:     crate::session_bridge::Seq::from_wire(request.resume_seq),
+	})
+}
+
+/// The scopes a welcome frame reports back to the caller.
+fn granted_scopes(context: &ControlContext) -> Vec<String> {
+	[ControlScope::Observe, ControlScope::ObserveHostLocal]
+		.into_iter()
+		.filter(|scope| context.scopes().contains(*scope))
+		.map(|scope| <&'static str>::from(scope).to_owned())
+		.collect()
+}
+
+/// Splits one snapshot into ordered chunks, the last marked final.
+///
+/// An empty snapshot still produces one final chunk, so a client always sees
+/// the boundary it folds on.
+fn snapshot_frames(epoch: u64, seq: u64, snapshot: &[u8]) -> Vec<pb::AttachFrame> {
+	let mut chunks = snapshot.chunks(SNAPSHOT_CHUNK_BYTES).peekable();
+	let mut frames = Vec::new();
+	let mut index = 0_u32;
+	while let Some(chunk) = chunks.next() {
+		frames.push(frame(pb::attach_frame::Frame::SnapshotChunk(pb::SnapshotChunk {
+			epoch,
+			seq,
+			index,
+			bytes: bytes::Bytes::copy_from_slice(chunk),
+			r#final: chunks.peek().is_none(),
+		})));
+		index = index.saturating_add(1);
+	}
+	if frames.is_empty() {
+		frames.push(frame(pb::attach_frame::Frame::SnapshotChunk(pb::SnapshotChunk {
+			epoch,
+			seq,
+			index: 0,
+			bytes: bytes::Bytes::new(),
+			r#final: true,
+		})));
+	}
+	frames
+}
+
+const fn frame(body: pb::attach_frame::Frame) -> pb::AttachFrame {
+	pb::AttachFrame { frame: Some(body) }
+}
+
+/// Renders a closure as the stream's terminal status.
+///
+/// Only [`Closure::Detached`] ends a stream successfully. Every other closure
+/// truncated the stream mid-session, so the client must learn that its cursor
+/// outlived what this host can serve.
+fn closure_status(closure: Closure) -> Option<Status> {
+	match closure {
+		Closure::Detached => None,
+		Closure::SubscriptionLost => Some(Status::aborted(
+			"the host dropped this session's kernel subscription; the stream is truncated",
+		)),
+		Closure::Replica | Closure::Encode | Closure::Panicked => {
+			Some(Status::internal("the session bridge failed; the stream is truncated"))
+		},
+	}
+}
+
+/// Pumps one subscriber into attach frames until the bridge closes.
+fn attach_stream(
+	mut subscriber: Subscriber,
+	policy: Option<Arc<ControlVisibility>>,
+	label: Str,
+	context: ControlContext,
+	heartbeat: Duration,
+) -> RpcStream<pb::AttachFrame> {
+	let scopes = granted_scopes(&context);
+	Box::pin(async_stream::stream! {
+		let mut idle = tokio::time::interval(heartbeat);
+		idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+		idle.tick().await;
+		let mut pending: std::collections::VecDeque<pb::AttachFrame> =
+			std::collections::VecDeque::new();
+		loop {
+			if let Some(next) = pending.pop_front() {
+				yield Ok(next);
+				continue;
+			}
+			// The policy reference never crosses an await: polling here and
+			// awaiting in `idle` is what keeps this stream `Send`.
+			let polled = {
+				let policy = policy.as_deref().map(|policy| policy as &dyn PropPolicy);
+				subscriber.try_next(policy)
+			};
+			match polled {
+				Polled::Ready(Delivery::Welcome { cursor, snapshot }) => {
+					let epoch = cursor.epoch.get();
+					let seq = cursor.seq.get();
+					yield Ok(frame(pb::attach_frame::Frame::Welcome(pb::WelcomeFrame {
+						epoch,
+						head_seq: seq,
+						label: label.as_str().to_owned(),
+						granted_scopes: scopes.clone(),
+					})));
+					pending.extend(snapshot_frames(epoch, seq, snapshot.as_bytes()));
+				},
+				Polled::Ready(Delivery::Event { cursor, bytes }) => {
+					yield Ok(frame(pb::attach_frame::Frame::Event(pb::EventFrame {
+						epoch: cursor.epoch.get(),
+						seq:   cursor.seq.get(),
+						bytes,
+					})));
+				},
+				Polled::Ready(Delivery::Resync { reason }) => {
+					yield Ok(frame(pb::attach_frame::Frame::Resync(pb::ResyncFrame {
+						reason: reason.to_string(),
+					})));
+				},
+				Polled::Closed(closure) => {
+					if let Some(status) = closure_status(closure) {
+						yield Err(status);
+					}
+					return;
+				},
+				Polled::Empty => {
+					tokio::select! {
+						live = subscriber.idle() => if !live {
+							// The wake channel closed; the next poll reports
+							// the closure that explains why.
+							continue;
+						},
+						_ = idle.tick() => {
+							yield Ok(frame(pb::attach_frame::Frame::Heartbeat(
+								pb::HeartbeatFrame { head_seq: 0 },
+							)));
+						},
+					}
+				},
+			}
+		}
+	})
+}
+
+#[tonic::async_trait]
+impl SessionControlAuthority for SessionWire {
+	async fn list(
+		&self,
+		_context: ControlContext,
+		request: pb::ListSessionsRequest,
+	) -> Result<pb::SessionList, SessionControlError> {
+		let root = request.project_root.trim();
+		let sessions = self
+			.sessions
+			.list()
+			.into_iter()
+			.filter(|handle| root.is_empty() || handle.project_root.as_os_str() == root)
+			.map(|handle| {
+				let epoch = self.epoch_of(&handle.id);
+				session_ref(&handle, epoch)
+			})
+			.collect();
+		Ok(pb::SessionList { sessions })
+	}
+
+	async fn attach(
+		&self,
+		context: ControlContext,
+		request: pb::AttachRequest,
+	) -> Result<RpcStream<pb::AttachFrame>, SessionControlError> {
+		let id = SessionId::from_ref(request.session_id.as_str());
+		let handle = self
+			.sessions
+			.lookup(id)
+			.ok_or_else(|| SessionControlError::UnknownSession {
+				session_id: Str::new(request.session_id.as_str()),
+			})?;
+		let bridge = self.bridge_for(&handle).await?;
+		let cursor = resume_cursor(&handle.id, &request);
+		let subscriber = bridge.subscribe(cursor.as_ref());
+		Ok(attach_stream(
+			subscriber,
+			self.policy_for(&context),
+			handle.name.clone(),
+			context,
+			self.heartbeat,
+		))
+	}
+}

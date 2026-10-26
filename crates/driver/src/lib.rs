@@ -27,6 +27,7 @@ pub mod rules;
 pub mod secrets;
 pub mod session_bridge;
 pub mod session_host;
+pub mod session_wire;
 pub mod session_imports;
 pub mod sessions;
 pub mod settings;
