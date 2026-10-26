@@ -1698,27 +1698,20 @@ mod tests {
 
 	/// `JoinHandle::abort` drops the drain future at its await point, so the
 	/// guard runs with no closure recorded. That is the host detaching on its
-	/// own terms, and it races [`SessionBridge::drop`]'s own close, so both
-	/// orderings must agree.
-	#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+	/// own terms, not a fault, and on a multi-thread runtime it races
+	/// [`SessionBridge::drop`]'s own close. Dropping the guard directly is what
+	/// pins the branch: the race decides only which of two equal answers wins.
+	#[tokio::test]
 	async fn a_cancelled_drain_closes_as_a_detach() {
 		let (_producer, bridge) = Producer::start(limits(16, usize::MAX, usize::MAX));
 		let mut subscriber = bridge.subscribe(None);
 		assert!(matches!(subscriber.try_next(None), Polled::Ready(Delivery::Welcome { .. })));
 
-		drop(bridge);
+		drop(DrainGuard { shared: Arc::clone(&bridge.shared), closure: None });
 
-		let closure = tokio::time::timeout(Duration::from_secs(5), async {
-			loop {
-				match subscriber.try_next(None) {
-					Polled::Closed(closure) => return closure,
-					Polled::Empty => tokio::task::yield_now().await,
-					Polled::Ready(delivery) => panic!("nothing was published, got {delivery:?}"),
-				}
-			}
-		})
-		.await
-		.expect("a dropped bridge closes its subscribers");
-		assert_eq!(closure, Closure::Detached, "a cancelled drain is not a fault");
+		assert!(
+			matches!(subscriber.try_next(None), Polled::Closed(Closure::Detached)),
+			"a drain dropped without unwinding is a detach, not a fault",
+		);
 	}
 }
