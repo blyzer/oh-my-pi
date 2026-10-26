@@ -740,17 +740,20 @@ impl<C: omp_agent::Inference> Controller<C> {
 			let goal_continuation_ready = self.goal_continuation_ready();
 			let flow = tokio::select! {
 				biased;
-				command = command_rx.recv_async() => match command {
-					Ok(command) => self.apply_idle(command).await?,
-					Err(_) => Flow::Quit,
-				},
-				() = input_gate.changed() => Flow::Idle,
+				// Ahead of everything else: serving a subscription is one
+				// channel send, and an observer that cannot attach to an idle
+				// session cannot attach at all.
 				request = self.idle_subscribe.recv_async() => {
 					if let Ok(reply) = request {
 						let _ = reply.send(self.session.subscribe());
 					}
 					Flow::Idle
 				},
+				command = command_rx.recv_async() => match command {
+					Ok(command) => self.apply_idle(command).await?,
+					Err(_) => Flow::Quit,
+				},
+				() = input_gate.changed() => Flow::Idle,
 				done = self.tan_rx.recv_async() => {
 					if let Ok(done) = done {
 						self.settle_tan(done)?;
@@ -3901,7 +3904,7 @@ mod tests {
 			let live = Arc::new(omp_driver::sessions::SessionRegistry::new());
 			let home = SessionHome {
 				sessions_dir:    dir.path().join("sessions"),
-				idle_subscribe: None,
+				idle_subscribe:  None,
 				project_root:    dir.path().to_path_buf(),
 				model:           Str::new_static("test/model"),
 				prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4261,7 +4264,7 @@ mod tests {
 		.with_session_observer(Arc::new(OrderBridge { order: order_tx.clone() }));
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
-			idle_subscribe: None,
+			idle_subscribe:  None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4419,7 +4422,7 @@ mod tests {
 		);
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
-			idle_subscribe: None,
+			idle_subscribe:  None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4802,15 +4805,15 @@ mod tests {
 		harness
 			.live
 			.register(Str::new_static("child"), omp_driver::sessions::KernelHandle {
-				id:           omp_driver::sessions::SessionId::new("child"),
-				name:         Str::new_static("child"),
-				up:           child_up,
-				snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
-				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
-				autoreply:    None,
+				id:             omp_driver::sessions::SessionId::new("child"),
+				name:           Str::new_static("child"),
+				up:             child_up,
+				snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+				topology:       omp_agent::SessionTopology::main(Str::new_static("child")),
+				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
+				autoreply:      None,
 				idle_subscribe: None,
-				project_root: Arc::from(std::path::Path::new("/workspace")),
+				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		harness
 			.commands
@@ -4940,15 +4943,15 @@ mod tests {
 		harness
 			.live
 			.register(Str::new_static("child"), omp_driver::sessions::KernelHandle {
-				id:           omp_driver::sessions::SessionId::new("child"),
-				name:         Str::new_static("child"),
-				up:           child_up,
-				snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
-				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
-				autoreply:    None,
+				id:             omp_driver::sessions::SessionId::new("child"),
+				name:           Str::new_static("child"),
+				up:             child_up,
+				snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+				topology:       omp_agent::SessionTopology::main(Str::new_static("child")),
+				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
+				autoreply:      None,
 				idle_subscribe: None,
-				project_root: Arc::from(std::path::Path::new("/workspace")),
+				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		let mailbox = harness.mailbox();
 

@@ -161,15 +161,19 @@ Units, in dependency order. Each lands as its own change with its own tests.
    **OPEN**: the P-proof covering convergence, detach and cursor resume, eviction and `Resync`,
    host restart and a new epoch, redaction, and the refusal of every mutation path, over a real
    `omp chat` host on a PTY.
-9. **OPEN, blocks R1 from being usable** An idle interactive kernel never answers `Up::Subscribe`.
-   `CallControl::handle` (`crates/agent/src/dispatch.rs`) serves that message, but the kernel only
-   drains its mailbox inside a turn (`Kernel::drain_mailbox`), and between turns the chat
-   controller owns the session. Smoked against a real `omp chat` on 2026-10-26: `omp attach` lists
-   the live session from the socket, and attaching to it answers `UNAVAILABLE` until a turn runs.
-   Child sessions are unaffected — the revive loop drains continuously
-   (`crates/driver/src/subagent/revive.rs`). The fix is a host-side seam that serves a subscription
-   while idle, not a client retry: an observer must be able to attach to a session that is doing
-   nothing, which is the case it exists for.
+9. **DONE** An idle interactive kernel never answered `Up::Subscribe`, because a kernel drains its
+   mailbox only inside a turn. `KernelHandle` now carries `idle_subscribe`, the channel whoever
+   holds the session between turns serves, and the wire asks the mailbox and that seam together,
+   taking whichever answers. The chat controller serves it from its idle loop; `SessionHome`
+   installs the seam and patches the handle `compose_kernel` registered before the controller
+   existed. Smoked against a real `omp chat` sitting idle: welcome, a two-chunk snapshot, and a
+   heartbeat.
+
+   Found while fixing it, and left as it stands: the controller's idle `select!` is `biased`, and
+   its first arm (`command_rx`) is ready often enough to starve every arm below it. The
+   subscription arm is therefore first. The arms that remain below — the pending-input gate,
+   settled TANs, collaboration remotes, revived agents, goal continuation — are starved under the
+   same conditions, which is a defect in its own right and not R1's to fix.
 
 Deferred by the same decision: WebSocket, JSON, and gRPC-Web surfaces, which are adapters over
 this projection and need a named consumer first.

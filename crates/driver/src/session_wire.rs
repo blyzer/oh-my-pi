@@ -1071,6 +1071,56 @@ mod tests {
 		);
 	}
 
+	/// A kernel drains its mailbox only inside a turn, so an idle session is
+	/// served by whoever holds it between turns.
+	#[tokio::test]
+	async fn an_idle_kernel_is_served_through_the_owner_seam() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let (idle_tx, idle_rx) = flume::unbounded::<flume::Sender<DomSubscription>>();
+		// Replace the handle with one whose mailbox nobody drains: that is an
+		// interactive session sitting between turns.
+		let (stalled, stalled_mailbox) = flume::unbounded();
+		let handle = sessions
+			.lookup(SessionId::from_ref("live"))
+			.expect("the session is registered");
+		sessions.register(Str::new("live"), KernelHandle {
+			up: stalled,
+			idle_subscribe: Some(idle_tx),
+			..handle
+		});
+		let seam = {
+			let snapshot = kernel.dom.snapshot();
+			let drain = kernel.drain.clone();
+			tokio::spawn(async move {
+				// A real owner answers from the session it holds; this one
+				// answers from the same tree and event stream.
+				while let Ok(reply) = idle_rx.recv_async().await {
+					let _ = reply.send((snapshot.clone(), drain.clone()));
+				}
+			})
+		};
+		let wire = wire(Arc::clone(&sessions));
+
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("the owner seam serves the attachment");
+		let frames = ready(&mut stream).await;
+		assert!(
+			matches!(frames.first(), Some(pb::attach_frame::Frame::Welcome(_))),
+			"the attachment opens even though the kernel never answered, got {frames:?}"
+		);
+		assert!(
+			stalled_mailbox.try_recv().is_ok(),
+			"the mailbox was asked too, so a session mid-turn is still served"
+		);
+		seam.abort();
+	}
+
 	#[tokio::test]
 	async fn attaching_to_an_unknown_session_is_not_found() {
 		let sessions = Arc::new(SessionRegistry::new());

@@ -87,26 +87,29 @@ fn await_send_hands_authenticated_envelope_to_recipient_actor() {
 	let (child_up, child_inbox) = flume::unbounded();
 	let actor = Arc::new(CaptureAutoreply { request: Mutex::new(None) });
 	sessions.register(Str::new_static("Main"), KernelHandle {
-		id:           SessionId::new("main-id"),
-		name:         Str::new_static("Main"),
-		up:           main_up,
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::main(Str::new_static("main-id")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    None,
+		id:             SessionId::new("main-id"),
+		name:           Str::new_static("Main"),
+		up:             main_up,
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::main(Str::new_static("main-id")),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Child"), KernelHandle {
-		id:           SessionId::new("child-id"),
-		name:         Str::new_static("Child"),
-		up:           child_up,
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::child(Str::new_static("main-id"), Str::new_static("main-id")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    Some(actor.clone()),
+		id:             SessionId::new("child-id"),
+		name:           Str::new_static("Child"),
+		up:             child_up,
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::child(
+			Str::new_static("main-id"),
+			Str::new_static("main-id"),
+		),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      Some(actor.clone()),
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 
 	SessionHub::send_expecting_reply(
@@ -146,37 +149,40 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		IrcRelayPolicy::new(move || enabled.load(Ordering::Acquire))
 	};
 	sessions.register(Str::new_static("Console"), KernelHandle {
-		id:           SessionId::new("root-1"),
-		name:         Str::new_static("Console"),
-		up:           main_up.clone(),
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::main(Str::new_static("root-1")),
-		relay:        policy.clone(),
-		autoreply:    None,
+		id:             SessionId::new("root-1"),
+		name:           Str::new_static("Console"),
+		up:             main_up.clone(),
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::main(Str::new_static("root-1")),
+		relay:          policy.clone(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Alpha"), KernelHandle {
-		id:           SessionId::new("alpha-id"),
-		name:         Str::new_static("Alpha"),
-		up:           alpha_up,
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::child(Str::new_static("root-1"), Str::new_static("root-1")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    None,
+		id:             SessionId::new("alpha-id"),
+		name:           Str::new_static("Alpha"),
+		up:             alpha_up,
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::child(Str::new_static("root-1"), Str::new_static("root-1")),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Beta"), KernelHandle {
-		id:           SessionId::new("beta-id"),
-		name:         Str::new_static("Beta"),
-		up:           beta_up,
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::child(Str::new_static("alpha-id"), Str::new_static("root-1")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    None,
+		id:             SessionId::new("beta-id"),
+		name:           Str::new_static("Beta"),
+		up:             beta_up,
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::child(
+			Str::new_static("alpha-id"),
+			Str::new_static("root-1"),
+		),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 
 	SessionHub::send(
@@ -259,26 +265,26 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 	assert!(main_inbox.try_recv().is_err());
 
 	sessions.register(Str::new_static("Console"), KernelHandle {
-		id:           SessionId::new("root-1"),
-		name:         Str::new_static("Console"),
-		up:           main_up.clone(),
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::main(Str::new_static("root-1")),
-		relay:        policy.clone(),
-		autoreply:    None,
+		id:             SessionId::new("root-1"),
+		name:           Str::new_static("Console"),
+		up:             main_up.clone(),
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::main(Str::new_static("root-1")),
+		relay:          policy.clone(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Console 2"), KernelHandle {
-		id:           SessionId::new("root-2"),
-		name:         Str::new_static("Console 2"),
-		up:           main_up,
-		snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-		topology:     SessionTopology::main(Str::new_static("root-2")),
-		relay:        policy,
-		autoreply:    None,
+		id:             SessionId::new("root-2"),
+		name:           Str::new_static("Console 2"),
+		up:             main_up,
+		snapshot:       Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+		topology:       SessionTopology::main(Str::new_static("root-2")),
+		relay:          policy,
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.remove(SessionId::from_ref("root-1"));
 	assert_eq!(
@@ -338,26 +344,26 @@ async fn send_lands_in_child_steering_and_inbox_reads_it() {
 	let sessions = SessionRegistry::new();
 	let (main_up, _main_inbox) = flume::unbounded();
 	sessions.register(Str::new_static("Main"), KernelHandle {
-		id:           SessionId::new("main"),
-		name:         Str::new_static("Main"),
-		up:           main_up,
-		snapshot:     Arc::new(RwLock::new(child.dom().snapshot())),
-		topology:     SessionTopology::main(Str::new_static("main")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    None,
+		id:             SessionId::new("main"),
+		name:           Str::new_static("Main"),
+		up:             main_up,
+		snapshot:       Arc::new(RwLock::new(child.dom().snapshot())),
+		topology:       SessionTopology::main(Str::new_static("main")),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Child"), KernelHandle {
-		id:           SessionId::new("child"),
-		name:         Str::new_static("Child"),
-		up:           kernel.mailbox(),
-		snapshot:     Arc::new(RwLock::new(child.dom().snapshot())),
-		topology:     SessionTopology::child(Str::new_static("main"), Str::new_static("main")),
-		relay:        IrcRelayPolicy::default(),
-		autoreply:    None,
+		id:             SessionId::new("child"),
+		name:           Str::new_static("Child"),
+		up:             kernel.mailbox(),
+		snapshot:       Arc::new(RwLock::new(child.dom().snapshot())),
+		topology:       SessionTopology::child(Str::new_static("main"), Str::new_static("main")),
+		relay:          IrcRelayPolicy::default(),
+		autoreply:      None,
 		idle_subscribe: None,
-		project_root: Arc::from(std::path::Path::new("/workspace")),
+		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 
 	SessionHub::send(&sessions, "Main", "child", Str::new_static("please adjust"), None)

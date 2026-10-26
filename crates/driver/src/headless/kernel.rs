@@ -3277,11 +3277,25 @@ impl SessionHome {
 	}
 
 	/// Installs the channel an idle owner serves DOM subscriptions on.
+	///
+	/// The session is registered by `compose_kernel` before its owner exists,
+	/// so the live handle is patched here as well as every later one: an
+	/// observer looks the handle up, and a handle without the seam is only
+	/// reachable while a turn runs.
 	#[must_use]
 	pub fn with_idle_subscribe(
 		mut self,
 		idle: flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>,
 	) -> Self {
+		for live in self.live.list() {
+			if live.up.same_channel(&self.up) {
+				let name = live.name.clone();
+				self.live.register(name, crate::sessions::KernelHandle {
+					idle_subscribe: Some(idle.clone()),
+					..live
+				});
+			}
+		}
 		self.idle_subscribe = Some(idle);
 		self
 	}
@@ -5313,7 +5327,7 @@ mod tests {
 		};
 		let home = SessionHome {
 			sessions_dir:    sessions_dir.clone(),
-			idle_subscribe: None,
+			idle_subscribe:  None,
 			project_root:    scratch.path().to_path_buf(),
 			model:           Str::new_static("provider/model"),
 			prompt:          PromptOverrides::default(),
