@@ -14,33 +14,60 @@
 //! [`SV_CONTROL_HOST_LOCAL_PROPS`] convar, so the owner changes the rules
 //! without a recompile:
 //!
-//! - `*/path` blanks the `path` property of every element.
-//! - `user/path` blanks it only on `<user>` elements.
-//! - `tool:grep/path` names a tool element, using the same `tool:` prefix the
-//!   DOM wire format uses; `custom:` names a tool-defined property.
+//! - `*/provider` blanks the `provider` property of every element.
+//! - `assistant/route` blanks it only on `<assistant>` elements.
+//! - `tool:grep/custom:root` names a tool element and a tool-defined property,
+//!   using the same `tool:` and `custom:` prefixes the DOM wire format uses.
 //!
-//! `*` is accepted in the tag half only. An entry that is malformed, empty on
-//! either side, or wildcards the property half is rejected as a
-//! [`VisibilityTableError`] naming the entry, rather than being dropped (which
-//! would narrow the policy) or read as a literal element or property name
-//! (which would widen it).
+//! `*` is accepted in the tag half only. A half written without a prefix must
+//! name a [`KnownTag`] or a [`PropId`]. `Tag::from_str` and
+//! `PropKey::from_str` are infallible and fall back to the custom form, so
+//! without that requirement `*/pathh`, `*/call_id`, and `usr/path` would all
+//! parse into rules that are reported valid and match nothing, silently
+//! narrowing the policy. An entry that is malformed, empty on either side,
+//! wildcards the property half, or names an unknown tag or property is
+//! rejected as a [`VisibilityTableError`] naming the entry, rather than being
+//! dropped (which would narrow the policy) or read as a literal element or
+//! property name (which would widen it).
+//!
+//! The convar hook returns that error, but [`Ctx`] keeps only the fact of the
+//! veto: an operator's console sees only that the variable rejected the
+//! supplied value, not which entry was at fault. The named entry reaches any
+//! caller of [`ControlVisibility::from_entries`] or
+//! [`ControlVisibility::from_ctx`].
 //!
 //! # Default table
 //!
-//! The default covers the host-local facts A4 names that the DOM can actually
-//! identify from a tag and a property: filesystem paths (A4's `cwd` and local
-//! resources) and raw provider metadata (the provider and the resolved route).
-//! The model-facing advisor aside is a bare `<developer>` element with no
-//! marker, so a tag-and-property table cannot separate it from any other
-//! developer message; per the ADR amendment of 2026-10-26 it is out of R1 and
-//! no marker is invented here.
+//! The default blanks the raw provider metadata the fold writes onto
+//! `<assistant>` and `<usage>` elements: the provider identity and the
+//! resolved route.
+//!
+//! # Known gaps
+//!
+//! Two host-local facts A4 names stay visible in R1.
+//!
+//! Local filesystem paths never reach a property of their own. A tool call's
+//! arguments are the *content* of its `<input>` child, and a tool result is
+//! [`PropId::Text`] and [`PropId::Data`] on `<result>`, so a path arrives
+//! embedded in a payload that a property-keyed table cannot separate from the
+//! rest of it. Blanking those wholesale would empty the surface an observer
+//! exists to watch, so this module does not, and paths remain visible.
+//!
+//! The advisor transcript card *is* identifiable in the DOM: the advisor
+//! Director writes it as a [`KnownTag::Notice`] element carrying
+//! `kind = advisor` beside a [`PropId::Data`] payload and a content body.
+//! [`PropPolicy::redacts_content`] receives only a [`Tag`], so a rule
+//! conditioned on a property value cannot be expressed, and widening to
+//! `notice/data` would swallow every unrelated notice. Classifying the card
+//! needs a wider [`PropPolicy`] signature, which is a separate unit, so R1
+//! does not redact it.
 
 use std::{collections::BTreeSet, str::FromStr};
 
 use omp_collab::host::VisibilityClass;
 use omp_con::Ctx;
 use omp_core::{Str, sf};
-use omp_dom::{PropKey, PropPolicy, Tag};
+use omp_dom::{KnownTag, PropId, PropKey, PropPolicy, Tag};
 use thiserror::Error;
 
 /// Separates the tag half of a table entry from its property half.
@@ -49,8 +76,17 @@ const ENTRY_SEPARATOR: char = '/';
 /// Tag half that matches every element.
 const ANY_TAG: &str = "*";
 
-/// Seed table: the A4 host-local facts a tag-and-property rule can identify.
-const DEFAULT_HOST_LOCAL_PROPS: &[&str] = &["*/path", "*/provider", "*/route"];
+/// Prefix that names a tool element, as in the DOM wire format.
+const TOOL_PREFIX: &str = "tool:";
+
+/// Prefix that names a tool-defined property, as in the DOM wire format.
+const CUSTOM_PREFIX: &str = "custom:";
+
+/// Seed table: the provider metadata a tag-and-property rule can identify.
+///
+/// Local paths and the advisor card are known gaps; see the module
+/// documentation.
+const DEFAULT_HOST_LOCAL_PROPS: &[&str] = &["*/provider", "*/route"];
 
 omp_con::var! {
 	/// Host-local property table for control observers, as `<tag>/<prop>`
@@ -96,6 +132,28 @@ pub enum VisibilityTableError {
 	WildcardProp {
 		/// The rejected entry, verbatim.
 		entry: Str,
+	},
+	/// The tag half is neither `*`, a known tag, nor `tool:`-prefixed.
+	#[error(
+		"host-local entry `{entry}` names unknown element `{tag}`; write `tool:{tag}` for a tool \
+		 element"
+	)]
+	UnknownTag {
+		/// The rejected entry, verbatim.
+		entry: Str,
+		/// The tag half that named nothing.
+		tag:   Str,
+	},
+	/// The property half is neither a known property nor `custom:`-prefixed.
+	#[error(
+		"host-local entry `{entry}` names unknown property `{prop}`; write `custom:{prop}` for a \
+		 tool-defined property"
+	)]
+	UnknownProp {
+		/// The rejected entry, verbatim.
+		entry: Str,
+		/// The property half that named nothing.
+		prop:  Str,
 	},
 }
 
@@ -156,9 +214,15 @@ impl PropPolicy for ControlVisibility {
 		self.classify(tag, prop) == VisibilityClass::HostLocal
 	}
 
-	/// Element text content is never host-local in R1: the only content-bearing
-	/// host-local fact A4 names is the advisor aside, which carries no marker
-	/// the DOM can key on (see the module documentation).
+	/// Element text content is never blanked in R1.
+	///
+	/// The content-bearing host-local fact A4 names is the advisor transcript
+	/// card, and it is identifiable in the DOM: a [`KnownTag::Notice`] element
+	/// carrying `kind = advisor` beside its [`PropId::Data`] payload. This
+	/// signature receives only the [`Tag`], so a rule conditioned on a property
+	/// *value* cannot be expressed here, and widening to every `<notice>` would
+	/// blank unrelated notices. Classifying the card needs a wider
+	/// [`PropPolicy`] signature, which is a separate unit.
 	fn redacts_content(&self, _tag: &Tag) -> bool {
 		false
 	}
@@ -181,131 +245,252 @@ fn parse_rule(entry: &str) -> Result<Rule, VisibilityTableError> {
 	if prop == ANY_TAG {
 		return Err(VisibilityTableError::WildcardProp { entry: Str::new(entry) });
 	}
-	let prop = PropKey::from_str(prop).expect("property parsing is infallible");
+	let prop = parse_prop(entry, prop)?;
 	if tag == ANY_TAG {
 		return Ok(Rule::AnyTag(prop));
 	}
-	let tag = Tag::from_str(tag).expect("tag parsing is infallible");
-	Ok(Rule::Exact(tag, prop))
+	Ok(Rule::Exact(parse_tag(entry, tag)?, prop))
+}
+
+/// Reads the tag half, which must be `tool:`-prefixed or name a [`KnownTag`].
+fn parse_tag(entry: &str, tag: &str) -> Result<Tag, VisibilityTableError> {
+	if let Some(name) = tag.strip_prefix(TOOL_PREFIX) {
+		if name.is_empty() {
+			return Err(VisibilityTableError::EmptyTag { entry: Str::new(entry) });
+		}
+		return Ok(Tag::Custom(Str::new(name)));
+	}
+	KnownTag::from_str(tag)
+		.map(Tag::Known)
+		.map_err(|_| VisibilityTableError::UnknownTag {
+			entry: Str::new(entry),
+			tag:   Str::new(tag),
+		})
+}
+
+/// Reads the property half, which must be `custom:`-prefixed or name a
+/// [`PropId`].
+fn parse_prop(entry: &str, prop: &str) -> Result<PropKey, VisibilityTableError> {
+	if let Some(name) = prop.strip_prefix(CUSTOM_PREFIX) {
+		if name.is_empty() {
+			return Err(VisibilityTableError::EmptyProp { entry: Str::new(entry) });
+		}
+		return Ok(PropKey::Custom(Str::new(name)));
+	}
+	PropId::from_str(prop)
+		.map(PropKey::Known)
+		.map_err(|_| VisibilityTableError::UnknownProp {
+			entry: Str::new(entry),
+			prop:  Str::new(prop),
+		})
 }
 
 #[cfg(test)]
 mod tests {
-	use omp_dom::{Dom, Handle, KnownTag, NodeSpec, Op, PropId, Txn, Value};
+	use omp_dom::{Dom, Handle, NodeSpec, Op, Txn, Value};
 	use omp_journal::EntryId;
+	use serde_json::value::RawValue;
 
 	use super::*;
+
+	/// The owner's local path, as it reaches the DOM inside tool payloads.
+	const LOCAL_PATH: &str = "/home/owner/secret";
+
+	/// Tool arguments, which the fold writes as `<input>` content.
+	const INPUT_CONTENT: &str = r#"{"path":"/home/owner/secret"}"#;
+
+	/// Tool output, which the fold writes as `<result>` text.
+	const RESULT_TEXT: &str = "read 3 lines of /home/owner/secret";
+
+	/// The advisor card body the advisor Director writes onto its notice.
+	const ADVISOR_NOTE: &str = "check the deadline";
 
 	fn tool(name: &'static str) -> Tag {
 		Tag::Custom(Str::new_static(name))
 	}
 
-	/// Seeds a turn whose user and tool nodes carry one host-local property
-	/// from the default table and one ordinary property beside it.
-	fn seeded() -> (Dom, Handle, Handle) {
+	/// Handles into the turn [`seeded`] builds.
+	struct Seeded {
+		assistant: Handle,
+		notice:    Handle,
+		input:     Handle,
+		result:    Handle,
+	}
+
+	fn insert(dom: &mut Dom, parent: Handle, node: NodeSpec) -> Handle {
+		let after = dom.children(parent).last().copied();
+		let applied = dom
+			.apply(&Txn {
+				cause: EntryId::default(),
+				label: None,
+				ops:   vec![Op::Ins { parent, after, node }],
+			})
+			.expect("the insert applies");
+		applied.minted[0]
+	}
+
+	/// Seeds the turn shape the engine actually emits: an `<assistant>`
+	/// carrying provider metadata, the advisor `<notice>` card, and a tool
+	/// element whose local path lives in `<input>` content and `<result>` text.
+	fn seeded() -> (Dom, Seeded) {
 		let mut dom = Dom::new();
 		let body = dom.body();
-		let applied = dom
-			.apply(&Txn {
-				cause: EntryId::default(),
-				label: None,
-				ops:   vec![Op::Ins {
-					parent: body,
-					after:  None,
-					node:   NodeSpec::new(KnownTag::Turn),
-				}],
-			})
-			.expect("the turn insert applies");
-		let turn = applied.minted[0];
-		let applied = dom
-			.apply(&Txn {
-				cause: EntryId::default(),
-				label: None,
-				ops:   vec![
-					Op::Ins {
-						parent: turn,
-						after:  None,
-						node:   NodeSpec::new(KnownTag::User)
-							.with_prop(PropId::Text, Value::Str(Str::new_static("read the file")))
-							.with_prop(PropId::Status, Value::Str(Str::new_static("sent"))),
-					},
-					Op::Ins {
-						parent: turn,
-						after:  None,
-						node:   NodeSpec::new(tool("read"))
-							.with_prop(PropId::Path, Value::Str(Str::new_static("/home/owner/secret")))
-							.with_prop(PropId::Provider, Value::Str(Str::new_static("anthropic")))
-							.with_prop(PropId::Lines, Value::Int(42))
-							.with_content("file body"),
-					},
-				],
-			})
-			.expect("the message inserts apply");
-		let user = applied.minted[0];
-		let call = applied.minted[1];
-		(dom, user, call)
+		let turn = insert(&mut dom, body, NodeSpec::new(KnownTag::Turn));
+		let assistant = insert(
+			&mut dom,
+			turn,
+			NodeSpec::new(KnownTag::Assistant)
+				.with_prop(PropId::Model, Value::Str(Str::new_static("opus")))
+				.with_prop(PropId::Provider, Value::Str(Str::new_static("anthropic")))
+				.with_prop(PropId::Route, Value::Str(Str::new_static("http://127.0.0.1:8787/v1")))
+				.with_prop(PropId::Text, Value::Str(Str::new_static("reading it now"))),
+		);
+		let notice = insert(
+			&mut dom,
+			turn,
+			NodeSpec::new(KnownTag::Notice)
+				.with_prop(PropId::Kind, Value::Str(Str::new_static("advisor")))
+				.with_prop(
+					PropId::Data,
+					Value::Json(
+						RawValue::from_string(r#"{"notes":[{"note":"check the deadline"}]}"#.to_owned())
+							.expect("the advisor payload is valid JSON"),
+					),
+				)
+				.with_content(ADVISOR_NOTE),
+		);
+		let call = insert(
+			&mut dom,
+			turn,
+			NodeSpec::new(tool("read"))
+				.with_prop(PropId::Id, Value::Str(Str::new_static("call-1")))
+				.with_prop(PropId::Status, Value::Str(Str::new_static("ok"))),
+		);
+		let input =
+			insert(&mut dom, call, NodeSpec::new(KnownTag::Input).with_content(INPUT_CONTENT));
+		let result = insert(
+			&mut dom,
+			call,
+			NodeSpec::new(KnownTag::Result)
+				.with_prop(PropId::Text, Value::Str(Str::new_static(RESULT_TEXT))),
+		);
+		(dom, Seeded { assistant, notice, input, result })
+	}
+
+	fn default_policy() -> ControlVisibility {
+		ControlVisibility::from_entries(DEFAULT_HOST_LOCAL_PROPS.iter().copied())
+			.expect("the seeded default table parses")
 	}
 
 	#[test]
-	fn default_table_blanks_paths_and_provider_metadata_only() {
-		let policy = ControlVisibility::from_entries(DEFAULT_HOST_LOCAL_PROPS.iter().copied())
-			.expect("the seeded default table parses");
+	fn default_table_blanks_provider_metadata_only() {
+		let policy = default_policy();
 
-		assert_eq!(policy.classify(&tool("read"), &PropId::Path.into()), VisibilityClass::HostLocal);
 		assert_eq!(
-			policy.classify(&tool("read"), &PropId::Provider.into()),
+			policy.classify(&KnownTag::Assistant.into(), &PropId::Provider.into()),
 			VisibilityClass::HostLocal
 		);
-		assert_eq!(policy.classify(&tool("read"), &PropId::Route.into()), VisibilityClass::HostLocal);
+		assert_eq!(
+			policy.classify(&KnownTag::Assistant.into(), &PropId::Route.into()),
+			VisibilityClass::HostLocal
+		);
+		assert_eq!(
+			policy.classify(&KnownTag::Assistant.into(), &PropId::Model.into()),
+			VisibilityClass::PublicTranscript
+		);
 		assert_eq!(
 			policy.classify(&KnownTag::User.into(), &PropId::Text.into()),
 			VisibilityClass::PublicTranscript
 		);
-		assert!(policy.redacts(&tool("read"), &PropId::Path.into()));
-		assert!(!policy.redacts(&tool("read"), &PropId::Lines.into()));
+		// `path` is in no rule: the engine never writes that property, so a
+		// `*/path` entry would match nothing. See the module documentation.
+		assert_eq!(
+			policy.classify(&tool("read"), &PropId::Path.into()),
+			VisibilityClass::PublicTranscript
+		);
+		assert!(policy.redacts(&KnownTag::Usage.into(), &PropId::Provider.into()));
+		assert!(!policy.redacts(&KnownTag::Usage.into(), &PropId::Model.into()));
 	}
 
 	#[test]
 	fn a_wildcard_entry_crosses_tags_and_an_exact_entry_does_not() {
-		let policy =
-			ControlVisibility::from_entries(["*/path", "user/status"]).expect("both forms parse");
+		let policy = ControlVisibility::from_entries(["*/provider", "assistant/model"])
+			.expect("both forms parse");
 
-		assert!(policy.redacts(&tool("read"), &PropId::Path.into()));
-		assert!(policy.redacts(&KnownTag::User.into(), &PropId::Path.into()));
-		assert!(policy.redacts(&KnownTag::User.into(), &PropId::Status.into()));
-		assert!(!policy.redacts(&KnownTag::Assistant.into(), &PropId::Status.into()));
-		assert!(!policy.redacts(&tool("read"), &PropId::Status.into()));
+		assert!(policy.redacts(&tool("read"), &PropId::Provider.into()));
+		assert!(policy.redacts(&KnownTag::Assistant.into(), &PropId::Provider.into()));
+		assert!(policy.redacts(&KnownTag::Assistant.into(), &PropId::Model.into()));
+		assert!(!policy.redacts(&KnownTag::Usage.into(), &PropId::Model.into()));
+		assert!(!policy.redacts(&tool("read"), &PropId::Model.into()));
 	}
 
 	#[test]
 	fn an_unparseable_entry_is_rejected_by_name() {
 		assert_eq!(
-			ControlVisibility::from_entries(["*/path", "path"]),
-			Err(VisibilityTableError::Malformed { entry: Str::new_static("path") })
+			ControlVisibility::from_entries(["*/provider", "provider"]),
+			Err(VisibilityTableError::Malformed { entry: Str::new_static("provider") })
 		);
 		assert_eq!(
-			ControlVisibility::from_entries(["user/custom/path"]),
-			Err(VisibilityTableError::Malformed { entry: Str::new_static("user/custom/path") })
+			ControlVisibility::from_entries(["assistant/custom/root"]),
+			Err(VisibilityTableError::Malformed { entry: Str::new_static("assistant/custom/root") })
 		);
 		assert_eq!(
-			ControlVisibility::from_entries(["/path"]),
-			Err(VisibilityTableError::EmptyTag { entry: Str::new_static("/path") })
+			ControlVisibility::from_entries(["/provider"]),
+			Err(VisibilityTableError::EmptyTag { entry: Str::new_static("/provider") })
 		);
 		assert_eq!(
-			ControlVisibility::from_entries(["user/"]),
-			Err(VisibilityTableError::EmptyProp { entry: Str::new_static("user/") })
+			ControlVisibility::from_entries(["assistant/"]),
+			Err(VisibilityTableError::EmptyProp { entry: Str::new_static("assistant/") })
 		);
 		assert_eq!(
-			ControlVisibility::from_entries(["user/*"]),
-			Err(VisibilityTableError::WildcardProp { entry: Str::new_static("user/*") })
+			ControlVisibility::from_entries(["assistant/*"]),
+			Err(VisibilityTableError::WildcardProp { entry: Str::new_static("assistant/*") })
 		);
 	}
 
 	#[test]
-	fn redacting_a_snapshot_blanks_the_seeded_properties_and_keeps_the_shape() {
-		let (dom, user, call) = seeded();
-		let policy = ControlVisibility::from_entries(DEFAULT_HOST_LOCAL_PROPS.iter().copied())
-			.expect("the seeded default table parses");
+	fn a_misspelled_half_is_rejected_instead_of_narrowing_the_policy() {
+		assert_eq!(
+			ControlVisibility::from_entries(["*/pathh"]),
+			Err(VisibilityTableError::UnknownProp {
+				entry: Str::new_static("*/pathh"),
+				prop:  Str::new_static("pathh"),
+			})
+		);
+		assert_eq!(
+			ControlVisibility::from_entries(["*/call_id"]),
+			Err(VisibilityTableError::UnknownProp {
+				entry: Str::new_static("*/call_id"),
+				prop:  Str::new_static("call_id"),
+			})
+		);
+		assert_eq!(
+			ControlVisibility::from_entries(["usr/path"]),
+			Err(VisibilityTableError::UnknownTag {
+				entry: Str::new_static("usr/path"),
+				tag:   Str::new_static("usr"),
+			})
+		);
+		assert_eq!(
+			ControlVisibility::from_entries(["read/path"]),
+			Err(VisibilityTableError::UnknownTag {
+				entry: Str::new_static("read/path"),
+				tag:   Str::new_static("read"),
+			})
+		);
+
+		let policy = ControlVisibility::from_entries(["tool:read/custom:root", "*/call-id"])
+			.expect("the prefixed forms stay nameable");
+
+		assert!(policy.redacts(&tool("read"), &PropKey::Custom(Str::new_static("root"))));
+		assert!(!policy.redacts(&tool("grep"), &PropKey::Custom(Str::new_static("root"))));
+		assert!(policy.redacts(&KnownTag::Assistant.into(), &PropId::CallId.into()));
+	}
+
+	#[test]
+	fn redacting_a_snapshot_blanks_provider_metadata_and_keeps_the_shape() {
+		let (dom, seeded) = seeded();
+		let policy = default_policy();
 		let snapshot = dom.snapshot();
 		let redacted = snapshot.redact(&policy);
 
@@ -324,23 +509,49 @@ mod tests {
 		}
 
 		let blanked = Value::Str(Str::empty());
-		let call = redacted.get(call).expect("the tool node survives");
-		assert_eq!(call.prop(&PropId::Path.into()), Some(&blanked));
-		assert_eq!(call.prop(&PropId::Provider.into()), Some(&blanked));
-		assert_eq!(call.prop(&PropId::Lines.into()), Some(&Value::Int(42)));
-		assert_eq!(call.content.as_deref(), Some("file body"));
-
-		let user = redacted.get(user).expect("the user node survives");
+		let assistant = redacted
+			.get(seeded.assistant)
+			.expect("the assistant node survives");
+		assert_eq!(assistant.prop(&PropId::Provider.into()), Some(&blanked));
+		assert_eq!(assistant.prop(&PropId::Route.into()), Some(&blanked));
+		assert_eq!(assistant.prop(&PropId::Model.into()), Some(&Value::Str(Str::new_static("opus"))));
 		assert_eq!(
-			user.prop(&PropId::Text.into()),
-			Some(&Value::Str(Str::new_static("read the file")))
+			assistant.prop(&PropId::Text.into()),
+			Some(&Value::Str(Str::new_static("reading it now")))
 		);
-		assert_eq!(user.prop(&PropId::Status.into()), Some(&Value::Str(Str::new_static("sent"))));
 		assert!(
 			!redacted
 				.as_bytes()
-				.windows(6)
-				.any(|window| window == b"secret")
+				.windows(b"anthropic".len())
+				.any(|window| window == b"anthropic")
 		);
+	}
+
+	/// Pins the two gaps the module documents, so widening or narrowing either
+	/// one has to update the documentation with it.
+	#[test]
+	fn r1_leaves_tool_payload_paths_and_the_advisor_card_visible() {
+		let (dom, seeded) = seeded();
+		let redacted = dom.snapshot().redact(&default_policy());
+
+		let input = redacted.get(seeded.input).expect("the tool input survives");
+		assert_eq!(input.content.as_deref(), Some(INPUT_CONTENT));
+		assert!(INPUT_CONTENT.contains(LOCAL_PATH));
+
+		let result = redacted
+			.get(seeded.result)
+			.expect("the tool result survives");
+		assert_eq!(
+			result.prop(&PropId::Text.into()),
+			Some(&Value::Str(Str::new_static(RESULT_TEXT)))
+		);
+		assert!(RESULT_TEXT.contains(LOCAL_PATH));
+
+		let notice = redacted
+			.get(seeded.notice)
+			.expect("the advisor card survives");
+		assert_eq!(notice.prop(&PropId::Kind.into()), Some(&Value::Str(Str::new_static("advisor"))));
+		assert!(matches!(notice.prop(&PropId::Data.into()), Some(Value::Json(_))));
+		assert_eq!(notice.content.as_deref(), Some(ADVISOR_NOTE));
 	}
 }
