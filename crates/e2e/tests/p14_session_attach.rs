@@ -14,8 +14,6 @@
 //! it; that a caller without `observe_host_local` never sees a host-local
 //! property; and that every mutating verb is refused.
 
-#![feature(impl_trait_in_assoc_type)]
-
 use std::{path::Path, sync::Arc, time::Duration};
 
 use omp_agent::{DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput, Up};
@@ -391,6 +389,11 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 	//    a new one binds the same path, and the observer that outlived it
 	//    reconnects onto a new epoch.
 	host.abort();
+	// `abort` only requests cancellation: the listener's descriptor lives
+	// until the task future is dropped, and a socket still holding it answers
+	// the liveness probe in `bind_owner_socket`, so the replacement host would
+	// refuse to bind. Await the handle, which resolves once the task is gone.
+	let _ = host.await;
 	let socket = omp_driver::session_wire::socket_path(&data_dir);
 	assert!(socket.exists(), "a killed host leaves its socket behind");
 	let restarted = build_wire(&sessions)?;
@@ -501,5 +504,6 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 	assert!(kernel.mailbox().send(Up::Interrupt).is_ok(), "the kernel outlived every attachment");
 
 	host.abort();
+	let _ = host.await;
 	Ok(())
 }
