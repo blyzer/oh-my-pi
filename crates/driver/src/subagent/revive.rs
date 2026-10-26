@@ -318,6 +318,7 @@ async fn drive(
 		topology: composed.topology,
 		relay: composed.relay,
 		autoreply,
+		project_root: Arc::clone(&composed.project_root),
 	};
 	child.sessions.register(child.id.clone(), live.clone());
 	let idle_ttl = idle_park_delay(child.settings.agent_idle_ttl_ms);

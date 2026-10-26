@@ -27,6 +27,7 @@ fn register(
 		topology,
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
+		project_root: Arc::from(std::path::Path::new("/workspace")),
 	});
 }
 

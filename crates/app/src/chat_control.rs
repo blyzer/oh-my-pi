@@ -4784,13 +4784,14 @@ mod tests {
 		harness
 			.live
 			.register(Str::new_static("child"), omp_driver::sessions::KernelHandle {
-				id:        omp_driver::sessions::SessionId::new("child"),
-				name:      Str::new_static("child"),
-				up:        child_up,
-				snapshot:  Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-				topology:  omp_agent::SessionTopology::main(Str::new_static("child")),
-				relay:     omp_driver::sessions::IrcRelayPolicy::default(),
-				autoreply: None,
+				id:           omp_driver::sessions::SessionId::new("child"),
+				name:         Str::new_static("child"),
+				up:           child_up,
+				snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
+				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
+				autoreply:    None,
+				project_root: Arc::from(std::path::Path::new("/workspace")),
 			});
 		harness
 			.commands
@@ -4920,13 +4921,14 @@ mod tests {
 		harness
 			.live
 			.register(Str::new_static("child"), omp_driver::sessions::KernelHandle {
-				id:        omp_driver::sessions::SessionId::new("child"),
-				name:      Str::new_static("child"),
-				up:        child_up,
-				snapshot:  Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
-				topology:  omp_agent::SessionTopology::main(Str::new_static("child")),
-				relay:     omp_driver::sessions::IrcRelayPolicy::default(),
-				autoreply: None,
+				id:           omp_driver::sessions::SessionId::new("child"),
+				name:         Str::new_static("child"),
+				up:           child_up,
+				snapshot:     Arc::new(RwLock::new(omp_dom::Dom::new().snapshot())),
+				topology:     omp_agent::SessionTopology::main(Str::new_static("child")),
+				relay:        omp_driver::sessions::IrcRelayPolicy::default(),
+				autoreply:    None,
+				project_root: Arc::from(std::path::Path::new("/workspace")),
 			});
 		let mailbox = harness.mailbox();
 

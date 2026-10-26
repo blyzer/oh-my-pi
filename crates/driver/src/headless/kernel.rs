@@ -3125,6 +3125,7 @@ pub async fn compose_kernel(
 		topology,
 		relay,
 		autoreply,
+		project_root: Arc::from(project_root.as_path()),
 	});
 	if tools_enabled {
 		let cfg: Arc<dyn omp_con::CfgLoader> =
@@ -3434,6 +3435,7 @@ impl SessionHome {
 				topology,
 				relay,
 				autoreply,
+				project_root: Arc::from(self.project_root.as_path()),
 			});
 	}
 
@@ -4069,6 +4071,35 @@ mod tests {
 	};
 
 	const GPT5: &str = "openai/gpt-5";
+
+	#[test]
+	fn a_registered_session_carries_the_composed_project_root() {
+		let scratch = tempfile::tempdir().expect("tempdir");
+		let data_dir = scratch.path().join("data");
+		let project_root = scratch.path().join("project");
+		std::fs::create_dir_all(&project_root).expect("project root");
+		let (up, _inbox) = flume::unbounded();
+		let home = super::SessionHome::new(
+			&data_dir,
+			&project_root,
+			&KernelOptions::default(),
+			sf!(GPT5),
+			up,
+		)
+		.expect("session home");
+		let session = home.create(None).expect("session");
+		let id = session
+			.journal_path()
+			.file_stem()
+			.and_then(|name| name.to_str())
+			.expect("journal stem");
+		let live = home
+			.live
+			.lookup(crate::sessions::SessionId::from_ref(id))
+			.expect("registered handle");
+		assert_eq!(&*live.project_root, home.project_root.as_path());
+		assert_eq!(&*live.project_root, std::fs::canonicalize(&project_root).expect("canonical"));
+	}
 
 	#[test]
 	fn visibility_transport_preserves_source_lines_and_remaps_filtered_parts() {
