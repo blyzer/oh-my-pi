@@ -113,6 +113,18 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   because that shape arrives through the ACP client. The Codex adapter is
   correct as it stands. Do not re-apply #366.
 
+  Re-confirmed 2026-10-27, because a stash-triage plan written before the
+  revert listed the Codex-side typing as the one change worth retaking from
+  the stashes. It is not. `crates/envd/src/acp_client/wire.rs:58-61` holds
+  `MISSING_LOGIN_CODE` and `MISSING_LOGIN_DATA`, consumed at
+  `delegated_session.rs:611` and `:789`, and `acp_client/tests.rs:956-1015`
+  pins the exact shape plus four near-misses that must stay internal (`-32603`
+  with the same `data`, `-32000` with no `data`, `-32000` with other `data`,
+  and a structured `data`). `codex_app_server/session.rs:935-937` states the
+  decision in the code: the object form stays `Internal` on purpose. The
+  stashes are gone, so retaking it would mean re-implementing the reverted
+  approach by hand.
+
 ## ADR 0039 R1 — decided and queued
 
 The owner answered R1's blocking questions on 2026-10-26, recorded as the ADR 0039 amendment of
