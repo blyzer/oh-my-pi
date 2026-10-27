@@ -1,0 +1,28 @@
+chore(ci): gate patch-script recipes in repo text
+
+AGENTS.md "Editing Discipline" binds every prompt and skill body authored
+here, but it is prose, so nothing stopped an example from shipping the
+recipe anyway. scripts/check-editing-discipline.py scans the text surfaces
+this repo owns (AGENTS.md, docs/, .omp/, .claude/, crates/*/README.md) and
+reports five forms that rewrite a tracked file from a shell: sed -i and
+--in-place, perl -pi -e, an interpreter heredoc (python/perl/ruby/node,
+any version suffix), an ed or ex script, and awk or tee redirected over a
+source path. It fails with the file, line and form.
+
+Two escapes carry a reason: an editing-discipline-allow marker, and a fence
+opened as a text prohibited block. The rule's own section in AGENTS.md is
+skipped by heading so it may quote what it forbids; if that heading is
+renamed the skip simply stops applying, so the section's own examples get
+reported rather than the rest of the file being swallowed.
+
+Wired into just lint and the CI format job. Proven by planting each form in
+a scratch doc: all are reported, exit 1, and the tree is clean again once
+removed. One pre-existing hit is marked rather than rewritten, because it
+names omp's own sed/jq builtins, not an edit recipe.
+
+Also rewrites the remote_seed job's if: from a folded block wrapping an
+expression to a plain expression. actionlint flags the folded form as
+always true, because the value carries characters outside the ${{ }}; a
+review disputed that reading, citing that if: is evaluated as an expression
+regardless. The plain form is unambiguous either way, so this is a
+clarity change and not a verified security fix.

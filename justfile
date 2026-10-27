@@ -156,9 +156,15 @@ remote-heavy:
     cargo test --doc --workspace --exclude omp-e2e --locked
     CARGO_TARGET_DIR="$HOME/.cache/omp-target-clippy" cargo clippy --workspace --all-targets --locked
 
+# Fail when a repo text surface (AGENTS.md, docs, .omp, crate READMEs) teaches a patch-script
+# recipe. AGENTS.md "Editing Discipline" binds every prompt and skill body authored here.
+[group('format & lint')]
+lint-editing-discipline:
+    python3 scripts/check-editing-discipline.py
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
-lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet
+lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet lint-editing-discipline
 
 # ---------------------------------------------------------------------------
 # Build & check

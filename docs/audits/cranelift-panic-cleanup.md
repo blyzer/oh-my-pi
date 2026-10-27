@@ -229,7 +229,8 @@ The two bulk categories are classified by rule, and the rows that break the rule
   - **[M]** A `TempDir` owned by a failing test is not removed. The envd probe left `/tmp/.tmpAXaKVH` and `/tmp/.tmpX0Ehvh` behind under Cranelift; the LLVM control removed its own.
   - Exceptions where the path is fixed or lands beside user files:
     - `crates/envd/src/grep.rs:1515`: a test helper with its own `TempDir` type that creates `/tmp/omp-grep-<pid>-<n>`, used at `:1641 :1672 :1688 :1705 :1806`. A later process that reuses the PID reuses the directory with its stale contents.
-    - `crates/shell-builtins/src/sed.rs:7554` (`sed -i`) and `crates/shell-builtins/src/jq.rs:1141` (`jq -i`) create in-place temp files next to the user's own file.
+    - <!-- editing-discipline-allow: names omp's own sed/jq builtins, not an edit recipe -->
+      `crates/shell-builtins/src/sed.rs:7554` (`sed -i`) and `crates/shell-builtins/src/jq.rs:1141` (`jq -i`) create in-place temp files next to the user's own file.
     - `crates/vcs/src/git/mutate.rs` `detach_git_dir_does_not_mutate_when_index_snapshot_fails` uses a fixed sibling name. PR #32 already lists it as a known issue.
 - **G, tokio spawns (400 sites): cascading, low by default.**
   - On the dev `omp` binary's multi-thread runtime (`#[tokio::main]`, `crates/app/src/main.rs:60`), a panicking task aborts the process. **[M]** for the mechanism (probe row 8, and CI in §5).

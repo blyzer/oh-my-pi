@@ -105,6 +105,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check the CI gate
         run: python3 scripts/check-ci-paths.py
+      - name: Check the editing discipline of repo text
+        run: python3 scripts/check-editing-discipline.py
 
   # crates/proto/proto holds the wire contracts other processes speak. `just lint`
   # and `just fmt-check` already run buf locally; this is the CI half. The binary is
@@ -833,9 +835,7 @@ jobs:
 # BuildBuddy API key, which has AC-write permission.
   remote_seed:
     name: Seed BuildBuddy omp2 runner cache
-    if: >
-      ${{ github.event_name == 'workflow_dispatch' &&
-          github.ref == 'refs/heads/omp2' }}
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/omp2'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
