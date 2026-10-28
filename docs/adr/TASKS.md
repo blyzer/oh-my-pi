@@ -173,17 +173,11 @@ Units, in dependency order. Each lands as its own change with its own tests.
 6. **DONE** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
    `SessionControlAuthority` trait that driver implements, with identity taken from transport
    extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2 (PR #435).
-7. **DONE** `omp attach --observe`: connects to the owner UDS, folds frames into a local `Dom`,
-   and renders it through the production transcript projection as it converges. `omp chat` hosts
-   the socket, first process wins. The historical `std::future::pending()` stub is not restored.
-   **OPEN, deferred by decision:** the retained chat-actor viewer is not the R1 presentation. The
-   chat host takes a controller, services, and an editor that an observer has nothing to put
-   behind; the transcript projection is the read-only path that exists today. R2 brings the
-   observer input, and the retained viewer lands with it. Concretely, `TranscriptViewer`
-   (`crates/chat/src/overlays/hub.rs`) takes `(Snapshot, Receiver<Event>)` — which an
-   attachment already has — but it is a full-screen retained overlay keyed on a parent
-   session's subagent `JobRow`, while `omp attach` is a pipeable stdout tail. Hosting it
-   needs a standalone panel loop in `crates/app` and a session-shaped row, not a wrapper.
+7. **DONE** `omp attach --observe` remains the pipeable owner-socket observer. The retained
+   R2 viewer is also implemented in `crates/chat/src/overlays/hub.rs`: `/hub` Enter runs
+   `transcript <id>`, `TranscriptViewer` consumes `AgentView` snapshots and ordered patch
+   streams, renders the detached transcript, supports steering input and scrolling, and closes
+   cleanly. The `omp-chat` package verification passed 738 tests and doctests.
 8. **DONE** Proofs: unit tests per crate, the driver integration test over a real UDS
    (`crates/driver/tests/session_attach_uds.rs`), the command's own socket path
    (`crates/app/tests/attach_client.rs`), and P14 (`crates/e2e/tests/p14_session_attach.rs`):
