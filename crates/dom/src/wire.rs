@@ -320,6 +320,9 @@ mod tests {
 		for raw in [
 			r#"{ "nested" : [ 1e+02, { "large" : 18446744073709551615 } ] }"#,
 			r#"[ { "nested" : [ 1.50, 1e-3 ] }, 18446744073709551615 ]"#,
+			r#"1e+02"#,
+			r#""a\u0062""#,
+			r#"null"#,
 		] {
 			let mut dom = Dom::new();
 			dom.apply(&Txn {
@@ -361,7 +364,8 @@ mod tests {
 		);
 	}
 
-	/// The decoder validates the producer's snapshot without altering its structured JSON.
+	/// The decoder validates the producer's snapshot without altering its
+	/// structured JSON.
 	#[test]
 	fn snapshot_decode_equals_validating_the_producers_bytes() {
 		let snapshot = uncanonical();

@@ -208,7 +208,11 @@ impl Snapshot {
 				return Err(SnapshotDecodeError::InconsistentStructure);
 			}
 		}
-		Ok(Self::build(high_water, encoded.next_sid, nodes, parents, encoded.streams))
+		let mut snapshot = Self::build(high_water, encoded.next_sid, nodes, parents, encoded.streams);
+		// Validation materializes typed values for callers; retain the validated
+		// source bytes so lexical JSON survives the round trip unchanged.
+		snapshot.bytes = bytes.to_vec();
+		Ok(snapshot)
 	}
 
 	pub(crate) fn build(
