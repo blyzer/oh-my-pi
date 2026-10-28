@@ -24,6 +24,27 @@ Status meanings:
   complete.
 - **HISTORICAL**: retained for traceability; not an active queue.
 
+## Coordinator monitoring record
+
+- 2026-10-28: The `pr_monitor` extension is available; no PR monitor was started
+  in this session. Tool discovery found no BuildBuddy monitor. GitHub Actions
+  and BuildBuddy were not being actively monitored at this checkpoint.
+- The snapshot fix has no recorded PR in this ledger. Its targeted BuildBuddy
+  result is recorded below; that result is not a substitute for PR CI.
+
+## Snapshot JSON byte preservation
+
+- **OPEN** integration after independent review and required gates. The snapshot fix is now
+  `e2d0723` plus correction commit `c4ceb04` in
+  `/Users/enverfrancisco/.omp/wt/snapshot-json-oh-my-pi` on
+  `fix/snapshot-json-fixed-point`. The correction retains validated source bytes while
+  preserving typed scalar `Value` compatibility. Targeted `omp-dom` verification passed
+  28 tests and doctests locally; the earlier remote BuildBuddy run covered `e2d0723` only
+  (invocation `928e1126-e744-43e9-a2bd-7eb20e9e04c3`).
+- The configured reviewer dispatch failed before producing a verdict. The session-model fallback
+  reviewed the correction and returned READY after the scalar-compatibility issue was fixed.
+  Required PR CI and integration gates remain open because no PR has been created.
+
 ## ADR 0045 — envd responsibility boundaries
 
 ADR status: **proposed; owner review required**. Its implementation gate says
@@ -61,6 +82,11 @@ Completed implementation items:
   `frozen_surface.rs`, but `docs/architecture/processes.md` still carries the
   stale `WorkerProcess::spawn` description. Filing/verification of the
   `WorkerHello` and `chat --gateway` issues is also not established by code.
+  **OPEN implementation evidence gate:** `docs/architecture/processes.md` names
+  `__omp-py-worker`, but the application entrypoint has no matching selector.
+  `WorkerSupervisor::publish_process` has a test caller but no production caller
+  found under `crates`. Prove the actual worker launcher and protocol before
+  correcting the process documentation or closing B9.
 
 Active items:
 
