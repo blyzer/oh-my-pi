@@ -32,6 +32,31 @@ Status meanings:
 - The coordinator now records monitor and merge evidence per PR instead of treating
   a targeted local or BuildBuddy invocation as a substitute for PR CI.
 
+## Decision matrix for remaining ADR work
+
+The owner authorized the council to decide software-development questions. That authority does not
+override an ADR's explicit owner-acceptance gate. The council dispatch on 2026-10-28 failed before
+producing a verdict because child startup rejected the requested tool set and hit an extension-load
+error. No council verdict is recorded.
+
+- **ADR 0045 owner gate:** accept or reject Alternative F before production implementation.
+- **ADR 0045 decision item 7:** decide reconnect policy; admission placement on untrusted workers;
+  whether approval and reflection relays may violate ADR 0006's duplex prohibition; MCP process
+  locus; per-subagent daemon sharing; and the future of schedules.
+- **ADR 0045 containment:** after acceptance, authorize typed remote-route termination and local
+  backend survival. Reconnect remains a separate policy decision.
+- **ADR 0045 P8 evidence:** define or confirm W1-W9 workloads, attached versus embedded modes,
+  macOS/Linux execution, metrics, artifact format, and comparison thresholds.
+- **ADR 0048 B4:** choose validation of every HostFrame and WorkerFrame before prost decode, or
+  deletion of the unused validators; identify the owning decode paths.
+- **ADR 0048 B5:** choose the golden corpus scope. Current fixtures cover `chat-stream` and
+  `tool-calls-and-rewind`; decide whether `compaction`, `tool.update`, `patch`, and each field
+  addition require separate fixtures.
+- **ADR 0048 B9:** prove the real worker launcher and WorkerHello path plus gateway Hello behavior,
+  or authorize correcting stale documentation and missing production wiring.
+- **ADR 0048 acceptance:** confirm the Buf ignore list, especially `toolhost`; choose the B1
+  lenient-decode versus revision-bump variant; and run the required local Buf proof.
+
 ## Snapshot JSON byte preservation
 
 - **DONE** integration merged as PR #449. The snapshot fix is `e2d0723` plus correction
