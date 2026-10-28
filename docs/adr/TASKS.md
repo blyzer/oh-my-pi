@@ -26,11 +26,11 @@ Status meanings:
 
 ## Coordinator monitoring record
 
-- 2026-10-28: The `pr_monitor` extension is available; no PR monitor was started
-  in this session. Tool discovery found no BuildBuddy monitor. GitHub Actions
-  and BuildBuddy were not being actively monitored at this checkpoint.
-- The snapshot fix has no recorded PR in this ledger. Its targeted BuildBuddy
-  result is recorded below; that result is not a substitute for PR CI.
+- 2026-10-28: Native GitHub `run_watch` monitored PR #449 through all terminal
+  checks. The 14 required CI jobs, including BuildBuddy and macOS/Linux acceptance
+  jobs, passed; PR #449 then merged. No separate BuildBuddy monitor was available.
+- The coordinator now records monitor and merge evidence per PR instead of treating
+  a targeted local or BuildBuddy invocation as a substitute for PR CI.
 
 ## Snapshot JSON byte preservation
 
