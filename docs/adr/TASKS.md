@@ -40,7 +40,7 @@ Status meanings:
   `fix/snapshot-json-fixed-point`. The correction retains validated source bytes while
   preserving typed scalar `Value` compatibility. Targeted `omp-dom` verification passed
   28 tests and doctests locally; the earlier remote BuildBuddy run covered `e2d0723` only
-  (invocation `928e1126-e744-43e9-a2bd-7eb20e9e04c3`).
+  (invocation `928e1126-e744-43e9-a2bd-7eb20e9e04c3`). A fresh BuildBuddy run for `c4ceb04` was not started because this host has no `BUILDBUDDY_API_KEY` or Keychain entry.
 - The configured reviewer dispatch failed before producing a verdict. The session-model fallback
   reviewed the correction and returned READY after the scalar-compatibility issue was fixed.
   Required PR CI and integration gates remain open because no PR has been created.
