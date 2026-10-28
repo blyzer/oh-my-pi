@@ -12,11 +12,8 @@
 //! embedded [`crate::Value::Json`] property crosses the wire with the exact
 //! spacing and number form the producer wrote.
 //!
-//! Byte identity end to end is still bounded by [`Snapshot::from_bytes`],
-//! which canonicalizes every property it validates. A snapshot whose own bytes
-//! are not a fixed point of that validator — one carrying a non-compact
-//! [`crate::Value::Json`] minted locally through [`crate::Dom`] — decodes to
-//! the canonicalized form, not to the producer's bytes.
+//! Snapshot validation canonicalizes the envelope while retaining structured
+//! JSON property bytes verbatim.
 
 use std::borrow::Cow;
 
@@ -319,6 +316,32 @@ mod tests {
 	}
 
 	#[test]
+	fn snapshot_preserves_structured_json_bytes() {
+		for raw in [
+			r#"{ "nested" : [ 1e+02, { "large" : 18446744073709551615 } ] }"#,
+			r#"[ { "nested" : [ 1.50, 1e-3 ] }, 18446744073709551615 ]"#,
+		] {
+			let mut dom = Dom::new();
+			dom.apply(&Txn {
+				cause: EntryId::default(),
+				label: None,
+				ops:   vec![Op::Ins {
+					parent: dom.body(),
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Turn).with_prop(
+						PropId::Data,
+						Value::Json(RawValue::from_string(raw.to_owned()).unwrap()),
+					),
+				}],
+			})
+			.unwrap();
+			let original = dom.snapshot();
+			let decoded = Snapshot::from_bytes(original.as_bytes()).unwrap();
+			assert_eq!(decoded.as_bytes(), original.as_bytes(), "{raw}");
+		}
+	}
+
+	#[test]
 	fn snapshot_envelope_embeds_canonical_bytes_verbatim() {
 		let snapshot = uncanonical();
 		assert!(
@@ -338,10 +361,7 @@ mod tests {
 		);
 	}
 
-	/// The decoder hands the producer's own envelope bytes to `Snapshot`
-	/// untouched. It is not a byte round trip: `Snapshot::from_bytes`
-	/// canonicalizes, so the fixture's uncompacted JSON compacts on both sides
-	/// of the comparison. See `crates/dom/README.md` for that bound.
+	/// The decoder validates the producer's snapshot without altering its structured JSON.
 	#[test]
 	fn snapshot_decode_equals_validating_the_producers_bytes() {
 		let snapshot = uncanonical();

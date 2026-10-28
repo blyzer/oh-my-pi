@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{Handle, KnownTag, Node, Sid, Tag, Value, stream::SnapshotStream};
@@ -24,11 +26,48 @@ struct CanonicalNode {
 }
 
 #[derive(Deserialize)]
-struct EncodedSnapshot {
+struct EncodedSnapshot<'a> {
 	high_water: u64,
 	next_sid:   Sid,
-	nodes:      Vec<CanonicalNode>,
+	#[serde(borrow)]
+	nodes:      Vec<EncodedNode<'a>>,
 	streams:    Vec<SnapshotStream>,
+}
+
+#[derive(Deserialize)]
+struct EncodedNode<'a> {
+	handle: Handle,
+	parent: Option<Handle>,
+	#[serde(borrow)]
+	node:   EncodedNodeData<'a>,
+}
+
+#[derive(Deserialize)]
+struct EncodedNodeData<'a> {
+	tag:     Tag,
+	#[serde(borrow)]
+	props:   SmallVec<(crate::PropKey, &'a RawValue), 4>,
+	kids:    Vec<Handle>,
+	content: Option<omp_core::Str>,
+}
+
+impl EncodedNodeData<'_> {
+	fn decode(self) -> Result<Node, serde_json::Error> {
+		let props = self
+			.props
+			.into_iter()
+			.map(|(key, raw)| {
+				let text = raw.get();
+				let value = if text.starts_with(['{', '[']) {
+					Value::Json(raw.to_owned())
+				} else {
+					serde_json::from_str(text)?
+				};
+				Ok((key, value))
+			})
+			.collect::<Result<_, serde_json::Error>>()?;
+		Ok(Node { tag: self.tag, props, kids: self.kids, content: self.content })
+	}
 }
 
 /// Failure to decode an untrusted canonical session snapshot.
@@ -111,7 +150,7 @@ impl Snapshot {
 				}
 				parents[index] = Some(parent);
 			}
-			nodes[index] = Some(encoded_node.node);
+			nodes[index] = Some(encoded_node.node.decode()?);
 		}
 		let canonical_roots = [
 			(1, KnownTag::Session, None),
