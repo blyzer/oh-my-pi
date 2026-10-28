@@ -34,16 +34,13 @@ Status meanings:
 
 ## Snapshot JSON byte preservation
 
-- **OPEN** integration after independent review and required gates. The snapshot fix is now
-  `e2d0723` plus correction commit `c4ceb04` in
-  `/Users/enverfrancisco/.omp/wt/snapshot-json-oh-my-pi` on
-  `fix/snapshot-json-fixed-point`. The correction retains validated source bytes while
-  preserving typed scalar `Value` compatibility. Targeted `omp-dom` verification passed
-  28 tests and doctests locally; the earlier remote BuildBuddy run covered `e2d0723` only
-  (invocation `928e1126-e744-43e9-a2bd-7eb20e9e04c3`). A fresh BuildBuddy run for `c4ceb04` was not started because this host has no `BUILDBUDDY_API_KEY` or Keychain entry.
+- **DONE** integration merged as PR #449. The snapshot fix is `e2d0723` plus correction
+  commit `c4ceb04` on `fix/snapshot-json-fixed-point`. The correction retains validated
+  source bytes while preserving typed scalar `Value` compatibility. Local `omp-dom`
+  verification passed 28 tests and doctests. PR CI passed all 14 jobs, including BuildBuddy,
+  macOS, Linux, acceptance proofs, and format checks. The PR merged at 2026-10-28T09:30:13Z.
 - The configured reviewer dispatch failed before producing a verdict. The session-model fallback
   reviewed the correction and returned READY after the scalar-compatibility issue was fixed.
-  Required PR CI and integration gates remain open because no PR has been created.
 
 ## ADR 0045 — envd responsibility boundaries
 
@@ -220,14 +217,9 @@ this projection and need a named consumer first.
 
 Found while building units 2 and 4, and not part of R1:
 
-- **OPEN** `Snapshot::from_bytes` is not a fixed point. `Value`'s `Deserialize`
-  (`crates/dom/src/node.rs`) routes a map through `serde_json::Value` and `to_raw_value`, and
-  `Snapshot::build` re-serializes it, so a non-compact `Value::Json` property loses its whitespace
-  and number form on the first hop and is stable after. `Snapshot` equality is a byte compare, so
-  two structurally identical trees can compare unequal. An attached observer folding events into
-  its own replica therefore cannot prove convergence by comparing canonical bytes with the host
-  until this is fixed. Fixing it means capturing the raw value directly in `Value::deserialize`
-  rather than round-tripping through `serde_json::Value`.
+- **RESOLVED by PR #449** `Snapshot::from_bytes` now validates through borrowed
+  `RawValue` tokens and retains the validated source bytes, so structured and scalar lexical JSON
+  survives the fixed-point round trip while typed scalar `Value` compatibility remains unchanged.
 - **OPEN** `PropPolicy::redacts_content` receives only a `Tag`, so a value-conditioned rule cannot
   be expressed. The advisor transcript card is identifiable in the DOM, as a `notice` carrying
   `kind = advisor`, but classifying it needs a wider signature; `notice/data` alone would swallow
