@@ -184,6 +184,25 @@ fn cells(selection: &MatrixSelection) -> Vec<(Workload, usize, Transport, Daemon
 /// A child that fails its cell still records that failure in its own artifact,
 /// so only a child that died without writing one becomes an error here.
 #[cfg(unix)]
+fn artifact_matches_cell(
+	recorded: &omp_e2e::baseline::MatrixArtifact,
+	cell: (Workload, usize, Transport, DaemonState),
+) -> bool {
+	let (workload, index, transport, state) = cell;
+	let expected_variant = omp_e2e::baseline::variant_label(workload, index);
+	recorded.cells.iter().any(|cell| {
+		cell.workload == workload
+			&& cell.variant == expected_variant
+			&& cell.transport == transport
+			&& cell.daemon_state == state
+	}) || recorded.failures.iter().any(|failure| {
+		failure.workload == workload
+			&& failure.variant == expected_variant
+			&& failure.transport == transport
+			&& failure.daemon_state == state
+	})
+}
+
 fn record_cell(
 	executable: &Path,
 	options: &Options,
@@ -211,19 +230,7 @@ fn record_cell(
 		.with_context(|| format!("reading cell artifact {}", artifact.display()))?;
 	let recorded: omp_e2e::baseline::MatrixArtifact =
 		serde_json::from_str(&encoded).context("decoding a cell artifact")?;
-	let expected_variant = omp_e2e::baseline::variant_label(workload, index);
-	let matches_cell = recorded.cells.iter().any(|cell| {
-		cell.workload == workload
-			&& cell.variant == expected_variant
-			&& cell.transport == transport
-			&& cell.daemon_state == state
-	}) || recorded.failures.iter().any(|failure| {
-		failure.workload == workload
-			&& failure.variant == expected_variant
-			&& failure.transport == transport
-			&& failure.daemon_state == state
-	});
-	if !matches_cell {
+	if !artifact_matches_cell(&recorded, cell) {
 		return Err(error(format!(
 			"cell recorder exited {status} without a matching artifact for {workload} variant \
 			 {index} {transport} {state}"
@@ -355,5 +362,82 @@ async fn run(options: Options) -> Result<()> {
 		Ok(())
 	} else {
 		Err(error(problems.join("\n")))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use omp_e2e::baseline::{
+		MatrixArtifact, MatrixCell, MatrixFailure, MatrixMetric, MatrixSample, Summary,
+	};
+
+	use super::*;
+
+	fn metadata() -> MatrixArtifact {
+		MatrixArtifact {
+			schema_version: omp_e2e::baseline::MATRIX_SCHEMA_VERSION,
+			metadata:       omp_e2e::baseline::MatrixMetadata::capture(1),
+			synthetic:      None,
+			cells:          Vec::new(),
+			failures:       Vec::new(),
+		}
+	}
+
+	fn cell_artifact() -> MatrixArtifact {
+		let mut artifact = metadata();
+		artifact.cells.push(MatrixCell {
+			workload:                  Workload::W7,
+			variant:                   Some("slots=8".to_owned()),
+			transport:                 Transport::Attached,
+			daemon_state:              DaemonState::Cold,
+			repetitions:               1,
+			operations_per_repetition: 1,
+			metrics:                   vec![MatrixMetric {
+				name:    "create_ns".to_owned(),
+				summary: Summary::of(&[1.0]).expect("summary"),
+			}],
+			samples:                   vec![MatrixSample {
+				metrics: BTreeMap::from([(String::from("create_ns"), 1.0)]),
+				facts:   BTreeMap::new(),
+			}],
+			facts:                     BTreeMap::new(),
+		});
+		artifact
+	}
+
+	#[test]
+	fn artifact_identity_accepts_the_requested_cell() {
+		assert!(artifact_matches_cell(
+			&cell_artifact(),
+			(Workload::W7, 2, Transport::Attached, DaemonState::Cold),
+		));
+	}
+
+	#[test]
+	fn artifact_identity_rejects_a_different_cell() {
+		assert!(!artifact_matches_cell(
+			&cell_artifact(),
+			(Workload::W7, 2, Transport::Embedded, DaemonState::Cold),
+		));
+	}
+
+	#[test]
+	fn artifact_identity_accepts_a_matching_failure() {
+		let mut artifact = metadata();
+		artifact.failures.push(MatrixFailure {
+			workload:          Workload::W7,
+			variant:           Some("slots=8".to_owned()),
+			transport:         Transport::Attached,
+			daemon_state:      DaemonState::Cold,
+			error:             String::from("child failed"),
+			samples:           Vec::new(),
+			failed_repetition: Some(1),
+		});
+		assert!(artifact_matches_cell(
+			&artifact,
+			(Workload::W7, 2, Transport::Attached, DaemonState::Cold),
+		));
 	}
 }
