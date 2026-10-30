@@ -207,13 +207,35 @@ fn record_cell(
 		.arg(artifact)
 		.status()
 		.context("spawning the cell recorder")?;
-	let Ok(encoded) = fs::read_to_string(artifact) else {
+	let encoded = fs::read_to_string(artifact)
+		.with_context(|| format!("reading cell artifact {}", artifact.display()))?;
+	let recorded: omp_e2e::baseline::MatrixArtifact =
+		serde_json::from_str(&encoded).context("decoding a cell artifact")?;
+	let expected_variant = omp_e2e::baseline::variant_label(workload, index);
+	let matches_cell = recorded.cells.iter().any(|cell| {
+		cell.workload == workload
+			&& cell.variant == expected_variant
+			&& cell.transport == transport
+			&& cell.daemon_state == state
+	}) || recorded.failures.iter().any(|failure| {
+		failure.workload == workload
+			&& failure.variant == expected_variant
+			&& failure.transport == transport
+			&& failure.daemon_state == state
+	});
+	if !matches_cell {
 		return Err(error(format!(
-			"the cell recorder for {workload} variant {index} {transport} {state} exited with \
-			 {status} and wrote no artifact"
+			"cell recorder exited {status} without a matching artifact for {workload} variant \
+			 {index} {transport} {state}"
 		)));
-	};
-	serde_json::from_str(&encoded).context("decoding a cell artifact")
+	}
+	if !status.success() && recorded.failures.is_empty() {
+		return Err(error(format!(
+			"cell recorder exited {status} without recording a failure for {workload} variant \
+			 {index} {transport} {state}"
+		)));
+	}
+	Ok(recorded)
 }
 
 #[cfg(unix)]
@@ -230,10 +252,16 @@ async fn record(
 		failures:       Vec::new(),
 	};
 	omp_e2e::baseline::write_matrix(&options.artifact, &recording)?;
-	let scratch = options.artifact.with_extension("cell.json");
-	for cell in cells(&options.selection) {
+	for (cell_index, cell) in cells(&options.selection).into_iter().enumerate() {
 		let (workload, index, transport, state) = cell;
-		let _ = fs::remove_file(&scratch);
+		let scratch = options
+			.artifact
+			.with_extension(format!("cell-{cell_index}.json"));
+		match fs::remove_file(&scratch) {
+			Ok(()) => {},
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+			Err(error) => return Err(error.into()),
+		}
 		match record_cell(&executable, options, cell, &scratch) {
 			Ok(mut recorded) => {
 				recording.cells.append(&mut recorded.cells);
@@ -251,9 +279,13 @@ async fn record(
 				failed_repetition: None,
 			}),
 		}
+		match fs::remove_file(&scratch) {
+			Ok(()) => {},
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+			Err(error) => return Err(error.into()),
+		}
 		omp_e2e::baseline::write_matrix(&options.artifact, &recording)?;
 	}
-	let _ = fs::remove_file(&scratch);
 	println!("wrote {}", options.artifact.display());
 	Ok(failure_lines(&recording))
 }

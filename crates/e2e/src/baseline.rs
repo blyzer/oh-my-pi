@@ -64,6 +64,15 @@ pub fn variant_count(workload: Workload) -> usize {
 	workloads::Variant::of(workload).len()
 }
 
+/// Returns the serialized label for one workload variant.
+#[cfg(unix)]
+#[must_use]
+pub fn variant_label(workload: Workload, index: usize) -> Option<String> {
+	workloads::Variant::of(workload)
+		.get(index)
+		.and_then(workloads::Variant::label)
+}
+
 const SCHEMA_VERSION: u32 = 3;
 const TOKEN: &str = "·";
 
