@@ -10,7 +10,7 @@ use std::{
 
 use omp_core::{Str, Ulid};
 use omp_proto::{
-	bounds::FRAME_MAX_BYTES,
+	bounds::{FRAME_MAX_BYTES, validate_worker_frame},
 	prost::Message,
 	toolhost::v1::{WorkerFrame, worker_frame},
 };
@@ -310,11 +310,11 @@ async fn read_worker_frame(
 	}
 	let mut bytes = vec![
 		0;
-		usize::try_from(value).map_err(|_| std::io::Error::new(
-			std::io::ErrorKind::InvalidData,
-			"worker frame too large"
-		))?
+		usize::try_from(value).map_err(|_| {
+			std::io::Error::new(std::io::ErrorKind::InvalidData, "worker frame too large")
+		})?
 	];
 	reader.read_exact(&mut bytes).await?;
+	validate_worker_frame(bytes.as_slice()).map_err(std::io::Error::other)?;
 	WorkerFrame::decode(bytes.as_slice()).map_err(std::io::Error::other)
 }
