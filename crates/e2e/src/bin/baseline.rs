@@ -56,7 +56,7 @@ fn flag_value(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<S
 		.next()
 		.with_context(|| format!("{flag} requires a value"))?
 		.into_string()
-	\t// lintx-allow: error-format CLI boundary renders OS argument conversion.
+		// lintx-allow: error-format CLI boundary renders OS argument conversion.
 		.map_err(|value| error(format!("{flag} value {value:?} is not UTF-8")))
 }
 
@@ -91,7 +91,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
 	while let Some(flag) = args.next() {
 		let flag = flag
 			.into_string()
-	\t\t// lintx-allow: error-format CLI boundary renders OS argument conversion.
+			// lintx-allow: error-format CLI boundary renders OS argument conversion.
 			.map_err(|flag| error(format!("argument {flag:?} is not UTF-8")))?;
 		match flag.as_str() {
 			"--samples" => {
@@ -245,7 +245,7 @@ async fn record(
 					.then(|| format!("variant {index}")),
 				transport,
 				daemon_state: state,
-	\t\t\t// lintx-allow: error-format artifact boundary renders child failure.
+				// lintx-allow: error-format artifact boundary renders child failure.
 				error: failure.to_string(),
 				samples: Vec::new(),
 				failed_repetition: None,
