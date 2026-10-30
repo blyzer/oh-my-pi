@@ -45,7 +45,7 @@ else
 	curl -LsSf https://astral.sh/uv/install.sh | sh # fetch-python.sh needs uv
 fi
 export NEXTEST_HIDE_PROGRESS_BAR=1 # Keep failures and the summary on separate CI log lines.
-export CARGO_BUILD_JOBS=4 
+export CARGO_BUILD_JOBS=4 # The 16 GB runner OOM-killed omp-envd's test compiler with unrestricted jobs. 
 
 
 # The runner image reports soft=hard=16384, so there is no headroom to raise;
