@@ -94,15 +94,6 @@ Completed implementation items:
 
 - **DONE** `buf breaking` configuration, CI check, and `just proto-breaking`.
 - **DONE** B1, B2, B3, B6, B7, and B8.
-- **PARTIAL** B9. `omp.limits.SCHEMA_REV` is synchronized and guarded by
-  `frozen_surface.rs`, but `docs/architecture/processes.md` still carries the
-  stale `WorkerProcess::spawn` description. Filing/verification of the
-  `WorkerHello` and `chat --gateway` issues is also not established by code.
-  **OPEN implementation evidence gate:** `docs/architecture/processes.md` names
-  `__omp-py-worker`, but the application entrypoint has no matching selector.
-  `WorkerSupervisor::publish_process` has a test caller but no production caller
-  found under `crates`. Prove the actual worker launcher and protocol before
-  correcting the process documentation or closing B9.
 
 Active items:
 
