@@ -8,7 +8,7 @@ use std::{
 
 use omp_proto::{
 	SCHEMA_REV,
-	bounds::FRAME_MAX_BYTES,
+	bounds::{FRAME_MAX_BYTES, validate_host_frame},
 	prost::Message,
 	toolhost::v1::{HostFrame, WorkerFrame, WorkerHello, host_frame, worker_frame},
 };
@@ -22,6 +22,9 @@ const API_LEVEL: u32 = 1;
 /// Errors raised by the named-worker child protocol.
 #[derive(Debug, Error)]
 pub enum WorkerChildError {
+	/// A decoded frame exceeded a protocol bound.
+	#[error("worker frame violates the protocol bounds")]
+	Bounds(#[source] omp_proto::bounds::FrameBoundsError),
 	/// A generation environment value was malformed.
 	#[error("invalid worker generation environment")]
 	Generation(#[source] std::num::ParseIntError),
@@ -131,6 +134,7 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<HostFrame>, WorkerChildEr
 	}
 	let mut bytes = vec![0; usize::try_from(length).map_err(|_| WorkerChildError::FrameTooLarge)?];
 	reader.read_exact(&mut bytes)?;
+	validate_host_frame(&bytes).map_err(WorkerChildError::Bounds)?;
 	HostFrame::decode(bytes.as_slice())
 		.map(Some)
 		.map_err(WorkerChildError::Decode)
