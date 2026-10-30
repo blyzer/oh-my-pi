@@ -1,6 +1,7 @@
+[docs/adr/0048-schema-and-serialization-boundaries.md (verbatim, 234 lines total)]
 # 0048. Schema and serialization boundaries: keep the formats, check wire compatibility, harden durable decode
 
-Status: proposed; requires owner review
+Status: accepted 2026-10-28; implementation gate open
 Date: 2026-10-11
 Area: runtime/interface
 
@@ -202,13 +203,13 @@ Deferred:
 
 ## Required evidence before acceptance
 
-- A local `buf breaking crates/proto --against '.git#branch=omp2,subdir=crates/proto'` on the current tree passes with the proposed `buf.yaml`.
-- The owner confirms the ignore list, in particular that `toolhost` stays in scope for `ReadyPing`.
-- The owner chooses between the two B1 variants (lenient decode, or rev-bump rule).
+- **OPEN verification:** run the local `buf breaking crates/proto --against '.git#branch=omp2,subdir=crates/proto'` proof.
+- **DECIDED:** `toolhost` remains in the Buf breaking scope for the WorkerFrame/ReadyPing contract.
+- **DECIDED:** B1 uses lenient unknown-field decoding.
 
 ## Implementation gate
 
-This ADR authorizes no format migration. After owner acceptance:
+The owner accepted this ADR on 2026-10-28. The implementation gate is open for the approved B1-B9 changes, subject to their individual tests and the remaining evidence below:
 
 - the `buf.yaml` `breaking:` section, the two CI steps and `just proto-breaking` may land as one change;
 - B1–B9 land as separate changes, each with tests.
@@ -217,18 +218,13 @@ Benchmarks in the research document stay plans (UNVERIFIED) and do not gate CI.
 
 ## Status in omp
 
-**Status: Partially implemented.** The format-preservation decision is in
-force and the Buf check plus most hardening items are implemented, but the ADR
-is still proposed and its acceptance evidence is incomplete.
+**Status: Partially implemented.** The owner accepted the format-preservation decision and the Buf check plus most hardening items are implemented. B4 and B5 remain implementation work; B9 Variant 1 is selected but its daemon-context authority verification remains open.
 
 - **Done:** Buf breaking configuration and CI, B1, B2, B3, B6, B7, and B8.
-- **Partial:** B5 has two golden journal fixture pairs, not coverage for every
-  kind or field addition named by the ADR.
-- **Open:** B4 does not validate every normal host/worker frame before prost
-  decode.
+- **Partial:** B5 is authorized to expand the golden corpus by durable behavior family, including compaction, tool.update and patch, without redundant field permutations.
+- **Open:** B4 is authorized as full pre-decode validation for every normal HostFrame and WorkerFrame path.
 - **Partial:** B9 fixes the Python schema revision drift, but
   `docs/architecture/processes.md` still contains the stale
   `WorkerProcess::spawn` description and issue filing for WorkerHello and
   gateway Hello is not established.
-- **Acceptance still required:** local Buf proof, owner confirmation of the
-  ignore list, and the B1 variant choice.
+- **Open verification:** local Buf proof, B4 implementation, B5 fixture expansion, and B9 daemon-context authority verification.

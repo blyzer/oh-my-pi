@@ -286,8 +286,25 @@ e2e-p14:
 # Record a fresh P8 performance-baseline artifact.
 [group('e2e')]
 e2e-baseline:
+    cargo build -p omp-e2e --bin baseline --bin omp_e2e_host --locked
     cargo run -p omp-e2e --bin baseline --locked -- \
+        --samples 30 --mode all --daemon-state all --workload all \
         --artifact target/e2e-artifacts/p8-baselines.json
+
+# Run the real W1-W9 matrix remotely and export its raw artifact for CI upload.
+[group('remote')]
+remote-p8-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    status=0
+    just e2e-baseline || status=$?
+    if [ -f target/e2e-artifacts/p8-baselines.json ]; then
+        echo OMP_P8_ARTIFACT_BEGIN
+        base64 -w0 target/e2e-artifacts/p8-baselines.json
+        echo
+        echo OMP_P8_ARTIFACT_END
+    fi
+    exit "$status"
 
 # Run the tool-sources check: production environment source routing and shared document snapshots.
 [group('e2e')]

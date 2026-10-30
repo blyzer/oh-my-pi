@@ -1,10 +1,15 @@
 //! Executable P8 checks for the non-gating performance baseline recorder.
 
-use std::{fs, time::Duration};
+use std::{collections::BTreeMap, fs, time::Duration};
 
+#[cfg(unix)]
+use omp_e2e::baseline::record_matrix;
 use omp_e2e::baseline::{
-	BaselineMetrics, LOOP_THROUGHPUT_FLOOR, REPLAY_THROUGHPUT_FLOOR, duration_rate,
-	is_gross_regression, is_replay_gross_regression, measure, slowdown_ratio, write_metrics,
+	BaselineMetrics, DEFAULT_REPETITIONS, DaemonState, LOOP_THROUGHPUT_FLOOR, MATRIX_SCHEMA_VERSION,
+	MatrixArtifact, MatrixCell, MatrixFailure, MatrixMetadata, MatrixMetric, MatrixSample,
+	MatrixSelection, REPLAY_THROUGHPUT_FLOOR, Summary, Transport, Workload, duration_rate,
+	is_gross_regression, is_replay_gross_regression, measure, slowdown_ratio, write_matrix,
+	write_metrics,
 };
 
 #[test]
@@ -123,4 +128,235 @@ async fn artifact_schema_is_stable_and_frame_metric_is_record_only() {
 	] {
 		assert!((actual - expected).abs() <= expected.abs() * f64::EPSILON);
 	}
+}
+
+#[test]
+fn summary_reports_median_nearest_rank_p95_and_mad() {
+	let thirty: Vec<f64> = (1..=30).map(f64::from).collect();
+	let summary = Summary::of(&thirty).expect("summary of thirty samples");
+	assert_eq!(summary, Summary {
+		samples: 30,
+		min:     1.0,
+		max:     30.0,
+		p50:     15.5,
+		p95:     29.0,
+		mad:     7.5,
+	});
+	let mut reversed = thirty;
+	reversed.reverse();
+	assert_eq!(Summary::of(&reversed).expect("order does not matter"), summary);
+
+	let odd = Summary::of(&[5.0, 1.0, 9.0, 3.0, 7.0]).expect("summary of five samples");
+	assert_eq!((odd.p50, odd.p95, odd.mad), (5.0, 9.0, 2.0));
+	let one = Summary::of(&[42.0]).expect("summary of one sample");
+	assert_eq!((one.p50, one.p95, one.mad), (42.0, 42.0, 0.0));
+
+	let mut noisy = vec![100.0; 29];
+	noisy.push(10_000.0);
+	let noisy = Summary::of(&noisy).expect("summary with an outlier");
+	assert_eq!((noisy.p50, noisy.p95, noisy.mad, noisy.max), (100.0, 100.0, 0.0, 10_000.0));
+
+	assert!(Summary::of(&[]).is_err(), "no samples");
+	assert!(Summary::of(&[1.0, f64::NAN]).is_err(), "non-finite sample");
+}
+
+#[test]
+fn matrix_selection_names_parse_and_default_to_the_complete_matrix() {
+	assert_eq!("W7".parse::<Workload>().unwrap(), Workload::W7);
+	assert_eq!("w9".parse::<Workload>().unwrap(), Workload::W9);
+	assert!("W0".parse::<Workload>().is_err());
+	assert!("W10".parse::<Workload>().is_err());
+	assert_eq!("Attached".parse::<Transport>().unwrap(), Transport::Attached);
+	assert!("remote".parse::<Transport>().is_err());
+	assert_eq!("warm".parse::<DaemonState>().unwrap(), DaemonState::Warm);
+	assert!("tepid".parse::<DaemonState>().is_err());
+
+	let complete = MatrixSelection::complete();
+	assert_eq!(DEFAULT_REPETITIONS, 30, "audit 12.3 asks for at least 30 runs");
+	assert_eq!(complete.repetitions, DEFAULT_REPETITIONS);
+	assert_eq!(complete.transports, [Transport::Embedded, Transport::Attached]);
+	assert_eq!(complete.states, [DaemonState::Cold, DaemonState::Warm]);
+	assert_eq!(complete.workloads.len(), 9);
+	assert_eq!(complete.workloads.first(), Some(&Workload::W1));
+	assert_eq!(complete.workloads.last(), Some(&Workload::W9));
+}
+
+fn keys(value: &serde_json::Value) -> Vec<&str> {
+	value
+		.as_object()
+		.expect("JSON object")
+		.keys()
+		.map(String::as_str)
+		.collect()
+}
+
+#[test]
+fn matrix_artifact_schema_is_stable() {
+	let artifact = MatrixArtifact {
+		schema_version: MATRIX_SCHEMA_VERSION,
+		metadata:       MatrixMetadata::capture(30),
+		synthetic:      None,
+		cells:          vec![MatrixCell {
+			workload:                  Workload::W4,
+			variant:                   Some("63KiB".to_owned()),
+			transport:                 Transport::Attached,
+			daemon_state:              DaemonState::Cold,
+			repetitions:               30,
+			operations_per_repetition: 1,
+			metrics:                   vec![MatrixMetric {
+				name:    "exec_ns".to_owned(),
+				summary: Summary::of(&[1.0, 2.0, 3.0]).expect("summary"),
+			}],
+			samples:                   vec![MatrixSample {
+				metrics: BTreeMap::from([("exec_ns".to_owned(), 1.0)]),
+				facts:   BTreeMap::from([("streamed_bytes".to_owned(), 64_512)]),
+			}],
+
+			facts: BTreeMap::from([("streamed_bytes".to_owned(), 64_512)]),
+		}],
+		failures:       Vec::new(),
+	};
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let path = scratch.path().join("nested/p8.json");
+	write_matrix(&path, &artifact).expect("write matrix");
+	assert!(
+		!scratch.path().join("nested/p8.json.partial").exists(),
+		"the staged file is renamed away"
+	);
+	let encoded = fs::read_to_string(&path).expect("read matrix");
+	let value: serde_json::Value = serde_json::from_str(&encoded).expect("valid JSON");
+	assert_eq!(keys(&value), ["schema_version", "metadata", "synthetic", "cells", "failures"]);
+	assert_eq!(keys(&value["metadata"]), [
+		"host_os",
+		"host_arch",
+		"host_version",
+		"host_cpus",
+		"commit_sha",
+		"commit_dirty",
+		"build_profile",
+		"recorded_at_unix_ms",
+		"repetitions",
+		"interrupt_grace_ms",
+	]);
+	assert_eq!(value["metadata"]["host_os"], std::env::consts::OS);
+	assert_eq!(value["metadata"]["host_arch"], std::env::consts::ARCH);
+	assert_eq!(value["metadata"]["repetitions"], 30);
+	assert_eq!(value["metadata"]["interrupt_grace_ms"], 150);
+	assert!(!value["metadata"]["commit_sha"].as_str().unwrap().is_empty());
+	let cell = &value["cells"][0];
+	assert_eq!(keys(cell), [
+		"workload",
+		"variant",
+		"transport",
+		"daemon_state",
+		"repetitions",
+		"operations_per_repetition",
+		"metrics",
+		"samples",
+		"facts",
+	]);
+	assert_eq!(cell["workload"], "W4");
+	assert_eq!(cell["transport"], "attached");
+	assert_eq!(cell["daemon_state"], "cold");
+	assert_eq!(keys(&cell["metrics"][0]), ["name", "samples", "min", "max", "p50", "p95", "mad"]);
+	let decoded: MatrixArtifact = serde_json::from_str(&encoded).expect("stable schema decodes");
+	assert_eq!(decoded, artifact);
+}
+
+#[test]
+fn matrix_failure_preserves_partial_samples() {
+	let partial = MatrixSample {
+		metrics: BTreeMap::from([("builtin_cancel_to_terminal_ns".to_owned(), 42.0)]),
+		facts:   BTreeMap::from([("pending_after_grace".to_owned(), 0)]),
+	};
+	let artifact = MatrixArtifact {
+		schema_version: MATRIX_SCHEMA_VERSION,
+		metadata:       MatrixMetadata::capture(30),
+		synthetic:      None,
+		cells:          Vec::new(),
+		failures:       vec![MatrixFailure {
+			workload:          Workload::W8,
+			variant:           None,
+			transport:         Transport::Embedded,
+			daemon_state:      DaemonState::Cold,
+			error:             "cancel exceeded interrupt grace".to_owned(),
+			samples:           vec![partial.clone()],
+			failed_repetition: Some(2),
+		}],
+	};
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let path = scratch.path().join("failure.json");
+	write_matrix(&path, &artifact).expect("write failure artifact");
+	let decoded: MatrixArtifact =
+		serde_json::from_str(&fs::read_to_string(path).expect("read failure artifact"))
+			.expect("decode failure artifact");
+	assert_eq!(decoded, artifact);
+	assert_eq!(decoded.failures[0].failed_repetition, Some(2));
+	assert_eq!(decoded.failures[0].samples, vec![partial]);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matrix_records_real_embedded_cells_with_verified_facts() {
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let artifact = scratch.path().join("matrix.json");
+	let selection = MatrixSelection {
+		transports:  vec![Transport::Embedded],
+		states:      vec![DaemonState::Warm, DaemonState::Cold],
+		workloads:   vec![Workload::W9, Workload::W1],
+		repetitions: 1,
+	};
+	let recording = record_matrix(&selection, &artifact, None, None)
+		.await
+		.expect("matrix recording");
+	assert!(recording.failures.is_empty(), "{:?}", recording.failures);
+	assert_eq!(recording.cells.len(), 4);
+	for cell in &recording.cells {
+		assert_eq!(cell.repetitions, 1);
+		assert_eq!(cell.transport, Transport::Embedded);
+		for metric in &cell.metrics {
+			assert_eq!(metric.summary.samples, 1, "{}", metric.name);
+			assert!(metric.summary.p50 > 0.0, "{} measured a real duration", metric.name);
+		}
+	}
+	for state in DaemonState::ALL {
+		let reads = recording
+			.cells
+			.iter()
+			.find(|cell| cell.workload == Workload::W1 && cell.daemon_state == state)
+			.expect("W1 cell");
+		assert_eq!(reads.operations_per_repetition, 1_000);
+		assert_eq!(reads.facts["bytes_per_read"], 1_024);
+		let attach = recording
+			.cells
+			.iter()
+			.find(|cell| cell.workload == Workload::W9 && cell.daemon_state == state)
+			.expect("W9 cell");
+		let names: Vec<&str> = attach
+			.metrics
+			.iter()
+			.map(|metric| metric.name.as_str())
+			.collect();
+		assert_eq!(names, ["attach_ns", "first_request_ns", "reused_request_ns", "total_ns"]);
+	}
+	let written: MatrixArtifact =
+		serde_json::from_str(&fs::read_to_string(&artifact).expect("read matrix"))
+			.expect("decode matrix");
+	assert_eq!(written, recording);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn matrix_rejects_an_unknown_variant_index() {
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let selection = MatrixSelection {
+		transports:  vec![Transport::Embedded],
+		states:      vec![DaemonState::Cold],
+		workloads:   vec![Workload::W7],
+		repetitions: 1,
+	};
+	let error = record_matrix(&selection, &scratch.path().join("matrix.json"), None, Some(3))
+		.await
+		.expect_err("unknown variant index must fail");
+	assert_eq!(error.to_string(), "--variant-index selects no variant for the workload");
 }

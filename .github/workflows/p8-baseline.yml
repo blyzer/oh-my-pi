@@ -18,6 +18,10 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "justfile"
+      - "scripts/remote-verify.sh"
+      - "scripts/remote-verify-runner.sh"
+
       - "rust-toolchain.toml"
   # Only to prove changes to this workflow and the build state it relies on
   # before they reach omp2. The artifact of such a run describes the pull
@@ -25,8 +29,16 @@ on:
   pull_request:
     branches: [omp2]
     paths:
+      - ".cargo/**"
       - ".github/actions/macos-build-state/**"
       - ".github/workflows/p8-baseline.yml"
+      - "crates/**"
+      - "justfile"
+      - "scripts/remote-verify.sh"
+      - "scripts/remote-verify-runner.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
   # A manual re-recording, for example of an omp2 commit measured while the
   # runner was busy. GitHub offers it because omp2 is the default branch; the
   # artifact names the commit of whatever ref is dispatched.
@@ -46,26 +58,69 @@ env:
 
 jobs:
   record:
-    name: Record P8 baseline
+    name: Record P8 baseline (${{ matrix.name }})
+    strategy:
+      matrix:
+        include:
+          - name: macos-arm64
+            platform: macos
+            runner: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
     # Same machine as the rust job in ci.yml, so the numbers stay comparable
     # with the history recorded there. With one runner registered the two
     # jobs queue instead of measuring against each other.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
-    timeout-minutes: 90
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Select pinned Rust toolchain
+        if: matrix.platform == 'macos'
         run: |
           test "$(uname -m)" = arm64
           rustup show active-toolchain
 
+      - name: Select pinned Rust toolchain
+        if: matrix.platform == 'linux'
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup show active-toolchain
+
       # As in ci.yml: hosted runners install, self-hosted runners check.
       - uses: ./.github/actions/macos-native-tools
+        if: matrix.platform == 'macos'
 
       - uses: ./.github/actions/macos-build-state
+        if: matrix.platform == 'macos'
         with:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+      - name: Install Linux native tools
+        if: matrix.platform == 'linux'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore embedded Python
+        if: matrix.platform == 'linux'
+        id: python-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        if: matrix.platform == 'linux' && steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        if: matrix.platform == 'linux'
+        run: test -f vendor/python/pyo3-config.txt
+
 
       # Read-only: ci.yml owns saving this cache on hosted runners.
       - name: Restore Cargo cache
@@ -83,9 +138,10 @@ jobs:
             cargo-${{ runner.os }}-${{ runner.arch }}-
 
       # Built before the clock starts, so the recording measures the run and
-      # not the compile.
+      # not the compile. The recorder starts the extension-host-capable
+      # omp_e2e_host that Cargo builds beside it, so both binaries are built.
       - name: Build recorder
-        run: cargo build -p omp-e2e --bin baseline --locked
+        run: cargo build -p omp-e2e --bin baseline --bin omp_e2e_host --locked
 
       # What the host was doing when the numbers were taken, kept beside them.
       - name: Describe host
@@ -108,6 +164,7 @@ jobs:
         continue-on-error: true
         run: |
           cargo run -p omp-e2e --bin baseline --locked -- \
+            --samples 30 --mode all --daemon-state all --workload all \
             --artifact target/e2e-artifacts/p8-baselines.json
 
       - name: Summarize
@@ -142,9 +199,75 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: p8-baseline-macos-arm64-${{ github.sha }}
+          name: p8-baseline-${{ matrix.name }}-${{ github.sha }}
           path: |
             target/e2e-artifacts/p8-baselines.json
             target/e2e-artifacts/p8-host.txt
+          if-no-files-found: warn
+          retention-days: 90
+
+
+  buildbuddy_linux:
+    name: Record P8 baseline (BuildBuddy Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Decide whether this run may use the BuildBuddy key
+        id: trust
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          HAS_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$FORK" = true ] || [ "$HAS_KEY" != true ]; then
+            echo "remote=false" >> "$GITHUB_OUTPUT"
+            echo "BuildBuddy Linux matrix skipped because this run cannot use the repository credential." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "remote=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: steps.trust.outputs.remote == 'true'
+      - name: Install pinned BuildBuddy client
+        if: steps.trust.outputs.remote == 'true'
+        uses: ./.github/actions/buildbuddy-client
+      - name: Run the real W1-W9 matrix remotely
+        if: steps.trust.outputs.remote == 'true'
+        id: record
+        continue-on-error: true
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: |
+          set +e
+          scripts/remote-verify.sh remote-p8-baseline > "$RUNNER_TEMP/p8-buildbuddy.log" 2>&1
+          status=$?
+          set -e
+          mkdir -p target/e2e-artifacts
+          awk '/^OMP_P8_ARTIFACT_BEGIN$/{capture=1; next} /^OMP_P8_ARTIFACT_END$/{capture=0} capture' \
+            "$RUNNER_TEMP/p8-buildbuddy.log" | tr -d '\n' | base64 --decode > target/e2e-artifacts/p8-baselines.json || true
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+            echo "runner=$RUNNER_NAME ($RUNNER_ENVIRONMENT)"
+            echo "platform=buildbuddy-linux"
+            echo "recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "toolchain=remote runner reported in log"
+            echo "remote_exit=$status"
+          } > target/e2e-artifacts/p8-host.txt
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::BuildBuddy real P8 matrix exited $status; raw artifact and log remain available"
+          fi
+          exit 0
+      - name: Upload BuildBuddy Linux P8 artifacts
+        if: always() && steps.trust.outputs.remote == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: p8-baseline-buildbuddy-linux-${{ github.sha }}
+          path: |
+            target/e2e-artifacts/p8-baselines.json
+            target/e2e-artifacts/p8-host.txt
+            ${{ runner.temp }}/p8-buildbuddy.log
           if-no-files-found: warn
           retention-days: 90

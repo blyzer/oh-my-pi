@@ -9,7 +9,9 @@ use std::{
 
 use bytes::BytesMut;
 use flume::Receiver;
-use omp_env::{Admitter, BlobDownloadEvent, EnvClient};
+use omp_env::{
+	Admitter, BlobDownloadEvent, EnvClient, FramePipe, InProcessEnvTransport, in_process_frames,
+};
 use omp_envd::{
 	ActiveContentInputs, EnvServer, RegistryBridges, exthost::ConvarControlFactory,
 	worker::ExtHostConfig,
@@ -33,11 +35,20 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{DEFAULT_TIMEOUT, OwnedProcess, Scratch, install_omp_binary_env, omp_binary, within};
+use super::{
+	DEFAULT_TIMEOUT, OwnedProcess, PythonExtension, Scratch, install_omp_binary_env, omp_binary,
+	within,
+};
 use crate::{Context as _, Result, error};
 
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
 const PROCESS_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Grace a closing in-process authority gives its managed processes, matching
+/// the interrupt grace the P8 recorder measures cancellation against.
+
+/// Session identity every harness constructor gives its worker-capable host.
+const SESSION_ID: &str = "e2e-session";
+const SESSION_GENERATION: u64 = 1;
 
 /// Test policy that accepts legitimate invocation admission queries unchanged.
 pub struct AllowAdmission;
@@ -61,8 +72,8 @@ fn open_inputs() -> Result<(ExtHostConfig, Arc<omp_con::Ctx>, Arc<ConvarControlF
 	let ext_host_config = ExtHostConfig::new(
 		omp_binary().context("resolving worker-capable host")?,
 		omp_core::Principal::new(omp_core::sf!("e2e-tester"), omp_core::sf!("E2E Tester")),
-		omp_core::sf!("e2e-session"),
-		1,
+		omp_core::Str::new_static(SESSION_ID),
+		SESSION_GENERATION,
 	);
 	let con = Arc::new(omp_con::Ctx::new());
 	let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
@@ -269,6 +280,191 @@ impl Drop for EnvHarness {
 			task.abort();
 		}
 		let _ = remove_socket(&self.socket);
+	}
+}
+
+/// Roots an in-process authority runs on, owned for the authority's lifetime.
+enum InProcessRoots {
+	Scratch(Scratch),
+	Rooted { project: PathBuf, _state: tempfile::TempDir },
+}
+
+/// In-process environment authority used by the P8 recorder.
+///
+/// It serves `EnvClient::in_process` channels, so no process, socket or frame
+/// codec sits between a client and the production host.
+pub struct InProcessEnvHarness {
+	primary:   InProcessConnection,
+	data_task: Option<JoinHandle<()>>,
+	shutdown:  CancellationToken,
+	server:    Arc<EnvServer>,
+	roots:     InProcessRoots,
+}
+
+/// One hello-complete client connection to an [`InProcessEnvHarness`].
+pub struct InProcessConnection {
+	client:   EnvClient,
+	_serving: InProcessServing,
+}
+
+/// The serving task behind one in-process connection; dropping it closes the
+/// connection.
+pub struct InProcessServing {
+	task: JoinHandle<()>,
+}
+
+impl InProcessServing {
+	fn start(server: &Arc<EnvServer>, transport: InProcessEnvTransport) -> Self {
+		let server = Arc::clone(server);
+		Self { task: tokio::spawn(async move { server.serve_in_process(transport).await }) }
+	}
+
+	async fn stop(&mut self) {
+		self.task.abort();
+		let _ = (&mut self.task).await;
+	}
+}
+
+impl Drop for InProcessServing {
+	fn drop(&mut self) {
+		self.task.abort();
+	}
+}
+
+impl InProcessConnection {
+	async fn open(server: &Arc<EnvServer>, name: &str) -> Result<Self> {
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(AllowAdmission);
+		let serving = InProcessServing::start(server, transport);
+		hello_env(&client, name, &[]).await?;
+		Ok(Self { client, _serving: serving })
+	}
+
+	/// Returns the hello-complete environment client.
+	pub const fn client(&self) -> &EnvClient {
+		&self.client
+	}
+}
+
+impl InProcessEnvHarness {
+	/// Opens the local authority over `scratch`.
+	pub async fn spawn(scratch: Scratch) -> Result<Self> {
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open(project, state, InProcessRoots::Scratch(scratch), None).await
+	}
+
+	/// Opens the local authority over `scratch` with `extension` registered
+	/// behind its CONTROL extension host (the P9 registration pattern).
+	pub async fn spawn_with_extension(
+		scratch: Scratch,
+		extension: &PythonExtension,
+	) -> Result<Self> {
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open(project, state, InProcessRoots::Scratch(scratch), Some(extension)).await
+	}
+
+	/// Opens a local authority rooted at an existing directory, such as an
+	/// isolated worktree, with a private state directory.
+	pub async fn spawn_at(project: &Path) -> Result<Self> {
+		let state = tempfile::Builder::new()
+			.prefix("omp-e2e-state-")
+			.tempdir()
+			.context("creating embedded environment state")?;
+		let state_path = state.path().to_path_buf();
+		let roots = InProcessRoots::Rooted { project: project.to_path_buf(), _state: state };
+		Self::open(project.to_path_buf(), state_path, roots, None).await
+	}
+
+	async fn open(
+		project: PathBuf,
+		state: PathBuf,
+		roots: InProcessRoots,
+		extension: Option<&PythonExtension>,
+	) -> Result<Self> {
+		let (mut ext_host_config, con, convars) = open_inputs()?;
+		let binding = match extension {
+			Some(extension) => {
+				let install = extension.install(&project, &state, SESSION_ID, SESSION_GENERATION)?;
+				ext_host_config.extensions.push(install.spec);
+				Some(install.binding)
+			},
+			None => None,
+		};
+		let server = Arc::new(
+			EnvServer::open_local(
+				&project,
+				&state,
+				Registry::new(),
+				ext_host_config,
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.context("opening embedded environment authority")?,
+		);
+		if let Some(extension) = extension {
+			extension.verify(&server)?;
+		}
+		let shutdown = CancellationToken::new();
+		let cleanup = shutdown.clone().drop_guard();
+		let data_task = binding.map(|binding| {
+			let data_server = Arc::clone(&server);
+			let data_shutdown = shutdown.clone();
+			tokio::spawn(async move {
+				let _ = data_server
+					.serve_extension_uds(binding, data_shutdown)
+					.await;
+			})
+		});
+		let primary = InProcessConnection::open(&server, "omp-e2e-embedded").await?;
+		cleanup.disarm();
+		Ok(Self { primary, data_task, shutdown, server, roots })
+	}
+
+	/// Opens another hello-complete connection to the same authority.
+	pub async fn connect_client(&self, name: &str) -> Result<InProcessConnection> {
+		InProcessConnection::open(&self.server, name).await
+	}
+
+	/// Opens raw frame channels to the same authority and serves them, for a
+	/// caller that performs the hello itself, such as a partition router.
+	pub fn connect_frames(&self) -> (FramePipe, InProcessServing) {
+		let (pipe, transport) = in_process_frames(64);
+		(pipe, InProcessServing::start(&self.server, transport))
+	}
+
+	/// Returns the hello-complete environment client.
+	pub const fn client(&self) -> &EnvClient {
+		self.primary.client()
+	}
+
+	/// Returns the project root used by the authority.
+	pub fn project(&self) -> &Path {
+		match &self.roots {
+			InProcessRoots::Scratch(scratch) => scratch.project(),
+			InProcessRoots::Rooted { project, .. } => project,
+		}
+	}
+
+	/// Stops serving and waits until every serving task has released the
+	/// authority.
+	pub async fn shutdown(mut self) {
+		self.shutdown.cancel();
+		self.primary._serving.stop().await;
+		if let Some(task) = self.data_task.take() {
+			task.abort();
+			let _ = task.await;
+		}
+	}
+}
+
+impl Drop for InProcessEnvHarness {
+	fn drop(&mut self) {
+		self.shutdown.cancel();
+		if let Some(task) = self.data_task.take() {
+			task.abort();
+		}
 	}
 }
 

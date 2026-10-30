@@ -12,6 +12,8 @@ mod gateway;
 #[cfg(unix)]
 mod owned_groups;
 mod process;
+#[cfg(unix)]
+mod pyext;
 mod scratch;
 mod scripted;
 mod storage;
@@ -23,8 +25,8 @@ pub use builders::{assert_all_entries_caused, journal_entries};
 pub use docserver::DocServerTask;
 #[cfg(unix)]
 pub use envd::{
-	AllowAdmission, EnvHarness, FramedEnvConnection, ProcessEnvHarness, RawEnvConnection,
-	connect_env, read_blob,
+	AllowAdmission, EnvHarness, FramedEnvConnection, InProcessConnection, InProcessEnvHarness,
+	InProcessServing, ProcessEnvHarness, RawEnvConnection, connect_env, read_blob,
 };
 #[cfg(unix)]
 pub use extension::{ExtensionRegistrar, LiveComponent};
@@ -33,6 +35,8 @@ pub use gateway::GatewayInference;
 pub use process::{OwnedProcess, install_omp_binary_env, omp_binary};
 #[cfg(unix)]
 pub use process::{process_group_alive, wait_process_group_dead};
+#[cfg(unix)]
+pub use pyext::PythonExtension;
 pub use scratch::Scratch;
 pub use scripted::{CapturedRequests, ScriptedInference, hanging_stream, scripted_stream};
 pub use storage::{create_session, reopen_session};

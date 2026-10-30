@@ -33,7 +33,7 @@ pub fn install_omp_binary_env() -> io::Result<()> {
 }
 
 /// Resolves the worker-capable application binary Cargo builds with `omp-e2e`
-/// tests, as its canonical path.
+/// tests and the `baseline` recorder, as its canonical path.
 ///
 /// A child started from the canonical path reports that same spelling as its
 /// `current_exe` on every platform (Linux always reports the canonical one),
@@ -57,18 +57,17 @@ fn locate_omp_binary() -> io::Result<PathBuf> {
 	{
 		return Ok(current);
 	}
-	let profile = current
-		.parent()
-		.and_then(|parent| {
-			(parent.file_name().is_some_and(|name| name == "deps")).then(|| parent.parent())
-		})
-		.flatten()
-		.ok_or_else(|| {
-			io::Error::new(
-				io::ErrorKind::NotFound,
-				"test executable is not under Cargo's deps directory",
-			)
-		})?;
+	// Integration-test binaries live in `deps/`, one level below the profile
+	// directory; plain bins such as `baseline` sit in the profile directory
+	// beside `omp_e2e_host`.
+	let dir = current.parent().ok_or_else(|| {
+		io::Error::new(io::ErrorKind::NotFound, "executable has no parent directory")
+	})?;
+	let profile = if dir.file_name().is_some_and(|name| name == "deps") {
+		dir.parent().unwrap_or(dir)
+	} else {
+		dir
+	};
 	let binary = profile.join(format!("omp_e2e_host{}", std::env::consts::EXE_SUFFIX));
 	if binary.is_file() {
 		Ok(binary)

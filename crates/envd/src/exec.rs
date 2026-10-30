@@ -483,12 +483,13 @@ impl RestartSupervisor {
 }
 
 struct RunControl {
-	cancel_tx: flume::Sender<CancelRequest>,
-	input:     Mutex<Option<InputSink>>,
-	spawns:    Arc<SpawnBook>,
-	finished:  AtomicBool,
-	retained:  Mutex<Option<Weak<NamedProcess>>>,
-	events:    Weak<Receiver<ExecEvent>>,
+	cancel_tx:        flume::Sender<CancelRequest>,
+	input:            Mutex<Option<InputSink>>,
+	spawns:           Arc<SpawnBook>,
+	finished:         AtomicBool,
+	retained:         Mutex<Option<Weak<NamedProcess>>>,
+	events:           Weak<Receiver<ExecEvent>>,
+	cancel_requested: AtomicBool,
 }
 
 struct CancelRequest {
@@ -1050,7 +1051,11 @@ impl ExecHost {
 			ExecControlKind::Terminate => {
 				control.cancel(Duration::from_millis(request.grace_ms).min(Duration::from_secs(30)));
 			},
-			ExecControlKind::Kill => control.spawns.signal(ProcessSignal::Kill)?,
+			// Builtins have no child group, so the cancel channel is their termination path.
+			ExecControlKind::Kill => {
+				control.cancel(Duration::ZERO);
+				control.spawns.signal(ProcessSignal::Kill)?;
+			},
 			ExecControlKind::Unspecified => return Err(ExecError::InvalidControl),
 		}
 		Ok(ExecControlResult { exec: request.exec.clone(), accepted: true })
@@ -1176,6 +1181,7 @@ impl ExecHost {
 			finished: AtomicBool::new(false),
 			retained: Mutex::new(None),
 			events: Arc::downgrade(&events),
+			cancel_requested: AtomicBool::new(false),
 		});
 		let command = SessionCommand {
 			host: Arc::downgrade(&self.inner),
@@ -1552,6 +1558,7 @@ impl ExecHost {
 			finished: AtomicBool::new(false),
 			retained: Mutex::new(None),
 			events: Weak::new(),
+			cancel_requested: AtomicBool::new(false),
 		});
 		let mut supervisor = RestartSupervisor::from_spec(spec.restart.as_ref());
 		if let Some(record) = recovered {
@@ -1791,6 +1798,7 @@ impl ExecHost {
 				finished: AtomicBool::new(false),
 				retained: Mutex::new(None),
 				events: Weak::new(),
+				cancel_requested: AtomicBool::new(false),
 			});
 			let state = match record.phase {
 				ProcessPhase::WaitingReady | ProcessPhase::Starting => ProcessState::Starting,
@@ -2387,6 +2395,7 @@ impl Drop for ProcessReservation {
 }
 impl RunControl {
 	fn cancel(&self, grace: Duration) {
+		self.cancel_requested.store(true, Ordering::Release);
 		let _ = self.cancel_tx.try_send(CancelRequest { grace });
 	}
 
@@ -2840,6 +2849,11 @@ async fn finish_session_command(
 	elapsed: Duration,
 	working_dir: &Path,
 ) {
+	if command.control.cancel_requested.load(Ordering::Acquire)
+		&& !matches!(result, RunTerminal::Timeout)
+	{
+		result = RunTerminal::Cancelled;
+	}
 	command.control.finished.store(true, Ordering::Release);
 	let (spilled_output, projection) = match command.output.lock().finish_with_projection() {
 		Ok((spilled, projection)) => (spilled.as_ref().map(wire_blob), Some(projection)),
@@ -3517,7 +3531,12 @@ fn spawn_detached_monitor(
 		process.control.finished.store(true, Ordering::Release);
 		runtime.spawn(async move {
 			let timed_out = process.timed_out.load(Ordering::Acquire);
-			settle_named_process(process, exit_code, cancelled && !timed_out, timed_out);
+			settle_named_process(
+				process.clone(),
+				exit_code,
+				(cancelled || process.control.cancel_requested.load(Ordering::Acquire)) && !timed_out,
+				timed_out,
+			);
 		});
 	});
 }
@@ -4989,6 +5008,90 @@ mod tests {
 		);
 	}
 
+	#[tokio::test]
+	async fn typed_kill_cancels_in_process_builtin() {
+		let root = tempfile::tempdir().expect("workspace creates");
+		let host = ExecHost::default();
+		let session = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("root URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("session opens")
+			.session;
+		let (started, run) = host
+			.exec(script_request(&session, "sleep 30"), None)
+			.await
+			.expect("builtin starts");
+		let exec = match run.next_event().await {
+			Some(ExecEvent::Started { exec_id }) => exec_id,
+			other => panic!("expected started event, got {other:?}"),
+		};
+		assert_eq!(started.exec, exec);
+
+		let result = host
+			.control(&ExecControlRequest {
+				exec,
+				control: ExecControlKind::Kill as i32,
+				grace_ms: 0,
+				wire_revision: omp_proto::SCHEMA_REV,
+				..ExecControlRequest::default()
+			})
+			.expect("typed kill is accepted");
+		{
+			assert!(result.accepted);
+			let (_, external_run) = host
+				.exec(script_request(&session, "/bin/sleep 30"), None)
+				.await
+				.expect("external command starts");
+			let external_exec = match external_run.next_event().await {
+				Some(ExecEvent::Started { exec_id }) => exec_id,
+				other => panic!("expected external started event, got {other:?}"),
+			};
+			let external_control = host
+				.control(&ExecControlRequest {
+					exec: external_exec,
+					control: ExecControlKind::Kill as i32,
+					grace_ms: 0,
+					wire_revision: omp_proto::SCHEMA_REV,
+					..ExecControlRequest::default()
+				})
+				.expect("external typed kill is accepted");
+			assert!(external_control.accepted);
+			let external_exit = time::timeout(Duration::from_secs(1), async {
+				loop {
+					match external_run.next_event().await {
+						Some(ExecEvent::Exit(event)) => break event,
+						Some(ExecEvent::Output(_) | ExecEvent::Started { .. }) => {},
+						None => panic!("external exec stream closed before exit"),
+					}
+				}
+			})
+			.await
+			.expect("external typed kill reaches terminal");
+			assert_eq!(
+				external_exit.status.expect("external exit status").outcome,
+				ExecOutcome::Cancelled as i32
+			);
+		}
+
+		let exit = time::timeout(Duration::from_secs(1), async {
+			loop {
+				match run.next_event().await {
+					Some(ExecEvent::Exit(event)) => break event,
+					Some(ExecEvent::Output(_)) | Some(ExecEvent::Started { .. }) => {},
+					None => panic!("exec stream closed before exit"),
+				}
+			}
+		})
+		.await
+		.expect("typed kill reaches a builtin within one second");
+		assert_eq!(exit.status.expect("exit status").outcome, ExecOutcome::Cancelled as i32);
+		host.close_session(&session).expect("session closes");
+	}
 	async fn run_output(host: &ExecHost, request: ExecRequest) -> Vec<u8> {
 		let (_, run) = host.exec(request, None).await.expect("exec starts");
 		let mut output = Vec::new();

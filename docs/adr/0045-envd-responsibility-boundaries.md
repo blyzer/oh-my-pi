@@ -1,6 +1,8 @@
+[docs/adr/0045-envd-responsibility-boundaries.md (verbatim, 127 lines total)]
+[docs/adr/0045-envd-responsibility-boundaries.md (verbatim, 128 lines total)]
 # 0045. Proposed envd responsibility boundaries: preserve the authority core, shed the periphery
 
-Status: proposed; requires owner review
+Status: accepted 2026-10-28; Alternative F selected
 Date: 2026-10-11
 Area: runtime/environment
 
@@ -97,32 +99,23 @@ The performance scores are unmeasured estimates.
 - Extracted integrations still need an environment-side execution locus.
 - Moving vocabulary touches approval paths, which carry recent churn under ADR 0028.
 
-## Required evidence before acceptance
+## Accepted evidence and remaining measurements
 
 - P8 baseline for audit workloads W1–W9 in attached and embedded modes on macOS arm64 and Linux.
-- A daemon-kill test with in-flight invocations (W8) that demonstrates the containment gap.
+- **DONE** W8 daemon-kill acceptance: the partition proof and the real-daemon SIGKILL proof now pass with typed remote terminal errors, local-backend survival and no collateral local termination.
 - Cold build-time and envd compile-time numbers before the first extraction.
 - Owner answers to the open questions in Decision item 7.
 
 ## Implementation gate
 
-This ADR is a proposal. **No implementation is authorized.** Work begins only after owner review accepts it. Each step then proceeds as one reversible change with its acceptance criterion from audit §14. Hot-path changes additionally need a recorded baseline that meets audit §12.3.
+The owner accepted Alternative F on 2026-10-28. Implementation is authorized under the sequencing and evidence gates below. Each step then proceeds as one reversible change with its acceptance criterion from audit §14. Hot-path changes additionally need a recorded baseline that meets audit §12.3.
 
 ## Status in omp
 
-**Status: Not started.** The ADR remains proposed and its implementation gate
-prohibits production changes before owner acceptance.
+**Status: Partially implemented.** Alternative F is accepted. W1-W9 evidence, vocabulary extraction, modularization and peripheral extraction remain open; containment is implemented and accepted by the W8 proofs.
 
-- The containment gap is present and now demonstrated by two tests that pin the
-  current behavior until the containment fix inverts them:
-  - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream`
-    (`crates/env/src/partition.rs`): a closed remote backend leaves an in-flight
-    invocation stream pending, and a later remote-bound frame ends the router,
-    dropping an unrelated local invocation with `TransportClosed`.
-  - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
-    (`crates/e2e/tests/p12_daemon_approvals.rs`): the same sequence against a
-    SIGKILLed production `omp envd` child over the owner UDS (macOS, with the
-    other P12 proofs).
-- P8 W1–W9 baselines and owner answers in decision item 7 are not recorded.
-- `adr0045-slice-b.md` is an investigation of this gap, not an implementation
-  authorization.
+- W8 containment is implemented and verified by the partition and real-daemon proofs:
+  - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream` passes in `omp-env`.
+  - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local` passes against the production daemon on macOS.
+- Owner answers in decision item 7 are recorded: host-side admission with envd enforcement, issuing-connection-only approval relay, bounded reflection relay, envd-owned MCP, digest-matched daemon sharing, deferred reconnect and deferred schedules. P8 W1-W9 baselines remain open.
+- `adr0045-slice-b.md` remains supporting investigation evidence.

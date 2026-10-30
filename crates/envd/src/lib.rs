@@ -100,7 +100,10 @@ pub mod vcs;
 #[cfg(windows)]
 pub mod windows;
 pub mod worker;
+pub mod worker_child;
 pub mod worker_pool;
+pub mod worker_process;
+
 pub mod workspace;
 pub mod workspace_roots;
 pub mod write_scope;

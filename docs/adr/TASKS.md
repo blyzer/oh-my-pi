@@ -1,3 +1,5 @@
+[docs/adr/TASKS.md (verbatim, 267 lines total)]
+[docs/adr/TASKS.md (verbatim, 264 lines total)]
 # Active ADR and deferred-work ledger
 
 This file is the active work queue for ADR follow-ups. It is distinct from
@@ -24,24 +26,59 @@ Status meanings:
   complete.
 - **HISTORICAL**: retained for traceability; not an active queue.
 
+## Coordinator monitoring record
+
+- 2026-10-28: Native GitHub `run_watch` monitored PR #449 through all terminal
+  checks. The 14 required CI jobs, including BuildBuddy and macOS/Linux acceptance
+  jobs, passed; PR #449 then merged. No separate BuildBuddy monitor was available.
+- The coordinator now records monitor and merge evidence per PR instead of treating
+  a targeted local or BuildBuddy invocation as a substitute for PR CI.
+- 2026-10-28: Owner accepted ADR 0045 Alternative F and item-7 defaults. Admission remains host-decided with envd enforcement; approval relay is issuing-connection-only; reflection relay is bounded; MCP remains envd-owned; daemon sharing requires matching workspace/trust/policy digests; reconnect and schedules remain deferred.
+- 2026-10-28: Owner accepted ADR 0048 with B4 full frame preflight validation, behavior-family golden fixtures including compaction/tool.update/patch, `toolhost` retained in Buf breaking scope, and the lenient B1 decode variant. B9 Variant 1 is the selected implementation direction.
+
+## Decision matrix for remaining ADR work
+
+The owner authorized the council to decide software-development questions. That authority does not
+override an ADR's explicit owner-acceptance gate. The council dispatch on 2026-10-28 failed before
+producing a verdict because child startup rejected the requested tool set and hit an extension-load
+error. No council verdict is recorded.
+
+- **ADR 0045 owner gate:** accept or reject Alternative F before production implementation.
+- **ADR 0045 decision item 7:** decide reconnect policy; admission placement on untrusted workers;
+  whether approval and reflection relays may violate ADR 0006's duplex prohibition; MCP process
+  locus; per-subagent daemon sharing; and the future of schedules.
+- **ADR 0045 containment:** after acceptance, authorize typed remote-route termination and local
+  backend survival. Reconnect remains a separate policy decision.
+- **ADR 0045 P8 evidence:** define or confirm W1-W9 workloads, attached versus embedded modes,
+  macOS/Linux execution, metrics, artifact format, and comparison thresholds.
+- **ADR 0048 B4:** choose validation of every HostFrame and WorkerFrame before prost decode, or
+  deletion of the unused validators; identify the owning decode paths.
+- **ADR 0048 B5:** choose the golden corpus scope. Current fixtures cover `chat-stream` and
+  `tool-calls-and-rewind`; decide whether `compaction`, `tool.update`, `patch`, and each field
+  addition require separate fixtures.
+- **ADR 0048 B9:** prove the real worker launcher and WorkerHello path plus gateway Hello behavior,
+  or authorize correcting stale documentation and missing production wiring.
+- **ADR 0048 acceptance:** confirm the Buf ignore list, especially `toolhost`; choose the B1
+  lenient-decode versus revision-bump variant; and run the required local Buf proof.
+
+## Snapshot JSON byte preservation
+
+- **DONE** integration merged as PR #449. The snapshot fix is `e2d0723` plus correction
+  commit `c4ceb04` on `fix/snapshot-json-fixed-point`. The correction retains validated
+  source bytes while preserving typed scalar `Value` compatibility. Local `omp-dom`
+  verification passed 28 tests and doctests. PR CI passed all 14 jobs, including BuildBuddy,
+  macOS, Linux, acceptance proofs, and format checks. The PR merged at 2026-10-28T09:30:13Z.
+- The configured reviewer dispatch failed before producing a verdict. The session-model fallback
+  reviewed the correction and returned READY after the scalar-compatibility issue was fixed.
+
 ## ADR 0045 — envd responsibility boundaries
 
-ADR status: **proposed; owner review required**. Its implementation gate says
-that no implementation is authorized before acceptance.
+ADR status: **accepted 2026-10-28**. Alternative F selected.
 
-- **BLOCKED** owner acceptance and decision-item-7 answers. Required answers
-  include reconnect policy, admission placement, approval/reflection relay
-  treatment, MCP process locus, daemon sharing, and the future of schedules.
-- **DONE** W8 daemon-kill evidence with an in-flight invocation:
-  `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream`
-  (`crates/env/src/partition.rs`) and
-  `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
-  (`crates/e2e/tests/p12_daemon_approvals.rs`, macOS, real daemon). Both pin
-  the gap; the containment fix inverts them into acceptance tests.
-- **OPEN** P8 baselines for workloads W1–W9 in attached and embedded modes. The current workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996) records only the synthetic `omp-e2e` recorder on self-hosted macOS arm64; it does not satisfy the W1–W9 attached/embedded baseline requirement.
-- **OPEN after acceptance** containment fixes in `crates/env/src/partition.rs`:
-  typed terminal errors for pending remote routes and local-backend survival
-  after remote closure.
+- **DONE** owner acceptance and decision-item-7 answers. Reconnect remains deferred.
+- **DONE** W8 daemon-kill containment evidence and implementation. The partition proof and real-daemon macOS proof pass with typed remote terminal errors and local-backend survival.
+- **OPEN** P8 baselines for workloads W1-W9 in attached and embedded modes on macOS arm64 and Linux. The real recorder now runs 30 repetitions on native macOS and through BuildBuddy Linux, publishes raw matrix artifacts with host/build metadata, per-sample values, partial samples for failed cells, and failed repetition indexes. Acceptance remains open until both platform artifacts are produced; the local macOS W8 gate still has a reproduced tail above 150 ms.
+- **DONE** containment fixes in `crates/env/src/partition.rs`: remote pending routes receive typed terminal errors, the Local backend survives Remote closure, and the focused partition suite passes 16/16. The production daemon W8 SIGKILL proof also passes.
 - **DEFERRED** reconnect implementation. It is a policy decision, not a safe
   implementation detail.
 
@@ -61,6 +98,11 @@ Completed implementation items:
   `frozen_surface.rs`, but `docs/architecture/processes.md` still carries the
   stale `WorkerProcess::spawn` description. Filing/verification of the
   `WorkerHello` and `chat --gateway` issues is also not established by code.
+  **OPEN implementation evidence gate:** `docs/architecture/processes.md` names
+  `__omp-py-worker`, but the application entrypoint has no matching selector.
+  `WorkerSupervisor::publish_process` has a test caller but no production caller
+  found under `crates`. Prove the actual worker launcher and protocol before
+  correcting the process documentation or closing B9.
 
 Active items:
 
@@ -150,17 +192,11 @@ Units, in dependency order. Each lands as its own change with its own tests.
 6. **DONE** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
    `SessionControlAuthority` trait that driver implements, with identity taken from transport
    extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2 (PR #435).
-7. **DONE** `omp attach --observe`: connects to the owner UDS, folds frames into a local `Dom`,
-   and renders it through the production transcript projection as it converges. `omp chat` hosts
-   the socket, first process wins. The historical `std::future::pending()` stub is not restored.
-   **OPEN, deferred by decision:** the retained chat-actor viewer is not the R1 presentation. The
-   chat host takes a controller, services, and an editor that an observer has nothing to put
-   behind; the transcript projection is the read-only path that exists today. R2 brings the
-   observer input, and the retained viewer lands with it. Concretely, `TranscriptViewer`
-   (`crates/chat/src/overlays/hub.rs`) takes `(Snapshot, Receiver<Event>)` — which an
-   attachment already has — but it is a full-screen retained overlay keyed on a parent
-   session's subagent `JobRow`, while `omp attach` is a pipeable stdout tail. Hosting it
-   needs a standalone panel loop in `crates/app` and a session-shaped row, not a wrapper.
+7. **DONE** `omp attach --observe` remains the pipeable owner-socket observer. The retained
+   R2 viewer is also implemented in `crates/chat/src/overlays/hub.rs`: `/hub` Enter runs
+   `transcript <id>`, `TranscriptViewer` consumes `AgentView` snapshots and ordered patch
+   streams, renders the detached transcript, supports steering input and scrolling, and closes
+   cleanly. The `omp-chat` package verification passed 738 tests and doctests.
 8. **DONE** Proofs: unit tests per crate, the driver integration test over a real UDS
    (`crates/driver/tests/session_attach_uds.rs`), the command's own socket path
    (`crates/app/tests/attach_client.rs`), and P14 (`crates/e2e/tests/p14_session_attach.rs`):
@@ -194,14 +230,9 @@ this projection and need a named consumer first.
 
 Found while building units 2 and 4, and not part of R1:
 
-- **OPEN** `Snapshot::from_bytes` is not a fixed point. `Value`'s `Deserialize`
-  (`crates/dom/src/node.rs`) routes a map through `serde_json::Value` and `to_raw_value`, and
-  `Snapshot::build` re-serializes it, so a non-compact `Value::Json` property loses its whitespace
-  and number form on the first hop and is stable after. `Snapshot` equality is a byte compare, so
-  two structurally identical trees can compare unequal. An attached observer folding events into
-  its own replica therefore cannot prove convergence by comparing canonical bytes with the host
-  until this is fixed. Fixing it means capturing the raw value directly in `Value::deserialize`
-  rather than round-tripping through `serde_json::Value`.
+- **RESOLVED by PR #449** `Snapshot::from_bytes` now validates through borrowed
+  `RawValue` tokens and retains the validated source bytes, so structured and scalar lexical JSON
+  survives the fixed-point round trip while typed scalar `Value` compatibility remains unchanged.
 - **OPEN** `PropPolicy::redacts_content` receives only a `Tag`, so a value-conditioned rule cannot
   be expressed. The advisor transcript card is identifiable in the DOM, as a `notice` carrying
   `kind = advisor`, but classifying it needs a wider signature; `notice/data` alone would swallow

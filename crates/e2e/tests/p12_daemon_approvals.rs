@@ -35,7 +35,7 @@ use omp_e2e::{
 };
 use omp_env::{
 	APPROVAL_RELAY_CAPABILITY, ApprovalQueryEvent, ClientError, EnvClient, ExecEvent, ExecRun,
-	InProcessEnvTransport, PartitionedEnvTransport, in_process_frames,
+	InProcessEnvTransport, PartitionError, PartitionedEnvTransport, in_process_frames,
 };
 use omp_envd::EnvServer;
 use omp_proto::env::v1::{
@@ -218,39 +218,25 @@ async fn w8_sigkill_daemon_leaves_remote_pending_then_drops_local() -> Result<()
 
 	signal::kill(Pid::from_raw(daemon.pid()?.cast_signed()), signal::Signal::SIGKILL)
 		.context("SIGKILL project daemon")?;
+	let remote_terminal =
+		within("command terminal error", DEFAULT_TIMEOUT, run.next_event()).await?;
+	assert!(remote_terminal.is_err(), "the killed daemon did not terminate the remote command");
 	assert!(
-		within("command stream stays pending", Duration::from_millis(250), run.next_event())
+		tokio::time::timeout(Duration::from_millis(250), local.next_event())
 			.await
 			.is_err(),
-		"the killed daemon unexpectedly settled the in-flight command stream"
+		"the killed daemon terminated an unrelated local invocation"
 	);
 
-	// The router dies only on a remote-bound send arriving after the UDS
-	// bridge observed the daemon's EOF, so keep sending until the local
-	// stream reports the collateral loss.
-	let lost = within("local invocation transport loss", DEFAULT_TIMEOUT, async {
-		let mut attempt = 0_u32;
-		loop {
-			attempt += 1;
-			let _ = client
-				.invoke(InvokeTool {
-					invocation_id: format!("w8-after-kill-{attempt}"),
-					name: "bash".into(),
-					..InvokeTool::default()
-				})
-				.await;
-			match tokio::time::timeout(Duration::from_millis(200), local.next_event()).await {
-				Ok(result) => break result,
-				Err(_) => {},
-			}
-		}
-	})
-	.await?;
-	assert!(matches!(lost, Err(ClientError::TransportClosed)));
-
+	drop(run);
+	drop(local);
 	drop(client);
-	let result = within("partition router termination", DEFAULT_TIMEOUT, router).await?;
-	assert!(matches!(result.context("partition router task")?, Err(_)));
+	let result = tokio::time::timeout(Duration::from_secs(2), router)
+		.await
+		.context("router shutdown timed out")?
+		.context("router task failed")?;
+	assert!(matches!(result, Err(PartitionError::ClientClosed)));
+
 	remote_pump.abort();
 	let _ = daemon.shutdown().await;
 	Ok(())
