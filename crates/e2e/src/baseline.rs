@@ -38,17 +38,31 @@ use crate::{
 
 #[cfg(unix)]
 mod census;
+
 #[cfg(unix)]
 mod containment;
+
 #[cfg(unix)]
 mod recorder;
+
 #[cfg(unix)]
 mod topology;
+
 #[cfg(unix)]
 mod workloads;
 
 #[cfg(unix)]
 pub use recorder::record_matrix;
+
+/// Returns how many parameter variants `workload` is recorded at.
+///
+/// A caller that records one cell per child process selects a variant by its
+/// index in this range, so no variant label has to cross the process boundary.
+#[cfg(unix)]
+#[must_use]
+pub fn variant_count(workload: Workload) -> usize {
+	workloads::Variant::of(workload).len()
+}
 
 const SCHEMA_VERSION: u32 = 3;
 const TOKEN: &str = "·";
@@ -391,6 +405,7 @@ pub fn slowdown_ratio(raw_rate: f64, full_rate: f64) -> Result<f64> {
 
 /// Whether a full-loop throughput is a gross regression: below
 /// [`LOOP_THROUGHPUT_FLOOR`]. A rate exactly at the floor is not.
+
 #[must_use]
 pub fn is_gross_regression(full_tokens_per_second: f64) -> bool {
 	full_tokens_per_second < LOOP_THROUGHPUT_FLOOR
@@ -398,6 +413,7 @@ pub fn is_gross_regression(full_tokens_per_second: f64) -> bool {
 
 /// Whether a replay throughput is a gross regression: below
 /// [`REPLAY_THROUGHPUT_FLOOR`]. A rate exactly at the floor is not.
+
 #[must_use]
 pub fn is_replay_gross_regression(entries_per_second: f64) -> bool {
 	entries_per_second < REPLAY_THROUGHPUT_FLOOR
@@ -417,7 +433,7 @@ pub fn write_metrics(path: &Path, metrics: &BaselineMetrics) -> Result<()> {
 }
 
 /// Version of the serialized [`MatrixArtifact`] schema.
-pub const MATRIX_SCHEMA_VERSION: u32 = 1;
+pub const MATRIX_SCHEMA_VERSION: u32 = 2;
 
 /// Repetitions recorded per matrix cell unless a run overrides them: audit
 /// §12.3 asks for at least 30 per workload and mode.
@@ -439,6 +455,7 @@ pub struct MatrixSelection {
 impl MatrixSelection {
 	/// Selects every transport, daemon state and workload at the audit's
 	/// default repetition count.
+
 	#[must_use]
 	pub fn complete() -> Self {
 		Self {
@@ -662,6 +679,15 @@ pub struct MatrixMetric {
 	pub summary: Summary,
 }
 
+/// Raw metrics and verified facts for one matrix repetition.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MatrixSample {
+	/// Measured metric values, keyed by metric name.
+	pub metrics: BTreeMap<String, f64>,
+	/// Correctness facts observed for this repetition.
+	pub facts:   BTreeMap<String, u64>,
+}
+
 /// Every recorded repetition of one workload, variant, transport and daemon
 /// state.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -680,9 +706,12 @@ pub struct MatrixCell {
 	pub operations_per_repetition: u64,
 	/// Distribution of each metric across the repetitions.
 	pub metrics:                   Vec<MatrixMetric>,
+
+	/// Raw per-repetition values retained beside the aggregate summaries.
+	pub samples: Vec<MatrixSample>,
 	/// Correctness facts every repetition verified, such as bytes received or
 	/// processes found after a daemon kill.
-	pub facts:                     BTreeMap<String, u64>,
+	pub facts:   BTreeMap<String, u64>,
 }
 
 /// A matrix cell the recorder could not complete, or whose correctness gate
@@ -690,15 +719,19 @@ pub struct MatrixCell {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MatrixFailure {
 	/// Audit workload.
-	pub workload:     Workload,
+	pub workload:          Workload,
 	/// Workload parameter, if it has one.
-	pub variant:      Option<String>,
+	pub variant:           Option<String>,
 	/// How the client reached the authority.
-	pub transport:    Transport,
+	pub transport:         Transport,
 	/// Whether each repetition started the authority or reused a warm one.
-	pub daemon_state: DaemonState,
+	pub daemon_state:      DaemonState,
 	/// Why the cell failed.
-	pub error:        String,
+	pub error:             String,
+	/// Successful raw samples recorded before the failure.
+	pub samples:           Vec<MatrixSample>,
+	/// One-based repetition index, or zero for an unmeasured warm preflight.
+	pub failed_repetition: Option<usize>,
 }
 
 /// What the host was and which commit it measured.
@@ -730,6 +763,7 @@ pub struct MatrixMetadata {
 impl MatrixMetadata {
 	/// Describes the current host, commit and build for a recording of
 	/// `repetitions` repetitions per cell.
+
 	#[must_use]
 	pub fn capture(repetitions: usize) -> Self {
 		let github_sha = env::var("GITHUB_SHA").ok().filter(|sha| !sha.is_empty());

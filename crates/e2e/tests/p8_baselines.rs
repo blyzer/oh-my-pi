@@ -6,9 +6,10 @@ use std::{collections::BTreeMap, fs, time::Duration};
 use omp_e2e::baseline::record_matrix;
 use omp_e2e::baseline::{
 	BaselineMetrics, DEFAULT_REPETITIONS, DaemonState, LOOP_THROUGHPUT_FLOOR, MATRIX_SCHEMA_VERSION,
-	MatrixArtifact, MatrixCell, MatrixMetadata, MatrixMetric, MatrixSelection,
-	REPLAY_THROUGHPUT_FLOOR, Summary, Transport, Workload, duration_rate, is_gross_regression,
-	is_replay_gross_regression, measure, slowdown_ratio, write_matrix, write_metrics,
+	MatrixArtifact, MatrixCell, MatrixFailure, MatrixMetadata, MatrixMetric, MatrixSample,
+	MatrixSelection, REPLAY_THROUGHPUT_FLOOR, Summary, Transport, Workload, duration_rate,
+	is_gross_regression, is_replay_gross_regression, measure, slowdown_ratio, write_matrix,
+	write_metrics,
 };
 
 #[test]
@@ -206,7 +207,12 @@ fn matrix_artifact_schema_is_stable() {
 				name:    "exec_ns".to_owned(),
 				summary: Summary::of(&[1.0, 2.0, 3.0]).expect("summary"),
 			}],
-			facts:                     BTreeMap::from([("streamed_bytes".to_owned(), 64_512)]),
+			samples:                   vec![MatrixSample {
+				metrics: BTreeMap::from([("exec_ns".to_owned(), 1.0)]),
+				facts:   BTreeMap::from([("streamed_bytes".to_owned(), 64_512)]),
+			}],
+
+			facts: BTreeMap::from([("streamed_bytes".to_owned(), 64_512)]),
 		}],
 		failures:       Vec::new(),
 	};
@@ -246,6 +252,7 @@ fn matrix_artifact_schema_is_stable() {
 		"repetitions",
 		"operations_per_repetition",
 		"metrics",
+		"samples",
 		"facts",
 	]);
 	assert_eq!(cell["workload"], "W4");
@@ -254,6 +261,38 @@ fn matrix_artifact_schema_is_stable() {
 	assert_eq!(keys(&cell["metrics"][0]), ["name", "samples", "min", "max", "p50", "p95", "mad"]);
 	let decoded: MatrixArtifact = serde_json::from_str(&encoded).expect("stable schema decodes");
 	assert_eq!(decoded, artifact);
+}
+
+#[test]
+fn matrix_failure_preserves_partial_samples() {
+	let partial = MatrixSample {
+		metrics: BTreeMap::from([("builtin_cancel_to_terminal_ns".to_owned(), 42.0)]),
+		facts:   BTreeMap::from([("pending_after_grace".to_owned(), 0)]),
+	};
+	let artifact = MatrixArtifact {
+		schema_version: MATRIX_SCHEMA_VERSION,
+		metadata:       MatrixMetadata::capture(30),
+		synthetic:      None,
+		cells:          Vec::new(),
+		failures:       vec![MatrixFailure {
+			workload:          Workload::W8,
+			variant:           None,
+			transport:         Transport::Embedded,
+			daemon_state:      DaemonState::Cold,
+			error:             "cancel exceeded interrupt grace".to_owned(),
+			samples:           vec![partial.clone()],
+			failed_repetition: Some(2),
+		}],
+	};
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let path = scratch.path().join("failure.json");
+	write_matrix(&path, &artifact).expect("write failure artifact");
+	let decoded: MatrixArtifact =
+		serde_json::from_str(&fs::read_to_string(path).expect("read failure artifact"))
+			.expect("decode failure artifact");
+	assert_eq!(decoded, artifact);
+	assert_eq!(decoded.failures[0].failed_repetition, Some(2));
+	assert_eq!(decoded.failures[0].samples, vec![partial]);
 }
 
 #[cfg(unix)]
@@ -267,7 +306,7 @@ async fn matrix_records_real_embedded_cells_with_verified_facts() {
 		workloads:   vec![Workload::W9, Workload::W1],
 		repetitions: 1,
 	};
-	let recording = record_matrix(&selection, &artifact, None)
+	let recording = record_matrix(&selection, &artifact, None, None)
 		.await
 		.expect("matrix recording");
 	assert!(recording.failures.is_empty(), "{:?}", recording.failures);
@@ -304,4 +343,20 @@ async fn matrix_records_real_embedded_cells_with_verified_facts() {
 		serde_json::from_str(&fs::read_to_string(&artifact).expect("read matrix"))
 			.expect("decode matrix");
 	assert_eq!(written, recording);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn matrix_rejects_an_unknown_variant_index() {
+	let scratch = tempfile::tempdir().expect("artifact scratch directory");
+	let selection = MatrixSelection {
+		transports:  vec![Transport::Embedded],
+		states:      vec![DaemonState::Cold],
+		workloads:   vec![Workload::W7],
+		repetitions: 1,
+	};
+	let error = record_matrix(&selection, &scratch.path().join("matrix.json"), None, Some(3))
+		.await
+		.expect_err("unknown variant index must fail");
+	assert_eq!(error.to_string(), "--variant-index selects no variant for the workload");
 }
