@@ -1,3 +1,5 @@
+[docs/adr/TASKS.md (verbatim, 267 lines total)]
+[docs/adr/TASKS.md (verbatim, 264 lines total)]
 # Active ADR and deferred-work ledger
 
 This file is the active work queue for ADR follow-ups. It is distinct from
@@ -31,6 +33,8 @@ Status meanings:
   jobs, passed; PR #449 then merged. No separate BuildBuddy monitor was available.
 - The coordinator now records monitor and merge evidence per PR instead of treating
   a targeted local or BuildBuddy invocation as a substitute for PR CI.
+- 2026-10-28: Owner accepted ADR 0045 Alternative F and item-7 defaults. Admission remains host-decided with envd enforcement; approval relay is issuing-connection-only; reflection relay is bounded; MCP remains envd-owned; daemon sharing requires matching workspace/trust/policy digests; reconnect and schedules remain deferred.
+- 2026-10-28: Owner accepted ADR 0048 with B4 full frame preflight validation, behavior-family golden fixtures including compaction/tool.update/patch, `toolhost` retained in Buf breaking scope, and the lenient B1 decode variant. B9 Variant 1 is the selected implementation direction.
 
 ## Decision matrix for remaining ADR work
 
@@ -69,22 +73,12 @@ error. No council verdict is recorded.
 
 ## ADR 0045 — envd responsibility boundaries
 
-ADR status: **proposed; owner review required**. Its implementation gate says
-that no implementation is authorized before acceptance.
+ADR status: **accepted 2026-10-28**. Alternative F selected.
 
-- **BLOCKED** owner acceptance and decision-item-7 answers. Required answers
-  include reconnect policy, admission placement, approval/reflection relay
-  treatment, MCP process locus, daemon sharing, and the future of schedules.
-- **DONE** W8 daemon-kill evidence with an in-flight invocation:
-  `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream`
-  (`crates/env/src/partition.rs`) and
-  `w8_sigkill_daemon_leaves_remote_pending_then_drops_local`
-  (`crates/e2e/tests/p12_daemon_approvals.rs`, macOS, real daemon). Both pin
-  the gap; the containment fix inverts them into acceptance tests.
-- **OPEN** P8 baselines for workloads W1–W9 in attached and embedded modes. The current workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996) records only the synthetic `omp-e2e` recorder on self-hosted macOS arm64; it does not satisfy the W1–W9 attached/embedded baseline requirement.
-- **OPEN after acceptance** containment fixes in `crates/env/src/partition.rs`:
-  typed terminal errors for pending remote routes and local-backend survival
-  after remote closure.
+- **DONE** owner acceptance and decision-item-7 answers. Reconnect remains deferred.
+- **DONE** W8 daemon-kill containment evidence and implementation. The partition proof and real-daemon macOS proof pass with typed remote terminal errors and local-backend survival.
+- **OPEN** P8 baselines for workloads W1-W9 in attached and embedded modes on macOS arm64 and Linux. The real recorder now runs 30 repetitions on native macOS and through BuildBuddy Linux, publishes raw matrix artifacts with host/build metadata, per-sample values, partial samples for failed cells, and failed repetition indexes. Acceptance remains open until both platform artifacts are produced; the local macOS W8 gate still has a reproduced tail above 150 ms.
+- **DONE** containment fixes in `crates/env/src/partition.rs`: remote pending routes receive typed terminal errors, the Local backend survives Remote closure, and the focused partition suite passes 16/16. The production daemon W8 SIGKILL proof also passes.
 - **DEFERRED** reconnect implementation. It is a policy decision, not a safe
   implementation detail.
 

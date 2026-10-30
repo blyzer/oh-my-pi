@@ -106,6 +106,18 @@ async fn main() -> ExitCode {
 	}
 	if env::args_os()
 		.nth(1)
+		.is_some_and(|arg| arg == omp_envd::worker_child::PY_WORKER_ARG)
+	{
+		return match omp_envd::worker_child::run_worker_child_entry() {
+			Ok(()) => ExitCode::SUCCESS,
+			Err(error) => {
+				eprintln!("omp worker child: {error}");
+				ExitCode::FAILURE
+			},
+		};
+	}
+	if env::args_os()
+		.nth(1)
 		.is_some_and(|arg| arg == omp_envd::exthost::EXT_HOST_ARG)
 	{
 		return match omp_envd::exthost::run_ext_host_entry() {

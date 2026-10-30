@@ -296,7 +296,12 @@ impl Target {
 					Some(handle) => Some(router_exit(handle, released).await),
 					None => None,
 				};
-				drop(guards);
+				{
+					let mut guards = guards;
+					guards.pump.abort();
+					let _ = (&mut guards.pump).await;
+					drop(guards);
+				}
 				local.shutdown().await;
 				daemon.shutdown().await?;
 				exit

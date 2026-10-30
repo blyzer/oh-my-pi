@@ -43,6 +43,9 @@ use crate::{Context as _, Result, error};
 
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
 const PROCESS_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Grace a closing in-process authority gives its managed processes, matching
+/// the interrupt grace the P8 recorder measures cancellation against.
+
 /// Session identity every harness constructor gives its worker-capable host.
 const SESSION_ID: &str = "e2e-session";
 const SESSION_GENERATION: u64 = 1;

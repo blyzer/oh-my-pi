@@ -206,6 +206,23 @@ async fn route(
 						continue;
 					}
 				}
+				if backend == Backend::Remote && !remote_open {
+					if frame.request_id != 0 {
+						client_tx
+							.send_async(ServerFrame {
+								request_id: frame.request_id,
+								body: Some(server_frame::Body::Error(omp_proto::env::v1::ProtocolError {
+									code: omp_proto::env::v1::ProtocolErrorCode::Internal as i32,
+									message: "remote environment backend closed".to_owned(),
+									..Default::default()
+								})),
+								..ServerFrame::default()
+							})
+							.await
+							.map_err(|_| PartitionError::ClientClosed)?;
+					}
+					continue;
+				}
 				let target = match backend { Backend::Local => &local_tx, Backend::Remote => &remote_tx };
 				target.send_async(frame).await.map_err(|_| PartitionError::BackendClosed { backend: backend.name() })?;
 			}
@@ -221,6 +238,29 @@ async fn route(
 				if let Ok(frame) = frame {
 					forward_server_frame(frame, Backend::Remote, &client_tx, &mut routes).await?;
 				} else {
+					let closed_requests = routes
+						.requests
+						.iter()
+						.filter_map(|(request_id, backend)| (*backend == Backend::Remote).then_some(*request_id))
+						.collect::<Vec<_>>();
+					for request_id in closed_requests {
+						client_tx
+							.send_async(ServerFrame {
+								request_id,
+								body: Some(server_frame::Body::Error(omp_proto::env::v1::ProtocolError {
+									code: omp_proto::env::v1::ProtocolErrorCode::Internal as i32,
+									message: "remote environment backend closed".to_owned(),
+									..Default::default()
+								})),
+								..ServerFrame::default()
+							})
+							.await
+							.map_err(|_| PartitionError::ClientClosed)?;
+						routes.requests.remove(&request_id);
+						if let Some(invocation) = routes.request_invocations.remove(&request_id) {
+							routes.invocations.remove(&invocation);
+						}
+					}
 					remote_open = false;
 					withdraw_relayed(Backend::Remote, &client_tx, &mut routes).await?;
 				}
@@ -750,8 +790,13 @@ mod tests {
 		assert_eq!(receive(&remote_transport).await, approval_answer(82, 2));
 
 		drop(remote_transport);
+		let closed_first = merged(&final_pipe).await;
+		assert_eq!(closed_first.request_id, 81);
+		assert!(matches!(closed_first.body, Some(server_frame::Body::Error(_))));
+		let closed_second = merged(&final_pipe).await;
+		assert_eq!(closed_second.request_id, 82);
+		assert!(matches!(closed_second.body, Some(server_frame::Body::Error(_))));
 		assert_eq!(merged(&final_pipe).await, approval_withdrawn(81, 1));
-
 		// The late answer to the closed daemon is dropped; the router still
 		// carries the local backend's answer that follows it.
 		send(&final_pipe, approval_answer(81, 1)).await;
@@ -887,8 +932,9 @@ mod tests {
 		assert!(
 			tokio::time::timeout(WAIT, remote.next_event())
 				.await
+				.expect("remote close should terminate the invocation")
 				.is_err(),
-			"the closed remote backend unexpectedly settled its in-flight invocation"
+			"the closed remote invocation did not receive a typed terminal error"
 		);
 
 		let _ = client
@@ -898,19 +944,21 @@ mod tests {
 				..InvokeTool::default()
 			})
 			.await;
-		assert!(matches!(
+		assert!(
 			tokio::time::timeout(WAIT, local.next_event())
 				.await
-				.expect("local stream did not settle after router exit"),
-			Err(ClientError::TransportClosed)
-		));
+				.is_err(),
+			"local invocation was terminated when remote backend closed"
+		);
 
+		drop(remote);
+		drop(local);
 		drop(client);
 		let result = tokio::time::timeout(Duration::from_secs(2), router)
 			.await
 			.expect("router shutdown timed out")
 			.expect("router task panicked");
-		assert!(matches!(result, Err(PartitionError::BackendClosed { backend: "remote" })));
+		assert!(matches!(result, Err(PartitionError::ClientClosed)));
 	}
 
 	#[test]

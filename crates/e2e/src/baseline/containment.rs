@@ -28,6 +28,7 @@ use nix::{
 };
 use omp_core::EnvPath;
 use omp_env::{ClientError, EnvClient, ExecEvent, ExecRun, frame};
+use omp_proto::env::v1::ExecControlKind;
 use serde_json::{Value, json};
 use tokio::time;
 
@@ -74,61 +75,112 @@ fn interrupt_grace() -> Result<Duration> {
 		.context("converting the interrupt grace")
 }
 
-/// Records `count` repetitions of the W8 gate.
+/// A W8 repetition failure together with samples completed before it.
+#[derive(Debug)]
+pub(super) struct RepetitionFailure {
+	pub(super) repetition: Option<usize>,
+	pub(super) error:      crate::Error,
+}
+
+/// W8 samples and an optional failed repetition.
+pub(super) struct RepetitionResult {
+	pub(super) samples: Vec<Sample>,
+	pub(super) failure: Option<RepetitionFailure>,
+}
+
+fn failed_repetition(
+	samples: &mut Vec<Sample>,
+	repetition: Option<usize>,
+	error: crate::Error,
+) -> RepetitionResult {
+	RepetitionResult {
+		samples: std::mem::take(samples),
+		failure: Some(RepetitionFailure { repetition, error }),
+	}
+}
+
+/// Records W8 repetitions of the containment gate.
 pub(super) async fn repetitions(
 	transport: Transport,
 	state: DaemonState,
 	plan: &Plan,
 	count: usize,
-) -> Result<Vec<Sample>> {
+) -> Result<RepetitionResult> {
 	let mut samples = Vec::with_capacity(count);
 	match transport {
 		Transport::Attached => {
-			for _ in 0..count {
+			for index in 0..count {
 				quiesce().await;
-				samples.push(daemon_kill(state, plan).await?);
+				match daemon_kill(state, plan).await {
+					Ok(sample) => samples.push(sample),
+					Err(error) => return Ok(failed_repetition(&mut samples, Some(index + 1), error)),
+				}
 			}
 		},
 		Transport::Embedded => match state {
 			DaemonState::Cold => {
-				for _ in 0..count {
+				for index in 0..count {
 					quiesce().await;
-					let target = Staging::new(plan).await?.start(transport).await?;
+					let staging = match Staging::new(plan).await {
+						Ok(staging) => staging,
+						Err(error) => return Ok(failed_repetition(&mut samples, Some(index + 1), error)),
+					};
+					let target = match staging.start(transport).await {
+						Ok(target) => target,
+						Err(error) => return Ok(failed_repetition(&mut samples, Some(index + 1), error)),
+					};
 					let sample = cancellation(&target).await;
 					let closed = target.close().await;
-					samples.push(sample?);
-					closed?;
+					match sample {
+						Err(error) => return Ok(failed_repetition(&mut samples, Some(index + 1), error)),
+						Ok(sample) => samples.push(sample),
+					}
+					if let Err(error) = closed {
+						return Ok(failed_repetition(&mut samples, Some(index + 1), error));
+					}
 				}
 			},
 			DaemonState::Warm => {
-				let target = Staging::new(plan).await?.start(transport).await?;
-				let result: Result<()> = async {
-					cancellation(&target).await?;
-					for _ in 0..count {
-						quiesce().await;
-						samples.push(cancellation(&target).await?);
-					}
-					Ok(())
+				let staging = match Staging::new(plan).await {
+					Ok(staging) => staging,
+					Err(error) => return Ok(failed_repetition(&mut samples, None, error)),
+				};
+				let target = match staging.start(transport).await {
+					Ok(target) => target,
+					Err(error) => return Ok(failed_repetition(&mut samples, None, error)),
+				};
+				if let Err(error) = cancellation(&target).await {
+					let _ = target.close().await;
+					return Ok(failed_repetition(&mut samples, None, error));
 				}
-				.await;
-				let closed = target.close().await;
-				result?;
-				closed?;
+				for index in 0..count {
+					quiesce().await;
+					match cancellation(&target).await {
+						Ok(sample) => samples.push(sample),
+						Err(error) => {
+							let _ = target.close().await;
+							return Ok(failed_repetition(&mut samples, Some(index + 1), error));
+						},
+					}
+				}
+				if let Err(error) = target.close().await {
+					return Ok(failed_repetition(&mut samples, (count > 0).then_some(count), error));
+				}
 			},
 		},
 	}
-	Ok(samples)
+	Ok(RepetitionResult { samples, failure: None })
 }
 
 async fn start_running(
 	client: &EnvClient,
 	session: &bytes::Bytes,
 	script: &str,
-) -> Result<ExecRun> {
+) -> Result<(ExecRun, bytes::Bytes)> {
 	let mut run =
 		within("command start", STEP_LIMIT, client.exec(exec_request(session, script))).await??;
 	match within("command started event", STEP_LIMIT, run.next_event()).await?? {
-		Some(ExecEvent::Started(_)) => Ok(run),
+		Some(ExecEvent::Started(started)) => Ok((run, started.exec)),
 		other => Err(error(format!("expected {script:?} to start, got {other:?}"))),
 	}
 }
@@ -210,23 +262,36 @@ async fn cancellation(target: &Target) -> Result<Sample> {
 	let project = target.project();
 	let grace = interrupt_grace()?;
 	let recorder = std::process::id();
-	let baseline = Census::take().await?.descendants(recorder);
 
 	let builtin_session = open_session(client, project).await?;
 	let external_session = open_session(client, project).await?;
 	let survivor_session = open_session(client, project).await?;
-	let mut builtin = start_running(client, &builtin_session, BUILTIN_SLEEP).await?;
-	let mut external = start_running(client, &external_session, EXTERNAL_SLEEP).await?;
-	let mut survivor = start_running(client, &survivor_session, SURVIVOR).await?;
+	run_script(client, &builtin_session, "true", false).await?;
+	let baseline = Census::take().await?.descendants(recorder);
+
+	let (mut builtin, builtin_exec) = start_running(client, &builtin_session, BUILTIN_SLEEP).await?;
+	let (mut external, external_exec) =
+		start_running(client, &external_session, EXTERNAL_SLEEP).await?;
+	let (mut survivor, _) = start_running(client, &survivor_session, SURVIVOR).await?;
 	let children = await_children(recorder, &baseline).await?;
 
+	let builtin_control = client.active_exec_control(builtin_exec);
+	let external_control = client.active_exec_control(external_exec);
 	let cancelled = Instant::now();
-	builtin.guard().cancel();
-	external.guard().cancel();
-	let builtin_terminal =
-		cancelled_terminal(&mut builtin, cancelled, "the in-process command").await?;
-	let external_terminal =
-		cancelled_terminal(&mut external, cancelled, "the external command").await?;
+
+	let (builtin_cancel, external_cancel, builtin_terminal, external_terminal) = tokio::join!(
+		builtin_control.cancel(ExecControlKind::Kill, 0),
+		external_control.cancel(ExecControlKind::Kill, 0),
+		cancelled_terminal(&mut builtin, cancelled, "the in-process command"),
+		cancelled_terminal(&mut external, cancelled, "the external command"),
+	);
+	let builtin_cancel = builtin_cancel?;
+	let external_cancel = external_cancel?;
+	if !(builtin_cancel && external_cancel) {
+		return Err(error("the execution host rejected a W8 cancellation"));
+	}
+	let builtin_terminal = builtin_terminal?;
+	let external_terminal = external_terminal?;
 	if builtin_terminal > grace {
 		return Err(error(format!(
 			"the cancelled in-process command was still pending {builtin_terminal:?} after \
@@ -345,8 +410,8 @@ async fn kill_during_work(
 
 	let session_a = open_session(&client, &project).await?;
 	let session_b = open_session(&client, &project).await?;
-	let mut sleeper_a = start_running(&client, &session_a, REMOTE_SLEEP).await?;
-	let mut sleeper_b = start_running(&client, &session_b, REMOTE_SLEEP).await?;
+	let (mut sleeper_a, _) = start_running(&client, &session_a, REMOTE_SLEEP).await?;
+	let (mut sleeper_b, _) = start_running(&client, &session_b, REMOTE_SLEEP).await?;
 	let completed = Arc::new(AtomicU64::new(0));
 	let reader = tokio::spawn(read_until_failure(
 		client.clone(),

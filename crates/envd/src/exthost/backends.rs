@@ -1034,7 +1034,8 @@ pub fn parameter_control_factory(
 pub fn worker_control_factory(
 	supervisor: Arc<WorkerSupervisor>,
 ) -> Arc<dyn ControlAuthorityFactory> {
-	let processes = supervisor.clone() as Arc<dyn WorkerProcessAuthority>;
+	let processes: Arc<dyn WorkerProcessAuthority> =
+		Arc::new(crate::worker_process::PythonWorkerProcesses::new(Arc::clone(&supervisor)));
 	Arc::new(move |identity| {
 		Ok(Arc::new(WorkerControlOwner::new(
 			identity,

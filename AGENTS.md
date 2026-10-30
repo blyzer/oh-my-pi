@@ -727,6 +727,64 @@ the controlling terminal; live resizes don't propagate). Capability probe
 waits for replies — answer DA1 (`\x1b[?62c`) or let it time out. Feed the
 master stream to a VT emulator (e.g. `pyte`) for screen assertions.
 
+## OMP v1 ADW Workflow
+
+OMP v1 is the product target. The active source implementation is the `omp2`
+branch and current `oh-my-pi` checkout.
+
+When a request targets OMP v1, act as the ADW coordinator. Use existing OMP
+agents, skills, task dispatch, workpools, waits, todos, cancellation, and review
+agents. Do not create a new extension unless existing primitives cannot satisfy
+the behavior.
+
+Follow these stages:
+
+1. Triage.
+2. Specification.
+3. Research.
+4. Planning.
+5. Implementation.
+6. Testing.
+7. Review.
+8. Verification.
+9. Integration and release.
+
+### Execution policy
+
+- During planning and implementation, orchestrate in parallel. Use one agent
+  per crate, utility, provider, or independent category.
+- Use `sonic` for mechanical moves and renames. Never use hand-written bulk
+  rewrite scripts.
+- Use scouts only when files or ownership are genuinely unknown.
+- Keep shared contracts and integration work in the coordinator track.
+- Do not use sequential one-agent-at-a-time execution when tracks are
+  independent.
+- Finish the whole ask. Do not leave scaffolds, placeholders, or “rest is
+  trivial” work.
+- Preserve user edits and in-flight renames. Never revert or use destructive
+  checkout operations against them.
+
+### Verification policy
+
+- A change is complete only when it compiles, is wired, and is exercised.
+- Run focused checks first, then owning-crate tests, then required E2E proofs.
+- TUI changes require real-PTY verification of input, resize, and quit cleanup.
+- Preserve completed todo items and existing decisions.
+- Start only the earliest unblocked todo item.
+- Mark blockers with the exact missing prerequisite.
+- Do not claim completion from compilation alone.
+
+### Final report
+
+Every final report must include:
+
+- changed files;
+- decisions and tradeoffs;
+- commands and exact pass or fail results;
+- remaining blockers;
+- intentionally skipped work;
+- remaining risks.
+
 ## Testing & QA
 - Unit tests colocated in `src` where private behavior matters; public
   contracts + cross-module → `crates/*/tests`.

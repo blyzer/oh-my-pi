@@ -263,6 +263,22 @@ pub(super) struct Sample {
 	pub(super) facts:   Vec<(&'static str, u64)>,
 }
 
+/// A workload failure together with samples completed before it.
+#[derive(Debug)]
+pub(super) struct PartialFailure {
+	pub(super) samples:           Vec<Sample>,
+	pub(super) failed_repetition: Option<usize>,
+	pub(super) error:             crate::Error,
+}
+
+pub(super) fn partial_failure(
+	samples: Vec<Sample>,
+	failed_repetition: Option<usize>,
+	error: crate::Error,
+) -> PartialFailure {
+	PartialFailure { samples, failed_repetition, error }
+}
+
 fn nanoseconds(duration: Duration) -> f64 {
 	duration.as_nanos() as f64
 }
@@ -842,7 +858,7 @@ async fn w7_slots(target: &Target, slots: usize) -> Result<Sample> {
 	})
 }
 
-/// Records `repetitions` W9 attaches: from nothing to the first usable
+/// Records repetitions of W9 attaches: from nothing to the first usable
 /// request (cold), or a new connection to an authority that already served
 /// one (warm), then a second request on the same connection.
 pub(super) async fn attaches(
@@ -850,40 +866,73 @@ pub(super) async fn attaches(
 	state: DaemonState,
 	plan: &Plan,
 	repetitions: usize,
-) -> Result<Vec<Sample>> {
+) -> std::result::Result<Vec<Sample>, PartialFailure> {
 	let mut samples = Vec::with_capacity(repetitions);
 	match state {
 		DaemonState::Cold => {
-			for _ in 0..repetitions {
+			for index in 0..repetitions {
 				quiesce().await;
-				let staging = Staging::new(plan).await?;
+				let staging = match Staging::new(plan).await {
+					Ok(staging) => staging,
+					Err(error) => return Err(partial_failure(samples, Some(index + 1), error)),
+				};
 				let started = Instant::now();
-				let target = within("W9 cold start", STEP_LIMIT, staging.start(transport)).await??;
+				let target = match within("W9 cold start", STEP_LIMIT, staging.start(transport)).await {
+					Ok(Ok(target)) => target,
+					Ok(Err(error)) | Err(error) => {
+						return Err(partial_failure(samples, Some(index + 1), error));
+					},
+				};
 				let attach = started.elapsed();
 				let sample = usable_requests(target.client(), target.project(), attach).await;
 				let closed = target.close().await;
-				samples.push(sample?);
-				closed?;
+				match sample {
+					Err(error) => return Err(partial_failure(samples, Some(index + 1), error)),
+					Ok(sample) => samples.push(sample),
+				}
+				if let Err(error) = closed {
+					return Err(partial_failure(samples, Some(index + 1), error));
+				}
 			}
 		},
 		DaemonState::Warm => {
-			let target = Staging::new(plan).await?.start(transport).await?;
-			let result: Result<()> = async {
-				usable_requests(target.client(), target.project(), Duration::ZERO).await?;
-				for _ in 0..repetitions {
-					quiesce().await;
-					let started = Instant::now();
-					let attachment =
-						within("W9 warm attach", STEP_LIMIT, target.attach_again()).await??;
-					let attach = started.elapsed();
-					samples.push(usable_requests(attachment.client(), target.project(), attach).await?);
-				}
-				Ok(())
+			let staging = match Staging::new(plan).await {
+				Ok(staging) => staging,
+				Err(error) => return Err(partial_failure(samples, None, error)),
+			};
+			let target = match staging.start(transport).await {
+				Ok(target) => target,
+				Err(error) => return Err(partial_failure(samples, None, error)),
+			};
+			if let Err(error) =
+				usable_requests(target.client(), target.project(), Duration::ZERO).await
+			{
+				let _ = target.close().await;
+				return Err(partial_failure(samples, None, error));
 			}
-			.await;
-			let closed = target.close().await;
-			result?;
-			closed?;
+			for index in 0..repetitions {
+				quiesce().await;
+				let started = Instant::now();
+				let attachment = match within("W9 warm attach", STEP_LIMIT, target.attach_again()).await
+				{
+					Ok(Ok(attachment)) => attachment,
+					Ok(Err(error)) | Err(error) => {
+						let _ = target.close().await;
+						return Err(partial_failure(samples, Some(index + 1), error));
+					},
+				};
+				let attach = started.elapsed();
+				match usable_requests(attachment.client(), target.project(), attach).await {
+					Ok(sample) => samples.push(sample),
+					Err(error) => {
+						let _ = target.close().await;
+						return Err(partial_failure(samples, Some(index + 1), error));
+					},
+				}
+			}
+			if let Err(error) = target.close().await {
+				return Err(partial_failure(samples, None, error));
+			}
 		},
 	}
 	Ok(samples)
