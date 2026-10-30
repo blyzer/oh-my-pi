@@ -10,7 +10,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::{self, Stdio},
 	sync::{
-		Arc,
+		Arc, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	thread,
@@ -85,7 +85,9 @@ struct ProcessEvalInner {
 	executable:      PathBuf,
 	interpreter:     PathBuf,
 	exec:            ExecHost,
-	host:            Arc<SessionBridgeHost>,
+	/// Weak so the tool registry that owns this executor cannot keep the
+	/// session bridge, and through it the registry itself, alive forever.
+	host:            Weak<SessionBridgeHost>,
 	blobs:           Option<BlobHost>,
 	interrupt_grace: OmpDuration,
 	sessions:        Mutex<HashMap<Bytes, Arc<ProcessSession>>>,
@@ -145,14 +147,14 @@ impl ProcessEvalExec {
 			})?,
 			None => PathBuf::from(EMBEDDED_INTERPRETER),
 		};
-		Ok(Self::new_inner(executable, interpreter, exec, host, interrupt_grace, Some(blobs)))
+		Ok(Self::new_inner(executable, interpreter, exec, &host, interrupt_grace, Some(blobs)))
 	}
 
 	fn new_inner(
 		executable: PathBuf,
 		interpreter: PathBuf,
 		exec: ExecHost,
-		host: Arc<SessionBridgeHost>,
+		host: &Arc<SessionBridgeHost>,
 		interrupt_grace: OmpDuration,
 		blobs: Option<BlobHost>,
 	) -> Self {
@@ -161,7 +163,7 @@ impl ProcessEvalExec {
 				executable,
 				interpreter,
 				exec,
-				host,
+				host: Arc::downgrade(host),
 				blobs,
 				interrupt_grace,
 				sessions: Mutex::new(HashMap::new()),
@@ -203,6 +205,10 @@ impl EvalExec for ProcessEvalExec {
 		self
 			.inner
 			.host
+			.upgrade()
+			.ok_or_else(|| Fault::SessionLost {
+				message: sf!("the eval session bridge was released before the snapshot"),
+			})?
 			.freeze_runtime(owner, &session.id)
 			.map_err(|error| resource_fault("runtime_snapshot", error))
 	}
@@ -231,10 +237,9 @@ impl EvalExec for ProcessEvalExec {
 		let owned = self.inner.sessions.lock().get(&session.id).cloned();
 		async move {
 			if let Some(owned) = owned {
-				self
-					.inner
-					.host
-					.release_runtime(owned.owner.as_str(), &owned.key.session);
+				if let Some(host) = self.inner.host.upgrade() {
+					host.release_runtime(owned.owner.as_str(), &owned.key.session);
+				}
 				owned.needs_reset.store(true, Ordering::Release);
 				if let Some(mut child) = owned.child.lock().await.take() {
 					child.terminate().await;
@@ -245,7 +250,9 @@ impl EvalExec for ProcessEvalExec {
 	}
 
 	fn dispose_all(&self) {
-		self.inner.host.clear_runtimes();
+		if let Some(host) = self.inner.host.upgrade() {
+			host.clear_runtimes();
+		}
 		let sessions = self
 			.inner
 			.sessions
@@ -326,7 +333,11 @@ impl ProcessEvalExec {
 		} else {
 			owned.key.interpreter.clone()
 		};
-		let host = Arc::clone(&self.inner.host);
+		let Some(host) = self.inner.host.upgrade() else {
+			return Err(Fault::SessionLost {
+				message: sf!("the eval session bridge was released before the run started"),
+			});
+		};
 		let blobs = self.inner.blobs.clone();
 		let interrupt_grace = self.inner.interrupt_grace;
 		tokio::spawn(async move {
