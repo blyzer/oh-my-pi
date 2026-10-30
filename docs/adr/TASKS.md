@@ -77,7 +77,7 @@ ADR status: **accepted 2026-10-28**. Alternative F selected.
 
 - **DONE** owner acceptance and decision-item-7 answers. Reconnect remains deferred.
 - **DONE** W8 daemon-kill containment evidence and implementation. The partition proof and real-daemon macOS proof pass with typed remote terminal errors and local-backend survival.
-- **OPEN** P8 baselines for workloads W1-W9 in attached and embedded modes on macOS arm64 and Linux. The real recorder now runs 30 repetitions on native macOS and through BuildBuddy Linux, publishes raw matrix artifacts with host/build metadata, per-sample values, partial samples for failed cells, and failed repetition indexes. Acceptance remains open until both platform artifacts are produced; the local macOS W8 gate still has a reproduced tail above 150 ms.
+- **DONE** P8 W1-W9 baseline evidence: PR #450 merged the recorder and envd descriptor fix; BuildBuddy Linux and native macOS workflow run 41070076113 completed 30-repetition attached/embedded coverage with zero failures and no EMFILE, and the local single-process W7/W9 proof also passed under the 16384 descriptor ceiling.
 - **DONE** containment fixes in `crates/env/src/partition.rs`: remote pending routes receive typed terminal errors, the Local backend survives Remote closure, and the focused partition suite passes 16/16. The production daemon W8 SIGKILL proof also passes.
 - **DEFERRED** reconnect implementation. It is a policy decision, not a safe
   implementation detail.

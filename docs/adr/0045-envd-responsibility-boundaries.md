@@ -112,10 +112,10 @@ The owner accepted Alternative F on 2026-10-28. Implementation is authorized und
 
 ## Status in omp
 
-**Status: Partially implemented.** Alternative F is accepted. W1-W9 evidence, vocabulary extraction, modularization and peripheral extraction remain open; containment is implemented and accepted by the W8 proofs.
+**Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction, modularization and peripheral extraction remain open; containment is implemented and accepted by the W8 proofs.
 
 - W8 containment is implemented and verified by the partition and real-daemon proofs:
   - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream` passes in `omp-env`.
   - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local` passes against the production daemon on macOS.
-- Owner answers in decision item 7 are recorded: host-side admission with envd enforcement, issuing-connection-only approval relay, bounded reflection relay, envd-owned MCP, digest-matched daemon sharing, deferred reconnect and deferred schedules. P8 W1-W9 baselines remain open.
+- Owner answers in decision item 7 are recorded: host-side admission with envd enforcement, issuing-connection-only approval relay, bounded reflection relay, envd-owned MCP, digest-matched daemon sharing, deferred reconnect and deferred schedules. P8 W1-W9 baselines are complete through PR #450 and workflow run 41070076113.
 - `adr0045-slice-b.md` remains supporting investigation evidence.
