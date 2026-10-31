@@ -8,10 +8,12 @@ use std::{error::Error, sync::Arc, time::Duration};
 
 use omp_adw::PostureError;
 use omp_core::Str;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumDiscriminants, EnumString, IntoStaticStr, VariantArray};
 
 use crate::{
 	digest::Digest,
+	handle::ReattachHandle,
 	ids::BackendId,
 	platform::{Need, Platform},
 };
@@ -129,7 +131,7 @@ pub enum Unplaceable {
 #[strum_discriminants(
 	name(ExecutionErrorKind),
 	doc = "The class of an [`ExecutionError`], for telemetry and fallback records.",
-	derive(Hash, Display, EnumString, IntoStaticStr, VariantArray),
+	derive(Hash, Display, EnumString, IntoStaticStr, VariantArray, Serialize, Deserialize),
 	strum(serialize_all = "kebab-case")
 )]
 pub enum ExecutionError {
@@ -219,6 +221,18 @@ pub enum ExecutionError {
 		#[source]
 		source: ForeignError,
 	},
+	/// The backend cannot resume an accepted execution.
+	#[error("execution resume is unsupported")]
+	ResumeUnsupported {
+		/// The backend that cannot resume the work.
+		backend: BackendId,
+	},
+	/// The backend accepted the work, but no terminal effect is known.
+	#[error("execution effects are unknown after acceptance")]
+	EffectsUnknown {
+		/// The accepted operation that must not be started again.
+		handle: ReattachHandle,
+	},
 }
 
 /// When a failure happened relative to the backend accepting the work.
@@ -276,6 +290,8 @@ pub const fn fallback_eligible(error: &ExecutionError, stage: Stage) -> bool {
 			| ExecutionError::InputCapture { .. }
 			| ExecutionError::InputRefused { .. }
 			| ExecutionError::OutputRetrieval { .. }
+			| ExecutionError::ResumeUnsupported { .. }
+			| ExecutionError::EffectsUnknown { .. }
 			| ExecutionError::Config { .. },
 			Stage::BeforeAcceptance | Stage::AfterAcceptance,
 		) => false,
@@ -337,6 +353,18 @@ mod tests {
 				false,
 			),
 			(ExecutionError::OutputRetrieval { source: cause() }, false, false),
+			(ExecutionError::ResumeUnsupported { backend: backend() }, false, false),
+			(
+				ExecutionError::EffectsUnknown {
+					handle: crate::ReattachHandle::new(
+						backend(),
+						Str::new_static("operation"),
+						crate::ExecutionId::new_static("execution"),
+					),
+				},
+				false,
+				false,
+			),
 			(ExecutionError::Config { source: cause() }, false, false),
 		]
 	}
@@ -379,6 +407,19 @@ mod tests {
 		for (error, ..) in table() {
 			assert!(!fallback_eligible(&error, Stage::AfterAcceptance), "{error:?}");
 		}
+	}
+
+	#[test]
+	fn effects_unknown_is_typed_and_never_fallback_eligible() {
+		let handle = crate::ReattachHandle::new(
+			BackendId::new_static("remote"),
+			Str::new_static("operation-1"),
+			crate::ExecutionId::new_static("execution-1"),
+		);
+		let error = ExecutionError::EffectsUnknown { handle };
+		assert_eq!(ExecutionErrorKind::from(&error), ExecutionErrorKind::EffectsUnknown);
+		assert!(!fallback_eligible(&error, Stage::BeforeAcceptance));
+		assert!(!fallback_eligible(&error, Stage::AfterAcceptance));
 	}
 
 	#[test]

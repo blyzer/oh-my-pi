@@ -4,7 +4,7 @@
 //! captured git patches, while REAPI uploads the complete content-addressed
 //! tree.
 
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -18,7 +18,7 @@ use omp_adw::Posture;
 use omp_core::{ExposeSecret, SecretString, Str, base64};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelSupport, ExecutionBackend, ExecutionError,
-	ExecutionRequest, NeedSet, OutputSpec, Platform, Reattach,
+	ExecutionRequest, NeedSet, Platform, ReattachHandle, ResumeSupport,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -158,6 +158,7 @@ impl<S: RunInputSource> BuildBuddyBackend<S> {
 			} else {
 				CancelSupport::None
 			},
+			resume:         ResumeSupport::Unsupported,
 			max_blob_bytes: Some(MAX_PATCH_BYTES as u64),
 			warm_caches:    false,
 			enforced:       config.enforced,
@@ -269,21 +270,9 @@ impl<S: RunInputSource> ExecutionBackend for BuildBuddyBackend<S> {
 
 	fn reattach(
 		&self,
-		handle: Reattach,
+		_handle: ReattachHandle,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
-		async move {
-			if handle.backend != self.config.id || handle.operation.is_empty() {
-				return Err(ExecutionError::Config { source: Arc::new(ApiError::InvalidHandle) });
-			}
-			Ok(BuildBuddyRun::new(
-				self.config.clone(),
-				self.client.clone(),
-				handle.operation,
-				handle.id,
-				Duration::from_mins(30),
-				OutputSpec::Logs,
-			))
-		}
+		async move { Err(ExecutionError::ResumeUnsupported { backend: self.config.id.clone() }) }
 	}
 }
 

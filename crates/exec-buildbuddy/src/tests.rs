@@ -150,9 +150,11 @@ async fn run_submits_binary_patch_and_polls_to_normalized_failure_with_paginated
 	})
 	.await
 	.expect("run deadline");
-	assert!(
-		matches!(&events[0], ExecutionEvent::Accepted { operation } if operation == "invocation-1")
-	);
+	assert!(matches!(
+		&events[0],
+		ExecutionEvent::Accepted { handle }
+			if handle.operation == "invocation-1" && handle.schema == omp_exec::ReattachSchema::V1
+	));
 	assert!(matches!(&events[1], ExecutionEvent::Executing));
 	assert!(
 		matches!(&events[4], ExecutionEvent::Settled(Ok(result)) if result.outcome == Outcome::Exited { code: 1 })

@@ -48,6 +48,7 @@ mod cargo_just;
 mod deny;
 mod digest;
 mod error;
+mod handle;
 mod ids;
 mod place;
 mod platform;
@@ -58,7 +59,7 @@ mod result;
 pub use adapter::{BuildSystemAdapter, PlanError, RepoPins};
 pub use backend::{
 	BackendCapabilities, CachePolicy, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
-	ExecutionPolicy, ExecutionRun, FallbackPolicy, Reattach,
+	ExecutionPolicy, ExecutionRun, FallbackPolicy,
 };
 pub use cargo_just::{
 	CARGO_JUST_RECIPES, CARGO_TARGET_CACHE, CargoJust, DEFAULT_TIMEOUT, JUST, RecipeClass,
@@ -70,6 +71,7 @@ pub use error::{
 	CasOp, ExecutionError, ExecutionErrorKind, ForeignError, Rejection, RemoteCancel, Stage,
 	Unplaceable, fallback_eligible,
 };
+pub use handle::{ReattachHandle, ReattachSchema, ResumeSupport};
 pub use ids::{BackendId, CacheName, ExecutionId, ToolchainId};
 pub use place::{Placement, admit, place};
 pub use platform::{
@@ -81,6 +83,6 @@ pub use request::{
 	ExecutionRequest, InputSet, Intent, OutputSpec,
 };
 pub use result::{
-	Artifact, ExecutionEvent, ExecutionResult, FallbackCause, Logs, Outcome, OutputFrame, Stream,
-	Timing, TransferCounts,
+	Artifact, ExecutionEvent, ExecutionResult, ExecutionState, FallbackCause, Logs, Outcome,
+	OutputFrame, Stream, Timing, TransferCounts,
 };

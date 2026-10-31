@@ -11,6 +11,7 @@ enum ComponentJobKind {
 	Tool,
 	Subagent,
 	Process,
+	Execution,
 }
 
 #[derive(Clone, Copy, Debug, EnumString)]
@@ -28,6 +29,7 @@ enum DeliveryJobType {
 	Task,
 	Eval,
 	Tool,
+	Execution,
 }
 
 impl From<ComponentJobKind> for DeliveryJobType {
@@ -36,6 +38,7 @@ impl From<ComponentJobKind> for DeliveryJobType {
 			ComponentJobKind::Tool => Self::Tool,
 			ComponentJobKind::Subagent => Self::Task,
 			ComponentJobKind::Process => Self::Bash,
+			ComponentJobKind::Execution => Self::Execution,
 		}
 	}
 }
@@ -49,6 +52,26 @@ impl From<DetachedJobKind> for DeliveryJobType {
 		}
 	}
 }
+
+/// Custom properties used by execution jobs.
+/// Lifecycle state property for an execution job.
+pub const EXECUTION_STATE: &str = "execution_state";
+/// Backend identity property for an execution job.
+pub const EXECUTION_BACKEND: &str = "backend";
+/// Reattach handle schema property for an execution job.
+pub const EXECUTION_SCHEMA: &str = "reattach_schema";
+/// Serialized reattach handle property for an execution job.
+pub const EXECUTION_HANDLE: &str = "reattach_handle";
+/// Serialized request identity property for an execution job.
+pub const EXECUTION_REQUEST: &str = "request";
+/// Requested output mode property for an execution job.
+pub const EXECUTION_OUTPUT_MODE: &str = "output_mode";
+/// Bounded serialized result property for an execution job.
+pub const EXECUTION_RESULT: &str = "execution_result";
+/// Typed failure class property for an execution job.
+pub const EXECUTION_FAILURE: &str = "execution_failure";
+
+/// Builds a status update for one DOM job handle.
 
 /// Durable fields used to insert one member of the shared job primitive.
 #[derive(Clone, Debug)]
@@ -78,7 +101,9 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 		.unwrap_or(ComponentJobKind::Tool);
 	let tag = match kind {
 		ComponentJobKind::Subagent => KnownTag::Subagent,
-		ComponentJobKind::Tool | ComponentJobKind::Process => KnownTag::Job,
+		ComponentJobKind::Tool | ComponentJobKind::Process | ComponentJobKind::Execution => {
+			KnownTag::Job
+		},
 	};
 	let job_type = DeliveryJobType::from(kind);
 	let job_type: &'static str = job_type.into();
@@ -100,7 +125,89 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 	})
 }
 
+/// Durable identity and output contract for one execution job.
+#[derive(Clone, Debug)]
+pub struct ExecutionSpec {
+	/// Stable execution identity.
+	pub id:          Str,
+	/// Runtime owner identity.
+	pub owner:       Str,
+	/// Start timestamp represented by the caller.
+	pub started:     Str,
+	/// Backend identity selected by placement.
+	pub backend:     Str,
+	/// Serialized request identity.
+	pub request:     Str,
+	/// Requested output mode.
+	pub output_mode: Str,
+}
+
+/// Builds the journalled insertion for one execution job.
+pub fn insert_execution(dom: &Dom, cause: EntryId, spec: ExecutionSpec) -> Option<Txn> {
+	let jobs = jobs_handle(dom)?;
+	let node = NodeSpec::new(KnownTag::Job)
+		.with_prop(PropId::Id, Value::Str(spec.id.clone()))
+		.with_prop(PropId::Kind, Value::Str(Str::new_static("execution")))
+		.with_prop(PropId::Status, Value::Str(Str::new_static("running")))
+		.with_prop(PropKey::Custom(Str::new_static("owner")), Value::Str(spec.owner))
+		.with_prop(PropKey::Custom(Str::new_static("started")), Value::Str(spec.started))
+		.with_prop(
+			PropKey::Custom(Str::new_static(EXECUTION_STATE)),
+			Value::Str(Str::new_static("requested")),
+		)
+		.with_prop(PropKey::Custom(Str::new_static(EXECUTION_BACKEND)), Value::Str(spec.backend))
+		.with_prop(PropKey::Custom(Str::new_static(EXECUTION_REQUEST)), Value::Str(spec.request))
+		.with_prop(
+			PropKey::Custom(Str::new_static(EXECUTION_OUTPUT_MODE)),
+			Value::Str(spec.output_mode),
+		)
+		.with_prop(PropId::Name, Value::Str(Str::new_static("execution")))
+		.with_prop(PropId::Label, Value::Str(spec.id));
+	Some(Txn {
+		cause,
+		label: Some(Str::new_static("jobs.insert")),
+		ops: vec![Op::Ins { parent: jobs, after: dom.children(jobs).last().copied(), node }],
+	})
+}
+
+/// Builds the journalled accepted transition for one execution job.
+pub fn accept_execution(
+	cause: EntryId,
+	handle: Handle,
+	schema: impl Into<Str>,
+	backend: impl Into<Str>,
+	operation: impl Into<Str>,
+) -> Txn {
+	Txn {
+		cause,
+		label: Some(Str::new_static("jobs.accept")),
+		ops: vec![
+			Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(EXECUTION_STATE)),
+				value: Value::Str(Str::new_static("accepted")),
+			},
+			Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(EXECUTION_SCHEMA)),
+				value: Value::Str(schema.into()),
+			},
+			Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(EXECUTION_BACKEND)),
+				value: Value::Str(backend.into()),
+			},
+			Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(EXECUTION_HANDLE)),
+				value: Value::Str(operation.into()),
+			},
+		],
+	}
+}
+
 /// Builds a status update for one DOM job handle.
+
 #[must_use]
 pub fn set_status(cause: EntryId, handle: Handle, status: impl Into<Str>) -> Txn {
 	Txn {

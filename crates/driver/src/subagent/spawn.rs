@@ -880,12 +880,14 @@ fn spawn_child_task(
 				error:      execution.result.error.clone(),
 				output:     serde_json::value::to_raw_value(&execution.result).ok(),
 				completion: None,
+				execution:  None,
 			},
 			Err(source) => JobSettlement {
 				status:     Str::new_static("failed"),
 				output:     None,
 				error:      Some(crate::fault(source)),
 				completion: None,
+				execution:  None,
 			},
 		}
 	})

@@ -882,6 +882,7 @@ fn spawn_process_task(
 							signal:  None,
 						}),
 					}),
+					execution:  None,
 				}
 			},
 		}
@@ -1004,9 +1005,11 @@ fn process_settlement(process: ProcessInfo) -> JobSettlement {
 		fault: fault_kind.map(|kind| LaunchDaemonFault { kind, message: None, signal }),
 	};
 	JobSettlement {
-		status:     Str::new_static(if completed { "completed" } else { "failed" }),
-		output:     None,
-		error:      None,
+		status:    Str::new_static(if completed { "completed" } else { "failed" }),
+		output:    None,
+		error:     None,
+		execution: None,
+
 		completion: Some(completion),
 	}
 }

@@ -198,6 +198,7 @@ mod tests {
 			FallbackPolicy,
 		},
 		error::Unplaceable,
+		handle::ResumeSupport,
 		ids::ExecutionId,
 		place::{Placement, place},
 		platform::Platform,
@@ -254,6 +255,7 @@ mod tests {
 			max_timeout:    None,
 			action_cache:   CacheSupport::None,
 			cancel:         CancelSupport::Confirmed,
+			resume:         ResumeSupport::Unsupported,
 			max_blob_bytes: None,
 			warm_caches:    false,
 			enforced:       omp_adw::Posture {

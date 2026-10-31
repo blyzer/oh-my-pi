@@ -4935,6 +4935,7 @@ mod tests {
 						output:     None,
 						error:      None,
 						completion: None,
+						execution:  None,
 					}
 				}),
 			);

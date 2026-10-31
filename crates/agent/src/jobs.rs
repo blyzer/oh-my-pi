@@ -6,6 +6,7 @@
 //! elements to kill boundaries owned by the runtime.
 
 use std::{
+	collections::BTreeMap,
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
@@ -16,7 +17,11 @@ use std::{
 use flume::Receiver;
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_exec::ExecutionRun;
+use omp_exec::{
+	Artifact, BackendId, Digest, ExecutionError, ExecutionErrorKind, ExecutionEvent,
+	ExecutionResult, ExecutionRun, ExecutionState, FallbackCause, Logs, Outcome, ReattachHandle,
+	Timing, TransferCounts,
+};
 use omp_journal::{
 	EntryId,
 	blob::{BlobRef, BlobStore},
@@ -69,6 +74,50 @@ impl From<JobKind> for DeliveryJobType {
 	}
 }
 
+#[derive(Debug, Serialize)]
+struct DurableExecutionResult {
+	id:             omp_exec::ExecutionId,
+	backend:        BackendId,
+	outcome:        Outcome,
+	logs:           Option<Logs>,
+	artifacts:      Arc<[Artifact]>,
+	output_digests: BTreeMap<Str, Digest>,
+	timing:         Timing,
+	transfer:       TransferCounts,
+	cache_hit:      bool,
+	fallback:       Option<FallbackCause>,
+}
+
+impl From<&ExecutionResult> for DurableExecutionResult {
+	fn from(result: &ExecutionResult) -> Self {
+		Self {
+			id:             result.id.clone(),
+			backend:        result.backend.clone(),
+			outcome:        result.outcome,
+			logs:           result.logs,
+			artifacts:      result.artifacts.clone(),
+			output_digests: result.output_digests.clone(),
+			timing:         result.timing,
+			transfer:       result.transfer,
+			cache_hit:      result.cache_hit,
+			fallback:       result.fallback,
+		}
+	}
+}
+
+/// Typed execution state carried through the durable job settlement.
+#[derive(Debug)]
+pub struct ExecutionSettlement {
+	/// Journal-derived execution state.
+	pub state:  ExecutionState,
+	/// Accepted backend identity, when one exists.
+	pub handle: Option<ReattachHandle>,
+	/// Terminal result references, when the backend settled successfully.
+	pub result: Option<ExecutionResult>,
+	/// Typed terminal failure, when the backend did not settle successfully.
+	pub error:  Option<ExecutionError>,
+}
+
 /// Terminal result produced by one owned execution unit.
 #[derive(Debug)]
 pub struct JobSettlement {
@@ -80,6 +129,8 @@ pub struct JobSettlement {
 	pub error:      Option<Str>,
 	/// Typed one-shot completion for a supervised process.
 	pub completion: Option<LaunchDaemonCompletion>,
+	/// Execution-specific accepted handle, result, and typed error.
+	pub execution:  Option<ExecutionSettlement>,
 }
 
 /// Durable fields projected from one `<job>` or `<subagent>` element.
@@ -120,6 +171,13 @@ pub struct JobRecord {
 	pub request:         Option<Str>,
 	/// Fallback/error class recorded for a `JobKind::Execution` job.
 	pub fallback:        Option<Str>,
+	/// Explicit execution lifecycle state.
+	pub execution_state: Option<ExecutionState>,
+
+	/// Durable terminal execution result references.
+	pub execution_result:  Option<Box<RawValue>>,
+	/// Durable typed execution failure class.
+	pub execution_failure: Option<ExecutionErrorKind>,
 }
 
 /// Live execution state retained after a tool call stops blocking its turn.
@@ -145,6 +203,7 @@ struct RuntimeJob {
 	record:    JobRecord,
 	cancel:    CancellationToken,
 	task:      Option<JoinHandle<JobSettlement>>,
+	accepted:  Option<Receiver<ReattachHandle>>,
 	_detached: Option<DetachedCall>,
 	/// A terminal call outcome recovered before its job settlement patch
 	/// landed.
@@ -328,6 +387,8 @@ impl JobBoard {
 			record,
 			cancel,
 			task: None,
+			accepted: None,
+
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -356,6 +417,8 @@ impl JobBoard {
 			record,
 			cancel,
 			task: None,
+			accepted: None,
+
 			_detached: Some(detached),
 			recovered: None,
 			orphaned: false,
@@ -379,6 +442,8 @@ impl JobBoard {
 			record,
 			cancel,
 			task: Some(task),
+			accepted: None,
+
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -403,6 +468,8 @@ impl JobBoard {
 			record,
 			cancel,
 			task: Some(task),
+			accepted: None,
+
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -423,6 +490,17 @@ impl JobBoard {
 		cancel: CancellationToken,
 		task: JoinHandle<JobSettlement>,
 	) -> bool {
+		self.attach_execution_task_with_acceptance(dom, handle, cancel, task, None)
+	}
+
+	fn attach_execution_task_with_acceptance(
+		&self,
+		dom: &Dom,
+		handle: Handle,
+		cancel: CancellationToken,
+		task: JoinHandle<JobSettlement>,
+		accepted: Option<Receiver<ReattachHandle>>,
+	) -> bool {
 		let Some(record) = record(dom, handle) else {
 			return false;
 		};
@@ -431,6 +509,7 @@ impl JobBoard {
 			record,
 			cancel,
 			task: Some(task),
+			accepted,
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -452,8 +531,9 @@ impl JobBoard {
 	where
 		R: ExecutionRun + 'static,
 	{
-		let task = tokio::spawn(supervise_execution(run, cancel.clone()));
-		self.attach_execution_task(dom, handle, cancel, task)
+		let (accepted_tx, accepted_rx) = flume::bounded(1);
+		let task = tokio::spawn(supervise_execution(run, cancel.clone(), Some(accepted_tx)));
+		self.attach_execution_task_with_acceptance(dom, handle, cancel, task, Some(accepted_rx))
 	}
 
 	/// Rebuilds the index after open or rewind. The DOM is the source of truth.
@@ -477,6 +557,8 @@ impl JobBoard {
 					record: record.clone(),
 					cancel: CancellationToken::new(),
 					task: None,
+					accepted: None,
+
 					_detached: None,
 				}
 			});
@@ -499,6 +581,39 @@ impl JobBoard {
 
 	/// Commits every already-settled owned task to the authoritative job node.
 	pub fn poll(&self, session: &mut Session) -> Result<Vec<JobRecord>, omp_session::SessionError> {
+		let accepted = {
+			let jobs = self.jobs.lock();
+			jobs
+				.iter()
+				.filter_map(|(handle, job)| {
+					job.accepted
+						.as_ref()?
+						.try_recv()
+						.ok()
+						.map(|accepted| (*handle, accepted))
+				})
+				.collect::<Vec<_>>()
+		};
+		for (handle, accepted) in accepted {
+			commit_settlement(
+				session,
+				handle,
+				JobSettlement {
+					status:     Str::new_static("running"),
+					output:     None,
+					error:      None,
+					completion: None,
+					execution:  Some(ExecutionSettlement {
+						state:  ExecutionState::Accepted,
+						handle: Some(accepted),
+						result: None,
+						error:  None,
+					}),
+				},
+				self.output_bound.load(Ordering::Relaxed),
+			)?;
+		}
+
 		let recovered = {
 			let jobs = self.jobs.lock();
 			jobs
@@ -536,6 +651,7 @@ impl JobBoard {
 				output:     None,
 				error:      Some(Str::new_static(error)),
 				completion: None,
+				execution:  None,
 			})?;
 			if let Some(job) = self.jobs.lock().get_mut(&handle) {
 				job.orphaned = false;
@@ -603,6 +719,7 @@ impl JobBoard {
 					output:     None,
 					error:      Some(Str::new_static("job execution unit ended without a settlement")),
 					completion: None,
+					execution:  None,
 				});
 			self.commit(session, handle, settlement)?;
 		}
@@ -696,6 +813,7 @@ impl JobBoard {
 			output,
 			error: settlement.error,
 			completion: None,
+			execution: None,
 		})
 	}
 
@@ -817,6 +935,8 @@ impl JobBoard {
 				record,
 				cancel,
 				task: Some(task),
+				accepted: None,
+
 				_detached: None,
 				recovered: None,
 				orphaned: false,
@@ -900,60 +1020,118 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 		output:     None,
 		error:      None,
 		completion: None,
+		execution:  None,
 	}
 }
 
 async fn supervise_execution<R: ExecutionRun>(
 	mut run: R,
 	cancel: CancellationToken,
+	accepted_tx: Option<flume::Sender<ReattachHandle>>,
 ) -> JobSettlement {
-	use omp_exec::ExecutionEvent;
+	let mut accepted = None;
 	loop {
 		tokio::select! {
-			event = run.next_event() => {
-				match event {
-					Some(ExecutionEvent::Settled(Ok(result))) => {
-						let status = if result.outcome.is_success() {
-							Str::new_static("completed")
-						} else {
-							Str::new_static("failed")
-						};
+			 event = run.next_event() => {
+				  match event {
+						Some(ExecutionEvent::Accepted { handle }) => {
+							if let Some(sender) = accepted_tx.as_ref() {
+								let _ = sender.send(handle.clone());
+							}
+							accepted = Some(handle);
+						},
+						Some(ExecutionEvent::Settled(Ok(result))) => {
+							 let status = if result.outcome.is_success() {
+								  Str::new_static("completed")
+							 } else {
+								  Str::new_static("failed")
+							 };
+							 return JobSettlement {
+								  status,
+								  output: None,
+								  error: None,
+								  completion: None,
+								  execution: Some(ExecutionSettlement {
+										state: ExecutionState::Settled,
+										handle: accepted,
+										result: Some(result),
+										error: None,
+								  }),
+							 };
+						},
+						Some(ExecutionEvent::Settled(Err(error))) => {
+							 return JobSettlement {
+								  status: Str::new_static("failed"),
+								  output: None,
+								  error: Some(Str::new_static("execution failed")),
+								  completion: None,
+								  execution: Some(ExecutionSettlement {
+										state: ExecutionState::Settled,
+										handle: accepted,
+										result: None,
+										error: Some(error),
+								  }),
+							 };
+						},
+						Some(_) => continue,
+						None => {
+							 let (state, handle, error, message) = match accepted {
+								  Some(handle) => {
+										let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
+										(
+											 ExecutionState::EffectsUnknown,
+											 Some(handle),
+											 Some(error),
+											 Str::new_static("execution effects are unknown after acceptance"),
+										)
+								  },
+								  None => (
+										ExecutionState::Settled,
+										None,
+										None,
+										Str::new_static("execution run ended without a result"),
+								  ),
+							 };
+							 return JobSettlement {
+								  status: Str::new_static("failed"),
+								  output: None,
+								  error: Some(message),
+								  completion: None,
+								  execution: Some(ExecutionSettlement {
+										state,
+										handle,
+										result: None,
+										error,
+								  }),
+							 };
+						},
+				  }
+			 },
+			 _ = cancel.cancelled() => {
+				  let _ = run.cancel().await;
+				  let Some(handle) = accepted else {
 						return JobSettlement {
-							status,
-							output:     None,
-							error:      None,
-							completion: None,
+							 status: Str::new_static("cancelled"),
+							 output: None,
+							 error: None,
+							 completion: None,
+							 execution: None,
 						};
-					},
-					Some(ExecutionEvent::Settled(Err(err))) => {
-						return JobSettlement {
-							status:     Str::new_static("failed"),
-							output:     None,
-							error:      Some(Str::new(err.to_string())),
-							completion: None,
-						};
-					},
-					Some(_) => continue,
-					None => {
-						return JobSettlement {
-							status:     Str::new_static("failed"),
-							output:     None,
-							error:      Some(Str::new_static(
-								"execution run ended without a result",
-							)),
-							completion: None,
-						};
-					},
-				}
-			},
-			_ = cancel.cancelled() => {
-				return JobSettlement {
-					status:     Str::new_static("cancelled"),
-					output:     None,
-					error:      None,
-					completion: None,
-				};
-			},
+				  };
+				  let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
+				  return JobSettlement {
+						status: Str::new_static("cancelled"),
+						output: None,
+						error: Some(Str::new_static("execution effects are unknown after cancellation")),
+						completion: None,
+						execution: Some(ExecutionSettlement {
+							 state: ExecutionState::EffectsUnknown,
+							 handle: Some(handle),
+							 result: None,
+							 error: Some(error),
+						}),
+				  };
+			 },
 		}
 	}
 }
@@ -1214,6 +1392,53 @@ fn commit_settlement(
 			value: Value::Str(error),
 		});
 	}
+	if let Some(execution) = settlement.execution {
+		let state: &'static str = execution.state.into();
+		ops.push(Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static("execution_state")),
+			value: Value::Str(Str::new_static(state)),
+		});
+		if let Some(accepted) = execution.handle {
+			let serialized = serde_json::to_string(&accepted)?;
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("reattach_schema")),
+				value: Value::Str(Str::new(accepted.schema.to_string())),
+			});
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("backend")),
+				value: Value::Str(Str::new(accepted.backend.to_string())),
+			});
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("reattach_handle")),
+				value: Value::Str(Str::new(serialized)),
+			});
+		}
+		if let Some(result) = execution.result {
+			let result = bounded_output(
+				session,
+				serde_json::value::to_raw_value(&DurableExecutionResult::from(&result))?,
+				bound,
+			)?;
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("execution_result")),
+				value: Value::Json(result),
+			});
+		}
+		if let Some(error) = execution.error {
+			let kind: &'static str = ExecutionErrorKind::from(&error).into();
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("execution_failure")),
+				value: Value::Str(Str::new_static(kind)),
+			});
+		}
+	}
+
 	if let Some(completion) = settlement.completion {
 		ops.extend(crate::launch_completion_ops(session, handle, &completion)?);
 	}
@@ -1338,6 +1563,15 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 		backend: custom(node, "backend").map(Str::new),
 		reattach_handle: custom(node, "reattach_handle").map(Str::new),
 		request: custom(node, "request").map(Str::new),
+		execution_state: custom(node, "execution_state").and_then(|value| value.parse().ok()),
+		execution_result: node
+			.prop(&PropKey::Custom(Str::new_static("execution_result")))
+			.and_then(|value| match value {
+				Value::Json(raw) => RawValue::from_string(raw.get().to_owned()).ok(),
+				_ => None,
+			}),
+		execution_failure: custom(node, "execution_failure").and_then(|value| value.parse().ok()),
+
 		fallback: custom(node, "fallback").map(Str::new),
 	})
 }
@@ -1369,4 +1603,62 @@ fn custom_int(node: &omp_dom::Node, key: &'static str) -> Option<i64> {
 fn fallback_job_type(kind: JobKind) -> Str {
 	let job_type: &'static str = DeliveryJobType::from(kind).into();
 	Str::new_static(job_type)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		collections::VecDeque,
+		future::{Future, ready},
+	};
+
+	use omp_core::Str;
+	use omp_exec::{
+		BackendId, CancelOutcome, ExecutionError, ExecutionEvent, ExecutionId, ExecutionRun,
+		ExecutionState, ReattachHandle,
+	};
+	use tokio_util::sync::CancellationToken;
+
+	use super::supervise_execution;
+
+	struct TestRun {
+		events: VecDeque<Option<ExecutionEvent>>,
+	}
+
+	impl ExecutionRun for TestRun {
+		fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
+			ready(self.events.pop_front().flatten())
+		}
+
+		fn cancel(&self) -> impl Future<Output = CancelOutcome> + Send + '_ {
+			ready(CancelOutcome::Requested)
+		}
+
+		fn detach(self) -> ReattachHandle {
+			ReattachHandle::new(
+				BackendId::new_static("test"),
+				Str::new_static("operation"),
+				ExecutionId::new_static("execution"),
+			)
+		}
+	}
+
+	#[tokio::test]
+	async fn accepted_run_without_terminal_event_is_effects_unknown() {
+		let handle = ReattachHandle::new(
+			BackendId::new_static("test"),
+			Str::new_static("operation"),
+			ExecutionId::new_static("execution"),
+		);
+		let run = TestRun {
+			events: VecDeque::from([Some(ExecutionEvent::Accepted { handle: handle.clone() }), None]),
+		};
+		let settlement = supervise_execution(run, CancellationToken::new(), None).await;
+		let execution = settlement.execution.expect("execution settlement");
+		assert_eq!(execution.state, ExecutionState::EffectsUnknown);
+		assert_eq!(execution.handle, Some(handle.clone()));
+		assert!(
+			matches!(execution.error, Some(ExecutionError::EffectsUnknown { handle: actual }) if actual == handle)
+		);
+	}
 }

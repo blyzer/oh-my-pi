@@ -1628,6 +1628,7 @@ impl PoolActor {
 			output:     serde_json::value::to_raw_value(&json!({ "text": summary })).ok(),
 			error:      cancelled.then(|| Str::new_static("workpool was cancelled")),
 			completion: None,
+			execution:  None,
 		}
 	}
 

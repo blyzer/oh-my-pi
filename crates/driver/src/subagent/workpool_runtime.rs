@@ -358,6 +358,7 @@ async fn run_kernel_worker(run: KernelWorkerRun) -> JobSettlement {
 				output:     serde_json::value::to_raw_value(&output).ok(),
 				error:      cancellation_error,
 				completion: None,
+				execution:  None,
 			}
 		},
 		Err(source) => {
@@ -379,6 +380,7 @@ async fn run_kernel_worker(run: KernelWorkerRun) -> JobSettlement {
 				output:     None,
 				error:      Some(crate::fault(&source)),
 				completion: None,
+				execution:  None,
 			}
 		},
 	}

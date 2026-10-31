@@ -1491,6 +1491,33 @@ Evidence: `docs/audits/remote-verification-trial.md`, Slice 0c.
 Decision: keep REAPI portable/cold-capable; use BuildBuddy Run API snapshots
 for the optimized backend; do not make runner recycling a Slice 1 prerequisite.
 
+## Amendment (2026-10-31): accepted-action lifecycle and adversarial design gate
+
+The ADR0040-K adversarial review selected Design A over backend-owned durable run records, but
+returned **REVISE DESIGN A** before production approval. Journal and CAS remain the only durable
+authority. The runtime job board remains a disposable index.
+
+The accepted-action rule is now explicit. A backend-neutral execution lifecycle records
+requested, accepted, settled, and effects-unknown states. An accepted execution carries a
+versioned opaque reattach handle. If the watcher loses the terminal effect after acceptance,
+the journal records EffectsUnknown and the system MUST NOT start a second action. Provider
+idempotency or lookup is REQUIRED before any retry can be considered safe.
+
+The first implementation slice persists backend identity, the opaque handle, typed failure class,
+and a compact bounded execution result projection through the existing session journal/CAS path.
+Local and BuildBuddy Run API snapshot resume remain unsupported until their contracts are verified.
+Generic REAPI reattachment remains the only supported remote resume path in this slice.
+
+The following BuildBuddy Run API facts remain **UNVERIFIED** and are not part of the supported
+contract: client-supplied idempotency or invocation lookup, snapshot request and response fields,
+snapshot retention, and REST cancellation authorization. No implementation may infer those fields
+from the Run API's returned invocation ID.
+
+Production gate: journal replay, accepted-action crash handling, typed result persistence, and
+owning-crate tests MUST pass before this ADR can move from proposed to accepted. The full BuildBuddy
+warm-snapshot path remains a follow-up provider verification, not a hidden fallback.
+
+
 ## References
 
 - ADRs 0001, 0003, 0006, 0007, 0009, 0010, 0011, 0028, 0033, 0035, 0039.

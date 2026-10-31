@@ -51,6 +51,7 @@ async fn jobs_rewind_removing_a_subagent_terminates_it() {
 					output:     None,
 					error:      None,
 					completion: None,
+					execution:  None,
 				}
 			})
 		}
@@ -204,8 +205,9 @@ async fn jobs_revive_rearms_settlement_delivery() {
 				),
 				error:      None,
 				completion: None,
+				execution:  None,
 			}
-		}),
+		})
 	));
 	let settled = board
 		.wait(&mut session, Some(&[Str::new_static("child-revive")]))
@@ -318,6 +320,7 @@ async fn process_settlement_journals_one_atomic_replayable_completion() {
 					duration_ms: 2_500,
 					fault:       None,
 				}),
+				execution:  None,
 			}
 		}),
 	));
@@ -410,6 +413,7 @@ async fn jobs_oversized_settlement_is_spilled_to_the_cas_and_resolvable() {
 					output:     serde_json::value::to_raw_value(&full).ok(),
 					error:      None,
 					completion: None,
+					execution:  None,
 				}
 			}
 		}),
