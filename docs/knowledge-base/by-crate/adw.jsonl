@@ -1,0 +1,17 @@
+{"crate":"adw","name":"WriteScope","kind":"enum","path":"crates/adw/src/profile.rs","line":34}
+{"crate":"adw","name":"NetworkScope","kind":"enum","path":"crates/adw/src/profile.rs","line":60}
+{"crate":"adw","name":"ApprovalScope","kind":"enum","path":"crates/adw/src/profile.rs","line":86}
+{"crate":"adw","name":"Requirement","kind":"struct","path":"crates/adw/src/profile.rs","line":105}
+{"crate":"adw","name":"Posture","kind":"struct","path":"crates/adw/src/profile.rs","line":116}
+{"crate":"adw","name":"PostureError","kind":"enum","path":"crates/adw/src/profile.rs","line":153}
+{"crate":"adw","name":"DEFAULT_MAX_ATTEMPTS","kind":"const","path":"crates/adw/src/run.rs","line":15}
+{"crate":"adw","name":"SelectedInput","kind":"struct","path":"crates/adw/src/run.rs","line":23}
+{"crate":"adw","name":"Step","kind":"enum","path":"crates/adw/src/run.rs","line":32}
+{"crate":"adw","name":"Outcome","kind":"enum","path":"crates/adw/src/run.rs","line":73}
+{"crate":"adw","name":"RunError","kind":"enum","path":"crates/adw/src/run.rs","line":106}
+{"crate":"adw","name":"Run","kind":"struct","path":"crates/adw/src/run.rs","line":173}
+{"crate":"adw","name":"PhaseKind","kind":"enum","path":"crates/adw/src/workflow.rs","line":29}
+{"crate":"adw","name":"OnReject","kind":"enum","path":"crates/adw/src/workflow.rs","line":44}
+{"crate":"adw","name":"Phase","kind":"struct","path":"crates/adw/src/workflow.rs","line":55}
+{"crate":"adw","name":"WorkflowError","kind":"enum","path":"crates/adw/src/workflow.rs","line":139}
+{"crate":"adw","name":"Workflow","kind":"struct","path":"crates/adw/src/workflow.rs","line":167}

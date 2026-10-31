@@ -1,0 +1,3 @@
+{"crate":"exec-ssh","name":"Config","kind":"struct","path":"crates/exec-ssh/src/lib.rs","line":19}
+{"crate":"exec-ssh","name":"SshBackend","kind":"struct","path":"crates/exec-ssh/src/lib.rs","line":36}
+{"crate":"exec-ssh","name":"SshRun","kind":"struct","path":"crates/exec-ssh/src/lib.rs","line":108}

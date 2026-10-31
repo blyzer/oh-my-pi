@@ -1,0 +1,5 @@
+{"crate":"http","name":"Client","kind":"struct","path":"crates/http/src/lib.rs","line":17}
+{"crate":"http","name":"default_client","kind":"fn","path":"crates/http/src/lib.rs","line":51}
+{"crate":"http","name":"no_redirect_client","kind":"fn","path":"crates/http/src/lib.rs","line":57}
+{"crate":"http","name":"client_builder","kind":"fn","path":"crates/http/src/lib.rs","line":63}
+{"crate":"http","name":"install_tls_provider","kind":"fn","path":"crates/http/src/lib.rs","line":72}
