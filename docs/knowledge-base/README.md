@@ -32,12 +32,7 @@ Durable offline map of **where symbols live** and **which domain owns which sema
 
 ```sh
 # AST memory: where is Kernel::run_turn?
-python3 - <<'PY'
-import gzip, json
-idx = json.loads(gzip.open("docs/knowledge-base/ast-lookup.json.gz"))
-print(idx["Kernel::run_turn"])
-print(idx["compose_kernel"])
-PY
+python3 -c 'import gzip,json; idx=json.load(gzip.open("docs/knowledge-base/ast-lookup.json.gz")); print(idx["Kernel::run_turn"]); print(idx["compose_kernel"])'
 
 # Regenerate AST index (~15–20s)
 python3 scripts/knowledge-base/gen-ast-symbols.py
