@@ -3,17 +3,19 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use omp_core::{CowBytes, Str};
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
 	digest::Digest,
 	error::{ExecutionError, ExecutionErrorKind},
+	handle::ReattachHandle,
 	ids::{BackendId, ExecutionId},
 };
 
 /// How the command ended. A non-zero exit is "the command failed", not an
 /// [`ExecutionError`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Outcome {
 	/// The process exited with `code`.
 	Exited {
@@ -36,7 +38,7 @@ impl Outcome {
 }
 
 /// One output file of a run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
 	/// Path relative to the input root.
 	pub path:       Str,
@@ -51,7 +53,7 @@ pub struct Artifact {
 /// Where a run's wall time went, every field in milliseconds. Phases a backend
 /// does not have stay zero. `u32` spans 49 days, far beyond any run's timeout,
 /// and keeps [`ExecutionResult`] compact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Timing {
 	/// Waiting for a worker.
 	pub queued:    u32,
@@ -66,7 +68,7 @@ pub struct Timing {
 }
 
 /// Content-addressed-storage traffic of one run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TransferCounts {
 	/// Blobs the run referenced.
 	pub blobs_total:               u32,
@@ -86,7 +88,7 @@ pub struct TransferCounts {
 
 /// Why a remote-placed request ran locally instead. The backend that failed
 /// is the placement's; the record keeps only the class of its failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FallbackCause {
 	/// The class of the remote failure.
 	pub kind: ExecutionErrorKind,
@@ -94,7 +96,7 @@ pub struct FallbackCause {
 
 /// Digests of a run's standard streams. Both or neither: every output mode
 /// above `Metadata` fetches the pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Logs {
 	/// Standard output.
 	pub stdout: Digest,
@@ -132,6 +134,20 @@ pub struct ExecutionResult {
 // counters) so `ExecutionEvent::Settled` stays near its sibling variants.
 const _: () = assert!(size_of::<ExecutionResult>() <= 256, "ExecutionResult must stay compact");
 
+/// Journal-derived lifecycle state for one execution job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ExecutionState {
+	/// The request exists but the backend has not accepted it.
+	Requested,
+	/// The backend accepted the request and supplied an opaque handle.
+	Accepted,
+	/// The backend supplied a terminal result or typed failure.
+	Settled,
+	/// The backend accepted the request but its effects cannot be confirmed.
+	EffectsUnknown,
+}
+
 /// Which stream a live output frame came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
@@ -166,11 +182,11 @@ pub enum ExecutionEvent {
 		/// Bytes to upload.
 		total: u64,
 	},
-	/// The backend accepted the work and named the operation. After this,
-	/// fallback is forbidden ([`crate::Stage::AfterAcceptance`]).
+	/// The backend accepted the work and supplied a versioned handle. After
+	/// this, fallback is forbidden ([`crate::Stage::AfterAcceptance`]).
 	Accepted {
-		/// The backend's operation name, used to reattach.
-		operation: Str,
+		/// The backend-neutral identity used to reattach.
+		handle: ReattachHandle,
 	},
 	/// The command is running.
 	Executing,

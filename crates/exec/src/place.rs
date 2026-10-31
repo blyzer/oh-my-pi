@@ -135,6 +135,7 @@ mod tests {
 
 	use super::*;
 	use crate::{
+		ResumeSupport,
 		backend::{CachePolicy, CacheSupport, CancelSupport},
 		ids::{ExecutionId, ToolchainId},
 		platform::{Need, NeedSet, Platform, PlatformRequirement, ResourceRequirements},
@@ -172,6 +173,7 @@ mod tests {
 			max_timeout:    None,
 			action_cache:   CacheSupport::None,
 			cancel:         CancelSupport::BestEffort,
+			resume:         ResumeSupport::Unsupported,
 			max_blob_bytes: None,
 			warm_caches:    false,
 			enforced:       Posture {

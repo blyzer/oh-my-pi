@@ -11,7 +11,7 @@ use bytes::Bytes;
 use omp_core::{CowBytes, Str};
 use omp_exec::{
 	CancelOutcome, ExecutionError, ExecutionEvent, ExecutionId, ExecutionResult, ExecutionRun,
-	Outcome, OutputFrame, OutputSpec, Reattach, Stream, Timing, TransferCounts,
+	Outcome, OutputFrame, OutputSpec, ReattachHandle, Stream, Timing, TransferCounts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,7 +142,13 @@ impl ExecutionRun for BuildBuddyRun {
 				match self.state {
 					RunState::Accepted => {
 						self.state = RunState::Executing;
-						return Some(ExecutionEvent::Accepted { operation: self.invocation.clone() });
+						return Some(ExecutionEvent::Accepted {
+							handle: ReattachHandle::new(
+								self.config.id.clone(),
+								self.invocation.clone(),
+								self.id.clone(),
+							),
+						});
 					},
 					RunState::Executing => {
 						self.state = RunState::Polling;
@@ -214,8 +220,8 @@ impl ExecutionRun for BuildBuddyRun {
 		}
 	}
 
-	fn detach(self) -> Reattach {
-		Reattach { backend: self.config.id.clone(), operation: self.invocation, id: self.id }
+	fn detach(self) -> ReattachHandle {
+		ReattachHandle::new(self.config.id.clone(), self.invocation, self.id)
 	}
 }
 

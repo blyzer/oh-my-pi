@@ -943,8 +943,9 @@ async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() 
 				),
 				error:      None,
 				completion: None,
+				execution:  None,
 			}
-		}),
+		})
 	));
 	// The child settles shortly after the parent reaches its candidate yield.
 	tokio::spawn(async move {

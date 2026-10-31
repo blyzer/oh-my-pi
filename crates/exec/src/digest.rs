@@ -1,6 +1,7 @@
 //! Content digests for inputs, logs, and artifacts.
 
 use omp_core::Hash32;
+use serde::{Deserialize, Serialize};
 
 /// A content-addressed blob: SHA-256 of its bytes plus its length.
 ///
@@ -10,7 +11,7 @@ use omp_core::Hash32;
 /// filesystem capabilities into every consumer of these types. When a second
 /// crate needs the shared shape, `BlobRef` moves into `omp-core` (ADR 0040,
 /// Part B, "Digests") and this type is replaced by it, never kept beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Digest {
 	/// SHA-256 of the blob contents.
 	pub hash: Hash32,

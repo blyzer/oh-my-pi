@@ -8,7 +8,7 @@ use omp_envd::ssh::SshService;
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRequest, ExecutionResult, ExecutionRun,
-	Outcome, OutputFrame, Reattach, Stream, Timing, TransferCounts,
+	Outcome, OutputFrame, ReattachHandle, ResumeSupport, Stream, Timing, TransferCounts,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -48,6 +48,7 @@ impl SshBackend {
 			max_timeout:    None,
 			action_cache:   CacheSupport::None,
 			cancel:         CancelSupport::BestEffort,
+			resume:         ResumeSupport::Unsupported,
 			max_blob_bytes: Some(config.max_output_bytes as u64),
 			warm_caches:    false,
 			enforced:       config.enforced,
@@ -97,9 +98,9 @@ impl ExecutionBackend for SshBackend {
 
 	fn reattach(
 		&self,
-		_handle: Reattach,
+		_handle: ReattachHandle,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
-		async move { Err(config_error(SshError::ReattachUnsupported)) }
+		async move { Err(ExecutionError::ResumeUnsupported { backend: self.config.id.clone() }) }
 	}
 }
 
@@ -125,12 +126,8 @@ impl ExecutionRun for SshRun {
 		}
 	}
 
-	fn detach(self) -> Reattach {
-		Reattach {
-			backend:   self.backend.clone(),
-			operation: Str::new("ssh"),
-			id:        self.id.clone(),
-		}
+	fn detach(self) -> ReattachHandle {
+		ReattachHandle::new(self.backend.clone(), Str::new("ssh"), self.id.clone())
 	}
 }
 
@@ -157,7 +154,9 @@ async fn run_remote(
 	}
 	let operation = Str::from(format!("ssh: {alias}"));
 	let _ = events
-		.send_async(ExecutionEvent::Accepted { operation })
+		.send_async(ExecutionEvent::Accepted {
+			handle: ReattachHandle::new(backend.clone(), operation, id.clone()),
+		})
 		.await;
 	let _ = events.send_async(ExecutionEvent::Executing).await;
 	let result = service

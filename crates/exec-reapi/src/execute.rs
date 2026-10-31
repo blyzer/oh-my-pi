@@ -12,7 +12,8 @@ use omp_core::{Hash32, Str};
 use omp_exec::{
 	Artifact, BackendCapabilities, BackendId, CachePolicy, CancelOutcome, EnvEntry,
 	ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult,
-	ExecutionRun, InputSet, Logs, Outcome, OutputSpec, Platform, Reattach, Timing, TransferCounts,
+	ExecutionRun, InputSet, Logs, Outcome, OutputSpec, Platform, ReattachHandle, ResumeSupport,
+	Timing, TransferCounts,
 };
 use omp_observability::attrs::omp_exec as exec_attrs;
 use parking_lot::Mutex;
@@ -188,6 +189,7 @@ where
 			action_cache:   caps.action_cache,
 			cancel:         caps.cancel,
 			max_blob_bytes: caps.max_blob_bytes,
+			resume:         ResumeSupport::Reattach,
 			warm_caches:    false,
 			enforced:       config.enforced,
 		};
@@ -231,6 +233,7 @@ where
 			max_timeout:    None,
 			action_cache:   caps.action_cache,
 			cancel:         caps.cancel,
+			resume:         ResumeSupport::Reattach,
 			max_blob_bytes: caps.max_blob_bytes,
 			warm_caches:    false,
 			enforced:       config.enforced,
@@ -339,7 +342,7 @@ where
 
 	fn reattach(
 		&self,
-		handle: Reattach,
+		handle: ReattachHandle,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		let this = self.clone();
 		async move { this.reattach_request(handle).await }
@@ -448,8 +451,9 @@ where
 		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs, action_timeout))
 	}
 
-	async fn reattach_request(&self, handle: Reattach) -> Result<ReapiRun<S>, ExecutionError> {
+	async fn reattach_request(&self, handle: ReattachHandle) -> Result<ReapiRun<S>, ExecutionError> {
 		let request_wire = wire::WaitExecutionRequest { name: handle.operation.to_string() };
+
 		let request = with_metadata(
 			Request::new(request_wire),
 			&self.inner.profile,
@@ -861,7 +865,13 @@ where
 			*self.operation.lock() = Some(Str::new(&operation.name));
 			if !self.accepted {
 				self.accepted = true;
-				return Some(ExecutionEvent::Accepted { operation: Str::new(&operation.name) });
+				return Some(ExecutionEvent::Accepted {
+					handle: ReattachHandle::new(
+						self.backend.inner.id.clone(),
+						Str::new(&operation.name),
+						self.id.clone(),
+					),
+				});
 			}
 			if !operation.done {
 				return Some(stage_event(&operation));
@@ -1041,12 +1051,12 @@ where
 		}
 	}
 
-	fn detach(self) -> Reattach {
-		Reattach {
-			backend:   self.backend.inner.id.clone(),
-			operation: self.operation.lock().clone().unwrap_or_default(),
-			id:        self.id.clone(),
-		}
+	fn detach(self) -> ReattachHandle {
+		ReattachHandle::new(
+			self.backend.inner.id.clone(),
+			self.operation.lock().clone().unwrap_or_default(),
+			self.id.clone(),
+		)
 	}
 }
 

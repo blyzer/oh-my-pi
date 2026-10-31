@@ -13,7 +13,7 @@ use omp_envd::exec::{ExecError, ExecEvent, ExecHost, ExecRun};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRequest, ExecutionResult, ExecutionRun,
-	Outcome, OutputFrame, OutputSpec, Reattach, Stream, Timing, TransferCounts,
+	Outcome, OutputFrame, OutputSpec, ReattachHandle, ResumeSupport, Stream, Timing, TransferCounts,
 };
 use omp_proto::env::v1::{
 	EnvironmentDelta, ExecOutcome, ExecRequest, OpenSessionRequest, OutputRequest, Script,
@@ -53,6 +53,7 @@ impl LocalBackend {
 			max_timeout:    None,
 			action_cache:   CacheSupport::None,
 			cancel:         CancelSupport::Confirmed,
+			resume:         ResumeSupport::Unsupported,
 			max_blob_bytes: None,
 			warm_caches:    true,
 			enforced:       config.enforced,
@@ -133,7 +134,7 @@ impl ExecutionBackend for LocalBackend {
 
 	fn reattach(
 		&self,
-		handle: Reattach,
+		handle: ReattachHandle,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		async move {
 			let _ = handle;
@@ -178,7 +179,9 @@ impl ExecutionRun for LocalRun {
 					let operation = Str::from(hex::encode(&exec_id).into_string());
 					self.operation = Some(operation.clone());
 					self.state = RunState::WaitingEvents;
-					Some(ExecutionEvent::Accepted { operation })
+					Some(ExecutionEvent::Accepted {
+						handle: ReattachHandle::new(self.backend.clone(), operation, self.id.clone()),
+					})
 				},
 				ExecEvent::Output(frame) => Some(ExecutionEvent::Output(OutputFrame {
 					stream: match omp_proto::env::v1::OutputChannel::try_from(frame.channel)
@@ -207,12 +210,12 @@ impl ExecutionRun for LocalRun {
 		}
 	}
 
-	fn detach(self) -> Reattach {
-		Reattach {
-			backend:   self.backend.clone(),
-			operation: self.operation.clone().unwrap_or_default(),
-			id:        self.id.clone(),
-		}
+	fn detach(self) -> ReattachHandle {
+		ReattachHandle::new(
+			self.backend.clone(),
+			self.operation.clone().unwrap_or_default(),
+			self.id.clone(),
+		)
 	}
 }
 

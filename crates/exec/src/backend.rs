@@ -6,12 +6,12 @@
 use std::{sync::Arc, time::Duration};
 
 use omp_adw::Posture;
-use omp_core::Str;
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
 	error::ExecutionError,
-	ids::{BackendId, ExecutionId},
+	handle::{ReattachHandle, ResumeSupport},
+	ids::BackendId,
 	platform::{NeedSet, Platform},
 	request::ExecutionRequest,
 	result::ExecutionEvent,
@@ -46,15 +46,18 @@ pub enum CancelSupport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendCapabilities {
 	/// Platforms the backend runs.
-	pub platforms:      Arc<[Platform]>,
+	pub platforms:    Arc<[Platform]>,
 	/// Host capabilities the backend provides.
-	pub needs:          NeedSet,
+	pub needs:        NeedSet,
 	/// The longest timeout the backend accepts, if bounded.
-	pub max_timeout:    Option<Duration>,
+	pub max_timeout:  Option<Duration>,
 	/// Action-cache support.
-	pub action_cache:   CacheSupport,
+	pub action_cache: CacheSupport,
 	/// Cancel support.
-	pub cancel:         CancelSupport,
+	pub cancel:       CancelSupport,
+	/// Resume support for accepted executions.
+	pub resume:       ResumeSupport,
+
 	/// The largest blob the backend accepts, if bounded.
 	pub max_blob_bytes: Option<u64>,
 	/// Whether named caches survive between runs.
@@ -100,17 +103,6 @@ pub struct ExecutionPolicy {
 	pub cache:    CachePolicy,
 }
 
-/// Enough to resume watching a detached run after a disconnect or restart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reattach {
-	/// The backend that holds the work.
-	pub backend:   BackendId,
-	/// The backend's operation name.
-	pub operation: Str,
-	/// Execution identity.
-	pub id:        ExecutionId,
-}
-
 /// What a cancel achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
@@ -149,7 +141,7 @@ pub trait ExecutionBackend: Clone + Send + Sync + 'static {
 	/// Resumes watching a run detached with [`ExecutionRun::detach`].
 	fn reattach(
 		&self,
-		handle: Reattach,
+		handle: ReattachHandle,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_;
 }
 
@@ -167,5 +159,5 @@ pub trait ExecutionRun: Send + 'static {
 
 	/// Stops watching without cancelling and returns what
 	/// [`ExecutionBackend::reattach`] needs to resume.
-	fn detach(self) -> Reattach;
+	fn detach(self) -> ReattachHandle;
 }
