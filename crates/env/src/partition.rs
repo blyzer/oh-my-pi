@@ -1098,6 +1098,12 @@ mod tests {
 		tools.insert(Str::from("read"));
 		let router = tokio::spawn(route(final_transport, local_pipe, remote_pipe, Arc::new(tools)));
 
+		// A closing backend makes the router answer its pending requests with an error,
+		// so the backends stay open until both responses are read; otherwise that
+		// error races them.
+		let (local_release, local_held) = tokio::sync::oneshot::channel::<()>();
+		let (remote_release, remote_held) = tokio::sync::oneshot::channel::<()>();
+
 		let local = tokio::spawn(async move {
 			assert!(matches!(
 				receive(&local_transport).await.body,
@@ -1142,6 +1148,7 @@ mod tests {
 				})
 				.await
 				.expect("send local response");
+			let _ = local_held.await;
 		});
 
 		let remote = tokio::spawn(async move {
@@ -1192,6 +1199,7 @@ mod tests {
 				})
 				.await
 				.expect("send remote response");
+			let _ = remote_held.await;
 		});
 
 		send(&final_pipe, frame(0, client_frame::Body::Hello(ClientHello::default()))).await;
@@ -1293,6 +1301,8 @@ mod tests {
 		});
 		assert!(ids.contains(&"local-response".to_owned()));
 		assert!(ids.contains(&"remote-response".to_owned()));
+		local_release.send(()).expect("local backend released");
+		remote_release.send(()).expect("remote backend released");
 
 		local.await.expect("local backend task");
 		remote.await.expect("remote backend task");
