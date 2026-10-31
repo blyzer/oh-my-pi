@@ -242,6 +242,7 @@ async fn live_loop(child: Revived, first: Option<Str>, cancel: CancellationToken
 				output: serde_json::value::to_raw_value(&result).ok(),
 				error,
 				completion: None,
+				execution: None,
 			}
 		},
 		Err(source) => JobSettlement {
@@ -249,6 +250,7 @@ async fn live_loop(child: Revived, first: Option<Str>, cancel: CancellationToken
 			output:     None,
 			error:      Some(crate::fault(source)),
 			completion: None,
+			execution:  None,
 		},
 	}
 }
