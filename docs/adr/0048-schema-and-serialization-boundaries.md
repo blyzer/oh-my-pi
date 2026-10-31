@@ -218,13 +218,12 @@ Benchmarks in the research document stay plans (UNVERIFIED) and do not gate CI.
 
 ## Status in omp
 
-**Status: Partially implemented.** The owner accepted the format-preservation decision and the Buf check plus most hardening items are implemented. B4 and B5 remain implementation work; B9 Variant 1 is selected but its daemon-context authority verification remains open.
+**Status: Partially implemented.** The owner accepted the format-preservation decision and the Buf check plus most hardening items are implemented. B5 remains implementation work; B9 Variant 1 is selected but its daemon-context authority verification remains open.
 
-- **Done:** Buf breaking configuration and CI, B1, B2, B3, B6, B7, and B8.
+- **Done:** Buf breaking configuration and CI, B1, B2, B3, B4, B6, B7, and B8.
 - **Partial:** B5 is authorized to expand the golden corpus by durable behavior family, including compaction, tool.update and patch, without redundant field permutations.
-- **Open:** B4 is authorized as full pre-decode validation for every normal HostFrame and WorkerFrame path.
-- **Partial:** B9 fixes the Python schema revision drift, but
+- **Open:** B9 fixes the Python schema revision drift, but
   `docs/architecture/processes.md` still contains the stale
   `WorkerProcess::spawn` description and issue filing for WorkerHello and
   gateway Hello is not established.
-- **Open verification:** local Buf proof, B4 implementation, B5 fixture expansion, and B9 daemon-context authority verification.
+- **Open verification:** B5 fixture expansion and B9 daemon-context authority verification.

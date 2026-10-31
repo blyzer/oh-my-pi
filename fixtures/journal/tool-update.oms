@@ -1,0 +1,49 @@
+event: journal@1
+id: 01M68Y0XNXQEFEGHE3XCCCEKCE
+data: {"version":1,"cwd":"/Users/enverfrancisco/repositories/oh-my-pi/crates/session","created":"1793448769213"}
+
+event: turn.start@1
+id: 01M68Y0XP2VXAA0TYJ1F1VD49M
+by: 01M68Y0XNXQEFEGHE3XCCCEKCE
+data: {}
+
+event: msg.user@1
+id: 01M68Y0XP6MMVNPZD7EJVSN517
+by: 01M68Y0XP2VXAA0TYJ1F1VD49M
+data: {"text":"run the tool"}
+
+event: msg.assistant.start@1
+id: 01M68Y0XPBE3S9G49ZNPG29RYM
+by: 01M68Y0XP2VXAA0TYJ1F1VD49M
+data: {"model":"model-c","provider":"provider-c","route":"route-c"}
+
+event: msg.assistant.end@1
+id: 01M68Y0XPGAYNQ0HYKTYHKJWFV
+by: 01M68Y0XP2VXAA0TYJ1F1VD49M
+data: {"stop_reason":"tool_use"}
+
+event: tool.call@1
+id: 01M68Y0XPQDAWGR35DJ7R7TGSD
+by: 01M68Y0XP2VXAA0TYJ1F1VD49M
+data: {"name":"progress","rev":1,"call_id":"call-update","args":{"task":"index"}}
+
+event: tool.update@1
+id: 01M68Y0XPVXWWWH1BH4MDBH5XF
+by: 01M68Y0XPQDAWGR35DJ7R7TGSD
+data: {"kernel":"started"}
+
+event: tool.update@1
+id: 01M68Y0XQ0Q8SZCZ2187CX2KKH
+by: 01M68Y0XPQDAWGR35DJ7R7TGSD
+data: {"phase":"scan","completed":1}
+
+event: tool.update@1
+id: 01M68Y0XQ4297XWX4QVTS0Q01J
+by: 01M68Y0XPQDAWGR35DJ7R7TGSD
+data: {"phase":"done","completed":2}
+
+event: tool.result@1
+id: 01M68Y0XQ8BQ9KM9H9T1XJ1MBN
+by: 01M68Y0XPQDAWGR35DJ7R7TGSD
+data: {"outcome":{"text":"indexed"}}
+
