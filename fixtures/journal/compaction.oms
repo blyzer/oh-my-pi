@@ -1,0 +1,29 @@
+event: journal@1
+id: 01M68Y0XGW29SWYCS1PY9S0E2P
+data: {"version":1,"cwd":"/Users/enverfrancisco/repositories/oh-my-pi/crates/session","created":"1793448769052"}
+
+event: turn.start@1
+id: 01M68Y0XH1TW0VNJNN4XSSKRY0
+by: 01M68Y0XGW29SWYCS1PY9S0E2P
+data: {}
+
+event: msg.user@1
+id: 01M68Y0XH6XPQTNWE498EZMR80
+by: 01M68Y0XH1TW0VNJNN4XSSKRY0
+data: {"text":"old context"}
+
+event: compaction@1
+id: 01M68Y0XK6VW21JD51WPY9MAX1
+by: 01M68Y0XH1TW0VNJNN4XSSKRY0
+data: {"summary":{"h":"a612e94e40a0a68fc09ae15c43403cf23288efe674849d02c3312385baf0c7e1","n":17},"boundary":"01M68Y0XH6XPQTNWE498EZMR80","method":"auto","tokens_before":1024,"tokens_after":256,"warning":"bounded fixture"}
+
+event: turn.start@1
+id: 01M68Y0XKB0MKB8HGHR9YBY38G
+by: 01M68Y0XK6VW21JD51WPY9MAX1
+data: {}
+
+event: msg.user@1
+id: 01M68Y0XKGTJEACJJX8PT3ZDY3
+by: 01M68Y0XKB0MKB8HGHR9YBY38G
+data: {"text":"after compaction"}
+
