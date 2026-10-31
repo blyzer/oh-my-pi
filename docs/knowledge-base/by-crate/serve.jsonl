@@ -1,0 +1,13 @@
+{"crate":"serve","name":"ControlScope","kind":"enum","path":"crates/serve/src/session.rs","line":33}
+{"crate":"serve","name":"ScopeSet","kind":"struct","path":"crates/serve/src/session.rs","line":53}
+{"crate":"serve","name":"ControlContext","kind":"struct","path":"crates/serve/src/session.rs","line":84}
+{"crate":"serve","name":"SessionControlError","kind":"enum","path":"crates/serve/src/session.rs","line":108}
+{"crate":"serve","name":"SessionControlAuthority","kind":"trait","path":"crates/serve/src/session.rs","line":180}
+{"crate":"serve","name":"SessionControlRpc","kind":"struct","path":"crates/serve/src/session.rs","line":199}
+{"crate":"serve","name":"BlobRpc","kind":"struct","path":"crates/serve/src/blob.rs","line":19}
+{"crate":"serve","name":"RpcStream","kind":"type","path":"crates/serve/src/inference.rs","line":111}
+{"crate":"serve","name":"ProviderGatewayAuthority","kind":"trait","path":"crates/serve/src/inference.rs","line":118}
+{"crate":"serve","name":"InferenceRpc","kind":"struct","path":"crates/serve/src/inference.rs","line":168}
+{"crate":"serve","name":"project_provider_turn_for_test","kind":"fn","path":"crates/serve/src/inference.rs","line":2304}
+{"crate":"serve","name":"AuthenticatedRevealContext","kind":"struct","path":"crates/serve/src/auth.rs","line":96}
+{"crate":"serve","name":"AuthRpc","kind":"struct","path":"crates/serve/src/auth.rs","line":177}

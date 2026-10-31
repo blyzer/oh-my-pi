@@ -6,6 +6,20 @@ entry points. Prefer the linked source docs when a detail here conflicts with th
 **One-sentence product bet** ([PHILOSOPHY.md](../PHILOSOPHY.md)): build a coding harness so good
 that the model is the only replaceable part.
 
+### Symbol / semantic memory
+
+For “where is this type?” and domain ownership, use the machine index under
+[`knowledge-base/`](knowledge-base/):
+
+| File | Use |
+| --- | --- |
+| [`knowledge-base/semantics.md`](knowledge-base/semantics.md) | Domain → crate → anchor symbols |
+| [`knowledge-base/lookup.json`](knowledge-base/lookup.json) | Exact name → path:line (all module-level `pub` items) |
+| [`knowledge-base/by-crate/`](knowledge-base/by-crate/) | Per-crate JSONL API dumps |
+| [`knowledge-base/summary.json`](knowledge-base/summary.json) | Counts + `lib.rs` module trees |
+
+Regenerate: `python3 scripts/knowledge-base/gen-symbols.py`
+
 | Index | Jump |
 | --- | --- |
 | Architecture | [Production spine](#production-spine) · [Five layers](#five-layer-topology) · [One turn](#one-turn-kernel) |
@@ -396,3 +410,4 @@ Full policy: [AGENTS.md](../AGENTS.md).
 | [pyx/](pyx/) | pyx API reference |
 | [crates/e2e/README.md](../crates/e2e/README.md) | P1–P14 proof contracts |
 | [justfile](../justfile) | Source of truth for build/test/e2e recipes |
+| [knowledge-base/](knowledge-base/) | Symbol lookup + semantic domain memory |

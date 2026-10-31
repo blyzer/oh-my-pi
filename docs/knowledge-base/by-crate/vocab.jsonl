@@ -1,0 +1,4 @@
+{"crate":"vocab","name":"KnownTag","kind":"enum","path":"crates/vocab/src/lib.rs","line":297}
+{"crate":"vocab","name":"Tag","kind":"enum","path":"crates/vocab/src/lib.rs","line":362}
+{"crate":"vocab","name":"PropId","kind":"enum","path":"crates/vocab/src/lib.rs","line":443}
+{"crate":"vocab","name":"PropKey","kind":"enum","path":"crates/vocab/src/lib.rs","line":578}

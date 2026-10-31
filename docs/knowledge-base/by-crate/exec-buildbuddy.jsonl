@@ -1,0 +1,8 @@
+{"crate":"exec-buildbuddy","name":"BuildBuddyRun","kind":"struct","path":"crates/exec-buildbuddy/src/run.rs","line":20}
+{"crate":"exec-buildbuddy","name":"RunInput","kind":"struct","path":"crates/exec-buildbuddy/src/lib.rs","line":43}
+{"crate":"exec-buildbuddy","name":"RunInputSource","kind":"trait","path":"crates/exec-buildbuddy/src/lib.rs","line":56}
+{"crate":"exec-buildbuddy","name":"PreparedInputSource","kind":"struct","path":"crates/exec-buildbuddy/src/lib.rs","line":66}
+{"crate":"exec-buildbuddy","name":"PreparationError","kind":"enum","path":"crates/exec-buildbuddy/src/lib.rs","line":79}
+{"crate":"exec-buildbuddy","name":"Config","kind":"struct","path":"crates/exec-buildbuddy/src/lib.rs","line":87}
+{"crate":"exec-buildbuddy","name":"BuildBuddyBackend","kind":"struct","path":"crates/exec-buildbuddy/src/lib.rs","line":107}
+{"crate":"exec-buildbuddy","name":"ApiError","kind":"enum","path":"crates/exec-buildbuddy/src/lib.rs","line":360}
