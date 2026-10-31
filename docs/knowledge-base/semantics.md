@@ -1,18 +1,17 @@
 # Semantic domain → symbol map
 
 Maps **meaning** (what the system is doing) to **owning crates and anchor symbols**.
-Use [`lookup.json`](lookup.json) for exact `name → path:line` resolution; this file is the
-human/agent orientation layer.
+Use [`ast-lookup.json.gz`](ast-lookup.json.gz) for exact `name` / `Type::method` → path:line
+(AST outline). This file is the human/agent orientation layer.
 
-Regenerate the machine indexes with:
+Regenerate:
 
 ```sh
-python3 scripts/knowledge-base/gen-symbols.py
+python3 scripts/knowledge-base/gen-ast-symbols.py   # Tier 1 AST (preferred)
+python3 scripts/knowledge-base/gen-symbols.py       # Tier 0 pub text scan
 ```
 
-Method note: indexes are a **column-0 `pub` textual scan** (module-level API surface), not a
-full rustc AST. Prefer rust-analyzer / LSP when you need precise resolution, impls, or
-private items.
+See [`README.md`](README.md) for the Tier 0/1/2/3 model (text → AST → SCIP → live LSP).
 
 ---
 
@@ -150,9 +149,12 @@ Semantics: `ArgsCommitted` is the effect gate. Envd owns FS/process/document/too
 
 ## How to find “any class”
 
-1. **Know the name** → open [`lookup.json`](lookup.json) and search the key (exact Rust ident).
-2. **Know the domain** → use the tables above, then open [`by-crate/<crate>.jsonl`](by-crate/).
-3. **Need impls / private items / trait resolutions** → rust-analyzer LSP (`definition`,
-   `references`, `implementations`) — the index is a memory aid, not a compiler.
+1. **Know the name or `Type::method`** → query [`ast-lookup.json.gz`](ast-lookup.json.gz)
+   (includes nested impl methods and private items).
+2. **Know the domain** → use the tables above, then Tier-0 [`by-crate/<crate>.jsonl`](by-crate/)
+   or regenerate `by-crate-ast/` with `OMP_KB_AST_KEEP_JSONL=1`.
+3. **Need cross-file references / trait-impl resolution** → Tier 2 SCIP
+   (`scripts/knowledge-base/gen-scip.sh`) or live LSP (`definition` / `references` /
+   `implementations`).
 4. **Need architecture “why”** → [`../knowledge-base.md`](../knowledge-base.md) and
    [`../adr/`](../adr/).

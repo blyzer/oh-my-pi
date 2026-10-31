@@ -27,6 +27,13 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+# Knowledge-base local rebuild products (regenerate via scripts/knowledge-base/)
+/docs/knowledge-base/index.scip
+/docs/knowledge-base/ast-lookup.json
+/docs/knowledge-base/ast-lookup.min.json
+/docs/knowledge-base/ast-lookup.min.json.gz
+/docs/knowledge-base/by-crate-ast/
+
 # Session scratch (plans, gap audits, research sandbox) — local-only
 /.gap/
 /.plan/

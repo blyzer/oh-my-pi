@@ -14,11 +14,12 @@ For “where is this type?” and domain ownership, use the machine index under
 | File | Use |
 | --- | --- |
 | [`knowledge-base/semantics.md`](knowledge-base/semantics.md) | Domain → crate → anchor symbols |
-| [`knowledge-base/lookup.json`](knowledge-base/lookup.json) | Exact name → path:line (all module-level `pub` items) |
-| [`knowledge-base/by-crate/`](knowledge-base/by-crate/) | Per-crate JSONL API dumps |
-| [`knowledge-base/summary.json`](knowledge-base/summary.json) | Counts + `lib.rs` module trees |
+| [`knowledge-base/ast-lookup.json.gz`](knowledge-base/ast-lookup.json.gz) | **AST memory**: name / `Type::method` → path:line (impls, private, nested) |
+| [`knowledge-base/ast-summary.json`](knowledge-base/ast-summary.json) | AST index stats |
+| [`knowledge-base/lookup.json`](knowledge-base/lookup.json) | Tier-0 pub text scan (lighter, incomplete) |
+| [`knowledge-base/README.md`](knowledge-base/README.md) | Tier 0/1/2/3 model (text → AST → SCIP → LSP) |
 
-Regenerate: `python3 scripts/knowledge-base/gen-symbols.py`
+Regenerate AST: `python3 scripts/knowledge-base/gen-ast-symbols.py`
 
 | Index | Jump |
 | --- | --- |
