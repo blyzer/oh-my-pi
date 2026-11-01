@@ -92,7 +92,7 @@ fn file_hash(path: &Path) -> Result<Option<String>> {
 			hasher.update(revision);
 		}
 	} else {
-		return Err(Error::message(format!("unsupported file type: {}", path.display())));
+		return Err(Error::UnsupportedFile { path: path.display().to_string() });
 	}
 	Ok(Some(hasher.finalize().to_string()))
 }
@@ -147,10 +147,7 @@ impl Store {
 		)
 		.context("invalid knowledge-base head")?;
 		if head.version != 1 {
-			return Err(Error::message(format!(
-				"unsupported knowledge-base head version {}",
-				head.version
-			)));
+			return Err(Error::HeadVersion { version: head.version });
 		}
 		let digest: Hash32 = head
 			.digest
@@ -159,14 +156,11 @@ impl Store {
 		let object = self.dir.join("objects").join(format!("{digest}.json"));
 		let bytes = fs::read(&object).context(format!("reading {}", object.display()))?;
 		if Hash32::sum(&bytes) != digest {
-			return Err(Error::message("knowledge-base object digest mismatch"));
+			return Err(Error::DigestMismatch);
 		}
 		let index: Index = serde_json::from_slice(&bytes).context("invalid knowledge-base index")?;
 		if index.version != 1 {
-			return Err(Error::message(format!(
-				"unsupported knowledge-base index version {}",
-				index.version
-			)));
+			return Err(Error::IndexVersion { version: index.version });
 		}
 		Ok(index)
 	}
@@ -212,7 +206,7 @@ impl Store {
 				.keys()
 				.any(|path| !before.files.contains_key(path) && !covered.contains(path.as_str()))
 		{
-			return Err(Error::message("repository changed while SCIP producers were running"));
+			return Err(Error::ChangedDuringProducers);
 		}
 		let uncovered: Vec<&str> = sources
 			.iter()
@@ -223,10 +217,10 @@ impl Store {
 		index.add_syntactic(&self.root, &uncovered)?;
 		self.add_wasm_tags(&mut index)?;
 		if !index.has_definitions() {
-			return Err(Error::message("index has no definitions"));
+			return Err(Error::NoDefinitions);
 		}
 		if self.snapshot(&paths)? != after {
-			return Err(Error::message("repository changed while building the index"));
+			return Err(Error::ChangedDuringBuild);
 		}
 		Ok(index)
 	}
@@ -317,7 +311,7 @@ impl Store {
 				|| relative.components().any(|c| {
 					!matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)
 				}) {
-				return Err(Error::message(format!("invalid refresh path: {}", path.display())));
+				return Err(Error::InvalidRefresh { path: path.display().to_string() });
 			}
 		}
 		fs::create_dir_all(&self.dir)?;

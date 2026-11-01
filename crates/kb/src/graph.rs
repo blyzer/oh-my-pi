@@ -148,17 +148,17 @@ fn span(occurrence: &Occurrence) -> Result<Span> {
 		Some(Typed_range::MultiLineRange(r)) => {
 			(r.start_line, r.start_character, r.end_line, r.end_character)
 		},
-		Some(_) => return Err(Error::message("unsupported SCIP range encoding")),
+		Some(_) => return Err(Error::rejected("unsupported SCIP range encoding")),
 		None => match occurrence.range.as_slice() {
 			[line, col, end_col] => (*line, *col, *line, *end_col),
 			[line, col, end_line, end_col] => (*line, *col, *end_line, *end_col),
-			_ => return Err(Error::message("invalid SCIP occurrence range")),
+			_ => return Err(Error::rejected("invalid SCIP occurrence range")),
 		},
 	};
 	let start = (usize::try_from(line)?, usize::try_from(col)?);
 	let end = (usize::try_from(end_line)?, usize::try_from(end_col)?);
 	if end < start {
-		return Err(Error::message("invalid SCIP occurrence range order"));
+		return Err(Error::rejected("invalid SCIP occurrence range order"));
 	}
 	Ok(Span { start, end })
 }
@@ -179,7 +179,7 @@ impl Columns {
 			) => Ok(Self::Utf8),
 			Ok(PositionEncoding::UTF16CodeUnitOffsetFromLineStart) => Ok(Self::Utf16),
 			Ok(PositionEncoding::UTF32CodeUnitOffsetFromLineStart) => Ok(Self::Utf32),
-			Err(_) => return Err(Error::message("unsupported SCIP position encoding")),
+			Err(_) => return Err(Error::rejected("unsupported SCIP position encoding")),
 		}
 	}
 }
@@ -227,7 +227,7 @@ impl<'a> Lines<'a> {
 			};
 		}
 		if units != column {
-			return Err(Error::message("SCIP column is outside its line or splits a character"));
+			return Err(Error::rejected("SCIP column is outside its line or splits a character"));
 		}
 		Ok((row, line.len() - rest.len()))
 	}
@@ -415,7 +415,7 @@ impl Index {
 				.flat_map(|d| &d.occurrences)
 				.any(|o| o.symbol_roles & 1 != 0 && !o.symbol.is_empty())
 		{
-			return Err(Error::message("SCIP index has no definitions"));
+			return Err(Error::EmptyScip);
 		}
 		Ok(raw)
 	}
@@ -433,10 +433,7 @@ impl Index {
 		};
 		for document in &raw.documents {
 			if !valid_path(&document.relative_path) {
-				return Err(Error::message(format!(
-					"unsafe SCIP document path: {:?}",
-					document.relative_path
-				)));
+				return Err(Error::UnsafePath { path: document.relative_path.clone() });
 			}
 			Columns::of(document)?;
 			index.add_symbols(document);
@@ -459,10 +456,7 @@ impl Index {
 			.iter()
 			.map(|doc| {
 				if !valid_path(&doc.relative_path) {
-					return Err(Error::message(format!(
-						"unsafe SCIP document path: {:?}",
-						doc.relative_path
-					)));
+					return Err(Error::UnsafePath { path: doc.relative_path.clone() });
 				}
 				Ok(doc.relative_path.clone())
 			})

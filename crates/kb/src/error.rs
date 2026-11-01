@@ -18,8 +18,28 @@ pub enum Error {
 	Git { args: String, stderr: String },
 	#[error("{name} failed with {status}")]
 	Producer { name: &'static str, status: ExitStatus },
-	#[error("{message}")]
-	Message { message: String },
+	#[error("unsupported file type: {path}")]
+	UnsupportedFile { path: String },
+	#[error("unsupported knowledge-base head version {version}")]
+	HeadVersion { version: u32 },
+	#[error("unsupported knowledge-base index version {version}")]
+	IndexVersion { version: u32 },
+	#[error("knowledge-base object digest mismatch")]
+	DigestMismatch,
+	#[error("repository changed while SCIP producers were running")]
+	ChangedDuringProducers,
+	#[error("repository changed while building the index")]
+	ChangedDuringBuild,
+	#[error("index has no definitions")]
+	NoDefinitions,
+	#[error("SCIP index has no definitions")]
+	EmptyScip,
+	#[error("invalid refresh path: {path}")]
+	InvalidRefresh { path: String },
+	#[error("unsafe SCIP document path: {path:?}")]
+	UnsafePath { path: String },
+	#[error("{fact}")]
+	Rejected { fact: String },
 	#[error(transparent)]
 	Io(#[from] io::Error),
 	#[error(transparent)]
@@ -37,8 +57,8 @@ pub enum Error {
 }
 
 impl Error {
-	pub(crate) fn message(message: impl Into<String>) -> Self {
-		Self::Message { message: message.into() }
+	pub(crate) fn rejected(fact: impl Into<String>) -> Self {
+		Self::Rejected { fact: fact.into() }
 	}
 
 	pub(crate) fn foreign(
@@ -68,6 +88,6 @@ where
 
 impl<T> Context<T> for Option<T> {
 	fn context(self, action: impl Into<String>) -> Result<T> {
-		self.ok_or_else(|| Error::message(action))
+		self.ok_or_else(|| Error::rejected(action))
 	}
 }
