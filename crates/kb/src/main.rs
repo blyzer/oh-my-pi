@@ -5,9 +5,8 @@ use std::{
 	path::PathBuf,
 };
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
-use omp_kb::store::Store;
+use omp_kb::{error::Result, store::Store};
 use serde::Serialize;
 
 #[derive(Parser)]

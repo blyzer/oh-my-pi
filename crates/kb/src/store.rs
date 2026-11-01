@@ -6,12 +6,12 @@ use std::{
 	process::{Command, Stdio},
 };
 
-use anyhow::{Context, Result, bail};
 use omp_ast::SupportLang;
 use omp_core::Hash32;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+	error::{Context, Error, Result},
 	graph::Index,
 	producer::{PRODUCERS, Run},
 };
@@ -47,7 +47,10 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 		.output()
 		.context("running git")?;
 	if !output.status.success() {
-		bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+		return Err(Error::Git {
+			args:   args.join(" "),
+			stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+		});
 	}
 	Ok(output.stdout)
 }
@@ -63,7 +66,7 @@ fn file_hash(path: &Path) -> Result<Option<String>> {
 	let metadata = match fs::symlink_metadata(path) {
 		Ok(metadata) => metadata,
 		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-		Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+		Err(error) => return Err(error).context(format!("reading {}", path.display())),
 	};
 	let mut hasher = Hash32::hasher();
 	if metadata.file_type().is_symlink() {
@@ -78,8 +81,7 @@ fn file_hash(path: &Path) -> Result<Option<String>> {
 			Ok(_) => {},
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {},
 			Err(error) => {
-				return Err(error)
-					.with_context(|| format!("reading symlink target {}", path.display()));
+				return Err(error).context(format!("reading symlink target {}", path.display()));
 			},
 		}
 	} else if metadata.is_file() {
@@ -90,15 +92,15 @@ fn file_hash(path: &Path) -> Result<Option<String>> {
 			hasher.update(revision);
 		}
 	} else {
-		bail!("unsupported file type: {}", path.display());
+		return Err(Error::message(format!("unsupported file type: {}", path.display())));
 	}
 	Ok(Some(hasher.finalize().to_string()))
 }
 
 impl Store {
 	pub fn open(path: &Path) -> Result<Self> {
-		let path = fs::canonicalize(path)
-			.with_context(|| format!("opening repository {}", path.display()))?;
+		let path =
+			fs::canonicalize(path).context(format!("opening repository {}", path.display()))?;
 		let root = PathBuf::from(git_line(&path, &["rev-parse", "--show-toplevel"])?);
 		let git_dir = PathBuf::from(git_line(&root, &["rev-parse", "--git-path", "omp-kb"])?);
 		let dir = root.join(git_dir);
@@ -125,7 +127,7 @@ impl Store {
 		for path in paths {
 			files.insert(
 				path.clone(),
-				file_hash(&self.root.join(&path)).with_context(|| format!("hashing {path}"))?,
+				file_hash(&self.root.join(&path)).context(format!("hashing {path}"))?,
 			);
 		}
 		let fingerprint = Hash32::sum(serde_json::to_vec(&files)?).to_string();
@@ -141,24 +143,30 @@ impl Store {
 		let path = self.dir.join("index.json");
 		let head: Head = serde_json::from_slice(
 			&fs::read(&path)
-				.with_context(|| format!("reading {}; run omp-kb update first", path.display()))?,
+				.context(format!("reading {}; run omp-kb update first", path.display()))?,
 		)
 		.context("invalid knowledge-base head")?;
 		if head.version != 1 {
-			bail!("unsupported knowledge-base head version {}", head.version);
+			return Err(Error::message(format!(
+				"unsupported knowledge-base head version {}",
+				head.version
+			)));
 		}
 		let digest: Hash32 = head
 			.digest
 			.parse()
 			.context("invalid knowledge-base object digest")?;
 		let object = self.dir.join("objects").join(format!("{digest}.json"));
-		let bytes = fs::read(&object).with_context(|| format!("reading {}", object.display()))?;
+		let bytes = fs::read(&object).context(format!("reading {}", object.display()))?;
 		if Hash32::sum(&bytes) != digest {
-			bail!("knowledge-base object digest mismatch");
+			return Err(Error::message("knowledge-base object digest mismatch"));
 		}
 		let index: Index = serde_json::from_slice(&bytes).context("invalid knowledge-base index")?;
 		if index.version != 1 {
-			bail!("unsupported knowledge-base index version {}", index.version);
+			return Err(Error::message(format!(
+				"unsupported knowledge-base index version {}",
+				index.version
+			)));
 		}
 		Ok(index)
 	}
@@ -185,10 +193,9 @@ impl Store {
 			if producer.run(&self.root, scip.path())? == Run::Absent {
 				continue;
 			}
-			let bytes =
-				fs::read(scip.path()).with_context(|| format!("reading {} output", producer.name))?;
-			let mut raw = Index::read_scip(&bytes)
-				.with_context(|| format!("decoding {} output", producer.name))?;
+			let bytes = fs::read(scip.path()).context(format!("reading {} output", producer.name))?;
+			let mut raw =
+				Index::read_scip(&bytes).context(format!("decoding {} output", producer.name))?;
 			paths.extend(Index::document_paths(&raw)?);
 			combined.documents.append(&mut raw.documents);
 			combined.external_symbols.append(&mut raw.external_symbols);
@@ -205,7 +212,7 @@ impl Store {
 				.keys()
 				.any(|path| !before.files.contains_key(path) && !covered.contains(path.as_str()))
 		{
-			bail!("repository changed while SCIP producers were running");
+			return Err(Error::message("repository changed while SCIP producers were running"));
 		}
 		let uncovered: Vec<&str> = sources
 			.iter()
@@ -216,10 +223,10 @@ impl Store {
 		index.add_syntactic(&self.root, &uncovered)?;
 		self.add_wasm_tags(&mut index)?;
 		if !index.has_definitions() {
-			bail!("index has no definitions");
+			return Err(Error::message("index has no definitions"));
 		}
 		if self.snapshot(&paths)? != after {
-			bail!("repository changed while building the index");
+			return Err(Error::message("repository changed while building the index"));
 		}
 		Ok(index)
 	}
@@ -280,7 +287,7 @@ impl Store {
 		if !destination.exists() || file_hash(&destination)?.as_deref() != Some(&digest) {
 			object
 				.persist(&destination)
-				.context("publishing knowledge-base object")?;
+				.map_err(|error| Error::foreign("publishing knowledge-base object", error))?;
 		}
 		let mut temporary = tempfile::NamedTempFile::new_in(&self.dir)?;
 		serde_json::to_writer(&mut temporary, &Head { version: 1, digest })?;
@@ -288,7 +295,7 @@ impl Store {
 		temporary.as_file().sync_all()?;
 		temporary
 			.persist(self.dir.join("index.json"))
-			.context("publishing knowledge-base head")?;
+			.map_err(|error| Error::foreign("publishing knowledge-base head", error))?;
 		match fs::remove_file(self.dir.join("refresh.pending")) {
 			Ok(()) => {},
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {},
@@ -302,7 +309,7 @@ impl Store {
 			let relative = if path.is_absolute() {
 				path
 					.strip_prefix(&self.root)
-					.context("refresh path is outside repository")?
+					.map_err(|error| Error::foreign("refresh path is outside repository", error))?
 			} else {
 				path.as_path()
 			};
@@ -310,7 +317,7 @@ impl Store {
 				|| relative.components().any(|c| {
 					!matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)
 				}) {
-				bail!("invalid refresh path: {}", path.display());
+				return Err(Error::message(format!("invalid refresh path: {}", path.display())));
 			}
 		}
 		fs::create_dir_all(&self.dir)?;

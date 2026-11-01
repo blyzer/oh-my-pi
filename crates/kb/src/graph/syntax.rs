@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, path::Path};
 
-use anyhow::{Context, Result};
 use ast_grep_core::tree_sitter::LanguageExt;
 use omp_ast::SupportLang;
 use tree_sitter::{Language, Node, Parser};
 
 use super::{Call, Implementation, Index, Location, Resolution, token};
+use crate::error::{Context, Error, Result};
 
 const FUNCTIONS: [&str; 6] = [
 	"function_item",
@@ -182,14 +182,15 @@ impl Index {
 				continue;
 			}
 			let full = root.join(path);
-			let metadata =
-				std::fs::symlink_metadata(&full).with_context(|| format!("reading {path}"))?;
+			let metadata = std::fs::symlink_metadata(&full).context(format!("reading {path}"))?;
 			if !metadata.is_file() || metadata.len() > MAX_SOURCE_BYTES {
 				continue;
 			}
-			let source = std::fs::read(&full).with_context(|| format!("reading {path}"))?;
+			let source = std::fs::read(&full).context(format!("reading {path}"))?;
 			let mut parser = Parser::new();
-			parser.set_language(&grammar)?;
+			parser
+				.set_language(&grammar)
+				.map_err(|error| Error::foreign("setting parser language", error))?;
 			let tree = parser.parse(&source, None).context("cannot parse source")?;
 			collect(self, &mut found, &File { path, source: &source }, tree.root_node(), None);
 		}

@@ -4,7 +4,6 @@ use std::{
 	path::{Component, Path},
 };
 
-use anyhow::{Context, Result, bail};
 use ast_grep_core::tree_sitter::LanguageExt;
 use omp_ast::SupportLang;
 use protobuf::Message;
@@ -13,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 use xutf::{Encoding, Utf8, Utf16};
 
-use crate::store::Snapshot;
+use crate::{
+	error::{Context, Error, Result},
+	store::Snapshot,
+};
 
 mod syntax;
 
@@ -146,17 +148,17 @@ fn span(occurrence: &Occurrence) -> Result<Span> {
 		Some(Typed_range::MultiLineRange(r)) => {
 			(r.start_line, r.start_character, r.end_line, r.end_character)
 		},
-		Some(_) => bail!("unsupported SCIP range encoding"),
+		Some(_) => return Err(Error::message("unsupported SCIP range encoding")),
 		None => match occurrence.range.as_slice() {
 			[line, col, end_col] => (*line, *col, *line, *end_col),
 			[line, col, end_line, end_col] => (*line, *col, *end_line, *end_col),
-			_ => bail!("invalid SCIP occurrence range"),
+			_ => return Err(Error::message("invalid SCIP occurrence range")),
 		},
 	};
 	let start = (usize::try_from(line)?, usize::try_from(col)?);
 	let end = (usize::try_from(end_line)?, usize::try_from(end_col)?);
 	if end < start {
-		bail!("invalid SCIP occurrence range order");
+		return Err(Error::message("invalid SCIP occurrence range order"));
 	}
 	Ok(Span { start, end })
 }
@@ -177,7 +179,7 @@ impl Columns {
 			) => Ok(Self::Utf8),
 			Ok(PositionEncoding::UTF16CodeUnitOffsetFromLineStart) => Ok(Self::Utf16),
 			Ok(PositionEncoding::UTF32CodeUnitOffsetFromLineStart) => Ok(Self::Utf32),
-			Err(_) => bail!("unsupported SCIP position encoding"),
+			Err(_) => return Err(Error::message("unsupported SCIP position encoding")),
 		}
 	}
 }
@@ -225,7 +227,7 @@ impl<'a> Lines<'a> {
 			};
 		}
 		if units != column {
-			bail!("SCIP column is outside its line or splits a character");
+			return Err(Error::message("SCIP column is outside its line or splits a character"));
 		}
 		Ok((row, line.len() - rest.len()))
 	}
@@ -404,7 +406,8 @@ impl Syntax<'_> {
 
 impl Index {
 	pub(crate) fn read_scip(bytes: &[u8]) -> Result<scip::types::Index> {
-		let raw = scip::types::Index::parse_from_bytes(bytes).context("invalid SCIP data")?;
+		let raw = scip::types::Index::parse_from_bytes(bytes)
+			.map_err(|error| Error::foreign("invalid SCIP data", error))?;
 		if raw.documents.is_empty()
 			|| !raw
 				.documents
@@ -412,7 +415,7 @@ impl Index {
 				.flat_map(|d| &d.occurrences)
 				.any(|o| o.symbol_roles & 1 != 0 && !o.symbol.is_empty())
 		{
-			bail!("SCIP index has no definitions");
+			return Err(Error::message("SCIP index has no definitions"));
 		}
 		Ok(raw)
 	}
@@ -430,7 +433,10 @@ impl Index {
 		};
 		for document in &raw.documents {
 			if !valid_path(&document.relative_path) {
-				bail!("unsafe SCIP document path: {:?}", document.relative_path);
+				return Err(Error::message(format!(
+					"unsafe SCIP document path: {:?}",
+					document.relative_path
+				)));
 			}
 			Columns::of(document)?;
 			index.add_symbols(document);
@@ -453,7 +459,10 @@ impl Index {
 			.iter()
 			.map(|doc| {
 				if !valid_path(&doc.relative_path) {
-					bail!("unsafe SCIP document path: {:?}", doc.relative_path);
+					return Err(Error::message(format!(
+						"unsafe SCIP document path: {:?}",
+						doc.relative_path
+					)));
 				}
 				Ok(doc.relative_path.clone())
 			})
@@ -516,7 +525,7 @@ impl Index {
 	fn add_occurrences(&mut self, root: &Path, document: &Document) -> Result<()> {
 		let path = &document.relative_path;
 		let source =
-			std::fs::read(root.join(path)).with_context(|| format!("reading SCIP document {path}"))?;
+			std::fs::read(root.join(path)).context(format!("reading SCIP document {path}"))?;
 		let lines = Lines::new(&source);
 		let columns = Columns::of(document)?;
 		let mut positions: BTreeMap<(usize, usize), Vec<At>> = BTreeMap::new();
@@ -524,7 +533,7 @@ impl Index {
 			if occurrence.symbol.is_empty() {
 				continue;
 			}
-			let mut span = span(occurrence).with_context(|| format!("{path}: invalid occurrence"))?;
+			let mut span = span(occurrence).context(format!("{path}: invalid occurrence"))?;
 			span.start = lines.byte_point(span.start, columns)?;
 			span.end = lines.byte_point(span.end, columns)?;
 			let id = symbol_id(path, &occurrence.symbol);
@@ -544,7 +553,9 @@ impl Index {
 		}
 		if let Some(language) = SupportLang::from_path(Path::new(path)) {
 			let mut parser = Parser::new();
-			parser.set_language(&language.get_ts_language())?;
+			parser
+				.set_language(&language.get_ts_language())
+				.map_err(|error| Error::foreign("setting parser language", error))?;
 			let tree = parser.parse(&source, None).context("cannot parse source")?;
 			Syntax { path, source: &source, positions: &positions, index: self }
 				.visit(tree.root_node(), None);

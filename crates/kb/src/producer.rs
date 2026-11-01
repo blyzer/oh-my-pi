@@ -5,8 +5,9 @@ use std::{
 	process::{Command, Stdio},
 };
 
-use anyhow::{Context, Result, bail};
 use omp_ast::SupportLang;
+
+use crate::error::{Context, Error, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Run {
@@ -101,9 +102,9 @@ impl Producer {
 		(self.arguments)(&mut command, root, output);
 		match command.status() {
 			Ok(status) if status.success() => Ok(Run::Indexed),
-			Ok(status) => bail!("{} failed with {status}", self.name),
+			Ok(status) => return Err(Error::Producer { name: self.name, status }),
 			Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Run::Absent),
-			Err(error) => Err(error).with_context(|| format!("starting {}", self.name)),
+			Err(error) => Err(error).context(format!("starting {}", self.name)),
 		}
 	}
 }
