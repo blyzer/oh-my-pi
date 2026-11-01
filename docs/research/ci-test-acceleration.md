@@ -427,11 +427,9 @@ Rules that apply to every phase:
 | **6. Archives and sharding** | Only on the trigger in §5 C or §7 | Archive producer + max consumer ≤ current max Linux job p50 (n ≥ 5); identical per-binary test counts | Filtersets reproduce the `--test` sets | Single `if:` toggle (repository variable) back to local builds |
 | **7. Runner/remote** | Larger macOS runner, self-hosted `MACOS_RUNNER`, or BuildBuddy, per ADR 0040 | Owner decision recorded; n ≥ 5 comparison | The 3 hosted-only failures in `BRANCH_PROTECTION.md` resolved | Unset `MACOS_RUNNER`; remove the workflow |
 
-Hybrid prefer-idle-self-hosted / else-hosted for required macOS jobs is
-implemented (`macos_runner` + `scripts/ci-resolve-macos-runner.sh`); see
-`docs/research/ci-macos-runner-fallback.md`. That removes the “pending forever
-on a dead Mac” failure mode; the hosted-only flakes and warm-cache gains remain
-Phase 7 measurement work.
+The Mac in `vars.MACOS_RUNNER` runs only `rust` (persistent target cache).
+`lint_macos` and every Linux job stay on GitHub-hosted runners. See
+`docs/research/ci-macos-runner-fallback.md`.
 
 ## 10. Implement now (Phase 1–2 diffs)
 

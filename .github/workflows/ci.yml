@@ -287,69 +287,6 @@ jobs:
           done
           echo "No successful '$CHECK' run on $head proved tree $pushed; running the macOS job"
 
-  # Prefer an online idle self-hosted Mac when vars.MACOS_RUNNER names one;
-  # otherwise use GitHub-hosted macos-15. GitHub Actions has no native OR for
-  # runs-on (a label array is AND), so without this probe a busy or offline
-  # self-hosted machine leaves required macOS checks pending for up to 24h.
-  # Cross-repo (external) PRs always get hosted — that decision is made in
-  # this workflow file (and again on the rust job's runs-on), never only
-  # inside the checked-out resolve script, which an external PR can rewrite.
-  # Compare head.repo.full_name to github.repository; do NOT use
-  # head.repo.fork — that is true whenever *this* repository is itself a
-  # GitHub fork (blyzer/oh-my-pi ← can1357/oh-my-pi), which falsely forced
-  # every same-repo PR onto scarce hosted macos-15. Same check as
-  # remote_linux below. See docs/research/ci-macos-runner-fallback.md.
-  macos_runner:
-    name: Resolve macOS runner
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      # Listing self-hosted runners needs repo admin; that is NOT a grantable
-      # GITHUB_TOKEN permission (administration:read is invalid and fails the
-      # whole workflow at parse time). The resolve script therefore keeps a
-      # configured MACOS_RUNNER when the list call 403s. Optional secret
-      # ACTIONS_RUNNER_PROBE_TOKEN (repo-admin PAT) enables real idle probing.
-      actions: read
-    outputs:
-      runs_on: ${{ steps.external.outputs.runs_on || steps.resolve.outputs.runs_on }}
-    steps:
-      # Authoritative external-PR gate: untrusted cross-repo code must not
-      # choose self-hosted.
-      - name: External pull requests always use hosted macos-15
-        id: external
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          set -euo pipefail
-          echo "::notice::External pull request: forcing hosted macos-15 in workflow YAML"
-          {
-            echo "runs_on<<EOF"
-            echo '"macos-15"'
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        if: ${{ steps.external.outcome != 'success' }}
-
-      - name: Prefer idle self-hosted Mac, else macos-15
-        id: resolve
-        if: ${{ steps.external.outcome != 'success' }}
-        env:
-          PREFERRED: ${{ vars.MACOS_RUNNER }}
-          FALLBACK: '"macos-15"'
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          runs_on=$(scripts/ci-resolve-macos-runner.sh)
-          {
-            echo "runs_on<<EOF"
-            echo "$runs_on"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
   rust:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
@@ -366,18 +303,18 @@ jobs:
     # Nor is it gated on `Rust format`: waiting for `cargo fmt --check` held this
     # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
     # format still reports, and fails, its own required check.
-    needs: [changes, push_verified, macos_runner]
+    needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # Set MACOS_RUNNER to a JSON label array to prefer a self-hosted Apple
-    # silicon machine (more disk than hosted — every test binary statically
-    # links ~650 MB CPython):
-    #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
-    # macos_runner probes that the matching runner is online and idle; if not
-    # (or the variable is unset), runs-on is hosted macos-15 so required checks
-    # never queue forever on a dead machine. Cross-repo PRs are forced to
-    # hosted here in the workflow expression so a rewritten resolve script
-    # cannot override (full_name != repository — not head.repo.fork).
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"macos-15"' || needs.macos_runner.outputs.runs_on) }}
+    # This is the job that keeps a persistent target dir (incremental Rust +
+    # embedded CPython) on the self-hosted Mac registered on THIS repository
+    # (`vars.MACOS_RUNNER`, e.g. ["self-hosted","macOS","ARM64"]). Every other
+    # CI job stays on GitHub-hosted runners so that Mac is not occupied by
+    # work that does not reuse that cache. Unset MACOS_RUNNER → macos-15.
+    # A pull request whose head is a different repository (not a branch of
+    # this one) is forced to hosted here in the workflow file, so untrusted
+    # code never runs on the Mac. Do not use head.repo.fork for that: this
+    # repository can itself be a GitHub fork and still own the runner.
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"macos-15"' || vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -513,8 +450,8 @@ jobs:
   # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
   # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
   # cold one (371-912 s). It does not use the self-hosted target dir, so it
-  # stays on hosted macos-15 and does not wait on macos_runner. Linux clippy
-  # still cannot see #[cfg(target_os = "macos")].
+  # stays on GitHub-hosted macos-15 and leaves the Mac free for `rust`.
+  # Linux clippy still cannot see #[cfg(target_os = "macos")].
   lint_macos:
     name: Lint workspace (macOS)
     env:

@@ -145,16 +145,14 @@ Things that keep this honest:
 `Package macOS`, `PR labels` and the P8 recorder are not required and are not
 gated by `changes`.
 
-If the ruleset requires `Rust workspace and acceptance proofs` while the
-`MACOS_RUNNER` variable prefers a self-hosted Mac, CI still must not block
-forever on an offline or busy machine. The `macos_runner` job in `ci.yml`
-probes the Actions runners API and sets `rust` `runs-on` to
-those labels only when a matching runner is online and idle; otherwise it
-emits hosted `macos-15` (cross-repo PRs always get hosted; same-repo PRs on
-this forked repository are not treated as external). `lint_macos` always uses
-hosted `macos-15`. See
-`docs/research/ci-macos-runner-fallback.md`. The ruleset's admin bypass
-remains the escape hatch if hosted macOS itself is unavailable.
+`Rust workspace and acceptance proofs` is the only required job that uses the
+self-hosted Mac registered on this repository (`vars.MACOS_RUNNER`). It keeps
+the persistent compile cache. Every other required job, including
+`Lint workspace (macOS)`, runs on a GitHub-hosted runner so that Mac is not
+occupied by work that does not reuse the cache. A pull request from another
+repository is forced to hosted `macos-15`. If the Mac is offline, this one
+job waits; the escape hatch is the ruleset's admin bypass, or unsetting
+`MACOS_RUNNER`. See `docs/research/ci-macos-runner-fallback.md`.
 
 Measured on the hosted runner (run 37329841934, `macos-15-arm64`): the job builds and
 links the whole workspace in about 52 minutes (against about 15 on a warm self-hosted
