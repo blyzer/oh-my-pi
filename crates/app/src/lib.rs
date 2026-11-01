@@ -48,6 +48,7 @@ mod gui;
 pub mod help_extra;
 pub mod images_cmd;
 pub mod jobs_cmd;
+pub mod kb_cmd;
 pub mod keybindings;
 mod live_path;
 mod live_reachability;

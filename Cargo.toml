@@ -130,6 +130,7 @@ omp-audio = { path = "crates/audio", version = "2.0.0" }
 omp-core = { path = "crates/core", version = "2.0.0", features = ["schemars"] }
 omp-dom = { path = "crates/dom", version = "2.0.0" }
 omp-journal = { path = "crates/journal", version = "2.0.0" }
+omp-kb = { path = "crates/kb", version = "2.0.0" }
 objc2-core-graphics = "=0.3.2"
 omp-desktop = { path = "crates/desktop", version = "2.0.0" }
 omp-driver = { path = "crates/driver", version = "2.0.0", default-features = false }
@@ -195,6 +196,7 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 prost-types = "0.14.4"
 protox = "0.9.1"
+protobuf = "3.7.2"
 pyo3 = "0.29.2"
 pyo3-introspection = "0.29.2"
 quick-xml = "0.41"
@@ -214,6 +216,7 @@ russh-sftp = "2.4"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "1.2.2"
+scip = "0.10.0"
 security-framework = "3.7"
 rustybuzz = "0.20"
 self_cell = "1"

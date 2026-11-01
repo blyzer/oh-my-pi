@@ -82,7 +82,7 @@ use crate::{
 	gallery_cmd::GalleryArgs,
 	gc_cmd, git_cmd,
 	git_cmd::GitArgs,
-	grievances_cmd, jobs_cmd, models_cmd, print_mode, profile_alias, render_cmd,
+	grievances_cmd, jobs_cmd, kb_cmd, models_cmd, print_mode, profile_alias, render_cmd,
 	render_cmd::RenderArgs,
 	rpc_mode, say_cmd, setup_cmd, smoke_test, ssh_cmd,
 	ssh_cmd::SshArgs,
@@ -1216,6 +1216,7 @@ pub enum Command {
 	},
 	/// Rewrite text files into a dense telegraphic register.
 	Compress(CompressCliArgs),
+	Kb(kb_cmd::KbArgs),
 	/// Inspect or reattach journalled remote execution jobs.
 	Jobs(JobsArgs),
 	/// Auth-broker verbs are retained as structured errors until a broker
@@ -2695,6 +2696,7 @@ enum DispatchTarget {
 	Completions,
 	Complete,
 	Compress,
+	Kb,
 	Jobs,
 	Attach,
 }
@@ -2755,6 +2757,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Completions { .. }) => DispatchTarget::Completions,
 		Some(Command::Complete { .. }) => DispatchTarget::Complete,
 		Some(Command::Compress(_)) => DispatchTarget::Compress,
+		Some(Command::Kb(_)) => DispatchTarget::Kb,
 		Some(Command::Jobs(_)) => DispatchTarget::Jobs,
 		Some(Command::AuthBroker(_)) => DispatchTarget::AuthBroker,
 		Some(Command::AuthGateway(_)) => DispatchTarget::AuthGateway,
@@ -3333,6 +3336,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			})
 			.await
 		},
+		Command::Kb(args) => kb_cmd::run(args),
 		Command::Jobs(args) => jobs_cmd::run(args).await,
 		Command::AuthBroker(args) => auth_broker_cmd::run(args).await,
 		Command::AuthGateway(args) => auth_gateway_cmd::run(args).await,
