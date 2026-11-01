@@ -70,15 +70,22 @@ if [ -z "$REPO" ]; then
 	REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 fi
 
-# List repo self-hosted runners. Fail open to FALLBACK on any API error so a
-# permissions miss never queues required checks forever. --paginate emits one
-# page object per chunk; merge .runners across pages before matching labels.
-if ! runners_json=$(gh api --paginate "repos/$REPO/actions/runners" 2>/dev/null \
+# List repo self-hosted runners (needs administration:read on GITHUB_TOKEN).
+# --paginate emits one page object per chunk; merge .runners across pages.
+# On API failure: keep PREFERRED when it names something other than the
+# hosted fallback — ignoring a configured MACOS_RUNNER because the token
+# cannot probe is worse than briefly queueing. Only fall back when preferred
+# is empty/hosted-only (handled above) or explicitly want hosted.
+api_err=$(mktemp)
+if ! runners_json=$(gh api --paginate "repos/$REPO/actions/runners" 2>"$api_err" \
 	| jq -c -s '{runners: [.[].runners // [] | .[]]}'); then
-	notice "Could not list runners for $REPO; using hosted fallback $FALLBACK"
-	emit "$FALLBACK"
+	err=$(tr '\n' ' ' <"$api_err" | head -c 200)
+	rm -f "$api_err"
+	notice "Could not list runners for $REPO (${err:-unknown}); keeping configured MACOS_RUNNER=$preferred_json"
+	emit "$preferred_json"
 	exit 0
 fi
+rm -f "$api_err"
 
 # Prefer an online, idle runner that carries every preferred label.
 match=$(PREFERRED_JSON="$preferred_json" RUNNERS_JSON="$runners_json" jq -n -c '

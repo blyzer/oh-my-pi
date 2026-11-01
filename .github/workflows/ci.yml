@@ -307,7 +307,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # actions:read alone cannot call GET …/actions/runners (needs
+      # administration:read). Without that the probe always failed closed to
+      # hosted and ignored a configured MACOS_RUNNER / self-hosted Mac.
       actions: read
+      administration: read
     outputs:
       runs_on: ${{ steps.external.outputs.runs_on || steps.resolve.outputs.runs_on }}
     steps:
