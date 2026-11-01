@@ -71,7 +71,7 @@ if [ -z "$REPO" ]; then
 	REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 fi
 
-# List repo self-hosted runners (needs administration:read on GITHUB_TOKEN).
+# List repo self-hosted runners (needs a repo-admin token; GITHUB_TOKEN 403s).
 # --paginate emits one page object per chunk; merge .runners across pages.
 # On API failure: keep PREFERRED when it names something other than the
 # hosted fallback — ignoring a configured MACOS_RUNNER because the token
