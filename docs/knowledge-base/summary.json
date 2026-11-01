@@ -1,0 +1,6754 @@
+{
+  "format": "omp-knowledge-base-symbols/v1",
+  "method": "column-0 pub struct|enum|trait|type|fn|const|static (module-level API surface), not full rustc AST",
+  "totals": {
+    "symbols": 11588,
+    "crates": 52,
+    "by_kind": {
+      "struct": 4668,
+      "enum": 2192,
+      "trait": 276,
+      "type": 177,
+      "fn": 3429,
+      "const": 834,
+      "static": 12
+    }
+  },
+  "domains": {
+    "state_authority": [
+      "journal",
+      "dom",
+      "vocab",
+      "session"
+    ],
+    "control_plane": [
+      "con",
+      "agent",
+      "driver"
+    ],
+    "inference": [
+      "ai",
+      "catalog",
+      "scribe"
+    ],
+    "tools_env": [
+      "tool",
+      "tools",
+      "env",
+      "envd",
+      "shell",
+      "shell-builtins"
+    ],
+    "presentation": [
+      "tui",
+      "chat",
+      "app",
+      "gui",
+      "macros"
+    ],
+    "extensions": [
+      "ext",
+      "py",
+      "py-link"
+    ],
+    "transport": [
+      "proto",
+      "rpc",
+      "serve",
+      "sdk",
+      "http"
+    ],
+    "build_exec": [
+      "exec",
+      "exec-local",
+      "exec-reapi",
+      "exec-buildbuddy",
+      "exec-ssh"
+    ]
+  },
+  "crates": {
+    "adw": {
+      "count": 17,
+      "by_kind": {
+        "enum": 10,
+        "struct": 6,
+        "const": 1
+      }
+    },
+    "agent": {
+      "count": 402,
+      "by_kind": {
+        "struct": 148,
+        "enum": 92,
+        "fn": 100,
+        "type": 7,
+        "trait": 23,
+        "const": 32
+      }
+    },
+    "ai": {
+      "count": 1850,
+      "by_kind": {
+        "fn": 291,
+        "enum": 414,
+        "struct": 916,
+        "const": 142,
+        "trait": 49,
+        "type": 35,
+        "static": 3
+      }
+    },
+    "app": {
+      "count": 469,
+      "by_kind": {
+        "struct": 162,
+        "fn": 222,
+        "enum": 74,
+        "const": 8,
+        "type": 1,
+        "trait": 2
+      }
+    },
+    "ar": {
+      "count": 115,
+      "by_kind": {
+        "enum": 5,
+        "const": 19,
+        "struct": 21,
+        "fn": 68,
+        "type": 2
+      }
+    },
+    "ast": {
+      "count": 121,
+      "by_kind": {
+        "const": 3,
+        "fn": 90,
+        "struct": 20,
+        "enum": 6,
+        "trait": 1,
+        "type": 1
+      }
+    },
+    "audio": {
+      "count": 62,
+      "by_kind": {
+        "const": 3,
+        "enum": 9,
+        "fn": 19,
+        "type": 6,
+        "struct": 24,
+        "trait": 1
+      }
+    },
+    "cache": {
+      "count": 59,
+      "by_kind": {
+        "const": 5,
+        "struct": 31,
+        "enum": 12,
+        "fn": 11
+      }
+    },
+    "catalog": {
+      "count": 297,
+      "by_kind": {
+        "struct": 157,
+        "enum": 83,
+        "fn": 46,
+        "const": 5,
+        "type": 6
+      }
+    },
+    "chat": {
+      "count": 663,
+      "by_kind": {
+        "const": 77,
+        "struct": 255,
+        "fn": 201,
+        "enum": 118,
+        "type": 5,
+        "trait": 7
+      }
+    },
+    "con": {
+      "count": 70,
+      "by_kind": {
+        "struct": 29,
+        "type": 11,
+        "static": 2,
+        "enum": 16,
+        "const": 3,
+        "trait": 3,
+        "fn": 6
+      }
+    },
+    "core": {
+      "count": 185,
+      "by_kind": {
+        "type": 18,
+        "fn": 58,
+        "struct": 57,
+        "enum": 39,
+        "trait": 6,
+        "const": 7
+      }
+    },
+    "desktop": {
+      "count": 112,
+      "by_kind": {
+        "enum": 10,
+        "struct": 33,
+        "fn": 64,
+        "type": 2,
+        "trait": 2,
+        "const": 1
+      }
+    },
+    "dom": {
+      "count": 27,
+      "by_kind": {
+        "enum": 8,
+        "struct": 10,
+        "trait": 1,
+        "fn": 6,
+        "type": 1,
+        "const": 1
+      }
+    },
+    "driver": {
+      "count": 622,
+      "by_kind": {
+        "fn": 226,
+        "struct": 214,
+        "enum": 131,
+        "const": 36,
+        "trait": 12,
+        "type": 3
+      }
+    },
+    "e2e": {
+      "count": 120,
+      "by_kind": {
+        "type": 3,
+        "trait": 1,
+        "fn": 52,
+        "const": 10,
+        "struct": 46,
+        "enum": 7,
+        "static": 1
+      }
+    },
+    "edit": {
+      "count": 363,
+      "by_kind": {
+        "struct": 77,
+        "fn": 174,
+        "trait": 3,
+        "const": 79,
+        "enum": 28,
+        "type": 1,
+        "static": 1
+      }
+    },
+    "env": {
+      "count": 93,
+      "by_kind": {
+        "struct": 39,
+        "fn": 27,
+        "enum": 18,
+        "trait": 1,
+        "const": 8
+      }
+    },
+    "envd": {
+      "count": 1588,
+      "by_kind": {
+        "enum": 350,
+        "struct": 760,
+        "fn": 316,
+        "const": 103,
+        "trait": 49,
+        "type": 10
+      }
+    },
+    "exec": {
+      "count": 67,
+      "by_kind": {
+        "enum": 26,
+        "fn": 4,
+        "struct": 27,
+        "const": 5,
+        "trait": 3,
+        "type": 2
+      }
+    },
+    "exec-buildbuddy": {
+      "count": 8,
+      "by_kind": {
+        "struct": 5,
+        "trait": 1,
+        "enum": 2
+      }
+    },
+    "exec-local": {
+      "count": 3,
+      "by_kind": {
+        "struct": 3
+      }
+    },
+    "exec-reapi": {
+      "count": 32,
+      "by_kind": {
+        "enum": 9,
+        "fn": 8,
+        "struct": 12,
+        "const": 1,
+        "trait": 2
+      }
+    },
+    "exec-ssh": {
+      "count": 3,
+      "by_kind": {
+        "struct": 3
+      }
+    },
+    "ext": {
+      "count": 259,
+      "by_kind": {
+        "struct": 98,
+        "enum": 56,
+        "fn": 66,
+        "const": 36,
+        "trait": 2,
+        "type": 1
+      }
+    },
+    "gui": {
+      "count": 46,
+      "by_kind": {
+        "fn": 11,
+        "struct": 24,
+        "const": 2,
+        "enum": 7,
+        "type": 1,
+        "trait": 1
+      }
+    },
+    "http": {
+      "count": 5,
+      "by_kind": {
+        "struct": 1,
+        "fn": 4
+      }
+    },
+    "journal": {
+      "count": 100,
+      "by_kind": {
+        "struct": 49,
+        "enum": 20,
+        "const": 20,
+        "fn": 11
+      }
+    },
+    "macros": {
+      "count": 21,
+      "by_kind": {
+        "fn": 9,
+        "struct": 9,
+        "enum": 3
+      }
+    },
+    "memory": {
+      "count": 107,
+      "by_kind": {
+        "fn": 18,
+        "const": 14,
+        "enum": 16,
+        "struct": 56,
+        "trait": 2,
+        "type": 1
+      }
+    },
+    "oauth": {
+      "count": 53,
+      "by_kind": {
+        "struct": 21,
+        "enum": 10,
+        "fn": 19,
+        "const": 2,
+        "trait": 1
+      }
+    },
+    "observability": {
+      "count": 165,
+      "by_kind": {
+        "fn": 44,
+        "enum": 12,
+        "struct": 82,
+        "const": 12,
+        "type": 15
+      }
+    },
+    "proto": {
+      "count": 29,
+      "by_kind": {
+        "const": 16,
+        "enum": 3,
+        "fn": 7,
+        "struct": 3
+      }
+    },
+    "py": {
+      "count": 26,
+      "by_kind": {
+        "struct": 10,
+        "fn": 12,
+        "const": 2,
+        "enum": 2
+      }
+    },
+    "py-link": {
+      "count": 1,
+      "by_kind": {
+        "fn": 1
+      }
+    },
+    "rpc": {
+      "count": 102,
+      "by_kind": {
+        "type": 3,
+        "fn": 14,
+        "struct": 57,
+        "const": 12,
+        "enum": 14,
+        "trait": 2
+      }
+    },
+    "sandbox": {
+      "count": 137,
+      "by_kind": {
+        "struct": 37,
+        "enum": 23,
+        "fn": 64,
+        "const": 12,
+        "trait": 1
+      }
+    },
+    "scribe": {
+      "count": 26,
+      "by_kind": {
+        "struct": 8,
+        "fn": 8,
+        "enum": 10
+      }
+    },
+    "sdk": {
+      "count": 2,
+      "by_kind": {
+        "enum": 1,
+        "struct": 1
+      }
+    },
+    "secrets": {
+      "count": 47,
+      "by_kind": {
+        "struct": 10,
+        "fn": 27,
+        "enum": 7,
+        "const": 3
+      }
+    },
+    "serve": {
+      "count": 13,
+      "by_kind": {
+        "enum": 2,
+        "struct": 7,
+        "trait": 2,
+        "type": 1,
+        "fn": 1
+      }
+    },
+    "session": {
+      "count": 118,
+      "by_kind": {
+        "const": 47,
+        "struct": 30,
+        "enum": 8,
+        "fn": 32,
+        "trait": 1
+      }
+    },
+    "shell": {
+      "count": 594,
+      "by_kind": {
+        "fn": 236,
+        "enum": 106,
+        "struct": 187,
+        "type": 17,
+        "static": 2,
+        "const": 9,
+        "trait": 37
+      }
+    },
+    "shell-builtins": {
+      "count": 294,
+      "by_kind": {
+        "struct": 92,
+        "fn": 153,
+        "trait": 6,
+        "type": 4,
+        "enum": 32,
+        "static": 1,
+        "const": 6
+      }
+    },
+    "snapcompact": {
+      "count": 32,
+      "by_kind": {
+        "const": 8,
+        "enum": 4,
+        "fn": 11,
+        "struct": 7,
+        "type": 2
+      }
+    },
+    "tool": {
+      "count": 167,
+      "by_kind": {
+        "enum": 57,
+        "fn": 12,
+        "trait": 4,
+        "struct": 85,
+        "const": 5,
+        "type": 2,
+        "static": 2
+      }
+    },
+    "tools": {
+      "count": 1104,
+      "by_kind": {
+        "trait": 37,
+        "struct": 436,
+        "enum": 181,
+        "fn": 390,
+        "const": 54,
+        "type": 6
+      }
+    },
+    "tui": {
+      "count": 589,
+      "by_kind": {
+        "struct": 234,
+        "type": 7,
+        "fn": 210,
+        "enum": 106,
+        "trait": 11,
+        "const": 21
+      }
+    },
+    "vcs": {
+      "count": 59,
+      "by_kind": {
+        "fn": 23,
+        "enum": 9,
+        "struct": 22,
+        "type": 1,
+        "const": 4
+      }
+    },
+    "vocab": {
+      "count": 4,
+      "by_kind": {
+        "enum": 4
+      }
+    },
+    "walker": {
+      "count": 69,
+      "by_kind": {
+        "fn": 32,
+        "enum": 16,
+        "struct": 19,
+        "trait": 2
+      }
+    },
+    "webview": {
+      "count": 71,
+      "by_kind": {
+        "enum": 16,
+        "struct": 28,
+        "fn": 25,
+        "type": 2
+      }
+    }
+  },
+  "modules": {
+    "adw": [
+      {
+        "name": "profile",
+        "line": 32,
+        "public": false,
+        "path": "crates/adw/src/lib.rs"
+      },
+      {
+        "name": "run",
+        "line": 33,
+        "public": false,
+        "path": "crates/adw/src/lib.rs"
+      },
+      {
+        "name": "workflow",
+        "line": 34,
+        "public": false,
+        "path": "crates/adw/src/lib.rs"
+      }
+    ],
+    "agent": [
+      {
+        "name": "approvals",
+        "line": 5,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "cancel",
+        "line": 6,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "context",
+        "line": 7,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "delegated",
+        "line": 8,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "director",
+        "line": 9,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "directors",
+        "line": 10,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "dispatch",
+        "line": 11,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "env",
+        "line": 12,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "events",
+        "line": 13,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "extensions",
+        "line": 14,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "file_mentions",
+        "line": 15,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "hooks",
+        "line": 16,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "jobs",
+        "line": 17,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "local",
+        "line": 18,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "loop_",
+        "line": 20,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "model_watch",
+        "line": 21,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "pause",
+        "line": 22,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "prompt",
+        "line": 23,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "registry",
+        "line": 24,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "roster",
+        "line": 25,
+        "public": false,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "steering",
+        "line": 26,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "stream_coalesce",
+        "line": 27,
+        "public": false,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "vars",
+        "line": 28,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "name": "vision",
+        "line": 30,
+        "public": true,
+        "path": "crates/agent/src/lib.rs"
+      }
+    ],
+    "ai": [
+      {
+        "name": "account",
+        "line": 11,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "answer",
+        "line": 12,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "auth",
+        "line": 13,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "body",
+        "line": 14,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "call",
+        "line": 15,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "client",
+        "line": 16,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "codec",
+        "line": 17,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "debug_wire",
+        "line": 18,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "discovery",
+        "line": 19,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 20,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "event",
+        "line": 21,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "gate",
+        "line": 22,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "id",
+        "line": 23,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "layer",
+        "line": 24,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "local",
+        "line": 26,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "operation",
+        "line": 27,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "plan",
+        "line": 28,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "provider",
+        "line": 29,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "realtime",
+        "line": 30,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "receipt",
+        "line": 31,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "recovery",
+        "line": 32,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "registry",
+        "line": 33,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "router",
+        "line": 34,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "search_settings",
+        "line": 35,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "session",
+        "line": 36,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 37,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "speech_settings",
+        "line": 39,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "staging",
+        "line": 40,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "name": "transport",
+        "line": 41,
+        "public": true,
+        "path": "crates/ai/src/lib.rs"
+      }
+    ],
+    "app": [
+      {
+        "name": "acp_client",
+        "line": 5,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "acp_events",
+        "line": 6,
+        "public": false,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "acp_mode",
+        "line": 7,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "adw_cmd",
+        "line": 8,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "attach_cmd",
+        "line": 9,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "audio_coordinator",
+        "line": 10,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "auth_broker_cmd",
+        "line": 11,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "auth_cli",
+        "line": 12,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "auth_gateway_cmd",
+        "line": 13,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "bench_cmd",
+        "line": 14,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "browser_relay_cmd",
+        "line": 15,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "chat_cmd",
+        "line": 16,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "chat_services",
+        "line": 21,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "chat_voice",
+        "line": 23,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "cleanse_cmd",
+        "line": 24,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "cli",
+        "line": 25,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "collab_cmd",
+        "line": 26,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "commit_cmd",
+        "line": 27,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "complete_cmd",
+        "line": 28,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "completions",
+        "line": 29,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "compress_cmd",
+        "line": 30,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "config_cmd",
+        "line": 31,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "cursor_bridge",
+        "line": 32,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "daemon",
+        "line": 33,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "debug",
+        "line": 34,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "debug_logs",
+        "line": 35,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "diagnostics",
+        "line": 36,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "dry_balance_cmd",
+        "line": 37,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "endpoint",
+        "line": 38,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "exit_diagnostics",
+        "line": 39,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "ext_cli",
+        "line": 40,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "gallery_cmd",
+        "line": 41,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "gateway_rpc",
+        "line": 42,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "gc_cmd",
+        "line": 43,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "git_cmd",
+        "line": 44,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "grievances_cmd",
+        "line": 45,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "gui",
+        "line": 47,
+        "public": false,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "help_extra",
+        "line": 48,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "images_cmd",
+        "line": 49,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "jobs_cmd",
+        "line": 50,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "keybindings",
+        "line": 51,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "live_path",
+        "line": 52,
+        "public": false,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "live_reachability",
+        "line": 53,
+        "public": false,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "models_cmd",
+        "line": 54,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "print_mode",
+        "line": 56,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "profile_alias",
+        "line": 57,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "progress_reporter",
+        "line": 58,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "ps_cmd",
+        "line": 59,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "render_cmd",
+        "line": 60,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "rpc_mode",
+        "line": 61,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "rules_cmd",
+        "line": 62,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "say_cmd",
+        "line": 64,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 66,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "say_cmd",
+        "line": 69,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "session_import",
+        "line": 77,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "setup_cmd",
+        "line": 78,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "share_cmd",
+        "line": 79,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "shell_cmd",
+        "line": 80,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "smoke_test",
+        "line": 81,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "spec",
+        "line": 82,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "ssh_cmd",
+        "line": 83,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "standalone_tool_cmd",
+        "line": 84,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "startup_notice",
+        "line": 85,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "startup_update",
+        "line": 86,
+        "public": false,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "stats_cmd",
+        "line": 87,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "theme_watcher",
+        "line": 88,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "tiny_models_cmd",
+        "line": 89,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "token_cmd",
+        "line": 90,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "tool_installer",
+        "line": 91,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "trust_cmd",
+        "line": 92,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "update_cmd",
+        "line": 93,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "usage_cmd",
+        "line": 94,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "usage_error",
+        "line": 95,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "voice",
+        "line": 96,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "welcome_facts",
+        "line": 97,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      },
+      {
+        "name": "worktree_cmd",
+        "line": 98,
+        "public": true,
+        "path": "crates/app/src/lib.rs"
+      }
+    ],
+    "ar": [
+      {
+        "name": "archive",
+        "line": 22,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "arj",
+        "line": 23,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "asar",
+        "line": 24,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "cab",
+        "line": 25,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "codec",
+        "line": 26,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "cpio",
+        "line": 27,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "deb",
+        "line": 28,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "entry",
+        "line": 29,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 30,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "iso",
+        "line": 31,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "links",
+        "line": 32,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "lzh",
+        "line": 33,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "path",
+        "line": 34,
+        "public": false,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "rar",
+        "line": 35,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "rpm",
+        "line": 36,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "sevenzip",
+        "line": 37,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "tar",
+        "line": 38,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "unix_ar",
+        "line": 39,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "name": "zip",
+        "line": 40,
+        "public": true,
+        "path": "crates/ar/src/lib.rs"
+      }
+    ],
+    "ast": [
+      {
+        "name": "block",
+        "line": 4,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 6,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "language",
+        "line": 8,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "ops",
+        "line": 10,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "parse_cache",
+        "line": 12,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "summary",
+        "line": 14,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "name": "symbol",
+        "line": 16,
+        "public": true,
+        "path": "crates/ast/src/lib.rs"
+      }
+    ],
+    "audio": [
+      {
+        "name": "audio",
+        "line": 15,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "coordinator",
+        "line": 16,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "device",
+        "line": 18,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "segmentation",
+        "line": 20,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "triggers",
+        "line": 22,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "vad",
+        "line": 24,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      },
+      {
+        "name": "wav",
+        "line": 26,
+        "public": true,
+        "path": "crates/audio/src/lib.rs"
+      }
+    ],
+    "cache": [
+      {
+        "name": "atomic",
+        "line": 6,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "document_cache",
+        "line": 8,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "github_cache",
+        "line": 10,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "mcp_cache",
+        "line": 12,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "secret_key",
+        "line": 14,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "stats_cache",
+        "line": 16,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      },
+      {
+        "name": "telemetry_cache",
+        "line": 18,
+        "public": true,
+        "path": "crates/cache/src/lib.rs"
+      }
+    ],
+    "catalog": [
+      {
+        "name": "capability",
+        "line": 7,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "cascade",
+        "line": 8,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "classify",
+        "line": 9,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "compat",
+        "line": 10,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "compile",
+        "line": 11,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "contrib",
+        "line": 12,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "discover",
+        "line": 13,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "id",
+        "line": 14,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "model",
+        "line": 15,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "policy",
+        "line": 16,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "pricing",
+        "line": 17,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "provider",
+        "line": 18,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "resolve",
+        "line": 19,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "runtime",
+        "line": 20,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "selection",
+        "line": 21,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 22,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "snapshot",
+        "line": 23,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "taxonomy",
+        "line": 24,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "thinking",
+        "line": 25,
+        "public": true,
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 47,
+        "public": false,
+        "path": "crates/catalog/src/lib.rs"
+      }
+    ],
+    "chat": [
+      {
+        "name": "account_usage",
+        "line": 5,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "actions",
+        "line": 7,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "autocomplete",
+        "line": 9,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "cards",
+        "line": 11,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "celebrate",
+        "line": 13,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "chrome",
+        "line": 15,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "commands",
+        "line": 17,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "composer",
+        "line": 19,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "editor",
+        "line": 21,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "extension_status",
+        "line": 23,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "gallery",
+        "line": 25,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "gitwatch",
+        "line": 27,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "history",
+        "line": 29,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "host",
+        "line": 31,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "input",
+        "line": 33,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "markdown",
+        "line": 35,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "media",
+        "line": 37,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "notices",
+        "line": 39,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "notify",
+        "line": 41,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "overlays",
+        "line": 43,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "project",
+        "line": 45,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "reaction",
+        "line": 47,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 49,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "status_band",
+        "line": 51,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "status_line",
+        "line": 53,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "test_support",
+        "line": 55,
+        "public": false,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "thinking",
+        "line": 57,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "transcript",
+        "line": 59,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "name": "welcome",
+        "line": 63,
+        "public": true,
+        "path": "crates/chat/src/lib.rs"
+      }
+    ],
+    "con": [
+      {
+        "name": "builtins",
+        "line": 47,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "chord",
+        "line": 48,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "complete",
+        "line": 49,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "ctx",
+        "line": 50,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "dump",
+        "line": 51,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 52,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "handle",
+        "line": 53,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "layers",
+        "line": 54,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "macros",
+        "line": 55,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "repl",
+        "line": 56,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "script",
+        "line": 57,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "spec",
+        "line": 58,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "value",
+        "line": 59,
+        "public": false,
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "name": "__private",
+        "line": 89,
+        "public": true,
+        "path": "crates/con/src/lib.rs"
+      }
+    ],
+    "core": [
+      {
+        "name": "append_vec",
+        "line": 16,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "cache",
+        "line": 17,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "cow_bytes",
+        "line": 18,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "dirs",
+        "line": 20,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "display_time",
+        "line": 21,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "encoding",
+        "line": 22,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "exclusive_sync",
+        "line": 23,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "fasthash",
+        "line": 24,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "fs",
+        "line": 26,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "hash32",
+        "line": 27,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "location",
+        "line": 28,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "logging",
+        "line": 29,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "open",
+        "line": 30,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "path",
+        "line": 31,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "phase",
+        "line": 32,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "principal",
+        "line": 33,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "project_file",
+        "line": 35,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "qr",
+        "line": 36,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "secret",
+        "line": 37,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "semver",
+        "line": 38,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "slopjson",
+        "line": 40,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "sparse_index",
+        "line": 41,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "sparse_map",
+        "line": 42,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "sparse_set",
+        "line": 43,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "str",
+        "line": 44,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "string_id",
+        "line": 46,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "time",
+        "line": 47,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "name": "ulid",
+        "line": 48,
+        "public": true,
+        "path": "crates/core/src/lib.rs"
+      }
+    ],
+    "desktop": [
+      {
+        "name": "ax",
+        "line": 7,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "backend",
+        "line": 8,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 9,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "frame",
+        "line": 10,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "keys",
+        "line": 11,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "linux",
+        "line": 13,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "macos",
+        "line": 15,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "types",
+        "line": 16,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "win32",
+        "line": 18,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "name": "capture_tests",
+        "line": 1194,
+        "public": false,
+        "path": "crates/desktop/src/lib.rs"
+      }
+    ],
+    "dom": [
+      {
+        "name": "arena",
+        "line": 4,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "node",
+        "line": 5,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "op",
+        "line": 6,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "redact",
+        "line": 7,
+        "public": true,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "selector",
+        "line": 8,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "snapshot",
+        "line": 9,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "stream",
+        "line": 10,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "subscribe",
+        "line": 11,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "txn",
+        "line": 12,
+        "public": false,
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "name": "wire",
+        "line": 13,
+        "public": true,
+        "path": "crates/dom/src/lib.rs"
+      }
+    ],
+    "driver": [
+      {
+        "name": "adw",
+        "line": 5,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "auth_backend",
+        "line": 6,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "auth_flow",
+        "line": 7,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "bridges",
+        "line": 8,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "cfg",
+        "line": 9,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "cleanse",
+        "line": 10,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "collab",
+        "line": 11,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "commit",
+        "line": 12,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "compress",
+        "line": 13,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "control_visibility",
+        "line": 14,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "delegated_prompt",
+        "line": 15,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "discovery",
+        "line": 16,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "ext_updates",
+        "line": 17,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "headless",
+        "line": 18,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "keybindings",
+        "line": 19,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "legacy_settings",
+        "line": 20,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "plugin_commands",
+        "line": 21,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "plugin_hooks",
+        "line": 22,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "prompt_input",
+        "line": 23,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "prompt_templates",
+        "line": 24,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "registry",
+        "line": 25,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "rules",
+        "line": 26,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "secrets",
+        "line": 27,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "session_bridge",
+        "line": 28,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "session_wire",
+        "line": 29,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "delegated_acp",
+        "line": 31,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "delegated_host",
+        "line": 32,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "delegated_policy",
+        "line": 33,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "delegated_resolver",
+        "line": 34,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "session_imports",
+        "line": 35,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "sessions",
+        "line": 36,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 37,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "share",
+        "line": 38,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "subagent",
+        "line": 39,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "telemetry_upload",
+        "line": 40,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "v1_import",
+        "line": 41,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      },
+      {
+        "name": "workspace_trust",
+        "line": 42,
+        "public": true,
+        "path": "crates/driver/src/lib.rs"
+      }
+    ],
+    "e2e": [
+      {
+        "name": "baseline",
+        "line": 58,
+        "public": true,
+        "path": "crates/e2e/src/lib.rs"
+      },
+      {
+        "name": "support",
+        "line": 61,
+        "public": true,
+        "path": "crates/e2e/src/lib.rs"
+      }
+    ],
+    "edit": [
+      {
+        "name": "diff",
+        "line": 23,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "diff_string",
+        "line": 25,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "engine",
+        "line": 27,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 29,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "files",
+        "line": 31,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "fuzzy",
+        "line": 33,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "modes",
+        "line": 35,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "notebook",
+        "line": 37,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "path_policy",
+        "line": 39,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "session",
+        "line": 41,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "store",
+        "line": 43,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "stream_json",
+        "line": 45,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "name": "text",
+        "line": 47,
+        "public": true,
+        "path": "crates/edit/src/lib.rs"
+      }
+    ],
+    "env": [
+      {
+        "name": "admit",
+        "line": 8,
+        "public": false,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "build_id",
+        "line": 9,
+        "public": true,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "bundle",
+        "line": 10,
+        "public": false,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "client",
+        "line": 11,
+        "public": false,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "guard",
+        "line": 12,
+        "public": false,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "partition",
+        "line": 13,
+        "public": true,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "project_state",
+        "line": 14,
+        "public": true,
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "name": "windows",
+        "line": 16,
+        "public": true,
+        "path": "crates/env/src/lib.rs"
+      }
+    ],
+    "envd": [
+      {
+        "name": "acp_client",
+        "line": 6,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "admission",
+        "line": 8,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "approval_relay",
+        "line": 10,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "blobs",
+        "line": 11,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "browser_daemon",
+        "line": 12,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "browser_fetch",
+        "line": 13,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "browser_relay",
+        "line": 14,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "child_env",
+        "line": 16,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "child_tree",
+        "line": 17,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "codex_app_server",
+        "line": 19,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "computer",
+        "line": 20,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "daemon_policy",
+        "line": 21,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "devices_host",
+        "line": 22,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "direnv",
+        "line": 23,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "docs",
+        "line": 24,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "docserver",
+        "line": 27,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "document_cache",
+        "line": 28,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "editor_base",
+        "line": 29,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "editor_sync",
+        "line": 32,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "eval",
+        "line": 33,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "exec",
+        "line": 34,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "exec_network_diag",
+        "line": 35,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "exec_sandbox",
+        "line": 36,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "exec_settings",
+        "line": 37,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "ext_git",
+        "line": 38,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "exthost",
+        "line": 39,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "fetch_host",
+        "line": 41,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "github",
+        "line": 42,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "github_url",
+        "line": 43,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "grep",
+        "line": 44,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "host_info",
+        "line": 45,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "host_settings",
+        "line": 46,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "http_egress",
+        "line": 47,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "journal_runtime",
+        "line": 48,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "line_reader",
+        "line": 51,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "loopback_upstream",
+        "line": 53,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "lsp_settings",
+        "line": 54,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "managed_skills",
+        "line": 55,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "managed_skills_domain",
+        "line": 56,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "mcp",
+        "line": 57,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "media_devices",
+        "line": 58,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "media_tts",
+        "line": 59,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "memory",
+        "line": 60,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "model_discovery",
+        "line": 61,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "plan_writes",
+        "line": 63,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "plugin_commands",
+        "line": 64,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "policy",
+        "line": 65,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "presence",
+        "line": 66,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "process_identity",
+        "line": 67,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "process_log",
+        "line": 68,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "process_store",
+        "line": 69,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "recovery",
+        "line": 70,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "reflection_relay",
+        "line": 72,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "report_issue",
+        "line": 73,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "resource_materializer",
+        "line": 74,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "sandbox_proxy",
+        "line": 75,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "schedule_plan",
+        "line": 76,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "schedules",
+        "line": 77,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "search_backend",
+        "line": 78,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "security_scan",
+        "line": 79,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "server",
+        "line": 80,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "shell_child",
+        "line": 82,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "site",
+        "line": 83,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "ssh",
+        "line": 84,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "test_process",
+        "line": 86,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_ast_grep",
+        "line": 87,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_debug",
+        "line": 88,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_document",
+        "line": 89,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_lsp",
+        "line": 90,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_read_sources",
+        "line": 91,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_search",
+        "line": 92,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_settings",
+        "line": 93,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_shell",
+        "line": 95,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tool_url",
+        "line": 96,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tools",
+        "line": 97,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "vault",
+        "line": 98,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "vcs",
+        "line": 99,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "windows",
+        "line": 101,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "worker",
+        "line": 102,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "worker_child",
+        "line": 103,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "worker_pool",
+        "line": 104,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "worker_process",
+        "line": 105,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "workspace",
+        "line": 107,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "workspace_roots",
+        "line": 108,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "write_scope",
+        "line": 109,
+        "public": true,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "settings_tests",
+        "line": 322,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 2398,
+        "public": false,
+        "path": "crates/envd/src/lib.rs"
+      }
+    ],
+    "exec": [
+      {
+        "name": "adapter",
+        "line": 45,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "backend",
+        "line": 46,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "cargo_just",
+        "line": 47,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "deny",
+        "line": 48,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "digest",
+        "line": 49,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 50,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "handle",
+        "line": 51,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "ids",
+        "line": 52,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "place",
+        "line": 53,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "platform",
+        "line": 54,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "report",
+        "line": 55,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "request",
+        "line": 56,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "name": "result",
+        "line": 57,
+        "public": false,
+        "path": "crates/exec/src/lib.rs"
+      }
+    ],
+    "exec-buildbuddy": [
+      {
+        "name": "run",
+        "line": 26,
+        "public": false,
+        "path": "crates/exec-buildbuddy/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 28,
+        "public": false,
+        "path": "crates/exec-buildbuddy/src/lib.rs"
+      }
+    ],
+    "exec-local": [
+      {
+        "name": "tests",
+        "line": 336,
+        "public": false,
+        "path": "crates/exec-local/src/lib.rs"
+      }
+    ],
+    "exec-reapi": [
+      {
+        "name": "capabilities",
+        "line": 9,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "cas",
+        "line": 10,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "digest",
+        "line": 11,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "endpoint",
+        "line": 12,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "execute",
+        "line": 13,
+        "public": false,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "profile",
+        "line": 14,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "status",
+        "line": 15,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "tree",
+        "line": 16,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "buildbuddy_cancel",
+        "line": 22,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "name": "proto",
+        "line": 33,
+        "public": true,
+        "path": "crates/exec-reapi/src/lib.rs"
+      }
+    ],
+    "ext": [
+      {
+        "name": "claude_hooks",
+        "line": 8,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "claude_plugin",
+        "line": 9,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "config",
+        "line": 10,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "doctor",
+        "line": 11,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "index",
+        "line": 12,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "lock",
+        "line": 13,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "marketplace",
+        "line": 14,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "plugin_command",
+        "line": 15,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "resolver",
+        "line": 16,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "trust",
+        "line": 17,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "upgrade",
+        "line": 18,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "workspace_trust",
+        "line": 19,
+        "public": true,
+        "path": "crates/ext/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 277,
+        "public": false,
+        "path": "crates/ext/src/lib.rs"
+      }
+    ],
+    "gui": [
+      {
+        "name": "cells",
+        "line": 4,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "fonts",
+        "line": 5,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "gpu",
+        "line": 6,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "host",
+        "line": 7,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "input",
+        "line": 8,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "macos",
+        "line": 10,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "mux",
+        "line": 11,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "pixels",
+        "line": 12,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "scene",
+        "line": 13,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "name": "theme",
+        "line": 14,
+        "public": false,
+        "path": "crates/gui/src/lib.rs"
+      }
+    ],
+    "journal": [
+      {
+        "name": "blob",
+        "line": 7,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "chain",
+        "line": 8,
+        "public": false,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "data",
+        "line": 9,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "entry",
+        "line": 10,
+        "public": false,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "gc",
+        "line": 11,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "kind",
+        "line": 12,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "sse",
+        "line": 13,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "name": "ulid",
+        "line": 14,
+        "public": true,
+        "path": "crates/journal/src/lib.rs"
+      }
+    ],
+    "macros": [
+      {
+        "name": "cached",
+        "line": 9,
+        "public": false,
+        "path": "crates/macros/src/lib.rs"
+      },
+      {
+        "name": "dom",
+        "line": 10,
+        "public": false,
+        "path": "crates/macros/src/lib.rs"
+      },
+      {
+        "name": "markup",
+        "line": 11,
+        "public": false,
+        "path": "crates/macros/src/lib.rs"
+      },
+      {
+        "name": "view",
+        "line": 12,
+        "public": false,
+        "path": "crates/macros/src/lib.rs"
+      }
+    ],
+    "memory": [
+      {
+        "name": "aux_lane",
+        "line": 9,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "bank",
+        "line": 10,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "cache",
+        "line": 11,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "config",
+        "line": 12,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "diagnose",
+        "line": 13,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "embedding",
+        "line": 14,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "extract",
+        "line": 15,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "link",
+        "line": 16,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "recall",
+        "line": 17,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "remote",
+        "line": 18,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "retain",
+        "line": 19,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "runtime",
+        "line": 20,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "session",
+        "line": 21,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "name": "store",
+        "line": 22,
+        "public": true,
+        "path": "crates/memory/src/lib.rs"
+      }
+    ],
+    "oauth": [
+      {
+        "name": "authorization",
+        "line": 6,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "callback",
+        "line": 7,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "device",
+        "line": 8,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "discovery",
+        "line": 9,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "http",
+        "line": 10,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "metadata",
+        "line": 11,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "pkce",
+        "line": 12,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "registration",
+        "line": 13,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      },
+      {
+        "name": "token",
+        "line": 14,
+        "public": false,
+        "path": "crates/oauth/src/lib.rs"
+      }
+    ],
+    "observability": [
+      {
+        "name": "attrs",
+        "line": 20,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "autoqa",
+        "line": 21,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "collector",
+        "line": 22,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "config",
+        "line": 23,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "content",
+        "line": 24,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "export",
+        "line": 25,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "firehose",
+        "line": 26,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "logging",
+        "line": 27,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "metrics",
+        "line": 28,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "redact",
+        "line": 29,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "semconv",
+        "line": 30,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "semconv_gen",
+        "line": 31,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "sentiment",
+        "line": 32,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "span",
+        "line": 33,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "stats",
+        "line": 34,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      },
+      {
+        "name": "authority",
+        "line": 40,
+        "public": true,
+        "path": "crates/observability/src/lib.rs"
+      }
+    ],
+    "proto": [
+      {
+        "name": "bounds",
+        "line": 38,
+        "public": true,
+        "path": "crates/proto/src/lib.rs"
+      },
+      {
+        "name": "bytes_text",
+        "line": 40,
+        "public": true,
+        "path": "crates/proto/src/lib.rs"
+      },
+      {
+        "name": "lsp",
+        "line": 43,
+        "public": true,
+        "path": "crates/proto/src/lib.rs"
+      },
+      {
+        "name": "value_json",
+        "line": 45,
+        "public": true,
+        "path": "crates/proto/src/lib.rs"
+      },
+      {
+        "name": "omp",
+        "line": 54,
+        "public": true,
+        "path": "crates/proto/src/lib.rs"
+      }
+    ],
+    "py": [
+      {
+        "name": "bindings",
+        "line": 33,
+        "public": false,
+        "path": "crates/py/src/lib.rs"
+      },
+      {
+        "name": "env_types",
+        "line": 34,
+        "public": false,
+        "path": "crates/py/src/lib.rs"
+      },
+      {
+        "name": "interrupt",
+        "line": 35,
+        "public": true,
+        "path": "crates/py/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 439,
+        "public": false,
+        "path": "crates/py/src/lib.rs"
+      }
+    ],
+    "py-link": [
+      {
+        "name": "tests",
+        "line": 164,
+        "public": false,
+        "path": "crates/py-link/src/lib.rs"
+      }
+    ],
+    "rpc": [
+      {
+        "name": "client",
+        "line": 14,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "device_auth",
+        "line": 15,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "framing",
+        "line": 16,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "health",
+        "line": 17,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "hello",
+        "line": 18,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "protocol",
+        "line": 19,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "tls",
+        "line": 20,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "uds",
+        "line": 21,
+        "public": true,
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 111,
+        "public": false,
+        "path": "crates/rpc/src/lib.rs"
+      }
+    ],
+    "sandbox": [
+      {
+        "name": "accept",
+        "line": 8,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "backends",
+        "line": 9,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "capability",
+        "line": 10,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "environment",
+        "line": 11,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 12,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "paths",
+        "line": 13,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "plan",
+        "line": 14,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "runner",
+        "line": 15,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "runtime",
+        "line": 16,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "name": "spec",
+        "line": 17,
+        "public": false,
+        "path": "crates/sandbox/src/lib.rs"
+      }
+    ],
+    "scribe": [
+      {
+        "name": "canon",
+        "line": 22,
+        "public": true,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 23,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "filters",
+        "line": 24,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "lex",
+        "line": 25,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "parse",
+        "line": 26,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "props",
+        "line": 27,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "render",
+        "line": 28,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "value",
+        "line": 29,
+        "public": false,
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "name": "__private",
+        "line": 38,
+        "public": true,
+        "path": "crates/scribe/src/lib.rs"
+      }
+    ],
+    "sdk": [
+      {
+        "name": "tests",
+        "line": 85,
+        "public": false,
+        "path": "crates/sdk/src/lib.rs"
+      }
+    ],
+    "secrets": [
+      {
+        "name": "builtins",
+        "line": 8,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "json",
+        "line": 10,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "message",
+        "line": 12,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "obfuscator",
+        "line": 14,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "placeholder",
+        "line": 16,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "redact",
+        "line": 18,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "replacement",
+        "line": 20,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "rule",
+        "line": 22,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "stream",
+        "line": 24,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      },
+      {
+        "name": "tracked",
+        "line": 26,
+        "public": true,
+        "path": "crates/secrets/src/lib.rs"
+      }
+    ],
+    "serve": [
+      {
+        "name": "auth",
+        "line": 4,
+        "public": true,
+        "path": "crates/serve/src/lib.rs"
+      },
+      {
+        "name": "blob",
+        "line": 5,
+        "public": true,
+        "path": "crates/serve/src/lib.rs"
+      },
+      {
+        "name": "inference",
+        "line": 6,
+        "public": true,
+        "path": "crates/serve/src/lib.rs"
+      },
+      {
+        "name": "session",
+        "line": 7,
+        "public": true,
+        "path": "crates/serve/src/lib.rs"
+      }
+    ],
+    "session": [
+      {
+        "name": "component",
+        "line": 9,
+        "public": false,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "custom_message",
+        "line": 10,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "components",
+        "line": 11,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "exit_diagnostics",
+        "line": 27,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "fold",
+        "line": 28,
+        "public": false,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "import",
+        "line": 29,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "late_diagnostics",
+        "line": 30,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "projection",
+        "line": 31,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "rewind",
+        "line": 32,
+        "public": true,
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "name": "session",
+        "line": 33,
+        "public": false,
+        "path": "crates/session/src/lib.rs"
+      }
+    ],
+    "shell": [
+      {
+        "name": "analysis",
+        "line": 18,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "arithmetic",
+        "line": 19,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "braceexpansion",
+        "line": 20,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "builtins",
+        "line": 21,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "callstack",
+        "line": 22,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "commands",
+        "line": 23,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "completion",
+        "line": 24,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "env",
+        "line": 25,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 26,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "escape",
+        "line": 27,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "expansion",
+        "line": 28,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "extendedtests",
+        "line": 29,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "extensions",
+        "line": 30,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "functions",
+        "line": 31,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "history",
+        "line": 32,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "int_utils",
+        "line": 33,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "interfaces",
+        "line": 34,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "interp",
+        "line": 35,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "ioutils",
+        "line": 36,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "jobs",
+        "line": 37,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "keywords",
+        "line": 38,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "namedoptions",
+        "line": 39,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "openfiles",
+        "line": 40,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "options",
+        "line": 41,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "pathcache",
+        "line": 42,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "pathsearch",
+        "line": 43,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "patterns",
+        "line": 44,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "processes",
+        "line": 45,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "prompt",
+        "line": 46,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "regex",
+        "line": 47,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "results",
+        "line": 48,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "shell",
+        "line": 49,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "sourceinfo",
+        "line": 50,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "sys",
+        "line": 51,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 52,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "timing",
+        "line": 53,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "trace_categories",
+        "line": 54,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "traps",
+        "line": 55,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "variables",
+        "line": 56,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "wellknownvars",
+        "line": 57,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "parser",
+        "line": 59,
+        "public": true,
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "name": "test_result",
+        "line": 98,
+        "public": false,
+        "path": "crates/shell/src/lib.rs"
+      }
+    ],
+    "shell-builtins": [
+      {
+        "name": "cksum",
+        "line": 11,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "r",
+        "line": 12,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "factory",
+        "line": 13,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "graphics",
+        "line": 14,
+        "public": true,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "host",
+        "line": 15,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "proc_match",
+        "line": 16,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "proc_snapshot",
+        "line": 17,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "support",
+        "line": 18,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "b2sum",
+        "line": 20,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "base32",
+        "line": 21,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "base64",
+        "line": 22,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "basename",
+        "line": 23,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "cat",
+        "line": 24,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "cmp",
+        "line": 25,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "combine",
+        "line": 26,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "comm",
+        "line": 27,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "cut",
+        "line": 28,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "date",
+        "line": 29,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "diff",
+        "line": 30,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "dirname",
+        "line": 31,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "errno",
+        "line": 33,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "fd",
+        "line": 34,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "find",
+        "line": 35,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "grep",
+        "line": 36,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "head",
+        "line": 37,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "hostname",
+        "line": 38,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "ifne",
+        "line": 39,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "isutf8",
+        "line": 40,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "jq",
+        "line": 41,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "ln",
+        "line": 42,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "ls",
+        "line": 43,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "md5sum",
+        "line": 44,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "mkdir",
+        "line": 45,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "mktemp",
+        "line": 46,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "mv",
+        "line": 47,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "nproc",
+        "line": 48,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "paste",
+        "line": 49,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "printenv",
+        "line": 50,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "read_policy_tests",
+        "line": 52,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "readlink",
+        "line": 53,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "realpath",
+        "line": 54,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "rg",
+        "line": 55,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "rm",
+        "line": 56,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sed",
+        "line": 57,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "seq",
+        "line": 58,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sha1sum",
+        "line": 59,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sha224sum",
+        "line": 60,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sha256sum",
+        "line": 61,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sha384sum",
+        "line": 62,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sha512sum",
+        "line": 63,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sort",
+        "line": 64,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sponge",
+        "line": 65,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "stat",
+        "line": 66,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "tac",
+        "line": 67,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "tail",
+        "line": 68,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "tee",
+        "line": 69,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "touch",
+        "line": 70,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "tr",
+        "line": 71,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "truncate",
+        "line": 72,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "ts",
+        "line": 73,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "uname",
+        "line": 74,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "uniq",
+        "line": 75,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "wc",
+        "line": 76,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "which",
+        "line": 77,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "whoami",
+        "line": 78,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "xargs",
+        "line": 79,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "yes",
+        "line": 80,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "nohup",
+        "line": 82,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "pgrep",
+        "line": 83,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "pidwait",
+        "line": 84,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "pkill",
+        "line": 85,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "ps",
+        "line": 86,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "sleep",
+        "line": 87,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "timeout",
+        "line": 88,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "name": "top",
+        "line": 89,
+        "public": false,
+        "path": "crates/shell-builtins/src/lib.rs"
+      }
+    ],
+    "snapcompact": [
+      {
+        "name": "archive",
+        "line": 42,
+        "public": true,
+        "path": "crates/snapcompact/src/lib.rs"
+      }
+    ],
+    "tool": [
+      {
+        "name": "device_path",
+        "line": 7,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "diag",
+        "line": 8,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "incoming",
+        "line": 9,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "pins",
+        "line": 10,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "registry",
+        "line": 11,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "render",
+        "line": 12,
+        "public": true,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "restrictions",
+        "line": 13,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "spec_generated",
+        "line": 14,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 2439,
+        "public": false,
+        "path": "crates/tool/src/lib.rs"
+      }
+    ],
+    "tools": [
+      {
+        "name": "auto_background",
+        "line": 62,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "ask",
+        "line": 65,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "ast_edit",
+        "line": 67,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "ast_grep",
+        "line": 69,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "browser",
+        "line": 71,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "checkpoint",
+        "line": 73,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "computer",
+        "line": 75,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "path",
+        "line": 77,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "render",
+        "line": 78,
+        "public": false,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "settings",
+        "line": 80,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "staging",
+        "line": 82,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "debug",
+        "line": 90,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "debug_render",
+        "line": 92,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "device",
+        "line": 94,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "device_ctl",
+        "line": 96,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "edit",
+        "line": 98,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "editor_sync",
+        "line": 100,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "eval",
+        "line": 102,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "gallery",
+        "line": 104,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "github",
+        "line": 106,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "glob",
+        "line": 108,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "goal",
+        "line": 110,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "grep",
+        "line": 112,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "hub",
+        "line": 114,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "learn",
+        "line": 116,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "lsp",
+        "line": 118,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "manage_skill",
+        "line": 120,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "memory",
+        "line": 122,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "memory_edit",
+        "line": 124,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "output_schema",
+        "line": 126,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "read",
+        "line": 128,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "review",
+        "line": 130,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "security_scan",
+        "line": 132,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "shell",
+        "line": 134,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "shell_intercept",
+        "line": 136,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "shell_uri",
+        "line": 138,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "task",
+        "line": 140,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "think",
+        "line": 142,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "todo",
+        "line": 144,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "web_search",
+        "line": 146,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "write",
+        "line": 148,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "name": "yield_tool",
+        "line": 150,
+        "public": true,
+        "path": "crates/tools/src/lib.rs"
+      }
+    ],
+    "tui": [
+      {
+        "name": "anim",
+        "line": 10,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "assets",
+        "line": 12,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "color",
+        "line": 13,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "component",
+        "line": 14,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "components",
+        "line": 16,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "context",
+        "line": 17,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "debug",
+        "line": 18,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "editcore",
+        "line": 19,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "escape",
+        "line": 20,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "frame",
+        "line": 21,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "fuzzy",
+        "line": 23,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "graphics",
+        "line": 24,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "icons",
+        "line": 25,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "imagefmt",
+        "line": 27,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "imagereg",
+        "line": 28,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "input",
+        "line": 29,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "iterm2",
+        "line": 30,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "kitty",
+        "line": 31,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "latex",
+        "line": 32,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "markdown",
+        "line": 33,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "markup",
+        "line": 34,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "notify",
+        "line": 35,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "overlay",
+        "line": 36,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "paste",
+        "line": 38,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "props",
+        "line": 39,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "pump",
+        "line": 40,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "renderer",
+        "line": 41,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "rich",
+        "line": 42,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "runtime",
+        "line": 43,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "scene",
+        "line": 47,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "shader",
+        "line": 49,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "sixel",
+        "line": 50,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "slots",
+        "line": 52,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "spelling",
+        "line": 53,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "syntax",
+        "line": 54,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "terminal",
+        "line": 55,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "test_support",
+        "line": 57,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "theme",
+        "line": 58,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "tsp",
+        "line": 60,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "tty",
+        "line": 61,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "ttyid",
+        "line": 63,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "ui",
+        "line": 64,
+        "public": false,
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "name": "watchdog",
+        "line": 66,
+        "public": true,
+        "path": "crates/tui/src/lib.rs"
+      }
+    ],
+    "vcs": [
+      {
+        "name": "error",
+        "line": 18,
+        "public": true,
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "name": "git",
+        "line": 19,
+        "public": true,
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "name": "jj",
+        "line": 20,
+        "public": true,
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "name": "testing",
+        "line": 22,
+        "public": true,
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "name": "types",
+        "line": 23,
+        "public": true,
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 302,
+        "public": false,
+        "path": "crates/vcs/src/lib.rs"
+      }
+    ],
+    "vocab": [
+      {
+        "name": "tests",
+        "line": 656,
+        "public": false,
+        "path": "crates/vocab/src/lib.rs"
+      }
+    ],
+    "walker": [
+      {
+        "name": "cache",
+        "line": 19,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "glob",
+        "line": 20,
+        "public": true,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "platform",
+        "line": 3458,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "platform",
+        "line": 3728,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "platform",
+        "line": 4050,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "platform",
+        "line": 4239,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 4316,
+        "public": false,
+        "path": "crates/walker/src/lib.rs"
+      }
+    ],
+    "webview": [
+      {
+        "name": "automation",
+        "line": 65,
+        "public": true,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "discover",
+        "line": 66,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "error",
+        "line": 67,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "event",
+        "line": 68,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "geometry",
+        "line": 69,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "input",
+        "line": 70,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "options",
+        "line": 71,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "remote",
+        "line": 72,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "wk",
+        "line": 74,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "name": "tests",
+        "line": 813,
+        "public": false,
+        "path": "crates/webview/src/lib.rs"
+      }
+    ]
+  },
+  "reexports": {
+    "adw": [
+      {
+        "line": 36,
+        "body": "profile::{ApprovalScope, NetworkScope, Posture, PostureError, Requirement, WriteScope}",
+        "path": "crates/adw/src/lib.rs"
+      },
+      {
+        "line": 37,
+        "body": "run::{DEFAULT_MAX_ATTEMPTS, Outcome, Run, RunError, SelectedInput, Step}",
+        "path": "crates/adw/src/lib.rs"
+      },
+      {
+        "line": 38,
+        "body": "workflow::{OnReject, Phase, PhaseKind, PhaseName, Workflow, WorkflowError, WorkflowName}",
+        "path": "crates/adw/src/lib.rs"
+      }
+    ],
+    "agent": [
+      {
+        "line": 32,
+        "body": "approvals::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 33,
+        "body": "cancel::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 34,
+        "body": "director::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 35,
+        "body": "dispatch::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 36,
+        "body": "env::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 37,
+        "body": "events::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 38,
+        "body": "extensions::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 39,
+        "body": "file_mentions::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 40,
+        "body": "hooks::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 41,
+        "body": "jobs::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 42,
+        "body": "local::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 43,
+        "body": "loop_::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "model_watch::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 45,
+        "body": "pause::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 46,
+        "body": "prompt::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 47,
+        "body": "registry::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 48,
+        "body": "roster::roster_fingerprint",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 49,
+        "body": "steering::*",
+        "path": "crates/agent/src/lib.rs"
+      },
+      {
+        "line": 50,
+        "body": "vars::*",
+        "path": "crates/agent/src/lib.rs"
+      }
+    ],
+    "ai": [
+      {
+        "line": 43,
+        "body": "answer::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "call::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 45,
+        "body": "client::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 53,
+        "body": "error::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 54,
+        "body": "event::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 55,
+        "body": "id::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 72,
+        "body": "provider::ProviderService",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 73,
+        "body": "receipt::*",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 74,
+        "body": "registry::{Registry, RegistryBuilder, RegistryHandle, RegistrySnapshot, RouteUnavailable}",
+        "path": "crates/ai/src/lib.rs"
+      },
+      {
+        "line": 75,
+        "body": "settings::InferenceSettings",
+        "path": "crates/ai/src/lib.rs"
+      }
+    ],
+    "app": [
+      {
+        "line": 102,
+        "body": "miette::{IntoDiagnostic, Report, Result}",
+        "path": "crates/app/src/lib.rs"
+      }
+    ],
+    "ar": [
+      {
+        "line": 46,
+        "body": "entry::Entry",
+        "path": "crates/ar/src/lib.rs"
+      },
+      {
+        "line": 47,
+        "body": "error::{Error, Result}",
+        "path": "crates/ar/src/lib.rs"
+      }
+    ],
+    "ast": [
+      {
+        "line": 18,
+        "body": "error::{AstError, Result}",
+        "path": "crates/ast/src/lib.rs"
+      },
+      {
+        "line": 19,
+        "body": "language::SupportLang",
+        "path": "crates/ast/src/lib.rs"
+      }
+    ],
+    "catalog": [
+      {
+        "line": 27,
+        "body": "capability::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 28,
+        "body": "cascade::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 29,
+        "body": "classify::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 30,
+        "body": "compat::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 31,
+        "body": "compile::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 32,
+        "body": "contrib::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 33,
+        "body": "discover::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 34,
+        "body": "id::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 35,
+        "body": "model::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 36,
+        "body": "policy::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 37,
+        "body": "pricing::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 38,
+        "body": "provider::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 39,
+        "body": "resolve::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 40,
+        "body": "runtime::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 41,
+        "body": "selection::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 42,
+        "body": "snapshot::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 43,
+        "body": "taxonomy::*",
+        "path": "crates/catalog/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "thinking::*",
+        "path": "crates/catalog/src/lib.rs"
+      }
+    ],
+    "chat": [
+      {
+        "line": 65,
+        "body": "actions::{HostAction, HostMailbox, ModelRoster, SttFailureKind, SttUiEvent}",
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "line": 66,
+        "body": "chrome::ModelBadge",
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "line": 67,
+        "body": "extension_status::{ExtensionStatus, ExtensionStatuses}",
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "line": 72,
+        "body": "overlays::{ModelRow, PickerEvent}",
+        "path": "crates/chat/src/lib.rs"
+      },
+      {
+        "line": 73,
+        "body": "project::{BlockKind, BlockView, block_views}",
+        "path": "crates/chat/src/lib.rs"
+      }
+    ],
+    "con": [
+      {
+        "line": 61,
+        "body": "builtins::SV_CHEATS",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 62,
+        "body": "chord::{ChordError, normalize_chord}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 63,
+        "body": "complete::{CompleterFn, Suggestion}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 69,
+        "body": "dump::{CFG_HEADER_PREFIX, CFG_SCHEMA_VERSION, DumpOptions}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 70,
+        "body": "error::{ConError, ConResult, ConfigIoError, ConfigOperation, ParseError}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 71,
+        "body": "handle::{Action, CVar}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 72,
+        "body": "layers::{LayerId, Origin, Seed, SetReport}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 73,
+        "body": "repl::{Patch, Replica, Role}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 74,
+        "body": "script::{Arg, Statement, parse}",
+        "path": "crates/con/src/lib.rs"
+      },
+      {
+        "line": 79,
+        "body": "value::{ConType, Kv, Span, TypeSpec, Value, ValueKind}",
+        "path": "crates/con/src/lib.rs"
+      }
+    ],
+    "core": [
+      {
+        "line": 50,
+        "body": "append_vec::{AppendSlice, AppendVec}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 51,
+        "body": "cache::MemoCache",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 52,
+        "body": "cow_bytes::CowBytes",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 56,
+        "body": "encoding::{base32, base32_dns, base32_hex, base64, base64_url, hex}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 57,
+        "body": "exclusive_sync::ExclusiveSync",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 58,
+        "body": "fasthash::{FastHashMap, FastHashSet, FastState, fast_hash64}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 59,
+        "body": "hash32::{Hash32, Hash32ParseError}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 64,
+        "body": "path::{NormalizePath, shorten_home_path}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 65,
+        "body": "phase::{ActivateReason, InvocationPhase, LifecyclePhase, Point, PointSet, RestartReason}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 69,
+        "body": "qr::{QrCode, QrEc, QrOverflow}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 70,
+        "body": "secret::{ExposeSecret, Secret, SecretBox, SecretString, ct_eq}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 71,
+        "body": "semver::SemVer",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 72,
+        "body": "sparse_map::SparseMap",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 73,
+        "body": "sparse_set::SparseSet",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 74,
+        "body": "str::{CowStr, IntoStr, Str, StrExt, StrMut}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 75,
+        "body": "time::{Duration, DurationError, DurationUnit, format_rfc3339, parse_rfc3339}",
+        "path": "crates/core/src/lib.rs"
+      },
+      {
+        "line": 76,
+        "body": "ulid::{Ulid, UlidParseError}",
+        "path": "crates/core/src/lib.rs"
+      }
+    ],
+    "desktop": [
+      {
+        "line": 38,
+        "body": "error::{DesktopError, DesktopResult, ErrorCode}",
+        "path": "crates/desktop/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "types::*",
+        "path": "crates/desktop/src/lib.rs"
+      }
+    ],
+    "dom": [
+      {
+        "line": 15,
+        "body": "arena::Handle",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 16,
+        "body": "node::{Node, NodeSpec, Value}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 17,
+        "body": "omp_vocab::{KnownTag, PropId, PropKey, Tag}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 18,
+        "body": "op::{Op, StreamOp}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 19,
+        "body": "redact::{PropPolicy, redact_event}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 20,
+        "body": "selector::SelectorError",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 21,
+        "body": "snapshot::{Snapshot, SnapshotDecodeError}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 22,
+        "body": "stream::Sid",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 23,
+        "body": "subscribe::{Event, Patch}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 24,
+        "body": "txn::{Applied, Dom, DomError, Txn}",
+        "path": "crates/dom/src/lib.rs"
+      },
+      {
+        "line": 25,
+        "body": "wire::{EventDecodeError, decode_event, encode_event}",
+        "path": "crates/dom/src/lib.rs"
+      }
+    ],
+    "driver": [
+      {
+        "line": 30,
+        "body": "session_wire::SessionWire",
+        "path": "crates/driver/src/lib.rs"
+      }
+    ],
+    "edit": [
+      {
+        "line": 49,
+        "body": "diff::{SpanEdit, span_edits}",
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "line": 50,
+        "body": "diff_string::{COLLAPSED_DIFF_ROWS, PinnedMyersWindow}",
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "line": 55,
+        "body": "error::{EditError, EditResult}",
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "line": 56,
+        "body": "path_policy::PathPolicy",
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "line": 61,
+        "body": "store::EditStore",
+        "path": "crates/edit/src/lib.rs"
+      },
+      {
+        "line": 62,
+        "body": "stream_json::{ArgSnapshot, ArgStream, EditEntry}",
+        "path": "crates/edit/src/lib.rs"
+      }
+    ],
+    "env": [
+      {
+        "line": 18,
+        "body": "admit::Admitter",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 35,
+        "body": "guard::{RunGuard, WorkerLease}",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 37,
+        "body": "omp_proto::blob::v1 as blob_frame",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 39,
+        "body": "omp_proto::document::v1 as document_frame",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 41,
+        "body": "omp_proto::env::v1 as frame",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 43,
+        "body": "omp_proto::prost",
+        "path": "crates/env/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "partition::{FramePipe, PartitionError, PartitionedEnvTransport, in_process_frames}",
+        "path": "crates/env/src/lib.rs"
+      }
+    ],
+    "envd": [
+      {
+        "line": 126,
+        "body": "eval::{EVAL_CHILD_ARG, run_eval_child_entry}",
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "line": 162,
+        "body": "presence::PresenceError",
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "line": 165,
+        "body": "server::AgentControlBinding",
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "line": 166,
+        "body": "server::{EnvServer, EnvdError, ExtensionDataBinding, document_user_config_root}",
+        "path": "crates/envd/src/lib.rs"
+      },
+      {
+        "line": 167,
+        "body": "site::validate_trusted_module",
+        "path": "crates/envd/src/lib.rs"
+      }
+    ],
+    "exec": [
+      {
+        "line": 59,
+        "body": "adapter::{BuildSystemAdapter, PlanError, RepoPins}",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 68,
+        "body": "deny::DEFAULT_UPLOAD_DENY",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 69,
+        "body": "digest::Digest",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 74,
+        "body": "handle::{ReattachHandle, ReattachSchema, ResumeSupport}",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 75,
+        "body": "ids::{BackendId, CacheName, ExecutionId, ToolchainId}",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 76,
+        "body": "place::{Placement, admit, place}",
+        "path": "crates/exec/src/lib.rs"
+      },
+      {
+        "line": 80,
+        "body": "report::{BuildReport, BuildStatus}",
+        "path": "crates/exec/src/lib.rs"
+      }
+    ],
+    "exec-buildbuddy": [
+      {
+        "line": 32,
+        "body": "run::BuildBuddyRun",
+        "path": "crates/exec-buildbuddy/src/lib.rs"
+      }
+    ],
+    "exec-reapi": [
+      {
+        "line": 19,
+        "body": "execute::{Config as ExecuteConfig, ReapiBackend, Toolchain}",
+        "path": "crates/exec-reapi/src/lib.rs"
+      },
+      {
+        "line": 25,
+        "body": "buildbuddy_cancel::BuildBuddyCanceller",
+        "path": "crates/exec-reapi/src/lib.rs"
+      }
+    ],
+    "gui": [
+      {
+        "line": 16,
+        "body": "cells::{CellMetrics, Compositor, Instances, Selection, View}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 17,
+        "body": "fonts::{FontError, Fonts}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 18,
+        "body": "gpu::{Gpu, GpuError, Painter, WindowGpu}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 19,
+        "body": "host::{HostConfig, run}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 20,
+        "body": "pixels::{PixelDraw, PixelPainter, PixelSurface}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 21,
+        "body": "scene::{Effect, Scene, SceneFrame}",
+        "path": "crates/gui/src/lib.rs"
+      },
+      {
+        "line": 22,
+        "body": "theme::GuiTheme",
+        "path": "crates/gui/src/lib.rs"
+      }
+    ],
+    "journal": [
+      {
+        "line": 22,
+        "body": "chain::{abandoned, live_chain}",
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "line": 23,
+        "body": "entry::{Entry, EntryDraft, EntryId}",
+        "path": "crates/journal/src/lib.rs"
+      },
+      {
+        "line": 24,
+        "body": "kind::{Kind, KindError, KindName}",
+        "path": "crates/journal/src/lib.rs"
+      }
+    ],
+    "memory": [
+      {
+        "line": 26,
+        "body": "bank::{BankId, BankScope, BankScopeInput}",
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "line": 27,
+        "body": "config::{AutolearnSettings, MemoryBackend, MemorySettings, MnemopiSettings}",
+        "path": "crates/memory/src/lib.rs"
+      },
+      {
+        "line": 28,
+        "body": "runtime::{Capabilities, MemoryRuntime, RuntimeRegistry}",
+        "path": "crates/memory/src/lib.rs"
+      }
+    ],
+    "oauth": [
+      {
+        "line": 40,
+        "body": "pkce::{EntropyError, PkceMaterial, SystemEntropy, generate_pkce}",
+        "path": "crates/oauth/src/lib.rs"
+      }
+    ],
+    "proto": [
+      {
+        "line": 36,
+        "body": "prost",
+        "path": "crates/proto/src/lib.rs"
+      }
+    ],
+    "py": [
+      {
+        "line": 50,
+        "body": "pyo3",
+        "path": "crates/py/src/lib.rs"
+      }
+    ],
+    "rpc": [
+      {
+        "line": 29,
+        "body": "device_auth::{DeviceAuthError, DeviceKey, load_or_generate as device_load_or_generate}",
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "line": 30,
+        "body": "health::{HealthReporter, health_service}",
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "line": 31,
+        "body": "hello::{HelloService, MIN_SCHEMA_REV, Peer, handshake}",
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "line": 32,
+        "body": "tls::{TlsConfig, client_tls, server_tls}",
+        "path": "crates/rpc/src/lib.rs"
+      },
+      {
+        "line": 34,
+        "body": "uds::{Incoming, connect, listen}",
+        "path": "crates/rpc/src/lib.rs"
+      }
+    ],
+    "sandbox": [
+      {
+        "line": 19,
+        "body": "accept::{AcceptBackoff, AcceptFailure}",
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "line": 20,
+        "body": "backends::landlock::{HIDDEN_CHILD_ARG, abi as landlock_abi, run_child_entry}",
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "line": 21,
+        "body": "capability::{Backend, Capability, CapabilitySet, portable_capabilities}",
+        "path": "crates/sandbox/src/lib.rs"
+      },
+      {
+        "line": 29,
+        "body": "plan::{Caveat, FilesystemVirtualizationKind, Plan}",
+        "path": "crates/sandbox/src/lib.rs"
+      }
+    ],
+    "scribe": [
+      {
+        "line": 31,
+        "body": "error::{Error, HelperError, SyntaxErrorKind, TypeErrorKind}",
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "line": 32,
+        "body": "props::{Props, ScopedProps}",
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "line": 33,
+        "body": "render::{Engine, Template}",
+        "path": "crates/scribe/src/lib.rs"
+      },
+      {
+        "line": 34,
+        "body": "value::Value",
+        "path": "crates/scribe/src/lib.rs"
+      }
+    ],
+    "serve": [
+      {
+        "line": 9,
+        "body": "auth::{AuthRpc, AuthenticatedRevealContext}",
+        "path": "crates/serve/src/lib.rs"
+      },
+      {
+        "line": 10,
+        "body": "blob::BlobRpc",
+        "path": "crates/serve/src/lib.rs"
+      },
+      {
+        "line": 11,
+        "body": "inference::InferenceRpc",
+        "path": "crates/serve/src/lib.rs"
+      }
+    ],
+    "session": [
+      {
+        "line": 35,
+        "body": "component::{Component, ComponentRegistry, Draft}",
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "line": 44,
+        "body": "rewind::{LifecycleWork, diff}",
+        "path": "crates/session/src/lib.rs"
+      },
+      {
+        "line": 45,
+        "body": "session::{AttachmentInput, Session, SessionError, ToolReceipt, UnsettledCall}",
+        "path": "crates/session/src/lib.rs"
+      }
+    ],
+    "shell": [
+      {
+        "line": 105,
+        "body": "commands::{CommandArg, ExecutionContext}",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 106,
+        "body": "error::{BuiltinError, Error, ErrorKind}",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 107,
+        "body": "extensions::ShellExtensions",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 113,
+        "body": "parser::{SourcePosition, SourcePositionOffset, SourceSpan}",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 114,
+        "body": "results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult}",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 119,
+        "body": "sourceinfo::SourceInfo",
+        "path": "crates/shell/src/lib.rs"
+      },
+      {
+        "line": 122,
+        "body": "variables::{ShellValue, ShellVariable}",
+        "path": "crates/shell/src/lib.rs"
+      }
+    ],
+    "shell-builtins": [
+      {
+        "line": 91,
+        "body": "factory::{dyn_builtin, process_builtins, utility_builtins}",
+        "path": "crates/shell-builtins/src/lib.rs"
+      },
+      {
+        "line": 99,
+        "body": "proc_snapshot::{ProcInfo, ProcessStatus}",
+        "path": "crates/shell-builtins/src/lib.rs"
+      }
+    ],
+    "tool": [
+      {
+        "line": 29,
+        "body": "device_path::{DevicePath, DevicePathError}",
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "line": 30,
+        "body": "diag::{Diag, DiagEnvelope, DiagKind, Omitted, Severity, Unit}",
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "line": 36,
+        "body": "omp_core::slopjson::{PullMode, Pulled, PulledKind, PulledValueKind}",
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "line": 38,
+        "body": "omp_proto::inference::v1::{Fallback, InvokeInput}",
+        "path": "crates/tool/src/lib.rs"
+      },
+      {
+        "line": 40,
+        "body": "pins::{InvocationPins, ResolutionPin}",
+        "path": "crates/tool/src/lib.rs"
+      }
+    ],
+    "tools": [
+      {
+        "line": 86,
+        "body": "omp_macros::view",
+        "path": "crates/tools/src/lib.rs"
+      },
+      {
+        "line": 87,
+        "body": "render::{BuiltinRendererIdentities, live_renderers, register_builtin_renderers}",
+        "path": "crates/tools/src/lib.rs"
+      }
+    ],
+    "tui": [
+      {
+        "line": 68,
+        "body": "color::{CssColor, SystemColor}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 77,
+        "body": "context::{Appearance, Charset, Graphics, Grid, JamoWidth, Theme, UiContext}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 78,
+        "body": "debug::{FramePngError, frame_ansi, frame_png, frame_text, respond_debug_query}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 92,
+        "body": "icons::Icon",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 93,
+        "body": "imagefmt::ImageFormat",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 95,
+        "body": "imagereg::bytes as image_bytes",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 97,
+        "body": "imagereg::register as register_image_source",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 114,
+        "body": "omp_macros::dom",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 115,
+        "body": "overlay::{Layer, OverlayAnchor, OverlayBand, OverlayId, OverlayMargin, OverlayOptions}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 116,
+        "body": "paste::{Pasted, PastedImage}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 117,
+        "body": "props::{Prop, PropValue, Props}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 118,
+        "body": "pump::{ArrivedAt, DebugOp, DebugQuery, TerminalEvent}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 119,
+        "body": "renderer::{DeliveryError, OutputState, PaintStats, Renderer, file_link_target}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 124,
+        "body": "runtime::{App, AppEnv, AppEvent, AppOptions, ImageLoader, UiHandle, is_core_chord}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 125,
+        "body": "spelling::{SpellingAssist, SpellingFeatures, SpellingResult, TypoRange}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 126,
+        "body": "terminal::{AltScreenUse, CursorStyle, Progress, Terminal, TerminalOptions}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 131,
+        "body": "tty::{TtyOut, overridden as tty_overridden}",
+        "path": "crates/tui/src/lib.rs"
+      },
+      {
+        "line": 132,
+        "body": "ui::Ui",
+        "path": "crates/tui/src/lib.rs"
+      }
+    ],
+    "vcs": [
+      {
+        "line": 30,
+        "body": "error::{Error, Result}",
+        "path": "crates/vcs/src/lib.rs"
+      },
+      {
+        "line": 31,
+        "body": "types::*",
+        "path": "crates/vcs/src/lib.rs"
+      }
+    ],
+    "walker": [
+      {
+        "line": 164,
+        "body": "glob::CompiledWalkGlob",
+        "path": "crates/walker/src/lib.rs"
+      }
+    ],
+    "webview": [
+      {
+        "line": 81,
+        "body": "raw_window_handle",
+        "path": "crates/webview/src/lib.rs"
+      },
+      {
+        "line": 86,
+        "body": "wk::request_screen_capture",
+        "path": "crates/webview/src/lib.rs"
+      }
+    ]
+  }
+}

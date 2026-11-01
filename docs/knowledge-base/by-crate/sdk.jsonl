@@ -1,0 +1,2 @@
+{"crate":"sdk","name":"SdkError","kind":"enum","path":"crates/sdk/src/lib.rs","line":13}
+{"crate":"sdk","name":"Sdk","kind":"struct","path":"crates/sdk/src/lib.rs","line":23}

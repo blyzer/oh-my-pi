@@ -1,0 +1,3 @@
+{"crate":"exec-local","name":"Config","kind":"struct","path":"crates/exec-local/src/lib.rs","line":26}
+{"crate":"exec-local","name":"LocalBackend","kind":"struct","path":"crates/exec-local/src/lib.rs","line":41}
+{"crate":"exec-local","name":"LocalRun","kind":"struct","path":"crates/exec-local/src/lib.rs","line":147}

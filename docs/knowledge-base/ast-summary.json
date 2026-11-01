@@ -1,0 +1,796 @@
+{
+  "format": "omp-knowledge-base-ast/v1",
+  "method": "rust-analyzer symbols (per-file structure outline)",
+  "full": false,
+  "kept_kinds": [
+    "Const",
+    "Enum",
+    "Function",
+    "Impl",
+    "Macro",
+    "Method",
+    "Module",
+    "Static",
+    "Struct",
+    "Trait",
+    "TraitAlias",
+    "TypeAlias",
+    "Union"
+  ],
+  "totals": {
+    "symbols": 77319,
+    "lookup_keys": 92802,
+    "files": 1890,
+    "crates": 53,
+    "by_kind": {
+      "Const": 4992,
+      "Enum": 3070,
+      "Function": 30160,
+      "Impl": 6983,
+      "Macro": 85,
+      "Method": 18800,
+      "Module": 3233,
+      "Static": 489,
+      "Struct": 7865,
+      "Trait": 325,
+      "TypeAlias": 1315,
+      "Union": 2
+    }
+  },
+  "crates": {
+    "adw": {
+      "count": 131,
+      "by_kind": {
+        "Enum": 11,
+        "Struct": 7,
+        "Impl": 5,
+        "Method": 32,
+        "Module": 16,
+        "Const": 4,
+        "Function": 56
+      }
+    },
+    "agent": {
+      "count": 1795,
+      "by_kind": {
+        "Struct": 194,
+        "Impl": 163,
+        "Function": 526,
+        "Method": 582,
+        "Enum": 109,
+        "Const": 110,
+        "Module": 67,
+        "Trait": 23,
+        "TypeAlias": 18,
+        "Static": 2,
+        "Macro": 1
+      }
+    },
+    "ai": {
+      "count": 11231,
+      "by_kind": {
+        "Function": 3950,
+        "Module": 413,
+        "Struct": 1664,
+        "Impl": 1188,
+        "Method": 2396,
+        "Const": 642,
+        "Enum": 549,
+        "Trait": 51,
+        "TypeAlias": 324,
+        "Static": 49,
+        "Macro": 5
+      }
+    },
+    "app": {
+      "count": 2991,
+      "by_kind": {
+        "Function": 1650,
+        "Enum": 115,
+        "Const": 158,
+        "Struct": 306,
+        "Impl": 160,
+        "TypeAlias": 20,
+        "Method": 391,
+        "Trait": 3,
+        "Module": 184,
+        "Static": 3,
+        "Macro": 1
+      }
+    },
+    "ar": {
+      "count": 888,
+      "by_kind": {
+        "Function": 436,
+        "Const": 155,
+        "Enum": 11,
+        "Struct": 79,
+        "Impl": 39,
+        "Method": 133,
+        "TypeAlias": 2,
+        "Module": 33
+      }
+    },
+    "ast": {
+      "count": 397,
+      "by_kind": {
+        "Struct": 28,
+        "Function": 265,
+        "Module": 14,
+        "Const": 15,
+        "Enum": 7,
+        "TypeAlias": 2,
+        "Macro": 5,
+        "Impl": 14,
+        "Method": 45,
+        "Static": 2
+      }
+    },
+    "audio": {
+      "count": 567,
+      "by_kind": {
+        "Const": 56,
+        "Module": 18,
+        "Struct": 66,
+        "Impl": 78,
+        "Function": 176,
+        "Method": 117,
+        "Enum": 14,
+        "Trait": 2,
+        "TypeAlias": 29,
+        "Static": 10,
+        "Union": 1
+      }
+    },
+    "cache": {
+      "count": 208,
+      "by_kind": {
+        "Enum": 12,
+        "Function": 80,
+        "Module": 14,
+        "Const": 14,
+        "Struct": 32,
+        "Impl": 15,
+        "Method": 41
+      }
+    },
+    "catalog": {
+      "count": 1282,
+      "by_kind": {
+        "Const": 134,
+        "Struct": 204,
+        "Function": 503,
+        "Macro": 6,
+        "Enum": 90,
+        "Impl": 105,
+        "Method": 191,
+        "Module": 36,
+        "TypeAlias": 10,
+        "Static": 3
+      }
+    },
+    "chat": {
+      "count": 5011,
+      "by_kind": {
+        "Struct": 359,
+        "Impl": 291,
+        "Const": 603,
+        "Method": 1521,
+        "Function": 1818,
+        "Enum": 162,
+        "Module": 233,
+        "TypeAlias": 12,
+        "Trait": 7,
+        "Static": 5
+      }
+    },
+    "collab": {
+      "count": 313,
+      "by_kind": {
+        "Const": 38,
+        "Struct": 27,
+        "Function": 112,
+        "Enum": 28,
+        "Impl": 23,
+        "Method": 67,
+        "Module": 16,
+        "Trait": 1,
+        "TypeAlias": 1
+      }
+    },
+    "con": {
+      "count": 473,
+      "by_kind": {
+        "Static": 4,
+        "Function": 52,
+        "Enum": 20,
+        "Const": 34,
+        "Module": 15,
+        "Struct": 35,
+        "Impl": 55,
+        "TypeAlias": 12,
+        "Method": 232,
+        "Trait": 4,
+        "Macro": 10
+      }
+    },
+    "core": {
+      "count": 2491,
+      "by_kind": {
+        "Const": 56,
+        "Struct": 95,
+        "Impl": 531,
+        "Function": 691,
+        "Method": 854,
+        "TypeAlias": 117,
+        "Module": 65,
+        "Static": 5,
+        "Enum": 52,
+        "Macro": 18,
+        "Trait": 6,
+        "Union": 1
+      }
+    },
+    "desktop": {
+      "count": 861,
+      "by_kind": {
+        "Enum": 16,
+        "Struct": 67,
+        "Impl": 59,
+        "Function": 351,
+        "Method": 255,
+        "Module": 38,
+        "TypeAlias": 21,
+        "Trait": 2,
+        "Const": 44,
+        "Static": 8
+      }
+    },
+    "dom": {
+      "count": 218,
+      "by_kind": {
+        "Struct": 23,
+        "Impl": 20,
+        "Function": 53,
+        "Method": 87,
+        "Module": 12,
+        "Enum": 11,
+        "TypeAlias": 3,
+        "Trait": 1,
+        "Const": 8
+      }
+    },
+    "driver": {
+      "count": 3712,
+      "by_kind": {
+        "Enum": 184,
+        "Struct": 405,
+        "Impl": 311,
+        "Method": 767,
+        "Function": 1595,
+        "Module": 178,
+        "Trait": 14,
+        "TypeAlias": 37,
+        "Const": 213,
+        "Static": 8
+      }
+    },
+    "e2e": {
+      "count": 504,
+      "by_kind": {
+        "Function": 184,
+        "Const": 62,
+        "Struct": 57,
+        "Impl": 54,
+        "Method": 98,
+        "Module": 23,
+        "Enum": 9,
+        "Static": 9,
+        "TypeAlias": 7,
+        "Trait": 1
+      }
+    },
+    "edit": {
+      "count": 1234,
+      "by_kind": {
+        "Const": 143,
+        "Struct": 114,
+        "Function": 662,
+        "Impl": 42,
+        "TypeAlias": 6,
+        "Method": 147,
+        "Module": 53,
+        "Enum": 38,
+        "Trait": 3,
+        "Static": 25,
+        "Macro": 1
+      }
+    },
+    "env": {
+      "count": 576,
+      "by_kind": {
+        "Trait": 3,
+        "TypeAlias": 1,
+        "Method": 270,
+        "Function": 146,
+        "Static": 1,
+        "Module": 17,
+        "Const": 18,
+        "Struct": 50,
+        "Enum": 19,
+        "Impl": 51
+      }
+    },
+    "envd": {
+      "count": 11558,
+      "by_kind": {
+        "Const": 530,
+        "Struct": 1325,
+        "Impl": 1034,
+        "Function": 4385,
+        "Method": 3263,
+        "TypeAlias": 139,
+        "Module": 346,
+        "Enum": 456,
+        "Static": 27,
+        "Trait": 51,
+        "Macro": 2
+      }
+    },
+    "exec": {
+      "count": 181,
+      "by_kind": {
+        "Struct": 29,
+        "Enum": 26,
+        "Trait": 3,
+        "Method": 17,
+        "TypeAlias": 4,
+        "Impl": 17,
+        "Function": 56,
+        "Const": 10,
+        "Module": 19
+      }
+    },
+    "exec-buildbuddy": {
+      "count": 54,
+      "by_kind": {
+        "Module": 2,
+        "Const": 3,
+        "TypeAlias": 2,
+        "Struct": 15,
+        "Trait": 1,
+        "Method": 14,
+        "Impl": 6,
+        "Enum": 3,
+        "Function": 8
+      }
+    },
+    "exec-local": {
+      "count": 28,
+      "by_kind": {
+        "Struct": 3,
+        "Impl": 4,
+        "Function": 9,
+        "TypeAlias": 1,
+        "Method": 8,
+        "Enum": 2,
+        "Module": 1
+      }
+    },
+    "exec-reapi": {
+      "count": 231,
+      "by_kind": {
+        "Function": 111,
+        "Enum": 11,
+        "Struct": 19,
+        "Impl": 17,
+        "Method": 39,
+        "Module": 25,
+        "Const": 4,
+        "Trait": 2,
+        "TypeAlias": 2,
+        "Macro": 1
+      }
+    },
+    "exec-ssh": {
+      "count": 21,
+      "by_kind": {
+        "Struct": 3,
+        "Impl": 4,
+        "Function": 4,
+        "TypeAlias": 1,
+        "Method": 8,
+        "Enum": 1
+      }
+    },
+    "ext": {
+      "count": 866,
+      "by_kind": {
+        "Enum": 61,
+        "Impl": 93,
+        "Method": 162,
+        "Const": 45,
+        "Function": 350,
+        "Struct": 124,
+        "Module": 27,
+        "Trait": 2,
+        "TypeAlias": 2
+      }
+    },
+    "gui": {
+      "count": 330,
+      "by_kind": {
+        "Function": 92,
+        "Struct": 39,
+        "Impl": 24,
+        "Method": 128,
+        "Const": 16,
+        "Enum": 14,
+        "TypeAlias": 3,
+        "Module": 13,
+        "Trait": 1
+      }
+    },
+    "http": {
+      "count": 14,
+      "by_kind": {
+        "Struct": 1,
+        "Impl": 2,
+        "TypeAlias": 1,
+        "Method": 1,
+        "Function": 6,
+        "Static": 3
+      }
+    },
+    "journal": {
+      "count": 317,
+      "by_kind": {
+        "Static": 1,
+        "Const": 22,
+        "Struct": 60,
+        "Impl": 40,
+        "Method": 64,
+        "Function": 94,
+        "Enum": 20,
+        "TypeAlias": 4,
+        "Module": 12
+      }
+    },
+    "macros": {
+      "count": 122,
+      "by_kind": {
+        "Struct": 11,
+        "Function": 70,
+        "Module": 5,
+        "Impl": 2,
+        "Const": 5,
+        "Method": 23,
+        "Enum": 4,
+        "Macro": 2
+      }
+    },
+    "memory": {
+      "count": 406,
+      "by_kind": {
+        "Function": 130,
+        "Module": 21,
+        "Const": 30,
+        "Struct": 64,
+        "Impl": 29,
+        "Method": 110,
+        "Enum": 17,
+        "Trait": 2,
+        "TypeAlias": 1,
+        "Static": 2
+      }
+    },
+    "oauth": {
+      "count": 177,
+      "by_kind": {
+        "Struct": 28,
+        "Impl": 19,
+        "Method": 26,
+        "Enum": 10,
+        "Function": 67,
+        "Const": 10,
+        "Module": 15,
+        "Trait": 1,
+        "TypeAlias": 1
+      }
+    },
+    "observability": {
+      "count": 774,
+      "by_kind": {
+        "Module": 36,
+        "Const": 172,
+        "Function": 219,
+        "TypeAlias": 16,
+        "Struct": 114,
+        "Impl": 44,
+        "Method": 127,
+        "Enum": 15,
+        "Static": 27,
+        "Trait": 3,
+        "Macro": 1
+      }
+    },
+    "proto": {
+      "count": 114,
+      "by_kind": {
+        "Function": 28,
+        "Module": 37,
+        "Struct": 8,
+        "Impl": 8,
+        "Method": 11,
+        "TypeAlias": 1,
+        "Const": 16,
+        "Enum": 5
+      }
+    },
+    "py": {
+      "count": 289,
+      "by_kind": {
+        "Const": 16,
+        "Function": 87,
+        "Macro": 6,
+        "Struct": 30,
+        "Impl": 24,
+        "Method": 110,
+        "Static": 7,
+        "Enum": 4,
+        "Module": 5
+      }
+    },
+    "py-link": {
+      "count": 10,
+      "by_kind": {
+        "Function": 9,
+        "Module": 1
+      }
+    },
+    "rpc": {
+      "count": 370,
+      "by_kind": {
+        "Const": 28,
+        "Function": 86,
+        "Struct": 70,
+        "Impl": 45,
+        "Method": 105,
+        "Enum": 14,
+        "Module": 15,
+        "Trait": 2,
+        "TypeAlias": 5
+      }
+    },
+    "sandbox": {
+      "count": 743,
+      "by_kind": {
+        "Enum": 30,
+        "Impl": 61,
+        "Function": 327,
+        "Struct": 59,
+        "Const": 63,
+        "Method": 153,
+        "Module": 40,
+        "Trait": 1,
+        "TypeAlias": 1,
+        "Static": 8
+      }
+    },
+    "scribe": {
+      "count": 256,
+      "by_kind": {
+        "Function": 115,
+        "Module": 15,
+        "Struct": 12,
+        "Impl": 32,
+        "Enum": 12,
+        "Method": 65,
+        "Macro": 2,
+        "Const": 1,
+        "TypeAlias": 2
+      }
+    },
+    "sdk": {
+      "count": 17,
+      "by_kind": {
+        "Enum": 1,
+        "Struct": 2,
+        "Impl": 3,
+        "Function": 4,
+        "Method": 6,
+        "Module": 1
+      }
+    },
+    "secrets": {
+      "count": 176,
+      "by_kind": {
+        "Const": 11,
+        "Function": 76,
+        "Module": 19,
+        "Struct": 11,
+        "Impl": 12,
+        "Method": 38,
+        "Enum": 7,
+        "TypeAlias": 2
+      }
+    },
+    "serve": {
+      "count": 319,
+      "by_kind": {
+        "Static": 2,
+        "Const": 6,
+        "TypeAlias": 17,
+        "Struct": 18,
+        "Impl": 20,
+        "Function": 131,
+        "Method": 112,
+        "Module": 8,
+        "Trait": 2,
+        "Enum": 3
+      }
+    },
+    "session": {
+      "count": 443,
+      "by_kind": {
+        "Trait": 1,
+        "Method": 126,
+        "Struct": 35,
+        "Impl": 25,
+        "Function": 153,
+        "Const": 71,
+        "Enum": 11,
+        "Module": 21
+      }
+    },
+    "shell": {
+      "count": 3327,
+      "by_kind": {
+        "Function": 984,
+        "Struct": 220,
+        "Impl": 508,
+        "Method": 1028,
+        "Const": 98,
+        "Enum": 134,
+        "Module": 208,
+        "Trait": 38,
+        "TypeAlias": 98,
+        "Static": 9,
+        "Macro": 2
+      }
+    },
+    "shell-builtins": {
+      "count": 6624,
+      "by_kind": {
+        "Struct": 396,
+        "Impl": 619,
+        "Const": 533,
+        "Method": 1089,
+        "Function": 3083,
+        "Module": 362,
+        "TypeAlias": 88,
+        "Static": 199,
+        "Enum": 219,
+        "Trait": 29,
+        "Macro": 7
+      }
+    },
+    "snapcompact": {
+      "count": 113,
+      "by_kind": {
+        "Const": 19,
+        "Enum": 6,
+        "Function": 63,
+        "Struct": 12,
+        "TypeAlias": 2,
+        "Module": 2,
+        "Static": 5,
+        "Impl": 1,
+        "Method": 3
+      }
+    },
+    "tool": {
+      "count": 848,
+      "by_kind": {
+        "Enum": 63,
+        "Struct": 118,
+        "Function": 182,
+        "Impl": 88,
+        "Method": 309,
+        "Module": 16,
+        "TypeAlias": 29,
+        "Const": 33,
+        "Trait": 6,
+        "Static": 3,
+        "Macro": 1
+      }
+    },
+    "tools": {
+      "count": 5084,
+      "by_kind": {
+        "Function": 2360,
+        "Const": 299,
+        "Struct": 692,
+        "Enum": 224,
+        "Impl": 324,
+        "Trait": 41,
+        "Method": 694,
+        "TypeAlias": 220,
+        "Module": 218,
+        "Static": 12
+      }
+    },
+    "tui": {
+      "count": 6990,
+      "by_kind": {
+        "Struct": 406,
+        "Function": 2824,
+        "Const": 361,
+        "Module": 248,
+        "Impl": 545,
+        "Method": 2323,
+        "Enum": 181,
+        "Trait": 16,
+        "TypeAlias": 33,
+        "Static": 41,
+        "Macro": 12
+      }
+    },
+    "vcs": {
+      "count": 644,
+      "by_kind": {
+        "Struct": 37,
+        "Impl": 21,
+        "Method": 123,
+        "Function": 405,
+        "TypeAlias": 4,
+        "Const": 18,
+        "Module": 20,
+        "Enum": 14,
+        "Static": 2
+      }
+    },
+    "vocab": {
+      "count": 42,
+      "by_kind": {
+        "Macro": 2,
+        "Enum": 4,
+        "Impl": 15,
+        "Const": 2,
+        "Method": 7,
+        "Function": 8,
+        "TypeAlias": 2,
+        "Struct": 1,
+        "Module": 1
+      }
+    },
+    "walker": {
+      "count": 500,
+      "by_kind": {
+        "Struct": 52,
+        "Static": 7,
+        "Const": 22,
+        "Function": 187,
+        "Module": 9,
+        "Impl": 56,
+        "Method": 137,
+        "Enum": 20,
+        "Trait": 2,
+        "TypeAlias": 8
+      }
+    },
+    "webview": {
+      "count": 448,
+      "by_kind": {
+        "Module": 20,
+        "Const": 41,
+        "Struct": 39,
+        "Impl": 37,
+        "Function": 141,
+        "Method": 145,
+        "Enum": 21,
+        "TypeAlias": 4
+      }
+    }
+  }
+}
