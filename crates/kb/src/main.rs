@@ -1,6 +1,5 @@
 #![doc = include_str!("../README.md")]
 
-
 use std::{
 	io::{self, Write},
 	path::PathBuf,
@@ -8,9 +7,8 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use serde::Serialize;
-
 use omp_kb::store::Store;
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(name = "omp-kb", about = "Query a revision-aware Rust SCIP index")]

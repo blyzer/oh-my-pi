@@ -39,7 +39,15 @@ fn typescript_arguments(command: &mut Command, _root: &Path, output: &Path) {
 
 fn python_arguments(command: &mut Command, _root: &Path, output: &Path) {
 	command
-		.args(["index", "--project-name", "repository", "--project-version", "0", "--quiet", "--output"])
+		.args([
+			"index",
+			"--project-name",
+			"repository",
+			"--project-version",
+			"0",
+			"--quiet",
+			"--output",
+		])
 		.arg(output);
 }
 

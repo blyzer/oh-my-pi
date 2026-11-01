@@ -177,14 +177,16 @@ impl Store {
 		let mut paths = vec![tag_path];
 		for producer in PRODUCERS.iter().filter(|producer| {
 			producer.applies(&before.files)
-				&& sources.iter().any(|(_, language)| producer.handles(*language))
+				&& sources
+					.iter()
+					.any(|(_, language)| producer.handles(*language))
 		}) {
 			let scip = tempfile::NamedTempFile::new_in(&self.dir)?;
 			if producer.run(&self.root, scip.path())? == Run::Absent {
 				continue;
 			}
-			let bytes = fs::read(scip.path())
-				.with_context(|| format!("reading {} output", producer.name))?;
+			let bytes =
+				fs::read(scip.path()).with_context(|| format!("reading {} output", producer.name))?;
 			let mut raw = Index::read_scip(&bytes)
 				.with_context(|| format!("decoding {} output", producer.name))?;
 			paths.extend(Index::document_paths(&raw)?);
@@ -231,23 +233,31 @@ impl Store {
 		let tracked = git(&self.root, &["ls-files", "--cached", "-z"])?;
 		let tracked: BTreeSet<&[u8]> = tracked.split(|byte| *byte == 0).collect();
 		for line in tags.lines() {
-			let Some((wasm, rust)) = line.split_once('=') else { continue };
+			let Some((wasm, rust)) = line.split_once('=') else {
+				continue;
+			};
 			let (wasm, rust) = (wasm.trim(), rust.trim());
 			let valid = |path: &str, extension: &str| {
 				let path = Path::new(path);
 				path.extension().is_some_and(|ext| ext == extension)
-					&& path.components().all(|c| matches!(c, std::path::Component::Normal(_)))
-					&& fs::canonicalize(self.root.join(path)).is_ok_and(|resolved| resolved.starts_with(&self.root) && resolved.is_file())
+					&& path
+						.components()
+						.all(|c| matches!(c, std::path::Component::Normal(_)))
+					&& fs::canonicalize(self.root.join(path))
+						.is_ok_and(|resolved| resolved.starts_with(&self.root) && resolved.is_file())
 			};
 			if valid(wasm, "wasm") && valid(rust, "rs") && tracked.contains(rust.as_bytes()) {
-				if let Some(name) = Path::new(wasm).file_stem().and_then(|name| name.to_str()).filter(|name| !name.is_empty()) {
+				if let Some(name) = Path::new(wasm)
+					.file_stem()
+					.and_then(|name| name.to_str())
+					.filter(|name| !name.is_empty())
+				{
 					index.add_wasm_tag(wasm, name, rust);
 				}
 			}
 		}
 		Ok(())
 	}
-
 
 	pub fn update(&self) -> Result<Index> {
 		fs::create_dir_all(&self.dir)?;

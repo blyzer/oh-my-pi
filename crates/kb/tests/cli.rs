@@ -1,4 +1,4 @@
-#![doc = "Integration tests for the omp-kb CLI."]
+//!Integration tests for the omp-kb CLI.
 
 use std::{
 	fs,

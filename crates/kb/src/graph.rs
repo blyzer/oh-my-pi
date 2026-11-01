@@ -234,7 +234,8 @@ impl<'a> Lines<'a> {
 		if span.start.0 != span.end.0 {
 			return "";
 		}
-		self.line(span.start.0)
+		self
+			.line(span.start.0)
 			.ok()
 			.and_then(|line| line.get(span.start.1..span.end.1))
 			.and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -514,8 +515,8 @@ impl Index {
 
 	fn add_occurrences(&mut self, root: &Path, document: &Document) -> Result<()> {
 		let path = &document.relative_path;
-		let source = std::fs::read(root.join(path))
-			.with_context(|| format!("reading SCIP document {path}"))?;
+		let source =
+			std::fs::read(root.join(path)).with_context(|| format!("reading SCIP document {path}"))?;
 		let lines = Lines::new(&source);
 		let columns = Columns::of(document)?;
 		let mut positions: BTreeMap<(usize, usize), Vec<At>> = BTreeMap::new();
@@ -641,7 +642,9 @@ impl Index {
 			.collect();
 		let source = if source != "live"
 			&& !results.is_empty()
-			&& results.iter().all(|item| item.resolution == Resolution::Syntactic)
+			&& results
+				.iter()
+				.all(|item| item.resolution == Resolution::Syntactic)
 		{
 			"syntactic"
 		} else {

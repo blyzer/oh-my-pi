@@ -124,8 +124,8 @@ fn collect(
 		let point = node.start_position();
 		found.implementations.push(PendingImplementation {
 			interface: interface.to_owned(),
-			target:     target.to_owned(),
-			location:   Location::new(file.path, point.row, point.column),
+			target:    target.to_owned(),
+			location:  Location::new(file.path, point.row, point.column),
 		});
 	}
 	let mut cursor = node.walk();
@@ -182,7 +182,8 @@ impl Index {
 				continue;
 			}
 			let full = root.join(path);
-			let metadata = std::fs::symlink_metadata(&full).with_context(|| format!("reading {path}"))?;
+			let metadata =
+				std::fs::symlink_metadata(&full).with_context(|| format!("reading {path}"))?;
 			if !metadata.is_file() || metadata.len() > MAX_SOURCE_BYTES {
 				continue;
 			}
