@@ -130,6 +130,9 @@ pub enum SessionControlError {
 		/// The scope the verb requires.
 		scope: ControlScope,
 	},
+	/// A mutating verb arrived with no session selected.
+	#[error("no session is selected")]
+	NoSessionSelected,
 	/// The host is shutting down or its session store is not reachable.
 	#[error("the session host is unavailable")]
 	HostUnavailable,
@@ -147,9 +150,9 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::SessionNotLive`] | `failed_precondition` |
 	/// | [`SessionControlError::OutOfGrant`] | `permission_denied` |
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
+	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
 	/// | [`SessionControlError::HostUnavailable`] | `unavailable` |
 	/// | [`SessionControlError::Backend`] | `internal` |
-	///
 	/// The codes are diagnostic, not protective. R1 serves one principal, the
 	/// owner, over a filesystem-authenticated socket, so a caller already knows
 	/// which sessions exist and `not_found` discloses nothing it could not read
@@ -165,6 +168,7 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
+			SessionControlError::NoSessionSelected => Self::invalid_argument(message),
 			SessionControlError::HostUnavailable => Self::unavailable(message),
 			SessionControlError::Backend(_) => Self::internal(message),
 		}
@@ -215,6 +219,15 @@ fn read_only(verb: &str) -> Status {
 	))
 }
 
+/// A mutating verb needs a selected session. `Open` of a new session is the exception.
+fn require_session(session_id: &str) -> Result<(), Status> {
+	if session_id.is_empty() {
+		Err(SessionControlError::NoSessionSelected.into())
+	} else {
+		Ok(())
+	}
+}
+
 /// Extracts the interceptor-inserted identity and checks the read scope.
 ///
 /// Absence means the request reached a handler without passing an
@@ -263,29 +276,41 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 
 	async fn submit(
 		&self,
-		_request: Request<pb::ControlCommand>,
+		request: Request<pb::ControlCommand>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
+		let _context = observer(&request)?;
+		require_session(request.get_ref().session_id.as_str())?;
 		Err(read_only("Submit"))
 	}
 
 	async fn approve(
 		&self,
-		_request: Request<pb::ApproveRequest>,
+		request: Request<pb::ApproveRequest>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
+		let _context = observer(&request)?;
+		require_session(request.get_ref().session_id.as_str())?;
 		Err(read_only("Approve"))
 	}
 
 	async fn answer_ui(
 		&self,
-		_request: Request<pb::UiAnswer>,
+		request: Request<pb::UiAnswer>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
+		let _context = observer(&request)?;
+		require_session(request.get_ref().session_id.as_str())?;
 		Err(read_only("AnswerUi"))
 	}
 
 	async fn open(
 		&self,
-		_request: Request<pb::OpenSessionRequest>,
+		request: Request<pb::OpenSessionRequest>,
 	) -> Result<Response<pb::SessionRef>, Status> {
+		let _context = observer(&request)?;
+		let inner = request.get_ref();
+		let opens_new = matches!(inner.kind, Some(pb::open_session_request::Kind::NewSession(_)));
+		if !opens_new {
+			require_session(inner.session_id.as_str())?;
+		}
 		Err(read_only("Open"))
 	}
 }
@@ -511,6 +536,7 @@ mod tests {
 				SessionControlError::MissingScope { scope: ControlScope::ObserveHostLocal },
 				Code::PermissionDenied,
 			),
+			(SessionControlError::NoSessionSelected, Code::InvalidArgument),
 			(SessionControlError::HostUnavailable, Code::Unavailable),
 			(
 				SessionControlError::Backend(Box::new(std::io::Error::other("journal is sealed"))),
@@ -536,4 +562,23 @@ mod tests {
 		assert!(!granted.contains(ControlScope::ObserveHostLocal));
 		assert!(ScopeSet::EMPTY.is_empty());
 	}
+	#[tokio::test]
+	async fn mutating_verbs_refuse_when_no_session_is_selected() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let submit = authenticated(pb::ControlCommand::default(), observing("owner"));
+		assert_eq!(rpc.submit(submit).await.unwrap_err().code(), Code::InvalidArgument);
+		let approve = authenticated(pb::ApproveRequest::default(), observing("owner"));
+		assert_eq!(rpc.approve(approve).await.unwrap_err().code(), Code::InvalidArgument);
+		let answer = authenticated(pb::UiAnswer::default(), observing("owner"));
+		assert_eq!(rpc.answer_ui(answer).await.unwrap_err().code(), Code::InvalidArgument);
+		let open = authenticated(pb::OpenSessionRequest::default(), observing("owner"));
+		assert_eq!(rpc.open(open).await.unwrap_err().code(), Code::InvalidArgument);
+
+		let named = authenticated(
+			pb::ControlCommand { session_id: "01JSESSION".to_owned(), ..pb::ControlCommand::default() },
+			observing("owner"),
+		);
+		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::Unimplemented);
+	}
+
 }
