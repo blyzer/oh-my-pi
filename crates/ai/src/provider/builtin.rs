@@ -709,6 +709,9 @@ impl RouteComposer for ProductionRouteComposer {
 			provider: route.provider.clone(),
 			route: route.id.clone(),
 			authenticated,
+			invocation: auth_specs
+				.iter()
+				.any(|(id, _)| self.dependencies.credentials.invocation_overrides(id)),
 		};
 		let restored_kind = crate::auth::broker::restored_static_secret_kind(
 			catalog,
@@ -2180,6 +2183,9 @@ struct RouteAccountSelector {
 	provider:      ProviderId,
 	route:         RouteId,
 	authenticated: bool,
+	/// The invocation `--api-key` answers this route, so no stored account is
+	/// selected, pinned, or rotated to.
+	invocation:    bool,
 }
 
 impl AccountSelector<Call> for RouteAccountSelector {
@@ -2189,6 +2195,14 @@ impl AccountSelector<Call> for RouteAccountSelector {
 		if !self.authenticated {
 			return Ok(RouteAccount::Anonymous {
 				_account: AnonymousAccount {
+					_provider: self.provider.clone(),
+					_route:    self.route.clone(),
+				},
+			});
+		}
+		if self.invocation {
+			return Ok(RouteAccount::Brokered {
+				_account: BrokeredAccount {
 					_provider: self.provider.clone(),
 					_route:    self.route.clone(),
 				},
@@ -4427,6 +4441,7 @@ mod tests {
 			provider: encoder.route.provider.clone(),
 			route: encoder.route.id,
 			authenticated: true,
+			invocation: false,
 		};
 		let context = ExecutionContext::new(call.budget.clone());
 		(selector, call, context)
@@ -4487,6 +4502,35 @@ mod tests {
 			Some(ErrorDetail::AccountPin { reason: PinFailure::CoolingDown, .. })
 		));
 		assert!(error.to_string().contains("pinned to this session"));
+	}
+
+	#[test]
+	fn invocation_key_never_selects_a_stored_account() {
+		let alpha = AccountId::new("alpha");
+		let (mut selector, call, context) =
+			pinned_selector(&["alpha", "beta"], Some(AccountPin::Account(alpha.clone())));
+		assert!(
+			matches!(selector.select(&call, &context), Ok(RouteAccount::Authenticated(_))),
+			"without the flag the pinned stored account serves"
+		);
+		selector.invocation = true;
+		assert!(
+			matches!(selector.select(&call, &context), Ok(RouteAccount::Brokered { .. })),
+			"the flag outranks a pinned stored account"
+		);
+		selector
+			.pool
+			.cooldown(
+				alpha.clone(),
+				SystemTime::now() + Duration::from_secs(600),
+				crate::account::CooldownReason::Health,
+			)
+			.expect("cooldown records");
+		context.set_attempt_action(AttemptAction::RotateAccount { previous_account: Some(alpha) });
+		assert!(
+			matches!(selector.select(&call, &context), Ok(RouteAccount::Brokered { .. })),
+			"a cooling stored account neither blocks nor rotates the flag's key"
+		);
 	}
 
 	#[test]
@@ -4638,6 +4682,7 @@ mod tests {
 			provider: route.provider.clone(),
 			route: route.id.clone(),
 			authenticated: true,
+			invocation: false,
 		};
 		let leases = RouteLeaseProvider {
 			source,
@@ -4899,6 +4944,7 @@ mod tests {
 				provider: route.provider.clone(),
 				route: route.id.clone(),
 				authenticated: true,
+				invocation: false,
 			};
 			let leases = RouteLeaseProvider {
 				source:         CredentialBroker::from_catalog(

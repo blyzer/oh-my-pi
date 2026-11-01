@@ -254,6 +254,16 @@ impl CredentialBroker {
 		Ok(broker)
 	}
 
+	/// Whether the session-owned API-key overlay answers `spec` ahead of every
+	/// other source, stored accounts included.
+	#[must_use]
+	pub fn invocation_overrides(&self, spec: &AuthSpecId) -> bool {
+		self
+			.invocation
+			.as_ref()
+			.is_some_and(|invocation| invocation.specs.contains_key(spec))
+	}
+
 	/// Refreshes the renewable engine for an exact account/spec selection.
 	///
 	/// Stored OAuth is authoritative when installed. An AWS-only plan refreshes
