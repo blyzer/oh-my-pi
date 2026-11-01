@@ -291,7 +291,10 @@ jobs:
   # otherwise use GitHub-hosted macos-15. GitHub Actions has no native OR for
   # runs-on (a label array is AND), so without this probe a busy or offline
   # self-hosted machine leaves required macOS checks pending for up to 24h.
-  # Fork PRs always get hosted. See docs/research/ci-macos-runner-fallback.md.
+  # Fork PRs always get hosted — that decision is made in this workflow file
+  # (and again on the rust job's runs-on), never only inside the checked-out
+  # resolve script, which a fork PR can rewrite. See
+  # docs/research/ci-macos-runner-fallback.md.
   macos_runner:
     name: Resolve macOS runner
     needs: changes
@@ -302,17 +305,32 @@ jobs:
       contents: read
       actions: read
     outputs:
-      runs_on: ${{ steps.resolve.outputs.runs_on }}
+      runs_on: ${{ steps.fork.outputs.runs_on || steps.resolve.outputs.runs_on }}
     steps:
+      # Authoritative fork gate: untrusted PR code must not choose self-hosted.
+      - name: Fork pull requests always use hosted macos-15
+        id: fork
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Fork pull request: forcing hosted macos-15 in workflow YAML"
+          {
+            echo "runs_on<<EOF"
+            echo '"macos-15"'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: ${{ steps.fork.outcome != 'success' }}
+
       - name: Prefer idle self-hosted Mac, else macos-15
         id: resolve
+        if: ${{ steps.fork.outcome != 'success' }}
         env:
           PREFERRED: ${{ vars.MACOS_RUNNER }}
           FALLBACK: '"macos-15"'
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
         run: |
           set -euo pipefail
           runs_on=$(scripts/ci-resolve-macos-runner.sh)
@@ -346,8 +364,9 @@ jobs:
     #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
     # macos_runner probes that the matching runner is online and idle; if not
     # (or the variable is unset), runs-on is hosted macos-15 so required checks
-    # never queue forever on a dead machine.
-    runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}
+    # never queue forever on a dead machine. Fork PRs are forced to hosted here
+    # in the workflow expression so a rewritten resolve script cannot override.
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && '"macos-15"' || needs.macos_runner.outputs.runs_on) }}
     timeout-minutes: 120
     env:
       SCCACHE_GHA_ENABLED: "true"

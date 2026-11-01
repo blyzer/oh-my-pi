@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Resolve which macOS runner a CI job should use.
+# Resolve which macOS runner a CI job should use (trusted / same-repo runs).
 #
 # GitHub Actions has no native "prefer self-hosted, else hosted" OR for
 # runs-on (a label array is AND). When MACOS_RUNNER names a self-hosted Mac,
 # an offline or busy machine leaves required checks pending for up to 24h.
 # This script keeps the fast path when that Mac is online and idle, and falls
 # back to GitHub-hosted macos-15 otherwise so shipping is not blocked.
+#
+# Fork pull requests must NOT rely on this script for the hosted-only gate: a
+# fork can rewrite this file in the PR. ci.yml forces hosted macos-15 for forks
+# in the workflow YAML (macos_runner fork step + rust runs-on expression)
+# before this script is consulted.
 #
 # Prints a JSON value suitable for `runs-on: ${{ fromJSON(...) }}` to stdout.
 # Notices go to stderr (and ::notice:: when running in Actions).
@@ -14,13 +19,11 @@
 #   PREFERRED   — contents of vars.MACOS_RUNNER (JSON string or array), or empty
 #   FALLBACK    — JSON for hosted fallback (default: "macos-15")
 #   REPO        — owner/name (default: from gh)
-#   GH_TOKEN    — token with actions:read (optional; missing → cannot probe)
-#   IS_FORK     — "true" forces FALLBACK (self-hosted must not take fork PRs)
+#   GH_TOKEN    — token with actions:read (optional; missing → FALLBACK)
 set -euo pipefail
 
 FALLBACK="${FALLBACK:-\"macos-15\"}"
 PREFERRED="${PREFERRED:-}"
-IS_FORK="${IS_FORK:-false}"
 REPO="${REPO:-}"
 
 notice() {
@@ -31,12 +34,6 @@ notice() {
 emit() {
 	printf '%s\n' "$1"
 }
-
-if [ "$IS_FORK" = "true" ]; then
-	notice "Fork pull request: using hosted macOS runner ($FALLBACK), not self-hosted"
-	emit "$FALLBACK"
-	exit 0
-fi
 
 if [ -z "$PREFERRED" ] || [ "$PREFERRED" = '""' ]; then
 	emit "$FALLBACK"

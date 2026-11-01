@@ -26,8 +26,11 @@ availability-aware selection for the required macOS jobs.
 | BuildBuddy `just remote-heavy` | Remote Linux proof from a hosted driver | Already in `ci.yml`; not a macOS substitute |
 
 Fork pull requests must not land on self-hosted runners (untrusted code on a
-persistent machine). The resolve job forces hosted when
-`pull_request.head.repo.fork` is true.
+persistent machine). That gate lives in **workflow YAML** (`macos_runner`'s
+fork step and the `rust` job's `runs-on` expression), not in
+`scripts/ci-resolve-macos-runner.sh`: a fork PR can rewrite the script, so a
+script-only `IS_FORK` check is not a security boundary (GitHub Advanced
+Security finding on PR #458).
 
 ## Measured cost of the status quo
 
@@ -46,14 +49,15 @@ So the hybrid resolve keeps the ~15 min path when the Mac is free, and the
 
 ## What we changed
 
-1. `scripts/ci-resolve-macos-runner.sh` — given `PREFERRED` (`vars.MACOS_RUNNER`),
-   `FALLBACK` (`"macos-15"`), optional `GH_TOKEN` / `REPO`, and `IS_FORK`,
-   prints one JSON value for `runs-on`. Forks, empty/invalid preference, API
-   errors, and “no online idle label match” all emit the hosted fallback.
-2. `ci.yml` job `macos_runner` — cheap `ubuntu-24.04` step with `actions:read`,
-   runs only when `changes` says CI is needed, writes `outputs.runs_on`.
-3. `rust` — `needs: macos_runner` and
-   `runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}`.
+1. `ci.yml` job `macos_runner` — on fork PRs, a workflow step emits
+   `"macos-15"` and skips checkout/script. Otherwise a cheap `ubuntu-24.04`
+   job with `actions:read` runs the resolve script and writes `outputs.runs_on`.
+2. `scripts/ci-resolve-macos-runner.sh` — for trusted/same-repo runs only:
+   given `PREFERRED` / `FALLBACK` / `GH_TOKEN` / `REPO`, probe idle runners and
+   print JSON for `runs-on`. Empty/invalid preference, API errors, and “no
+   online idle match” emit hosted fallback. Not used for fork gating.
+3. `rust` — `needs: macos_runner`; `runs-on` is hosted when the PR is a fork
+   (workflow expression), else `fromJSON(needs.macos_runner.outputs.runs_on)`.
 4. `lint_macos` — always `runs-on: macos-15`. It has no self-hosted target
    cache, and a warm clippy was no faster than a cold one. It still has to be
    a Mac so `#[cfg(target_os = "macos")]` is linted.
@@ -85,6 +89,10 @@ matching runner is online and idle.
   offline / long-busy → hosted.
 - **Permissions.** Listing runners needs `actions: read` on the resolve job.
   Failures fall back to hosted rather than failing the workflow.
+- **Fork workflow edits.** A fork can also edit `ci.yml` on `pull_request`.
+  Keep GitHub’s “require approval for first-time contributors” (or runner
+  groups that only accept workflows from the default branch) enabled so a
+  rewritten workflow cannot schedule onto the Mac without review.
 - **Not** replacing BuildBuddy remote Linux or splitting the macOS suite onto
   Linux — those are other tracks in the acceleration research.
 
