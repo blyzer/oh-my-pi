@@ -25,12 +25,16 @@ availability-aware selection for the required macOS jobs.
 | Larger hosted runners / matrix fan-out | More CPU or shards | Orthogonal; does not replace Seatbelt/P12 on macOS |
 | BuildBuddy `just remote-heavy` | Remote Linux proof from a hosted driver | Already in `ci.yml`; not a macOS substitute |
 
-Fork pull requests must not land on self-hosted runners (untrusted code on a
-persistent machine). That gate lives in **workflow YAML** (`macos_runner`'s
-fork step and the `rust` job's `runs-on` expression), not in
-`scripts/ci-resolve-macos-runner.sh`: a fork PR can rewrite the script, so a
-script-only `IS_FORK` check is not a security boundary (GitHub Advanced
-Security finding on PR #458).
+Cross-repo pull requests must not land on self-hosted runners (untrusted code
+on a persistent machine). That gate lives in **workflow YAML**
+(`macos_runner`'s external step and the `rust` job's `runs-on` expression),
+comparing `head.repo.full_name != github.repository` — the same predicate as
+`remote_linux`. Do **not** use `head.repo.fork`: that flag means “this GitHub
+repository is a fork of another”, so on `blyzer/oh-my-pi` (fork of
+`can1357/oh-my-pi`) every same-repo PR looked “external”, skipped the idle
+probe, and queued on scarce hosted `macos-15` until cancel. A script-only
+gate is also not a security boundary (Advanced Security on PR #458): an
+external PR can rewrite the checked-out script.
 
 ## Measured cost of the status quo
 
@@ -49,15 +53,16 @@ So the hybrid resolve keeps the ~15 min path when the Mac is free, and the
 
 ## What we changed
 
-1. `ci.yml` job `macos_runner` — on fork PRs, a workflow step emits
+1. `ci.yml` job `macos_runner` — on cross-repo PRs, a workflow step emits
    `"macos-15"` and skips checkout/script. Otherwise a cheap `ubuntu-24.04`
    job with `actions:read` runs the resolve script and writes `outputs.runs_on`.
 2. `scripts/ci-resolve-macos-runner.sh` — for trusted/same-repo runs only:
    given `PREFERRED` / `FALLBACK` / `GH_TOKEN` / `REPO`, probe idle runners and
    print JSON for `runs-on`. Empty/invalid preference, API errors, and “no
-   online idle match” emit hosted fallback. Not used for fork gating.
-3. `rust` — `needs: macos_runner`; `runs-on` is hosted when the PR is a fork
-   (workflow expression), else `fromJSON(needs.macos_runner.outputs.runs_on)`.
+   online idle match” emit hosted fallback. Not used for external-PR gating.
+3. `rust` — `needs: macos_runner`; `runs-on` is hosted when the PR is
+   cross-repo (workflow expression), else
+   `fromJSON(needs.macos_runner.outputs.runs_on)`.
 4. `lint_macos` — always `runs-on: macos-15`. It has no self-hosted target
    cache, and a warm clippy was no faster than a cold one. It still has to be
    a Mac so `#[cfg(target_os = "macos")]` is linted.
@@ -89,10 +94,14 @@ matching runner is online and idle.
   offline / long-busy → hosted.
 - **Permissions.** Listing runners needs `actions: read` on the resolve job.
   Failures fall back to hosted rather than failing the workflow.
-- **Fork workflow edits.** A fork can also edit `ci.yml` on `pull_request`.
-  Keep GitHub’s “require approval for first-time contributors” (or runner
-  groups that only accept workflows from the default branch) enabled so a
-  rewritten workflow cannot schedule onto the Mac without review.
+- **External workflow edits.** A cross-repo PR can also edit `ci.yml` on
+  `pull_request`. Keep GitHub’s “require approval for first-time contributors”
+  (or runner groups that only accept workflows from the default branch)
+  enabled so a rewritten workflow cannot schedule onto the Mac without review.
+- **Hosted macOS capacity.** When resolve falls back to `macos-15` (or
+  `lint_macos` always), GitHub may cancel with “job was not acquired by
+  Runner of type hosted” under arm64 capacity pressure. That is orthogonal
+  to the idle-probe logic.
 - **Not** replacing BuildBuddy remote Linux or splitting the macOS suite onto
   Linux — those are other tracks in the acceleration research.
 

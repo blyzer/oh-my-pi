@@ -7,10 +7,12 @@
 # This script keeps the fast path when that Mac is online and idle, and falls
 # back to GitHub-hosted macos-15 otherwise so shipping is not blocked.
 #
-# Fork pull requests must NOT rely on this script for the hosted-only gate: a
-# fork can rewrite this file in the PR. ci.yml forces hosted macos-15 for forks
-# in the workflow YAML (macos_runner fork step + rust runs-on expression)
-# before this script is consulted.
+# Cross-repo (external) pull requests must NOT rely on this script for the
+# hosted-only gate: an external PR can rewrite this file. ci.yml forces hosted
+# macos-15 when head.repo.full_name != github.repository (macos_runner
+# external step + rust runs-on expression) before this script is consulted.
+# Never use head.repo.fork for that gate: it is true when *this* repository is
+# itself a GitHub fork, including same-repo PRs.
 #
 # Prints a JSON value suitable for `runs-on: ${{ fromJSON(...) }}` to stdout.
 # Notices go to stderr (and ::notice:: when running in Actions).
