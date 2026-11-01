@@ -287,6 +287,41 @@ jobs:
           done
           echo "No successful '$CHECK' run on $head proved tree $pushed; running the macOS job"
 
+  # Prefer an online idle self-hosted Mac when vars.MACOS_RUNNER names one;
+  # otherwise use GitHub-hosted macos-15. GitHub Actions has no native OR for
+  # runs-on (a label array is AND), so without this probe a busy or offline
+  # self-hosted machine leaves required macOS checks pending for up to 24h.
+  # Fork PRs always get hosted. See docs/research/ci-macos-runner-fallback.md.
+  macos_runner:
+    name: Resolve macOS runner
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      runs_on: ${{ steps.resolve.outputs.runs_on }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Prefer idle self-hosted Mac, else macos-15
+        id: resolve
+        env:
+          PREFERRED: ${{ vars.MACOS_RUNNER }}
+          FALLBACK: '"macos-15"'
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+          runs_on=$(scripts/ci-resolve-macos-runner.sh)
+          {
+            echo "runs_on<<EOF"
+            echo "$runs_on"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
@@ -303,17 +338,16 @@ jobs:
     # Nor is it gated on `Rust format`: waiting for `cargo fmt --check` held this
     # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
     # format still reports, and fails, its own required check.
-    needs: [changes, push_verified]
+    needs: [changes, push_verified, macos_runner]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
-    # somewhere else. Set it to a JSON label array to send this job to a
-    # self-hosted Apple silicon machine, which is the only way to give it more
-    # than a hosted runner's disk — every test binary statically links the
-    # ~650 MB CPython, so a full link is large:
+    # Set MACOS_RUNNER to a JSON label array to prefer a self-hosted Apple
+    # silicon machine (more disk than hosted — every test binary statically
+    # links ~650 MB CPython):
     #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
-    # Unset, and the expression falls back, so a repository with no runner
-    # registered keeps the hosted behaviour rather than queueing forever.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    # macos_runner probes that the matching runner is online and idle; if not
+    # (or the variable is unset), runs-on is hosted macos-15 so required checks
+    # never queue forever on a dead machine.
+    runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}
     timeout-minutes: 120
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -455,9 +489,9 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
-    needs: [changes, push_verified]
+    needs: [changes, push_verified, macos_runner]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

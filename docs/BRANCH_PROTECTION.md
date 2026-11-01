@@ -146,10 +146,13 @@ Things that keep this honest:
 gated by `changes`.
 
 If the ruleset requires `Rust workspace and acceptance proofs` while the
-`MACOS_RUNNER` variable points that job at a self-hosted Mac, an outage of that
-runner leaves the check pending and blocks every merge that touches CI paths.
-The escape hatch is the ruleset's admin bypass: merge as an admin, or unset
-`MACOS_RUNNER` so the job falls back to the hosted `macos-15` runner.
+`MACOS_RUNNER` variable prefers a self-hosted Mac, CI still must not block
+forever on an offline or busy machine. The `macos_runner` job in `ci.yml`
+probes the Actions runners API and sets `rust` / `lint_macos` `runs-on` to
+those labels only when a matching runner is online and idle; otherwise it
+emits hosted `macos-15` (fork PRs always get hosted). See
+`docs/research/ci-macos-runner-fallback.md`. The ruleset's admin bypass
+remains the escape hatch if hosted macOS itself is unavailable.
 
 Measured on the hosted runner (run 37329841934, `macos-15-arm64`): the job builds and
 links the whole workspace in about 52 minutes (against about 15 on a warm self-hosted

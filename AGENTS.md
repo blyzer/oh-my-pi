@@ -96,9 +96,10 @@ and on macOS a failed Seatbelt probe fails it.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
-never in a PR. The macOS jobs read `vars.MACOS_RUNNER` and fall back to
-`macos-15`, so a self-hosted Apple-silicon runner takes them when one is
-registered. Lint runs on BOTH
+never in a PR. The macOS jobs prefer `vars.MACOS_RUNNER` when that self-hosted
+Apple-silicon runner is online and idle (`macos_runner` in `ci.yml`); otherwise
+they use hosted `macos-15` so required checks do not queue on a dead machine.
+Lint runs on BOTH
 platforms deliberately: clippy on one target never sees the other's
 `#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until
 `lint_linux` existed. Embedded CPython bundles exist for
