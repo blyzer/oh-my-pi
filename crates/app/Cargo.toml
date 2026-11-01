@@ -76,6 +76,7 @@ omp-catalog.workspace = true
 omp-audio.workspace = true
 omp-ai = { workspace = true, features = ["realtime"] }
 omp-journal.workspace = true
+omp-kb.workspace = true
 omp-memory.workspace = true
 omp-session.workspace = true
 omp-dom.workspace = true
