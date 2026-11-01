@@ -21,7 +21,8 @@
 #   PREFERRED   — contents of vars.MACOS_RUNNER (JSON string or array), or empty
 #   FALLBACK    — JSON for hosted fallback (default: "macos-15")
 #   REPO        — owner/name (default: from gh)
-#   GH_TOKEN    — token with actions:read (optional; missing → FALLBACK)
+#   GH_TOKEN    — token that can list repo runners (repo-admin PAT), or the
+#                 default GITHUB_TOKEN (which 403s — then keep PREFERRED)
 set -euo pipefail
 
 FALLBACK="${FALLBACK:-\"macos-15\"}"

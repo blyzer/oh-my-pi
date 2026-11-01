@@ -92,11 +92,12 @@ matching runner is online and idle.
 - **Probe race.** A runner can become busy between resolve and job start; the
   job then queues briefly on self-hosted. Acceptable; the important case is
   offline / long-busy → hosted.
-- **Permissions.** Listing runners needs `administration: read` (not only
-  `actions: read`) on the resolve job. If the list call fails, the script
-  **keeps** a configured `MACOS_RUNNER` rather than ignoring the self-hosted
-  Mac and forcing scarce hosted capacity. Idle/offline fallback only applies
-  when the list call succeeds and no matching runner is online+idle.
+- **Permissions.** `GET …/actions/runners` needs repo admin. That is **not**
+  a grantable `GITHUB_TOKEN` scope (`administration: read` is invalid in
+  workflow `permissions:` and fails the workflow at load time). Default
+  behavior: if the list call fails, **keep** configured `MACOS_RUNNER`.
+  Optional secret `ACTIONS_RUNNER_PROBE_TOKEN` (repo-admin PAT) enables real
+  idle/offline probing and hosted fallback when the Mac is busy.
 - **External workflow edits.** A cross-repo PR can also edit `ci.yml` on
   `pull_request`. Keep GitHub’s “require approval for first-time contributors”
   (or runner groups that only accept workflows from the default branch)

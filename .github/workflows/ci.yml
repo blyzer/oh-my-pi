@@ -307,11 +307,12 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      # actions:read alone cannot call GET …/actions/runners (needs
-      # administration:read). Without that the probe always failed closed to
-      # hosted and ignored a configured MACOS_RUNNER / self-hosted Mac.
+      # Listing self-hosted runners needs repo admin; that is NOT a grantable
+      # GITHUB_TOKEN permission (administration:read is invalid and fails the
+      # whole workflow at parse time). The resolve script therefore keeps a
+      # configured MACOS_RUNNER when the list call 403s. Optional secret
+      # ACTIONS_RUNNER_PROBE_TOKEN (repo-admin PAT) enables real idle probing.
       actions: read
-      administration: read
     outputs:
       runs_on: ${{ steps.external.outputs.runs_on || steps.resolve.outputs.runs_on }}
     steps:
