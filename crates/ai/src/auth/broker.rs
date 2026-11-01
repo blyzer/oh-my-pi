@@ -258,7 +258,8 @@ impl CredentialBroker {
 	/// other source, stored accounts included.
 	#[must_use]
 	pub fn invocation_overrides(&self, spec: &AuthSpecId) -> bool {
-		self.invocation
+		self
+			.invocation
 			.as_ref()
 			.is_some_and(|invocation| invocation.specs.contains_key(spec))
 	}
