@@ -33,11 +33,28 @@ use omp_session::{ComponentRegistry, Session, ToolReceipt};
 use serde_json::value::RawValue;
 
 /// The fewest journals the corpus may contain.
-const MIN_FIXTURES: usize = 2;
+const MIN_FIXTURES: usize = 5;
 
 /// Repository-relative corpus directory.
 fn fixtures() -> PathBuf {
 	Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/journal")
+}
+
+fn copy_tree(source: &Path, target: &Path) {
+	if !source.is_dir() {
+		return;
+	}
+	fs::create_dir_all(target).expect("create fixture tree");
+	for entry in fs::read_dir(source).expect("read fixture tree") {
+		let entry = entry.expect("fixture tree entry");
+		let source_path = entry.path();
+		let target_path = target.join(entry.file_name());
+		if source_path.is_dir() {
+			copy_tree(&source_path, &target_path);
+		} else {
+			fs::copy(source_path, target_path).expect("copy fixture blob");
+		}
+	}
 }
 
 const REGENERATE: &str = "cargo nextest run -p omp-session --test golden_journals --run-ignored \
@@ -162,6 +179,69 @@ fn tool_calls_and_rewind(session: &mut Session) {
 	session.assistant_end("end_turn").expect("assistant end");
 	rename(session, "Second branch");
 }
+fn compaction(session: &mut Session) {
+	session.begin_turn().expect("turn");
+	let boundary = session
+		.user("old context", Vec::new())
+		.expect("boundary user");
+	let summary = session.blobs().put(b"compacted history").expect("summary");
+	let mut compaction = omp_journal::data::Compaction::new(summary, boundary);
+	compaction.method = Some(Str::new_static("auto"));
+	compaction.tokens_before = Some(1_024);
+	compaction.tokens_after = Some(256);
+	compaction.warning = Some(Str::new_static("bounded fixture"));
+	session.compaction(compaction).expect("compaction");
+	session.begin_turn().expect("post-compaction turn");
+	session
+		.user("after compaction", Vec::new())
+		.expect("post-compaction user");
+}
+
+fn tool_update(session: &mut Session) {
+	session.begin_turn().expect("turn");
+	session.user("run the tool", Vec::new()).expect("user");
+	session
+		.assistant_start("model-c", "provider-c", "route-c")
+		.expect("assistant start");
+	session.assistant_end("tool_use").expect("assistant end");
+	let call = session
+		.call(
+			"progress",
+			1,
+			"call-update",
+			None,
+			Some(raw(serde_json::json!({ "task": "index" }))),
+			None,
+		)
+		.expect("tool call");
+	session.call_started(call).expect("tool started");
+	session
+		.call_update(call, raw(serde_json::json!({ "phase": "scan", "completed": 1 })))
+		.expect("first update");
+	session
+		.call_update(call, raw(serde_json::json!({ "phase": "done", "completed": 2 })))
+		.expect("second update");
+	session
+		.settle(call, raw(serde_json::json!({ "text": "indexed" })))
+		.expect("tool settles");
+}
+
+fn patch(session: &mut Session) {
+	session.begin_turn().expect("turn");
+	session.user("patch the queue", Vec::new()).expect("user");
+	let cause = session.head().expect("head");
+	session
+		.patch(Txn {
+			cause,
+			label: Some(Str::new_static("golden.patch")),
+			ops: vec![Op::Set {
+				h:     session.dom().queues(),
+				prop:  PropId::Data.into(),
+				value: Value::Json(raw(serde_json::json!({ "fixture": "patch", "enabled": true }))),
+			}],
+		})
+		.expect("patch");
+}
 
 /// Builds one corpus journal on a fresh session.
 type Build = fn(&mut Session);
@@ -171,6 +251,9 @@ fn corpus() -> [(&'static str, Build); MIN_FIXTURES] {
 	[
 		("chat-stream", chat_stream as Build),
 		("tool-calls-and-rewind", tool_calls_and_rewind as Build),
+		("compaction", compaction as Build),
+		("tool-update", tool_update as Build),
+		("patch", patch as Build),
 	]
 }
 
@@ -214,6 +297,8 @@ fn golden_journals_open_and_fold_to_their_recorded_snapshots() {
 		let copy = directory.path().join(format!("{name}.oms"));
 		fs::write(&copy, &bytes).expect("copy fixture");
 
+		copy_tree(&fixtures().join("blobs"), &directory.path().join("blobs"));
+
 		let entries = Journal::scan(&copy).unwrap_or_else(|error| {
 			panic!("{name}.oms no longer decodes: {error:?}");
 		});
@@ -245,11 +330,13 @@ fn regenerate_golden_journals() {
 	for (name, build) in corpus() {
 		let journal = target.join(format!("{name}.oms"));
 		let snapshot = target.join(format!("{name}.snapshot.json"));
-		assert!(
-			!journal.exists() && !snapshot.exists(),
-			"{name} already exists under fixtures/journal/; golden journals are append-only history. \
-			 Delete it by hand only if the format change is deliberate."
-		);
+		if journal.exists() || snapshot.exists() {
+			assert!(
+				journal.exists() && snapshot.exists(),
+				"{name} has only one side of its golden fixture pair",
+			);
+			continue;
+		}
 
 		let scratch = tempfile::tempdir().expect("scratch directory");
 		let path = scratch.path().join(format!("{name}.oms"));
@@ -269,5 +356,6 @@ fn regenerate_golden_journals() {
 
 		fs::write(&snapshot, live.as_bytes()).expect("write snapshot");
 		fs::copy(&path, &journal).expect("copy journal");
+		copy_tree(&scratch.path().join("blobs"), &target.join("blobs"));
 	}
 }

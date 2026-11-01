@@ -1,0 +1,20 @@
+event: journal@1
+id: 01M68Y0XRM4G9MZ9MXRP7MF3ZC
+data: {"version":1,"cwd":"/Users/enverfrancisco/repositories/oh-my-pi/crates/session","created":"1793448769300"}
+
+event: turn.start@1
+id: 01M68Y0XRR2JDH3NAKE79Y1Q1F
+by: 01M68Y0XRM4G9MZ9MXRP7MF3ZC
+data: {}
+
+event: msg.user@1
+id: 01M68Y0XRWN07NFN55EZM8PPHW
+by: 01M68Y0XRR2JDH3NAKE79Y1Q1F
+data: {"text":"patch the queue"}
+
+: golden.patch
+event: patch@1
+id: 01M68Y0XS0SNAXCD38SWAM0377
+by: 01M68Y0XRWN07NFN55EZM8PPHW
+data: {"ops":[["set",4,"data",{"fixture":"patch","enabled":true}]]}
+

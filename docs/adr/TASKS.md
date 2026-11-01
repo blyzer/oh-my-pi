@@ -88,18 +88,18 @@ that fix.
 
 ## ADR 0048 — schema and serialization boundaries
 
-ADR status: **proposed; owner review required**.
+ADR status: **accepted 2026-10-28; implementation gate open**.
 
 Completed implementation items:
 
 - **DONE** `buf breaking` configuration, CI check, and `just proto-breaking`.
-- **DONE** B1, B2, B3, B6, B7, and B8.
+- **DONE** B1, B2, B3, B4, B6, B7, and B8.
 
 Active items:
 
-- **BLOCKED** B4 pending owner acceptance. `validate_worker_frame` is used only for the Ping probe, and `validate_host_frame` has no production caller. The current tree has no normal `HostFrame` decode path, while the worker path already preflights its only `WorkerFrame` decode in `crates/envd/src/exec.rs::take_worker_frame`. Do not add a second or speculative decode path before the owner accepts ADR 0048.
-- **BLOCKED** B5 pending owner acceptance and a corpus decision. The committed harness in `crates/session/tests/golden_journals.rs` has two fixture pairs, `chat-stream` and `tool-calls-and-rewind`, and passes its replay proof. It does not cover `compaction`, `tool.update`, or `patch` as separate corpus builders. Add those fixtures only after the owner decides that the ADR's “each kind or field addition” wording requires them.
-- **BLOCKED** owner acceptance. Confirm the Buf ignore list, choose the B1 lenient-decode versus revision-bump variant, and run the required local Buf breaking proof.
+- **DONE** B4. `validate_worker_frame` guards the worker process and readiness-ping decode paths, and `validate_host_frame` guards the host-frame child path. `just test-pkg omp-proto` passed 33 tests plus one doctest.
+- **OPEN** B5. Owner acceptance selected behavior-family golden fixtures for `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool.update`, and `patch`; implement the remaining fixture builders and replay proof.
+
 
 `just proto-breaking` passes on the current tree. `just e2e-p8` passes. The latest non-gating P8 artifact is workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996), but it measures the synthetic recorder workload, not ADR 0045 workloads W1–W9.
 
