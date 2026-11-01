@@ -148,9 +148,10 @@ gated by `changes`.
 If the ruleset requires `Rust workspace and acceptance proofs` while the
 `MACOS_RUNNER` variable prefers a self-hosted Mac, CI still must not block
 forever on an offline or busy machine. The `macos_runner` job in `ci.yml`
-probes the Actions runners API and sets `rust` / `lint_macos` `runs-on` to
+probes the Actions runners API and sets `rust` `runs-on` to
 those labels only when a matching runner is online and idle; otherwise it
-emits hosted `macos-15` (fork PRs always get hosted). See
+emits hosted `macos-15` (fork PRs always get hosted). `lint_macos` always uses
+hosted `macos-15`. See
 `docs/research/ci-macos-runner-fallback.md`. The ruleset's admin bypass
 remains the escape hatch if hosted macOS itself is unavailable.
 

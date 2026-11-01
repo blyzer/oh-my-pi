@@ -52,8 +52,11 @@ So the hybrid resolve keeps the ~15 min path when the Mac is free, and the
    errors, and “no online idle label match” all emit the hosted fallback.
 2. `ci.yml` job `macos_runner` — cheap `ubuntu-24.04` step with `actions:read`,
    runs only when `changes` says CI is needed, writes `outputs.runs_on`.
-3. `rust` and `lint_macos` — `needs: macos_runner` and
+3. `rust` — `needs: macos_runner` and
    `runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}`.
+4. `lint_macos` — always `runs-on: macos-15`. It has no self-hosted target
+   cache, and a warm clippy was no faster than a cold one. It still has to be
+   a Mac so `#[cfg(target_os = "macos")]` is linted.
 
 Non-gating macOS workflows (`p8-baseline.yml`, `package-macos.yml`) still use
 the static `vars.MACOS_RUNNER || macos-15` expression; they are not merge
@@ -75,10 +78,8 @@ matching runner is online and idle.
   while passing on the self-hosted Mac (`BRANCH_PROTECTION.md`). Fallback is
   still better than a pending required check; fixing those tests remains
   separate work.
-- **One Mac, two jobs.** `rust` and `lint_macos` share one resolve result. If
-  both get self-hosted labels they serialize on that machine (same as today
-  when `MACOS_RUNNER` is set). Wall clock on a warm Mac is still usually under
-  one hosted `rust` run.
+- **One Mac, one heavy job.** Only `rust` takes the self-hosted labels. `lint_macos`
+  stays on hosted `macos-15`, so the two no longer serialize on that machine.
 - **Probe race.** A runner can become busy between resolve and job start; the
   job then queues briefly on self-hosted. Acceptable; the important case is
   offline / long-busy → hosted.

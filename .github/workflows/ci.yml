@@ -482,16 +482,18 @@ jobs:
   # a required check (docs/research/ci-test-acceleration.md, Phase 3): moving
   # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
   # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
-  # cold one (371-912 s).
+  # cold one (371-912 s). It does not use the self-hosted target dir, so it
+  # stays on hosted macos-15 and does not wait on macos_runner. Linux clippy
+  # still cannot see #[cfg(target_os = "macos")].
   lint_macos:
     name: Lint workspace (macOS)
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
-    needs: [changes, push_verified, macos_runner]
+    needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ fromJSON(needs.macos_runner.outputs.runs_on) }}
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
