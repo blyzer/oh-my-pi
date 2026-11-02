@@ -150,6 +150,10 @@ pub struct JobRecord {
 	pub label:           Str,
 	/// Owning session or agent identity, when present.
 	pub owner:           Option<Str>,
+	/// Factory lease for a `JobKind::Subagent` job. Absent on journals written
+	/// before the lease existed. The three facts are one value: a partial write
+	/// folds as `None`.
+	pub factory_lease:   Option<FactoryLease>,
 	/// Start timestamp, when present.
 	pub started:         Option<Str>,
 	/// Exact elapsed wall time captured by the settlement patch.
@@ -178,6 +182,102 @@ pub struct JobRecord {
 	pub execution_result:  Option<Box<RawValue>>,
 	/// Durable typed execution failure class.
 	pub execution_failure: Option<ExecutionErrorKind>,
+}
+
+/// One factory lease. One custom prop, so a partial write cannot land.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryLease {
+	/// Worker holding the item.
+	pub worker_id:   Str,
+	/// Fencing token. A renew or release offering any other value writes
+	/// nothing.
+	pub lease_gen:   u64,
+	/// Absent when placement has no TTL. Never the start instant.
+	pub deadline_ms: Option<u64>,
+}
+
+/// Canonical text of one lease. An empty third field is no deadline.
+pub fn factory_lease_prop(lease: &FactoryLease) -> Str {
+	let deadline = lease.deadline_ms.map_or(String::new(), |ms| ms.to_string());
+	Str::new(format!("{}|{}|{}", lease.worker_id, lease.lease_gen, deadline))
+}
+
+/// Folds `factory_lease`. A missing prop, or a value that is not three fields,
+/// is `None`.
+fn factory_lease(node: &omp_dom::Node) -> Option<FactoryLease> {
+	let mut parts = custom(node, "factory_lease")?.split('|');
+	let worker_id = parts.next().filter(|part| !part.is_empty())?;
+	let lease_gen = parts.next()?.parse().ok()?;
+	let deadline_ms = match parts.next()? {
+		"" => None,
+		text => Some(text.parse().ok()?),
+	};
+	if parts.next().is_some() {
+		return None;
+	}
+	Some(FactoryLease { worker_id: Str::new(worker_id), lease_gen, deadline_ms })
+}
+
+/// A lease is past its deadline. A lease with no deadline is held until
+/// release.
+#[must_use]
+pub fn lease_expired(lease: &FactoryLease, now_ms: u64) -> bool {
+	lease.deadline_ms.is_some_and(|deadline| now_ms >= deadline)
+}
+
+/// Rejects a renew or release whose generation is stale or whose lease already
+/// expired.
+#[must_use]
+pub fn accept_lease(current: Option<&FactoryLease>, offered_gen: u64, now_ms: u64) -> bool {
+	current.is_some_and(|lease| lease.lease_gen == offered_gen && !lease_expired(lease, now_ms))
+}
+
+/// Writes the next generation of a held lease. `None` when the offered
+/// generation is not the folded one, or the lease already expired.
+#[must_use]
+pub fn renew_lease(
+	dom: &Dom,
+	handle: Handle,
+	cause: EntryId,
+	offered_gen: u64,
+	now_ms: u64,
+	ttl_ms: Option<u64>,
+) -> Option<Txn> {
+	let node = dom.get(handle)?;
+	let current = factory_lease(node)?;
+	if !accept_lease(Some(&current), offered_gen, now_ms) {
+		return None;
+	}
+	let next = FactoryLease {
+		worker_id:   current.worker_id,
+		lease_gen:   current.lease_gen.saturating_add(1),
+		deadline_ms: ttl_ms.map(|ttl| now_ms.saturating_add(ttl)),
+	};
+	Some(lease_txn(handle, cause, factory_lease_prop(&next)))
+}
+
+/// Clears a held lease so the item is placeable again. `None` when the offered
+/// generation is not the folded one.
+#[must_use]
+pub fn release_lease(dom: &Dom, handle: Handle, cause: EntryId, offered_gen: u64) -> Option<Txn> {
+	let node = dom.get(handle)?;
+	let current = factory_lease(node)?;
+	if current.lease_gen != offered_gen {
+		return None;
+	}
+	Some(lease_txn(handle, cause, Str::default()))
+}
+
+fn lease_txn(handle: Handle, cause: EntryId, value: Str) -> Txn {
+	Txn {
+		cause,
+		label: Some(Str::new_static("jobs.lease")),
+		ops: vec![Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static("factory_lease")),
+			value: Value::Str(value),
+		}],
+	}
 }
 
 /// Live execution state retained after a tool call stops blocking its turn.
@@ -1549,6 +1649,7 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 				Str::new,
 			),
 		owner: custom(node, "owner").map(Str::new),
+		factory_lease: factory_lease(node),
 		started: custom(node, "started").map(Str::new),
 		duration_ms: prop_int(node, PropId::DurationMs).and_then(|value| u64::try_from(value).ok()),
 		output: node
@@ -1659,6 +1760,85 @@ mod tests {
 		assert_eq!(execution.handle, Some(handle.clone()));
 		assert!(
 			matches!(execution.error, Some(ExecutionError::EffectsUnknown { handle: actual }) if actual == handle)
+		);
+	}
+	#[test]
+	fn a_subagent_lease_folds_or_stays_absent() {
+		use omp_dom::{Dom, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Txn, Value};
+		let mut dom = Dom::new();
+		let jobs = dom.high_water() + 1;
+		dom.apply(&Txn {
+			cause: omp_journal::EntryId::default(),
+			label: None,
+			ops:   vec![
+				Op::Ins { parent: dom.meta(), after: None, node: NodeSpec::new(KnownTag::Jobs) },
+				Op::Ins {
+					parent: Handle::new(jobs).expect("jobs handle"),
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Subagent)
+						.with_prop(PropId::Id, Value::Str(Str::new_static("child")))
+						.with_prop(
+							PropKey::Custom(Str::new_static("factory_lease")),
+							Value::Str(Str::new_static("w1|2|50")),
+						),
+				},
+				Op::Ins {
+					parent: Handle::new(jobs).expect("jobs handle"),
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Subagent)
+						.with_prop(PropId::Id, Value::Str(Str::new_static("old"))),
+				},
+			],
+		})
+		.expect("the fixture inserts");
+		let leased = super::record(&dom, Handle::new(jobs + 1).expect("leased"))
+			.expect("record")
+			.factory_lease
+			.expect("lease");
+		assert_eq!(leased.worker_id.as_str(), "w1");
+		assert_eq!(leased.lease_gen, 2);
+		assert_eq!(leased.deadline_ms, Some(50));
+		assert!(super::accept_lease(Some(&leased), 2, 10));
+		assert!(!super::accept_lease(Some(&leased), 1, 10), "a stale generation is refused");
+		assert!(!super::accept_lease(Some(&leased), 2, 50), "an expired lease is refused");
+		let old = super::record(&dom, Handle::new(jobs + 2).expect("old")).expect("old record");
+		assert!(old.factory_lease.is_none());
+
+		let leased_handle = Handle::new(jobs + 1).expect("leased");
+		assert!(
+			super::renew_lease(&dom, leased_handle, omp_journal::EntryId::default(), 1, 10, Some(100))
+				.is_none(),
+			"a stale generation writes nothing"
+		);
+		assert!(
+			super::renew_lease(&dom, leased_handle, omp_journal::EntryId::default(), 2, 50, Some(100))
+				.is_none(),
+			"an expired lease writes nothing"
+		);
+		let renew =
+			super::renew_lease(&dom, leased_handle, omp_journal::EntryId::default(), 2, 10, Some(100))
+				.expect("the held generation renews");
+		dom.apply(&renew).expect("the renewal applies");
+		let renewed = super::record(&dom, leased_handle)
+			.expect("record")
+			.factory_lease
+			.expect("renewed lease");
+		assert_eq!(renewed.lease_gen, 3);
+		assert_eq!(renewed.deadline_ms, Some(110));
+
+		assert!(
+			super::release_lease(&dom, leased_handle, omp_journal::EntryId::default(), 2).is_none(),
+			"a stale release writes nothing"
+		);
+		let release = super::release_lease(&dom, leased_handle, omp_journal::EntryId::default(), 3)
+			.expect("the held generation releases");
+		dom.apply(&release).expect("the release applies");
+		assert!(
+			super::record(&dom, leased_handle)
+				.expect("record")
+				.factory_lease
+				.is_none(),
+			"a released item folds as unleased"
 		);
 	}
 }

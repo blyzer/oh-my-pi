@@ -271,6 +271,7 @@ impl WorkpoolLauncher for KernelWorkpoolLauncher {
 					owner,
 					started: Str::new(now_ms().to_string()),
 					agent: Some(agent),
+					lease: None,
 				})
 				.ok_or(WorkpoolSchedulerError::MissingJobs)?;
 				parent.patch(txn)?;

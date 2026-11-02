@@ -457,7 +457,7 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 	);
 
 	// 7. Every mutating verb is refused, over the socket the owner trusts.
-	for (verb, status) in [
+	for (verb, status, expected) in [
 		(
 			"submit",
 			client
@@ -467,6 +467,7 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				})
 				.await
 				.err(),
+			tonic::Code::Unimplemented,
 		),
 		(
 			"approve",
@@ -477,6 +478,7 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				})
 				.await
 				.err(),
+			tonic::Code::Unimplemented,
 		),
 		(
 			"answer_ui",
@@ -484,15 +486,16 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				.answer_ui(pb::UiAnswer { session_id: "p14".to_owned(), ..pb::UiAnswer::default() })
 				.await
 				.err(),
+			tonic::Code::Unimplemented,
 		),
-		("open", client.open(pb::OpenSessionRequest::default()).await.err()),
+		(
+			"open",
+			client.open(pb::OpenSessionRequest::default()).await.err(),
+			tonic::Code::InvalidArgument,
+		),
 	] {
 		let status = status.with_context(|| format!("{verb} must be refused"))?;
-		assert_eq!(
-			status.code(),
-			tonic::Code::Unimplemented,
-			"{verb} is refused, not silently accepted"
-		);
+		assert_eq!(status.code(), expected, "{verb} is refused, not silently accepted");
 	}
 
 	// The kernel is still the only writer: nothing the observer did journaled.

@@ -352,6 +352,25 @@ omp_con::var! {
 			"legacy.path": "irc.timeoutMs",
 		},
 	};
+	/// How long a factory lease is held before an unreleased item is reclaimed.
+	pub static SV_FACTORY_LEASE_TTL = sv_factory_lease_ttl: omp_con::Span {
+		default: omp_con::Span::Finite(omp_core::Duration::new(
+			300,
+			omp_core::DurationUnit::Seconds,
+		)),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Execution",
+			"ui.label": "Factory Lease TTL",
+			"ui.unit": "ms",
+			"ui.option.never": "Held until release",
+			"ui.option.1m": "1 minute",
+			"ui.option.5m": "5 minutes",
+			"ui.option.15m": "15 minutes",
+		},
+	};
+
 	/// Relays peer-to-peer messages to the main transcript.
 	pub static CL_IRC_RELAY_TO_MAIN = cl_irc_relay_to_main: bool {
 		default: true,

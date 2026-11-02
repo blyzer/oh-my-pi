@@ -832,6 +832,7 @@ fn attach_process_job(
 					owner:   Str::new(owner),
 					started: Str::new(started),
 					agent:   None,
+					lease:   None,
 				})
 				.ok_or_else(|| omp_agent::SessionToolError::Rejected {
 					message: Str::new_static("session jobs component is absent"),

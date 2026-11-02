@@ -134,6 +134,11 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 
 - **RESOLVED** FOLLOW-0007. The owner kept the gitignore allowlist empty. Gitignored files stay out of the CoW snapshot. ADR 0007 and `STATUS.md` record that as the rule, not an open gap.
 
+Deltas started 2026-11-01 from `omp2` at `04576bc158`:
+
+- **IN PROGRESS** ADR 0039 mutating verbs. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. A named session still answers `UNIMPLEMENTED`. The verbs do not drive a session yet.
+- **BLOCKED** ADR 0041 `screen`, `flow`, and `TERN_BLOB_DIR`. The ADR does not name their node shape. No surface code until it does.
+
 Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
 
 - **RESOLVED** ADR 0039 phase R1 (read-only attach over the owner UDS). The orphaned PR #342
