@@ -25,7 +25,6 @@ on:
       - "justfile"
       - "scripts/remote-verify.sh"
       - "scripts/remote-verify-runner.sh"
-
       - "rust-toolchain.toml"
   # A manual re-recording, for example of an omp2 commit measured while the
   # runner was busy. GitHub offers it because omp2 is the default branch; the
