@@ -25,6 +25,10 @@ client APIs live in `omp-env`.
   patches to `omp-chat` for terminal or native-GUI presentation. `print_mode`,
   `rpc_mode`, and `acp_mode` expose pure text and protocol actors over the same
   journal-first composition.
+- `session_runner` shares the application service composition with chat. The
+  owner-local session listener can open another project session without a terminal.
+  The host retains its controller and command sender, and removes the live
+  registration when the controller stops.
 - `auth_*`, `models_cmd`, `setup_cmd`, and the other `*_cmd` modules implement
   user-facing command policy and diagnostics.
 - `daemon` and `gateway_rpc` adapt the production inference gateway. They are

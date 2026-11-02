@@ -76,6 +76,8 @@ pub mod say_cmd {
 	}
 }
 pub mod session_import;
+#[cfg(any(unix, windows))]
+mod session_runner;
 pub mod setup_cmd;
 pub mod share_cmd;
 pub mod shell_cmd;
