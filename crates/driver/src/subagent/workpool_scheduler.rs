@@ -546,6 +546,7 @@ impl Workpool {
 					owner,
 					started: Str::new(now_ms().to_string()),
 					agent: None,
+					lease: None,
 				})
 				.ok_or(WorkpoolSchedulerError::MissingJobs)?;
 				parent.patch(txn)?;

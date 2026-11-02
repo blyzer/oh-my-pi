@@ -26,6 +26,7 @@ async fn jobs_rewind_removing_a_subagent_terminates_it() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   Some(Str::new_static("task")),
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert subagent");
@@ -88,6 +89,7 @@ async fn jobs_tool_job_without_an_execution_unit_settles_failed_at_poll() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   None,
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert detached tool job");
@@ -120,6 +122,7 @@ async fn jobs_restart_settles_orphaned_subagent_and_replay_stays_revivable() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   Some(Str::new_static("task")),
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert subagent");
@@ -164,6 +167,7 @@ async fn jobs_revive_rearms_settlement_delivery() {
 				owner:   Str::new_static("Main"),
 				started: Str::new_static("1"),
 				agent:   Some(Str::new_static("task")),
+				lease:   None,
 			})
 			.expect("jobs root"),
 		)
@@ -292,6 +296,7 @@ async fn process_settlement_journals_one_atomic_replayable_completion() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   None,
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert process job");
@@ -386,6 +391,7 @@ async fn jobs_oversized_settlement_is_spilled_to_the_cas_and_resolvable() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   Some(Str::new_static("task")),
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert subagent");
@@ -578,6 +584,7 @@ async fn every_rewind_and_switch_tells_the_session_observers() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   None,
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert job");

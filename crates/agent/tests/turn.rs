@@ -917,6 +917,7 @@ async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() 
 			owner:   Str::new_static("Main"),
 			started: Str::new_static("1"),
 			agent:   Some(Str::new_static("task")),
+			lease:   None,
 		},
 	)
 	.expect("jobs root");

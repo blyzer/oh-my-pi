@@ -1913,6 +1913,7 @@ mod tests {
 				owner:   Str::new(owner),
 				started: Str::new(epoch_ms().saturating_sub(65_000).to_string()),
 				agent:   Some(Str::new(agent)),
+				lease:   None,
 			})
 			.expect("jobs component");
 			session.patch(txn).expect("insert job");

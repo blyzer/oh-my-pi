@@ -140,6 +140,7 @@ async fn p3_job_board_rebuilds_from_meta_jobs_and_rewind_terminates_runtime() {
 		owner:   Str::new_static("Main"),
 		started: Str::new_static("1"),
 		agent:   None,
+		lease:   None,
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert job");

@@ -673,6 +673,15 @@ pub async fn spawn_child(
 		.wait(parent, Some(std::slice::from_ref(&id)))
 		.await?
 		.ok_or(SpawnError::Workspace { defect: "subagent job disappeared before settlement" })?;
+	// A settled child releases its placement lease; an abandoned one keeps it
+	// until the deadline passes and the item is placeable again.
+	if let Some(lease) = record.factory_lease.as_ref()
+		&& let Some(cause) = parent.head()
+		&& let Some(txn) =
+			omp_agent::jobs::release_lease(parent.dom(), handle, cause, lease.lease_gen)
+	{
+		parent.patch(txn)?;
+	}
 	if let Some(output) = record
 		.output
 		.as_deref()
@@ -775,6 +784,17 @@ fn admit_batch(
 	Ok(())
 }
 
+/// A subagent job occupies a concurrency slot until it settles. An abandoned
+/// child that never settled stops holding one once its lease deadline passes.
+fn holds_a_slot(job: &omp_agent::JobRecord, now_ms: u64) -> bool {
+	job.kind == omp_agent::JobKind::Subagent
+		&& matches!(job.status.as_str(), "starting" | "running")
+		&& !job
+			.factory_lease
+			.as_ref()
+			.is_some_and(|lease| omp_agent::jobs::lease_expired(lease, now_ms))
+}
+
 fn prepare_child(
 	parent: &mut Session,
 	request: SpawnRequest<'_>,
@@ -799,14 +819,13 @@ fn prepare_child(
 	{
 		return Err(SpawnError::DisabledAgent { agent });
 	}
+	let now_ms =
+		u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()).unwrap_or(u64::MAX);
 	let active = request
 		.jobs
 		.list()
 		.into_iter()
-		.filter(|job| {
-			job.kind == omp_agent::JobKind::Subagent
-				&& matches!(job.status.as_str(), "starting" | "running")
-		})
+		.filter(|job| holds_a_slot(job, now_ms))
 		.count();
 	if parent_settings.max_concurrency != 0 && active >= parent_settings.max_concurrency {
 		return Err(SpawnError::Concurrency { maximum: parent_settings.max_concurrency });
@@ -826,10 +845,13 @@ fn prepare_child(
 			.set(&ctx, Str::new(request.model))
 			.map_err(SpawnError::Con)?;
 	}
-	let started = SystemTime::now()
-		.duration_since(UNIX_EPOCH)?
-		.as_millis()
-		.to_string();
+	let started_ms =
+		u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()).unwrap_or(u64::MAX);
+	let started = started_ms.to_string();
+	let lease_deadline_ms = crate::subagent::settings::SV_FACTORY_LEASE_TTL
+		.get(request.parent_ctx)
+		.to_std()
+		.map(|ttl| started_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
 	let paused = omp_agent::pause_state(parent.dom()).active;
 	let cause = parent.head().ok_or(SpawnError::MissingParentHead)?;
 	let txn = jobs::insert(parent.dom(), cause, JobSpec {
@@ -838,6 +860,11 @@ fn prepare_child(
 		owner:   Str::new(request.owner),
 		started: Str::new(started),
 		agent:   Some(agent.clone()),
+		lease:   Some(omp_agent::jobs::factory_lease_prop(&omp_agent::jobs::FactoryLease {
+			worker_id:   id.clone(),
+			lease_gen:   1,
+			deadline_ms: lease_deadline_ms,
+		})),
 	})
 	.ok_or(SpawnError::MissingJobs)?;
 	parent.patch(txn)?;
@@ -1445,6 +1472,56 @@ mod tests {
 			schema_mode:   Some(mode),
 			isolated:      None,
 		}
+	}
+
+	fn leased_job(lease: Option<omp_agent::jobs::FactoryLease>) -> omp_agent::JobRecord {
+		omp_agent::JobRecord {
+			handle:            omp_dom::Handle::new(1).expect("a handle"),
+			id:                Str::new_static("child"),
+			kind:              omp_agent::JobKind::Subagent,
+			status:            Str::new_static("running"),
+			job_type:          Str::new_static("task"),
+			label:             Str::new_static("child"),
+			owner:             None,
+			factory_lease:     lease,
+			started:           None,
+			duration_ms:       None,
+			output:            None,
+			error:             None,
+			call:              None,
+			detached_at:       None,
+			backend:           None,
+			reattach_handle:   None,
+			request:           None,
+			fallback:          None,
+			execution_state:   None,
+			execution_result:  None,
+			execution_failure: None,
+		}
+	}
+
+	#[test]
+	fn an_expired_lease_stops_holding_a_concurrency_slot() {
+		let live = leased_job(Some(omp_agent::jobs::FactoryLease {
+			worker_id:   Str::new_static("child"),
+			lease_gen:   1,
+			deadline_ms: Some(100),
+		}));
+		assert!(super::holds_a_slot(&live, 50), "a live lease still occupies its slot");
+		assert!(!super::holds_a_slot(&live, 100), "an expired lease frees its slot");
+
+		let unleased = leased_job(None);
+		assert!(
+			super::holds_a_slot(&unleased, 100),
+			"a running child written before the lease existed still occupies its slot"
+		);
+
+		let held = leased_job(Some(omp_agent::jobs::FactoryLease {
+			worker_id:   Str::new_static("child"),
+			lease_gen:   1,
+			deadline_ms: None,
+		}));
+		assert!(super::holds_a_slot(&held, u64::MAX), "a lease with no TTL is held until release");
 	}
 
 	#[test]

@@ -733,6 +733,7 @@ fn internal_url_tokens_complete_local_artifacts_and_live_agents() {
 		owner:   "Main".into(),
 		started: "0".into(),
 		agent:   Some("task".into()),
+		lease:   None,
 	})
 	.expect("jobs component");
 	session.patch(txn).expect("spawn agent");

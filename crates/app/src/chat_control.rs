@@ -3020,6 +3020,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			owner:   Str::new_static("Main"),
 			started: Str::new(started),
 			agent:   Some(Str::new_static("tan")),
+			lease:   None,
 		})
 		.ok_or_else(|| miette!("session has no jobs component"))?;
 		self.session.patch(txn).into_diagnostic()?;
@@ -4914,6 +4915,7 @@ mod tests {
 				owner:   Str::new_static("Main"),
 				started: Str::new_static("0"),
 				agent:   Some(Str::new_static("task")),
+				lease:   None,
 			})
 			.expect("jobs component");
 			session.patch(txn).expect("journal the child");
