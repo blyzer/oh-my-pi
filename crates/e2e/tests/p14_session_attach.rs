@@ -488,7 +488,11 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				.err(),
 			tonic::Code::Unimplemented,
 		),
-		("open", client.open(pb::OpenSessionRequest::default()).await.err(), tonic::Code::InvalidArgument),
+		(
+			"open",
+			client.open(pb::OpenSessionRequest::default()).await.err(),
+			tonic::Code::InvalidArgument,
+		),
 	] {
 		let status = status.with_context(|| format!("{verb} must be refused"))?;
 		assert_eq!(status.code(), expected, "{verb} is refused, not silently accepted");
