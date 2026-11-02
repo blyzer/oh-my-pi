@@ -412,27 +412,15 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn mutating_verbs_are_unimplemented_in_a_read_only_revision() {
+	async fn mutating_verbs_without_a_context_are_unauthenticated() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
 		let codes = [
-			rpc.submit(Request::new(pb::ControlCommand::default()))
-				.await
-				.unwrap_err()
-				.code(),
-			rpc.approve(Request::new(pb::ApproveRequest::default()))
-				.await
-				.unwrap_err()
-				.code(),
-			rpc.answer_ui(Request::new(pb::UiAnswer::default()))
-				.await
-				.unwrap_err()
-				.code(),
-			rpc.open(Request::new(pb::OpenSessionRequest::default()))
-				.await
-				.unwrap_err()
-				.code(),
+			rpc.submit(Request::new(pb::ControlCommand::default())).await.unwrap_err().code(),
+			rpc.approve(Request::new(pb::ApproveRequest::default())).await.unwrap_err().code(),
+			rpc.answer_ui(Request::new(pb::UiAnswer::default())).await.unwrap_err().code(),
+			rpc.open(Request::new(pb::OpenSessionRequest::default())).await.unwrap_err().code(),
 		];
-		assert_eq!(codes, [Code::Unimplemented; 4]);
+		assert_eq!(codes, [Code::Unauthenticated; 4]);
 	}
 
 	#[tokio::test]
