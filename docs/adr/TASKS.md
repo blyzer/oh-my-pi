@@ -130,6 +130,10 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).
 
+Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
+
+- **RESOLVED** FOLLOW-0007. The owner kept the gitignore allowlist empty. Gitignored files stay out of the CoW snapshot. ADR 0007 and `STATUS.md` record that as the rule, not an open gap.
+
 Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
 
 - **RESOLVED** ADR 0039 phase R1 (read-only attach over the owner UDS). The orphaned PR #342
