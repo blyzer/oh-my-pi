@@ -525,6 +525,7 @@ fn children(session: &mut Session, v1: &Omp1Context<'_>) -> miette::Result<()> {
 			owner:   Str::new(v1.id),
 			started: sf!("{}", child.started_ms),
 			agent:   Some(child.agent.clone()),
+			lease:   None,
 		})
 		.ok_or_else(|| miette!("imported session has no jobs component"))?;
 		session.patch(insert).into_diagnostic()?;

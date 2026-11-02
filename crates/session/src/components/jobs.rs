@@ -86,8 +86,9 @@ pub struct JobSpec {
 	pub started: Str,
 	/// Agent class for a subagent job.
 	pub agent:   Option<Str>,
+	/// Encoded factory lease. Set only when this insert is a subagent placement.
+	pub lease:   Option<Str>,
 }
-
 /// Builds the journalled patch that inserts a job under `<meta><jobs>`.
 ///
 /// Subagents use the semantic `<subagent>` tag; every other kind uses `<job>`.
@@ -117,6 +118,9 @@ pub fn insert(dom: &Dom, cause: EntryId, spec: JobSpec) -> Option<Txn> {
 		.with_prop(PropId::Label, Value::Str(spec.id));
 	if let Some(agent) = spec.agent {
 		node = node.with_prop(PropKey::Custom(Str::new_static("agent")), Value::Str(agent));
+	}
+	if let Some(lease) = spec.lease {
+		node = node.with_prop(PropKey::Custom(Str::new_static("factory_lease")), Value::Str(lease));
 	}
 	Some(Txn {
 		cause,
