@@ -219,7 +219,8 @@ fn read_only(verb: &str) -> Status {
 	))
 }
 
-/// A mutating verb needs a selected session. `Open` of a new session is the exception.
+/// A mutating verb needs a selected session. `Open` of a new session is the
+/// exception.
 fn require_session(session_id: &str) -> Result<(), Status> {
 	if session_id.is_empty() {
 		Err(SessionControlError::NoSessionSelected.into())
@@ -415,10 +416,22 @@ mod tests {
 	async fn mutating_verbs_without_a_context_are_unauthenticated() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
 		let codes = [
-			rpc.submit(Request::new(pb::ControlCommand::default())).await.unwrap_err().code(),
-			rpc.approve(Request::new(pb::ApproveRequest::default())).await.unwrap_err().code(),
-			rpc.answer_ui(Request::new(pb::UiAnswer::default())).await.unwrap_err().code(),
-			rpc.open(Request::new(pb::OpenSessionRequest::default())).await.unwrap_err().code(),
+			rpc.submit(Request::new(pb::ControlCommand::default()))
+				.await
+				.unwrap_err()
+				.code(),
+			rpc.approve(Request::new(pb::ApproveRequest::default()))
+				.await
+				.unwrap_err()
+				.code(),
+			rpc.answer_ui(Request::new(pb::UiAnswer::default()))
+				.await
+				.unwrap_err()
+				.code(),
+			rpc.open(Request::new(pb::OpenSessionRequest::default()))
+				.await
+				.unwrap_err()
+				.code(),
 		];
 		assert_eq!(codes, [Code::Unauthenticated; 4]);
 	}
@@ -563,10 +576,12 @@ mod tests {
 		assert_eq!(rpc.open(open).await.unwrap_err().code(), Code::InvalidArgument);
 
 		let named = authenticated(
-			pb::ControlCommand { session_id: "01JSESSION".to_owned(), ..pb::ControlCommand::default() },
+			pb::ControlCommand {
+				session_id: "01JSESSION".to_owned(),
+				..pb::ControlCommand::default()
+			},
 			observing("owner"),
 		);
 		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::Unimplemented);
 	}
-
 }
