@@ -134,19 +134,22 @@ pub struct SessionWire {
 	/// read back before it exists. A retried open would otherwise mint a
 	/// second session and strand the first, so the mapping lives here.
 	///
-	/// The invariant is per-open, not continuous: after each successful keyed
-	/// open the map holds live mappings plus the one just minted, because that
-	/// open sweeps every entry whose session the registry no longer knows.
-	/// Between a retirement and the next successful keyed open it can hold
-	/// arbitrarily many stale entries, and an open that fails before the
-	/// insert (no host, or an id the host never registered) does not sweep at
-	/// all.
+	/// The sweep makes one claim and no more: a successful keyed open removes
+	/// every entry whose session the registry no longer knows, so no stale
+	/// entry survives across it.
 	///
-	/// So the map is not bounded by live sessions at every instant. What it
-	/// cannot do is grow without limit with the number of opens ever made,
-	/// which is the unbounded case. Nothing else retires an entry: the
-	/// registry owns session lifetime and does not know this map exists, and
-	/// a hook from it to here would make two owners of one fact.
+	/// That is not a size bound. One entry exists per live keyed session, so
+	/// N successful opens under N keys hold N entries, and retiring all of
+	/// them without another successful keyed open leaves N stale entries in
+	/// place. An open that fails before the insert (no host, or an id the
+	/// host never registered) does not sweep at all. Growth is driven by how
+	/// many distinct keys a client uses and how often it opens again, neither
+	/// of which this map controls.
+	///
+	/// Nothing else retires an entry: the registry owns session lifetime and
+	/// does not know this map exists, and a hook from it to here would make
+	/// two owners of one fact. That is the trade: no coupling, and no bound
+	/// stronger than the sentence above.
 	///
 	/// Async, because the guard is held across the host's `open_new` so that
 	/// two concurrent retries of one key cannot both miss the map.
@@ -698,10 +701,10 @@ impl SessionControlAuthority for SessionWire {
 		if let Some(seen) = minted.as_mut() {
 			// Swept here rather than on retirement, because the registry owns
 			// lifetime and knows nothing of this map. A key whose session has
-			// gone is simply stale, and dropping every stale entry under the
-			// guard already held bounds the map by live sessions rather than
-			// by opens ever made. It is not prompt: an entry survives until
-			// some later keyed open gets this far.
+			// gone is simply stale. This removes every stale entry, so none
+			// survives a successful keyed open. It is not a size bound and
+			// it is not prompt: an entry lives until some later keyed open
+			// gets this far.
 			seen.retain(|_, minted| self.sessions.lookup(minted).is_some());
 			seen.insert(key, id);
 		}
@@ -1541,10 +1544,11 @@ mod tests {
 		);
 	}
 
-	/// The map is bounded by live sessions, not by opens ever made. Nothing
-	/// else retires an entry, so without the sweep a key whose session has
-	/// been removed stays forever and the map grows with every distinct key
-	/// a client ever sends.
+	/// A successful keyed open removes entries whose session the registry no
+	/// longer knows. Without the sweep a key whose session was retired stays
+	/// forever, which is what makes the map grow with every distinct key a
+	/// client ever sends. This pins the removal, not a size bound: the map
+	/// still holds one entry per live keyed session.
 	#[tokio::test]
 	async fn retiring_a_session_drops_the_key_that_minted_it() {
 		let sessions = Arc::new(SessionRegistry::new());
