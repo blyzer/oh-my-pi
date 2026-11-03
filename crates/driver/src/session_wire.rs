@@ -1377,6 +1377,41 @@ mod tests {
 		}
 	}
 
+	/// The scope check runs before the registry lookup, for every kind. A
+	/// caller without `Control` must not learn which ids are live by comparing
+	/// `MissingScope` against `UnknownSession`, so resume and fork answer the
+	/// scope first even though they are refused either way. Moving the check
+	/// below the kind branch would turn this verb into an id oracle, and the
+	/// `NewSession` tests alone would not notice.
+	#[tokio::test]
+	async fn resume_and_fork_answer_the_missing_scope_before_the_registry() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let wire = wire(Arc::clone(&sessions));
+		let observing = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::ObserveHostLocal]),
+		);
+
+		for kind in [
+			pb::open_session_request::Kind::Resume(pb::ResumeSession {}),
+			pb::open_session_request::Kind::Fork(pb::ForkSession::default()),
+		] {
+			let refusal = wire
+				.open_session(observing.clone(), pb::OpenSessionRequest {
+					session_id: "absent".to_owned(),
+					kind: Some(kind),
+					..pb::OpenSessionRequest::default()
+				})
+				.await
+				.expect_err("an observe grant does not open a session");
+
+			assert!(
+				matches!(refusal, SessionControlError::MissingScope { scope: ControlScope::Control }),
+				"the scope is answered before the registry, got {refusal:?}"
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn attaching_to_an_unknown_session_is_not_found() {
 		let sessions = Arc::new(SessionRegistry::new());

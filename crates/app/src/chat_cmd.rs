@@ -1765,8 +1765,13 @@ mod tests {
 		let sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
 		let host =
 			crate::session_runner::AppOpenHost::new(test_env(dir.path()), args, Arc::clone(&sessions));
-		let id = host.open_new(dir.path()).await.expect("a new session opens");
-		let handle = sessions.lookup(&id).expect("the returned session is registered");
+		let id = host
+			.open_new(dir.path())
+			.await
+			.expect("a new session opens");
+		let handle = sessions
+			.lookup(&id)
+			.expect("the returned session is registered");
 		let (reply, subscription) = flume::bounded(1);
 		handle
 			.idle_subscribe
@@ -1777,7 +1782,9 @@ mod tests {
 			.await
 			.expect("the idle controller replies")
 			.expect("the subscription remains live");
-		let commands = host.commands(&id).expect("the session command sender is retained");
+		let commands = host
+			.commands(&id)
+			.expect("the session command sender is retained");
 		commands
 			.send(omp_chat::HostCommand::Submit(Str::new_static("open-host-interrupt-test-prompt")))
 			.unwrap();
