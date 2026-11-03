@@ -132,8 +132,21 @@ pub struct SessionWire {
 	/// back from the DOM, so no side table is needed. `Open{NewSession}` has no
 	/// such entry: the session IS what it creates, and there is nothing to
 	/// read back before it exists. A retried open would otherwise mint a
-	/// second session and strand the first, so the mapping lives here and is
-	/// dropped as soon as the session it names stops being live.
+	/// second session and strand the first, so the mapping lives here.
+	///
+	/// The invariant is per-open, not continuous: after each successful keyed
+	/// open the map holds live mappings plus the one just minted, because that
+	/// open sweeps every entry whose session the registry no longer knows.
+	/// Between a retirement and the next successful keyed open it can hold
+	/// arbitrarily many stale entries, and an open that fails before the
+	/// insert (no host, or an id the host never registered) does not sweep at
+	/// all.
+	///
+	/// So the map is not bounded by live sessions at every instant. What it
+	/// cannot do is grow without limit with the number of opens ever made,
+	/// which is the unbounded case. Nothing else retires an entry: the
+	/// registry owns session lifetime and does not know this map exists, and
+	/// a hook from it to here would make two owners of one fact.
 	///
 	/// Async, because the guard is held across the host's `open_new` so that
 	/// two concurrent retries of one key cannot both miss the map.
@@ -683,6 +696,13 @@ impl SessionControlAuthority for SessionWire {
 		// has not opened anything, and a key pointing at one would refuse
 		// every later retry instead of opening.
 		if let Some(seen) = minted.as_mut() {
+			// Swept here rather than on retirement, because the registry owns
+			// lifetime and knows nothing of this map. A key whose session has
+			// gone is simply stale, and dropping every stale entry under the
+			// guard already held bounds the map by live sessions rather than
+			// by opens ever made. It is not prompt: an entry survives until
+			// some later keyed open gets this far.
+			seen.retain(|_, minted| self.sessions.lookup(minted).is_some());
 			seen.insert(key, id);
 		}
 		Ok(session_ref(&handle, self.epoch_of(&handle.id)))
@@ -1519,6 +1539,52 @@ mod tests {
 			matches!(refusal, SessionControlError::UnknownSession { .. }),
 			"a stale mapping would have refused differently",
 		);
+	}
+
+	/// The map is bounded by live sessions, not by opens ever made. Nothing
+	/// else retires an entry, so without the sweep a key whose session has
+	/// been removed stays forever and the map grows with every distinct key
+	/// a client ever sends.
+	#[tokio::test]
+	async fn retiring_a_session_drops_the_key_that_minted_it() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let wire = SessionWire::new(
+			Arc::clone(&sessions),
+			BridgeLimits::default(),
+			Arc::new(
+				ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+			),
+			Duration::from_secs(60),
+		)
+		.with_open_host(Arc::new(CountingHost {
+			sessions: Arc::clone(&sessions),
+			opens:    Arc::clone(&opens),
+		}));
+		let keyed = |key: &str| pb::OpenSessionRequest {
+			project_root: "/work/new".to_owned(),
+			idempotency_key: key.to_owned(),
+			kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+			..pb::OpenSessionRequest::default()
+		};
+
+		let first = wire
+			.open_session(owner(), keyed("retired"))
+			.await
+			.expect("the first open");
+		assert_eq!(wire.opened.lock().await.len(), 1, "the key that minted it is recorded");
+
+		sessions.remove(&SessionId::from_ref(first.session_id.as_str()));
+		// A second key, so the sweep is the only thing that can drop the
+		// first: overwriting the same key would hide an unbounded map.
+		wire
+			.open_session(owner(), keyed("live"))
+			.await
+			.expect("a later open");
+
+		let held = wire.opened.lock().await;
+		assert_eq!(held.len(), 1, "the retired session's key is gone, not merely shadowed");
+		assert!(held.contains_key(&Str::new("live")), "the live session keeps its key");
 	}
 
 	/// The RPC projection gates `Open` on `control`, but the authority is
