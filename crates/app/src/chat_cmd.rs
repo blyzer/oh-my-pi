@@ -1549,12 +1549,30 @@ mod tests {
 	}
 
 	#[cfg(any(unix, windows))]
+	fn isolate_test_home(root: &Path) {
+		let home = root.join("home");
+		fs::create_dir_all(&home).unwrap();
+		// SAFETY: nextest runs each test in its own process.
+		unsafe {
+			std::env::set_var("HOME", &home);
+			std::env::set_var("OMP_CONFIG_DIR", root.join("config"));
+			std::env::set_var("OMP_DATA_DIR", root.join("data"));
+			std::env::set_var("OMP_STATE_DIR", root.join("state"));
+			std::env::set_var("OMP_CACHE_DIR", root.join("cache"));
+			std::env::remove_var("OMP_PROFILE");
+			std::env::remove_var("OMP_CONFIG_FILES");
+		}
+	}
+
+	#[cfg(any(unix, windows))]
 	async fn fake_gateway(
 		root: &Path,
+		hold_open: bool,
 	) -> (
 		crate::endpoint::LocalEndpoint,
 		Str,
 		flume::Receiver<omp_ai::event::WorkflowResponse>,
+		flume::Receiver<()>,
 		tokio::task::JoinHandle<()>,
 	) {
 		use omp_ai::{
@@ -1597,18 +1615,27 @@ mod tests {
 		let route_id = model.routes.first().unwrap().clone();
 		let route = catalog.route(&route_id).unwrap();
 		let fake = FakeProvider::new(route.provider.clone(), route_id.clone());
-		fake.push(FakeScript::chat(vec![
-			Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
-			Ok(ChatEvent::TextDelta { index: 0, text: Str::new_static("offline fixture reply") }),
-			Ok(ChatEvent::Completed(Completion {
-				reason:  FinishReason::Stop,
-				blocks:  1,
-				usage:   Usage::default(),
-				receipt: ExecutionReceipt::default().into(),
-			})),
-		]));
+		if hold_open {
+			let (pending, _cancellation) = FakeScript::cancellable(OperationKind::Chat);
+			fake.push(pending);
+		} else {
+			fake.push(FakeScript::chat(vec![
+				Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
+				Ok(ChatEvent::TextDelta { index: 0, text: Str::new_static("offline fixture reply") }),
+				Ok(ChatEvent::Completed(Completion {
+					reason:  FinishReason::Stop,
+					blocks:  1,
+					usage:   Usage::default(),
+					receipt: ExecutionReceipt::default().into(),
+				})),
+			]));
+		}
+		let (started, request_started) = flume::bounded(1);
 		let service =
 			RouteProviderService::new(tower::service_fn(move |call: LayerCall<omp_ai::Call>| {
+				if hold_open {
+					let _ = started.send(());
+				}
 				fake.clone().oneshot(call.payload)
 			}));
 		let mut registry = Registry::builder(Arc::clone(&catalog));
@@ -1642,7 +1669,7 @@ mod tests {
 				.await
 				.unwrap();
 		});
-		(endpoint, model_key, incoming_responses, serving)
+		(endpoint, model_key, incoming_responses, request_started, serving)
 	}
 
 	#[cfg(any(unix, windows))]
@@ -1651,19 +1678,9 @@ mod tests {
 		use omp_driver::session_wire::OpenHost;
 
 		let dir = tempfile::tempdir().unwrap();
-		let home = dir.path().join("home");
-		fs::create_dir_all(&home).unwrap();
-		// SAFETY: nextest runs each test in its own process.
-		unsafe {
-			std::env::set_var("HOME", &home);
-			std::env::set_var("OMP_CONFIG_DIR", dir.path().join("config"));
-			std::env::set_var("OMP_DATA_DIR", dir.path().join("data"));
-			std::env::set_var("OMP_STATE_DIR", dir.path().join("state"));
-			std::env::set_var("OMP_CACHE_DIR", dir.path().join("cache"));
-			std::env::remove_var("OMP_PROFILE");
-			std::env::remove_var("OMP_CONFIG_FILES");
-		}
-		let (endpoint, model, _responses, gateway) = fake_gateway(dir.path()).await;
+		isolate_test_home(dir.path());
+		let (endpoint, model, _responses, _request_started, gateway) =
+			fake_gateway(dir.path(), false).await;
 		let mut args = ChatArgs::default_interactive();
 		args.gateway = Some(endpoint);
 		args.model = Some(model);
@@ -1729,6 +1746,66 @@ mod tests {
 		})
 		.await
 		.expect("the controller journals the prompt and the fixture reply");
+		gateway.abort();
+	}
+
+	#[cfg(any(unix, windows))]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn open_new_interrupts_a_live_turn() {
+		use omp_driver::session_wire::OpenHost;
+
+		let dir = tempfile::tempdir().unwrap();
+		isolate_test_home(dir.path());
+		let (endpoint, model, _responses, request_started, gateway) =
+			fake_gateway(dir.path(), true).await;
+		let mut args = ChatArgs::default_interactive();
+		args.gateway = Some(endpoint);
+		args.model = Some(model);
+		args.no_tools = true;
+		let sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
+		let host =
+			crate::session_runner::AppOpenHost::new(test_env(dir.path()), args, Arc::clone(&sessions));
+		let id = host.open_new(dir.path()).await.expect("a new session opens");
+		let handle = sessions.lookup(&id).expect("the returned session is registered");
+		let (reply, subscription) = flume::bounded(1);
+		handle
+			.idle_subscribe
+			.expect("idle controller accepts subscribers")
+			.send(reply)
+			.unwrap();
+		let (_, events) = tokio::time::timeout(Duration::from_secs(15), subscription.recv_async())
+			.await
+			.expect("the idle controller replies")
+			.expect("the subscription remains live");
+		let commands = host.commands(&id).expect("the session command sender is retained");
+		commands
+			.send(omp_chat::HostCommand::Submit(Str::new_static("open-host-interrupt-test-prompt")))
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(15), request_started.recv_async())
+			.await
+			.expect("the gateway receives the in-flight inference request")
+			.expect("the gateway remains live");
+		commands.send(omp_chat::HostCommand::Interrupt).unwrap();
+		let notice = tokio::time::timeout(Duration::from_secs(15), async {
+			loop {
+				let omp_dom::Event::Patch(patch) =
+					events.recv_async().await.expect("the session stays live")
+				else {
+					continue;
+				};
+				for op in patch.ops {
+					if let omp_dom::Op::Ins { node, .. } = op
+						&& node.tag == omp_dom::KnownTag::Notice.into()
+						&& let Some(content) = node.content
+					{
+						return content;
+					}
+				}
+			}
+		})
+		.await
+		.expect("the interrupted turn journals a notice");
+		assert_eq!(notice.as_str(), "Turn interrupted");
 		gateway.abort();
 	}
 
