@@ -203,9 +203,9 @@ Deferred:
 
 ## Required evidence before acceptance
 
-- **OPEN verification:** run the local `buf breaking crates/proto --against '.git#branch=omp2,subdir=crates/proto'` proof.
+- **PASSED:** the local `buf breaking crates/proto --against '.git#branch=omp2,subdir=crates/proto'` proof. `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
 - **DECIDED:** `toolhost` remains in the Buf breaking scope for the WorkerFrame/ReadyPing contract.
-- **DECIDED:** B1 uses lenient unknown-field decoding.
+- **DECIDED:** B1 uses lenient unknown-field decoding. Implemented as a hand-written `Deserialize for ToolResult` at `journal/src/data.rs:574-579`, with no `deny_unknown_fields` on its `Wire` struct and the exactly-one-of `outcome`/`fault` check keeping the payload fail-closed. The revision-bump alternative was not merely rejected, it is unreachable: `Kind::is_known` at `journal/src/kind.rs:131-132` accepts only `rev == 1`, so a `tool.result@2` would be refused as an unknown kind by every reader.
 
 ## Implementation gate
 

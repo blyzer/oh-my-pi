@@ -67,7 +67,7 @@ Totals: 25 implemented, 19 partially implemented, 4 not started.
 - [0024](0024-small-permanent-roster.md) Every permanent tool taxes every turn; the roster stays small and fixed: Wire roster latched per session (amended 2026-10-05); prompt prefix not yet stable.
 - [0034](0034-transcript-is-a-protocol.md) Blocks, exactly-once history, append-only scrollback; TLA+-checked: No full/compact/pulse geometry; `cl_resize_policy` convar still exists; TLC not run in CI.
 - [0035](0035-rust-for-the-engine.md) Language choice is architecture; Rust for the engine: 245 bare-string error variants and 1042 formatted error values remain, held by a per-crate lintx ratchet (`tools/lintx/baselines/error-formatting.toml`); migration to zero is open.
-- [0048](0048-schema-and-serialization-boundaries.md) Schema and serialization boundaries: `buf breaking` and most of the B1-B8 backlog landed before acceptance, and the B1 variant choice is unrecorded in this file. B5 is no longer open; it landed in `ee0371931f` and the ADR and `TASKS.md` record it.
+- [0048](0048-schema-and-serialization-boundaries.md) Schema and serialization boundaries: `buf breaking` and most of the B1-B8 backlog landed before acceptance. B5 landed in `ee0371931f`; the B1 variant is lenient unknown-field decoding, recorded in the row above and implemented at `journal/src/data.rs:574-579`, with `Kind::is_known` (`journal/src/kind.rs:131-132`) accepting only `rev == 1` so the revision-bump alternative is unreachable. Nothing in this entry is open.
 
 ## Resolved by amendment (2026-10-04)
 
