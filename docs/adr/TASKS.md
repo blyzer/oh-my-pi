@@ -53,13 +53,13 @@ error. No council verdict is recorded.
   macOS/Linux execution, metrics, artifact format, and comparison thresholds.
 - **ADR 0048 B4:** choose validation of every HostFrame and WorkerFrame before prost decode, or
   deletion of the unused validators; identify the owning decode paths.
-- **ADR 0048 B5:** choose the golden corpus scope. Current fixtures cover `chat-stream` and
-  `tool-calls-and-rewind`; decide whether `compaction`, `tool.update`, `patch`, and each field
-  addition require separate fixtures.
+- **RESOLVED** **ADR 0048 B5:** the owner chose one fixture per durable behavior family with no
+  redundant field permutations. Implemented and verified; see the ADR 0048 section below.
 - **ADR 0048 B9:** prove the real worker launcher and WorkerHello path plus gateway Hello behavior,
   or authorize correcting stale documentation and missing production wiring.
 - **ADR 0048 acceptance:** confirm the Buf ignore list, especially `toolhost`; choose the B1
-  lenient-decode versus revision-bump variant; and run the required local Buf proof.
+  lenient-decode versus revision-bump variant. The required local Buf proof is no longer open:
+  `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
 
 ## Snapshot JSON byte preservation
 
@@ -93,12 +93,12 @@ ADR status: **accepted 2026-10-28; implementation gate open**.
 Completed implementation items:
 
 - **DONE** `buf breaking` configuration, CI check, and `just proto-breaking`.
-- **DONE** B1, B2, B3, B4, B6, B7, and B8.
+- **DONE** B1, B2, B3, B4, B5, B6, B7, and B8.
 
 Active items:
 
 - **DONE** B4. `validate_worker_frame` guards the worker process and readiness-ping decode paths, and `validate_host_frame` guards the host-frame child path. `just test-pkg omp-proto` passed 33 tests plus one doctest.
-- **OPEN** B5. Owner acceptance selected behavior-family golden fixtures for `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool.update`, and `patch`; implement the remaining fixture builders and replay proof.
+- **DONE** B5. The golden corpus landed in `ee0371931f` with one fixture per durable behavior family, `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool-update` and `patch`, and no redundant field permutations. `corpus()` and `MIN_FIXTURES` in `crates/session/tests/golden_journals.rs:36,250-258` pin the count. `golden_journals_open_and_fold_to_their_recorded_snapshots` replays every checked-in `fixtures/journal/*.oms` against its recorded snapshot: `just test-pkg omp-session` passed 63 tests. The ledger carried this as OPEN until 2026-11-03 because the status update did not land with the code.
 
 
 `just proto-breaking` passes on the current tree. `just e2e-p8` passes. The latest non-gating P8 artifact is workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996), but it measures the synthetic recorder workload, not ADR 0045 workloads W1–W9.
