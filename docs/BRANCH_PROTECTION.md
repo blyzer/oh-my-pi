@@ -71,6 +71,7 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `Acceptance proofs P9, P10 and tool sources (Linux)`
 - `Error-formatting ratchet (lintx)`
 - `Remote Linux verification (BuildBuddy)`
+- `Protobuf format and lint`
 
 `Acceptance proofs P9, P10 and tool sources (Linux)` runs on a GitHub-hosted
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
