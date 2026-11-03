@@ -26,6 +26,7 @@ use crate::{
 };
 
 const SURFACE_ID: &str = "omp-chat";
+const COVER_ID: &str = "omp-screen";
 const MAIN_ID: &str = "main";
 const DOCK_ID: &str = "dock";
 const LAYER_ID: &str = "layer";
@@ -47,9 +48,51 @@ struct Stylesheet {
 	css:  Str,
 }
 
+/// The `screen` surface that covers the pane while a full-screen overlay draws
+/// natively.
+///
+/// Tern keeps the session surface live underneath: its document, focus and
+/// frame numbering stay as they were, frames addressed to it still apply, and
+/// it shows again exactly as it was once the cover closes.
+struct Cover {
+	opened:   bool,
+	/// Next frame number. It never restarts, so a late `ack` for an earlier
+	/// cover cannot be taken for one of the next.
+	next_seq: u64,
+	acked:    u64,
+	/// Id of the mounted view root; empty when none is.
+	view:     Str,
+}
+
+impl Cover {
+	fn new() -> Self {
+		Self { opened: false, next_seq: 1, acked: 0, view: Str::default() }
+	}
+
+	fn credit_available(&self, credits: u32) -> bool {
+		(self.next_seq.saturating_sub(1)).saturating_sub(self.acked) < u64::from(credits)
+	}
+
+	/// Drops the cover, whether Tern removed it or the presenter closed it.
+	/// Frames still in flight will never be acknowledged, so the credit window
+	/// starts over.
+	fn forget(&mut self) {
+		self.opened = false;
+		self.acked = self.next_seq.saturating_sub(1);
+		self.view = Str::default();
+	}
+}
+
 /// One terminal-epoch TSP surface presenter.
+///
+/// The surface sits in the pane as the [`Mode`] it was built for. The chat
+/// session is inline; a screen surface is discarded when it closes; a flow
+/// surface is command output that stays in the scrollback, never listens and
+/// mounts none of the session chrome. While an inline session is live it can
+/// cover the pane with a second, screen, surface ([`Surface::present_cover`]).
 pub struct Surface {
 	id:               Str,
+	mode:             Mode,
 	hello:            Hello,
 	encoder:          Encoder,
 	recorder:         Option<Recorder>,
@@ -68,6 +111,7 @@ pub struct Surface {
 	status_text:      Str,
 	approval_id:      Str,
 	form_id:          Str,
+	cover:            Cover,
 	events:           VecDeque<Event>,
 }
 /// HTML-like element tags supported by Tern's `el` vocabulary.
@@ -127,14 +171,18 @@ fn approval_node(id: &str, reason: &str) -> Node {
 	])
 }
 impl Surface {
-	/// Starts an inline surface for a terminal whose `hello` beat the DA1
-	/// fence.
+	/// Starts a surface for a terminal whose `hello` beat the DA1 fence.
+	///
+	/// `mode` is where the surface sits. Only an inline surface adopts one Tern
+	/// still holds (`adopt`). A flow surface needs the terminal `flow` feature;
+	/// without it [`Surface::present`] refuses with
+	/// [`io::ErrorKind::Unsupported`] and the caller prints plainly instead.
 	///
 	/// That reply reached the host through the startup probe rather than
 	/// through [`Surface::incoming`], so it is recorded here: a recording
 	/// `surface-play` replays must hold both directions of the handshake.
-	pub fn new(hello: Hello, adopt: bool) -> Self {
-		let mut surface = Self::with_hello(hello, adopt);
+	pub fn new(hello: Hello, mode: Mode, adopt: bool) -> Self {
+		let mut surface = Self::with_hello(hello, mode, adopt);
 		surface.record_reply(&Reply::Hello(surface.hello.clone()));
 		surface
 	}
@@ -163,14 +211,16 @@ impl Surface {
 				reduce_motion: None,
 				hour12:        None,
 			},
+			Mode::Inline,
 			adopt,
 		)
 	}
 
-	fn with_hello(hello: Hello, adopt: bool) -> Self {
+	fn with_hello(hello: Hello, mode: Mode, adopt: bool) -> Self {
 		let encoder = Encoder::new(hello.apc_limit());
 		Self {
 			id: Str::new_static(SURFACE_ID),
+			mode,
 			hello,
 			encoder,
 			recorder: Recorder::from_env(),
@@ -178,7 +228,7 @@ impl Surface {
 			acked: 0,
 			blocks: FastHashMap::default(),
 			opened: false,
-			adopting: adopt,
+			adopting: adopt && mode == Mode::Inline,
 			suspended: false,
 			dirty: true,
 			last_paced: None,
@@ -189,6 +239,7 @@ impl Surface {
 			status_text: Str::default(),
 			approval_id: Str::default(),
 			form_id: Str::default(),
+			cover: Cover::new(),
 			events: VecDeque::new(),
 		}
 	}
@@ -238,8 +289,8 @@ impl Surface {
 	/// Re-enters the surface for a new terminal epoch.
 	pub fn reenter(&mut self, adopt: bool) {
 		self.opened = false;
-		self.adopting = adopt;
-		if !adopt {
+		self.adopting = adopt && self.mode == Mode::Inline;
+		if !self.adopting {
 			self.blocks.clear();
 		}
 		self.composer_mounted = false;
@@ -249,6 +300,7 @@ impl Surface {
 		self.status_text = Str::default();
 		self.approval_id = Str::default();
 		self.form_id = Str::default();
+		self.cover.forget();
 		self.dirty = true;
 	}
 
@@ -264,6 +316,11 @@ impl Surface {
 	}
 
 	/// Emits pending native presentation updates if surface flow control allows.
+	///
+	/// A flow surface carries the blocks alone: the composer and the status band
+	/// are the chat session chrome. One the terminal cannot show (no `flow`
+	/// feature) is refused with [`io::ErrorKind::Unsupported`] before anything
+	/// is written.
 	pub fn present(
 		&mut self,
 		writer: &mut impl io::Write,
@@ -274,6 +331,9 @@ impl Surface {
 		now: Duration,
 		pacing: TspStreamPacing,
 	) -> io::Result<()> {
+		if !self.supported() {
+			return Err(io::ErrorKind::Unsupported.into());
+		}
 		if self.suspended || !self.credit_available() {
 			self.dirty = true;
 			return Ok(());
@@ -297,8 +357,10 @@ impl Surface {
 			self.opened = true;
 		}
 		self.blocks(blocks, &mut ops, now, pacing);
-		self.composer(composer, cursor_utf16, &mut ops);
-		self.status(status, &mut ops);
+		if self.mode != Mode::Flow {
+			self.composer(composer, cursor_utf16, &mut ops);
+			self.status(status, &mut ops);
+		}
 		if ops.is_empty() {
 			self.dirty = false;
 			return Ok(());
@@ -367,6 +429,64 @@ impl Surface {
 		Ok(())
 	}
 
+	/// Covers the pane with a `screen` surface that draws `view`, or removes the
+	/// cover when `view` is `None`.
+	///
+	/// The session surface stays live underneath: frames for it keep applying
+	/// and nothing is resent when the cover closes. Like
+	/// [`Self::present_form`], a view is identified by the id of its root:
+	/// while that stays the same nothing is sent, and a new id replaces the old
+	/// view in one frame. A cover is mounted only over an opened, unsuspended
+	/// session.
+	///
+	/// # Errors
+	/// Returns the error writing to the terminal.
+	pub fn present_cover(
+		&mut self,
+		writer: &mut impl io::Write,
+		view: Option<&Node>,
+	) -> io::Result<()> {
+		let Some(view) = view else {
+			return self.drop_cover(writer);
+		};
+		if self.cover.opened && self.cover.view == view.id {
+			return Ok(());
+		}
+		if !self.opened || self.suspended || !self.cover.credit_available(self.hello.credit_limit()) {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::with_capacity(2);
+		if self.cover.opened {
+			if !self.cover.view.is_empty() {
+				ops.push(Op::Del(self.cover.view.clone()));
+			}
+		} else {
+			let open = Open {
+				id:     Str::new_static(COVER_ID),
+				mode:   Mode::Screen,
+				title:  None,
+				role:   None,
+				adopt:  None,
+				listen: Some(true),
+			};
+			self.send(writer, Verb::Open, &open)?;
+			self.cover.opened = true;
+			ops.push(add(MAIN_ID, COVER_ID, Kind::Col, Map::new()));
+		}
+		ops.push(add_node(view.clone(), MAIN_ID));
+		self.send_cover_frame(writer, ops)?;
+		self.cover.view = view.id.clone();
+		Ok(())
+	}
+
+	/// Whether the terminal draws `node` and everything below it, kind by kind.
+	/// A view it cannot draw is not sent, so its overlay stays in cells.
+	#[must_use]
+	pub fn draws(&self, node: &Node) -> bool {
+		self.hello.draws(node.k) && node.c.iter().all(|child| self.draws(child))
+	}
+
 	/// Handles a terminal reply or event.
 	pub fn incoming(&mut self, incoming: Incoming) {
 		self.record_incoming(&incoming);
@@ -375,6 +495,13 @@ impl Surface {
 			Incoming::Reply(Reply::Blobs { .. }) => {},
 			Incoming::Event(Event::Ack { sf, s }) if sf == self.id => {
 				self.acked = self.acked.max(s);
+			},
+			Incoming::Event(Event::Ack { sf, s }) if sf.as_str() == COVER_ID => {
+				self.cover.acked = self.cover.acked.max(s);
+			},
+			Incoming::Event(Event::Gone { sf: Some(sf), .. }) if sf.as_str() == COVER_ID => {
+				self.cover.forget();
+				self.dirty = true;
 			},
 			Incoming::Event(Event::Gone { sf, .. })
 				if sf.as_ref().is_none_or(|surface| surface == &self.id) =>
@@ -402,7 +529,10 @@ impl Surface {
 	}
 
 	/// Suspends native composition so the regular renderer can paint overlays.
+	///
+	/// The cover goes first: it would hide what the renderer paints.
 	pub fn suspend(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
+		self.drop_cover(writer)?;
 		if !self.suspended {
 			self.send_frame(writer, vec![Op::Suspend])?;
 			self.suspended = true;
@@ -420,12 +550,25 @@ impl Surface {
 		Ok(())
 	}
 
-	/// Closes the live epoch while retaining the inline main region for
-	/// adoption.
+	/// Closes the live epoch: the cover first, then the surface. An inline
+	/// surface closed with `keep` stays in the scrollback for adoption and a
+	/// flow surface stays there as command output; a screen surface is
+	/// discarded whatever `keep` says.
 	pub fn close(&mut self, writer: &mut impl io::Write, keep: bool) -> io::Result<()> {
+		self.drop_cover(writer)?;
 		if self.opened {
+			let keep = keep && self.mode != Mode::Screen;
 			self.send(writer, Verb::Close, &Close { id: self.id.clone(), keep })?;
 			self.opened = false;
+		}
+		Ok(())
+	}
+
+	fn drop_cover(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
+		if self.cover.opened {
+			let close = Close { id: Str::new_static(COVER_ID), keep: false };
+			self.send(writer, Verb::Close, &close)?;
+			self.cover.forget();
 		}
 		Ok(())
 	}
@@ -437,26 +580,47 @@ impl Surface {
 
 	fn credit_available(&self) -> bool {
 		let unacknowledged = (self.next_seq.saturating_sub(1)).saturating_sub(self.acked);
-		unacknowledged < u64::from(self.hello.credit_limit())
+		!self.listening() || unacknowledged < u64::from(self.hello.credit_limit())
+	}
+
+	/// Whether Tern hears this surface. A flow surface never reads its input, so
+	/// Tern sends it no acks and its frames never wait for credits.
+	const fn listening(&self) -> bool {
+		!matches!(self.mode, Mode::Flow)
+	}
+
+	/// Whether the terminal can show this surface: an older Tern rejects the
+	/// flow mode.
+	fn supported(&self) -> bool {
+		!matches!(self.mode, Mode::Flow) || self.hello.has_feature("flow")
 	}
 
 	fn send_open(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
 		let open = Open {
 			id:     self.id.clone(),
-			mode:   Mode::Inline,
+			mode:   self.mode,
 			title:  Some(Str::new_static("omp")),
-			role:   Some(Str::new_static("omp.session")),
+			role:   (self.mode == Mode::Inline).then_some(Str::new_static("omp.session")),
 			adopt:  self.adopting.then_some(true),
-			listen: Some(true),
+			listen: Some(self.listening()),
 		};
 		self.send(writer, Verb::Open, &open)?;
 		self.adopting = false;
+		// A new inline or screen surface replaces any screen surface Tern holds,
+		// so a cover is mounted again from scratch.
+		self.cover.forget();
 		Ok(())
 	}
 
 	fn send_frame(&mut self, writer: &mut impl io::Write, ops: Vec<Op>) -> io::Result<()> {
 		let frame = Frame { sf: self.id.clone(), s: self.next_seq, ops };
 		self.next_seq = self.next_seq.saturating_add(1);
+		self.send(writer, Verb::Frame, &frame)
+	}
+
+	fn send_cover_frame(&mut self, writer: &mut impl io::Write, ops: Vec<Op>) -> io::Result<()> {
+		let frame = Frame { sf: Str::new_static(COVER_ID), s: self.cover.next_seq, ops };
+		self.cover.next_seq = self.cover.next_seq.saturating_add(1);
 		self.send(writer, Verb::Frame, &frame)
 	}
 
@@ -736,7 +900,11 @@ mod tests {
 		IntoComponent as _,
 		components::TextLeaf,
 		slots::Mode,
-		tsp::{doc::Document, frame::split},
+		tsp::{
+			doc::{Closed, Document},
+			frame::split,
+			wire::Mode as SurfaceMode,
+		},
 	};
 
 	use super::*;
@@ -935,7 +1103,7 @@ mod tests {
 		// Close with keep: true
 		out.clear();
 		surface.close(&mut out, true).unwrap();
-		doc.close();
+		doc.close(true);
 		assert!(doc.contains(MAIN_ID));
 		assert!(!doc.contains(DOCK_ID));
 
@@ -1060,7 +1228,7 @@ mod tests {
 			reduce_motion: None,
 			hour12:        None,
 		};
-		let mut surface = Surface::new(hello, false);
+		let mut surface = Surface::new(hello, SurfaceMode::Inline, false);
 		let mut out = Vec::new();
 		surface
 			.set_stylesheet(&mut out, "forms", ".ask { display: flex }")
@@ -1098,5 +1266,432 @@ mod tests {
 			values: None,
 		}));
 		assert!(matches!(surface.take_event(), Some(Event::Action { .. })));
+	}
+
+	/// A terminal reading one presenter output: each `o` opens a document, each
+	/// `f` applies to the live surface it names and each `x` closes one.
+	#[derive(Default)]
+	struct Tern {
+		opens:  Vec<Open>,
+		closes: Vec<(Close, Closed)>,
+		frames: usize,
+		live:   Vec<Document>,
+		kept:   Vec<Document>,
+	}
+
+	impl Tern {
+		fn read(&mut self, output: &[u8]) {
+			let mut rest = output;
+			while let Some(start) = rest.windows(2).position(|w| w == b"\x1b_") {
+				let after = &rest[start + 2..];
+				let end = after
+					.windows(2)
+					.position(|w| w == b"\x1b\\")
+					.expect("terminated message");
+				let raw = split(&after[..end]).expect("a TSP message");
+				match raw.verb {
+					"o" => {
+						let open: Open = serde_json::from_slice(raw.body).expect("valid open JSON");
+						self.open(open);
+					},
+					"f" => {
+						let frame: Frame = serde_json::from_slice(raw.body).expect("valid frame JSON");
+						self.apply(&frame);
+					},
+					"x" => {
+						let close: Close = serde_json::from_slice(raw.body).expect("valid close JSON");
+						self.close(&close);
+					},
+					verb => panic!("the presenter sent a {verb:?} message this terminal does not model"),
+				}
+				rest = &after[end + 2..];
+			}
+		}
+
+		fn open(&mut self, open: Open) {
+			// A new surface replaces the live one of its mode, and a new inline
+			// surface also discards a screen cover.
+			self.live.retain(|doc| {
+				doc.mode() != open.mode
+					&& !(open.mode == SurfaceMode::Inline && doc.mode() == SurfaceMode::Screen)
+			});
+			self.live.push(Document::open(&open));
+			self.opens.push(open);
+		}
+
+		fn apply(&mut self, frame: &Frame) {
+			let doc = self
+				.live
+				.iter_mut()
+				.find(|doc| doc.surface() == &frame.sf)
+				.unwrap_or_else(|| panic!("a frame for {}, which is not open", frame.sf));
+			let rejected = doc.apply(frame);
+			assert!(rejected.is_empty(), "frame had rejected ops: {rejected:?}");
+			self.frames += 1;
+		}
+
+		fn close(&mut self, close: &Close) {
+			let index = self
+				.live
+				.iter()
+				.position(|doc| doc.surface() == &close.id)
+				.unwrap_or_else(|| panic!("a close for {}, which is not open", close.id));
+			let mut doc = self.live.remove(index);
+			let closed = doc.close(close.keep);
+			if closed == Closed::Kept {
+				self.kept.push(doc);
+			}
+			self.closes.push((close.clone(), closed));
+		}
+
+		/// The live document of surface `id`.
+		fn doc(&self, id: &str) -> &Document {
+			self
+				.live
+				.iter()
+				.find(|doc| doc.surface().as_str() == id)
+				.unwrap_or_else(|| panic!("surface {id} is not open"))
+		}
+
+		/// The ids under the cover `main` region.
+		fn cover_main(&self) -> Vec<String> {
+			self
+				.doc(COVER_ID)
+				.get("main")
+				.expect("main region")
+				.c
+				.iter()
+				.map(|node| node.id.as_str().to_owned())
+				.collect()
+		}
+	}
+
+	/// The optimistic v1 `hello` (every kind) advertising `features`.
+	fn hello(features: &[&'static str]) -> Hello {
+		let mut hello = Surface::optimistic(false).hello;
+		hello.features = features.iter().copied().map(Str::new_static).collect();
+		hello
+	}
+
+	/// The view a full-screen panel hands the presenter.
+	fn view(id: &'static str) -> Node {
+		element_node(Str::new_static(id), ElementTag::Form, Map::new(), Vec::new())
+	}
+
+	fn session_present(surface: &mut Surface, out: &mut Vec<u8>, blocks: &[RenderedBlock]) {
+		surface
+			.present(out, blocks, "draft", 5, "ok", Duration::ZERO, TspStreamPacing::Raw)
+			.unwrap();
+	}
+
+	#[test]
+	fn the_session_surface_opens_inline_with_its_role_and_listens() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[make_block(1, BlockKind::User, "hi", true)]);
+		tern.read(&out);
+		let [open] = tern.opens.as_slice() else {
+			panic!("one surface opens: {:?}", tern.opens);
+		};
+		assert_eq!(open.id.as_str(), SURFACE_ID);
+		assert_eq!(open.mode, SurfaceMode::Inline);
+		assert_eq!(open.role.as_deref(), Some("omp.session"));
+		assert_eq!(open.listen, Some(true));
+		assert_eq!(open.adopt, None);
+	}
+
+	#[test]
+	fn a_screen_cover_opens_over_the_live_session_and_leaves_it_untouched() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[make_block(
+			1,
+			BlockKind::Assistant,
+			"Hello",
+			true,
+		)]);
+		tern.read(&out);
+		let before = tern.doc(SURFACE_ID).snapshot();
+
+		out.clear();
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+		let screen = &tern.opens[1];
+		assert_eq!(screen.id.as_str(), COVER_ID);
+		assert_eq!(screen.mode, SurfaceMode::Screen);
+		assert_eq!(screen.listen, Some(true));
+		assert_eq!(tern.cover_main(), ["settings"]);
+		assert_eq!(tern.doc(SURFACE_ID).snapshot(), before, "the cover leaves the session as it was");
+
+		// The session keeps drawing underneath: frames for it still apply.
+		out.clear();
+		let blocks = [
+			make_block(1, BlockKind::Assistant, "Hello", true),
+			make_block(2, BlockKind::Assistant, "More", true),
+		];
+		session_present(&mut surface, &mut out, &blocks);
+		tern.read(&out);
+		assert!(tern.doc(SURFACE_ID).contains(&block_id(2)));
+		assert!(!tern.doc(COVER_ID).contains(&block_id(2)));
+
+		out.clear();
+		surface.present_cover(&mut out, None).unwrap();
+		tern.read(&out);
+		let (close, closed) = &tern.closes[0];
+		assert_eq!(close.id.as_str(), COVER_ID);
+		assert!(!close.keep, "a screen surface is discarded whatever keep says");
+		assert_eq!(*closed, Closed::Discarded);
+		assert!(tern.doc(SURFACE_ID).contains(&block_id(2)), "the session shows again as it was");
+	}
+
+	#[test]
+	fn a_cover_is_identified_by_its_root_and_mounts_again_after_it_closes() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+
+		out.clear();
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		assert!(out.is_empty(), "the same view is not sent twice");
+
+		surface
+			.present_cover(&mut out, Some(&view("models")))
+			.unwrap();
+		tern.read(&out);
+		assert_eq!(tern.cover_main(), ["models"], "a new root replaces the old view");
+		assert_eq!(
+			tern.opens.len(),
+			2,
+			"the cover stays open: one surface for the session, one for it"
+		);
+
+		out.clear();
+		surface.present_cover(&mut out, None).unwrap();
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+		assert_eq!(tern.opens.len(), 3, "a closed cover opens again");
+		assert_eq!(tern.cover_main(), ["settings"]);
+	}
+
+	#[test]
+	fn the_cover_has_credits_of_its_own_and_starts_over_when_it_closes() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		surface.present_cover(&mut out, Some(&view("a"))).unwrap();
+		surface.present_cover(&mut out, Some(&view("b"))).unwrap();
+		tern.read(&out);
+
+		out.clear();
+		surface.present_cover(&mut out, Some(&view("c"))).unwrap();
+		assert!(out.is_empty(), "two cover frames are unacknowledged, so the third waits");
+		assert!(surface.dirty());
+
+		surface.incoming(Incoming::Event(Event::Ack { sf: Str::new_static(COVER_ID), s: 1 }));
+		surface.present_cover(&mut out, Some(&view("c"))).unwrap();
+		tern.read(&out);
+		assert_eq!(tern.cover_main(), ["c"]);
+
+		// Frames still in flight when a cover closes are never acknowledged.
+		out.clear();
+		surface.present_cover(&mut out, None).unwrap();
+		surface.present_cover(&mut out, Some(&view("d"))).unwrap();
+		tern.read(&out);
+		assert_eq!(tern.opens.len(), 3);
+		assert_eq!(tern.cover_main(), ["d"]);
+	}
+
+	#[test]
+	fn a_cover_mounts_again_after_tern_drops_it_or_the_session_opens_anew() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+		let covers = |tern: &Tern| {
+			tern
+				.opens
+				.iter()
+				.filter(|open| open.mode == SurfaceMode::Screen)
+				.count()
+		};
+		assert_eq!(covers(&tern), 1);
+
+		// Tern dropped the cover and said so.
+		tern.live.retain(|doc| doc.surface().as_str() != COVER_ID);
+		surface.incoming(Incoming::Event(Event::Gone {
+			sf:  Some(Str::new_static(COVER_ID)),
+			ids: vec![Str::new_static(COVER_ID)],
+		}));
+		out.clear();
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+		assert_eq!(covers(&tern), 2);
+
+		// A session that opens anew discards any cover, silently.
+		surface.incoming(Incoming::Event(Event::Gone {
+			sf:  None,
+			ids: vec![Str::new_static(SURFACE_ID)],
+		}));
+		out.clear();
+		session_present(&mut surface, &mut out, &[]);
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+		assert_eq!(covers(&tern), 3);
+		assert_eq!(tern.cover_main(), ["settings"]);
+	}
+
+	#[test]
+	fn suspending_or_closing_the_session_closes_the_cover_first() {
+		let mut surface = Surface::optimistic(false);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		session_present(&mut surface, &mut out, &[]);
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		tern.read(&out);
+
+		out.clear();
+		surface.suspend(&mut out).unwrap();
+		tern.read(&out);
+		assert_eq!(tern.closes.len(), 1, "the cover would hide what the cell renderer paints");
+		assert_eq!(tern.closes[0].1, Closed::Discarded);
+		assert!(tern.doc(SURFACE_ID).suspended());
+
+		out.clear();
+		surface.resume(&mut out).unwrap();
+		surface
+			.present_cover(&mut out, Some(&view("settings")))
+			.unwrap();
+		surface.close(&mut out, true).unwrap();
+		tern.read(&out);
+		let closed: Vec<_> = tern
+			.closes
+			.iter()
+			.map(|(close, _)| close.id.as_str())
+			.collect();
+		assert_eq!(closed, [COVER_ID, COVER_ID, SURFACE_ID]);
+		assert_eq!(tern.closes[2].1, Closed::Kept);
+	}
+
+	#[test]
+	fn a_flow_surface_needs_the_terminal_flow_feature() {
+		let mut surface = Surface::new(hello(&[]), SurfaceMode::Flow, false);
+		let mut out = Vec::new();
+		let blocks = [make_block(1, BlockKind::Assistant, "Done", true)];
+		let error = surface
+			.present(&mut out, &blocks, "", 0, "", Duration::ZERO, TspStreamPacing::Raw)
+			.unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+		assert!(out.is_empty(), "nothing is written for a mode the terminal lacks");
+	}
+
+	#[test]
+	fn a_flow_surface_prints_its_blocks_without_chrome_and_never_waits_for_credits() {
+		let mut surface = Surface::new(hello(&["flow"]), SurfaceMode::Flow, true);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		for count in 1..=4_u64 {
+			let blocks: Vec<_> = (1..=count)
+				.map(|key| make_block(key, BlockKind::Assistant, "line", true))
+				.collect();
+			session_present(&mut surface, &mut out, &blocks);
+		}
+		tern.read(&out);
+		let [open] = tern.opens.as_slice() else {
+			panic!("one surface opens: {:?}", tern.opens);
+		};
+		assert_eq!(open.mode, SurfaceMode::Flow);
+		assert_eq!(open.listen, Some(false));
+		assert_eq!(open.adopt, None, "only an inline surface adopts");
+		assert_eq!(open.role, None);
+		assert_eq!(tern.frames, 4, "no acknowledgement is owed, so frames never wait for credits");
+		let doc = tern.doc(SURFACE_ID);
+		assert!((1..=4).all(|key| doc.contains(&block_id(key)) && doc.is_settled(&block_id(key))));
+		assert!(
+			!doc.contains(COMPOSER_ID) && !doc.contains(STATUS_ID),
+			"a flow surface has no session chrome"
+		);
+
+		out.clear();
+		surface.close(&mut out, true).unwrap();
+		tern.read(&out);
+		assert_eq!(tern.closes[0].1, Closed::Kept);
+		let kept = &tern.kept[0];
+		assert!(
+			kept.contains(MAIN_ID) && kept.contains(&block_id(4)),
+			"command output stays in the scrollback"
+		);
+		assert!(!kept.contains(DOCK_ID));
+	}
+
+	#[test]
+	fn a_screen_surface_never_adopts_and_is_discarded_on_close() {
+		let mut surface = Surface::new(hello(&[]), SurfaceMode::Screen, true);
+		let mut tern = Tern::default();
+		let mut out = Vec::new();
+		let blocks = [make_block(1, BlockKind::User, "hi", true)];
+		session_present(&mut surface, &mut out, &blocks);
+		tern.read(&out);
+		let [open] = tern.opens.as_slice() else {
+			panic!("one surface opens: {:?}", tern.opens);
+		};
+		assert_eq!(open.mode, SurfaceMode::Screen);
+		assert_eq!(open.adopt, None);
+		assert_eq!(open.listen, Some(true));
+		assert!(tern.doc(SURFACE_ID).contains(MAIN_ID) && tern.doc(SURFACE_ID).contains(COMPOSER_ID));
+
+		out.clear();
+		surface.close(&mut out, true).unwrap();
+		tern.read(&out);
+		let (close, closed) = &tern.closes[0];
+		assert!(!close.keep, "a screen surface is discarded whatever keep says");
+		assert_eq!(*closed, Closed::Discarded);
+
+		surface.reenter(true);
+		out.clear();
+		session_present(&mut surface, &mut out, &blocks);
+		tern.read(&out);
+		assert_eq!(tern.opens[1].adopt, None, "re-entry does not adopt a screen surface");
+		assert!(
+			tern.doc(SURFACE_ID).contains(&block_id(1)),
+			"the blocks mount again in the new surface"
+		);
+	}
+
+	#[test]
+	fn a_view_is_drawn_only_when_every_kind_in_it_is() {
+		let mut narrow = hello(&[]);
+		narrow.kinds = ["col", "el"].map(Str::new_static).into_iter().collect();
+		let surface = Surface::new(narrow, SurfaceMode::Inline, false);
+		assert!(surface.draws(&view("settings")));
+		let picker =
+			Node { id: Str::new_static("p"), k: Kind::Picker, p: Map::new(), c: Vec::new() };
+		assert!(!surface.draws(&picker));
+		let nested =
+			Node { id: Str::new_static("f"), k: Kind::El, p: Map::new(), c: vec![picker] };
+		assert!(!surface.draws(&nested), "one kind the terminal lacks keeps the whole view in cells");
 	}
 }
