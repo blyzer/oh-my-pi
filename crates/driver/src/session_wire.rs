@@ -126,6 +126,18 @@ pub struct SessionWire {
 	redaction: Arc<ControlVisibility>,
 	heartbeat: Duration,
 	open_host: Option<std::sync::Arc<dyn OpenHost>>,
+	/// Sessions already minted for a client's `idempotency_key`.
+	///
+	/// ADR 0039 journals the key on the entry a mutation creates and reads it
+	/// back from the DOM, so no side table is needed. `Open{NewSession}` has no
+	/// such entry: the session IS what it creates, and there is nothing to
+	/// read back before it exists. A retried open would otherwise mint a
+	/// second session and strand the first, so the mapping lives here and is
+	/// dropped as soon as the session it names stops being live.
+	///
+	/// Async, because the guard is held across the host's `open_new` so that
+	/// two concurrent retries of one key cannot both miss the map.
+	opened:    tokio::sync::Mutex<FastHashMap<Str, SessionId>>,
 }
 
 /// Composes and registers a new session. `SessionWire` does not construct a
@@ -151,7 +163,15 @@ impl SessionWire {
 		redaction: Arc<ControlVisibility>,
 		heartbeat: Duration,
 	) -> Self {
-		Self { sessions, bridges: Mutex::default(), limits, redaction, heartbeat, open_host: None }
+		Self {
+			sessions,
+			bridges: Mutex::default(),
+			limits,
+			redaction,
+			heartbeat,
+			open_host: None,
+			opened: tokio::sync::Mutex::default(),
+		}
 	}
 
 	/// Builds an authority with every bound read from `ctx`.
@@ -621,6 +641,30 @@ impl SessionControlAuthority for SessionWire {
 				Err(SessionControlError::HostUnavailable)
 			};
 		}
+		// A retry carries the key its first attempt used (ADR 0039: every
+		// mutation carries one). Answering with the session that key already
+		// minted is what makes `Open` exactly-once as observed; minting a
+		// second one would strand the first, which stays live and attached to
+		// nothing the client knows about.
+		//
+		// The guard is held across the mint, so two concurrent retries of one
+		// key cannot both miss the map and both open. It is an async mutex
+		// because a blocking one must never be held across an await. Opens
+		// compose a kernel and are rare, so serializing them costs nothing
+		// that matters. An absent key cannot be matched to anything, so it
+		// skips the gate entirely rather than queueing behind keyed opens.
+		let key = Str::new(request.idempotency_key.as_str());
+		let mut minted = if key.is_empty() {
+			None
+		} else {
+			Some(self.opened.lock().await)
+		};
+		if let Some(seen) = minted.as_ref()
+			&& let Some(id) = seen.get(&key)
+			&& let Some(handle) = self.sessions.lookup(id)
+		{
+			return Ok(session_ref(&handle, self.epoch_of(&handle.id)));
+		}
 		let host = self
 			.open_host
 			.as_ref()
@@ -635,6 +679,12 @@ impl SessionControlAuthority for SessionWire {
 				.ok_or_else(|| SessionControlError::UnknownSession {
 					session_id: Str::new(id.as_str()),
 				})?;
+		// Recorded only now: a host that answered an id it never registered
+		// has not opened anything, and a key pointing at one would refuse
+		// every later retry instead of opening.
+		if let Some(seen) = minted.as_mut() {
+			seen.insert(key, id);
+		}
 		Ok(session_ref(&handle, self.epoch_of(&handle.id)))
 	}
 }
@@ -1316,6 +1366,159 @@ mod tests {
 			.await
 			.expect_err("an unregistered id is not a session");
 		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+	}
+
+	/// Mints a distinct id per call and counts them, so a second mint is
+	/// visible rather than masked by a fake that always answers the same id.
+	struct CountingHost {
+		sessions: Arc<SessionRegistry>,
+		opens:    Arc<std::sync::atomic::AtomicUsize>,
+	}
+
+	#[tonic::async_trait]
+	impl OpenHost for CountingHost {
+		async fn open_new(&self, _project_root: &Path) -> Result<SessionId, SessionControlError> {
+			let n = self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			// Suspends before registering, so a caller that reached here has
+			// given every other caller a chance to reach it too. Without a
+			// suspension point the host is atomic to the scheduler and a
+			// concurrency test cannot observe overlap at all. An
+			// implementation that released its guard before awaiting the
+			// host lets the second caller in here; one that holds it leaves
+			// the second blocked on the mutex, so the yield cannot deadlock.
+			tokio::task::yield_now().await;
+			// `SessionId` borrows its text, so the ids are literals rather
+			// than a formatted counter. Distinctness is what the tests read.
+			let id = ["01JNEW1", "01JNEW2", "01JNEW3"][n % 3];
+			registered(&self.sessions, id, "/work/new");
+			Ok(SessionId::new(id))
+		}
+	}
+
+	/// A retry carries the key its first attempt used, and must answer the
+	/// session that key already minted (ADR 0039: exactly-once as observed).
+	/// Minting a second would strand the first, which stays live and attached
+	/// to nothing the client can name. A key whose session is gone is stale
+	/// and opens a fresh one, and an absent key never deduplicates at all.
+	#[tokio::test]
+	async fn a_retried_open_answers_the_session_its_key_already_minted() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let wire = SessionWire::new(
+			Arc::clone(&sessions),
+			BridgeLimits::default(),
+			Arc::new(
+				ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+			),
+			Duration::from_secs(60),
+		)
+		.with_open_host(Arc::new(CountingHost {
+			sessions: Arc::clone(&sessions),
+			opens:    Arc::clone(&opens),
+		}));
+		let keyed = |key: &str| pb::OpenSessionRequest {
+			project_root: "/work/new".to_owned(),
+			idempotency_key: key.to_owned(),
+			kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+			..pb::OpenSessionRequest::default()
+		};
+
+		let first = wire
+			.open_session(owner(), keyed("retry-me"))
+			.await
+			.expect("the first open mints a session");
+		let again = wire
+			.open_session(owner(), keyed("retry-me"))
+			.await
+			.expect("the retry answers rather than refusing");
+		assert_eq!(first.session_id, again.session_id, "a retry is not a second session");
+		assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1, "the host was asked once");
+
+		// A different key is a different intent, and no key cannot be matched
+		// to anything, so neither deduplicates.
+		wire
+			.open_session(owner(), keyed("another"))
+			.await
+			.expect("a different key opens its own session");
+		wire
+			.open_session(owner(), keyed(""))
+			.await
+			.expect("an absent key always opens");
+		assert_eq!(
+			opens.load(std::sync::atomic::Ordering::SeqCst),
+			3,
+			"only the matching key deduplicated",
+		);
+	}
+
+	/// Two retries of one key can arrive at once. The lookup and the mint are
+	/// one critical section for exactly that reason: were the guard dropped
+	/// before the host call, both would miss the map and both would open,
+	/// which is the stranded session the key exists to prevent.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn concurrent_retries_of_one_key_mint_once() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let wire = Arc::new(
+			SessionWire::new(
+				Arc::clone(&sessions),
+				BridgeLimits::default(),
+				Arc::new(
+					ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+				),
+				Duration::from_secs(60),
+			)
+			.with_open_host(Arc::new(CountingHost {
+				sessions: Arc::clone(&sessions),
+				opens:    Arc::clone(&opens),
+			})),
+		);
+		let race = |wire: Arc<SessionWire>| async move {
+			wire
+				.open_session(owner(), pb::OpenSessionRequest {
+					project_root: "/work/new".to_owned(),
+					idempotency_key: "raced".to_owned(),
+					kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+					..pb::OpenSessionRequest::default()
+				})
+				.await
+				.expect("both callers are answered")
+		};
+		let (left, right) = tokio::join!(race(Arc::clone(&wire)), race(Arc::clone(&wire)));
+
+		assert_eq!(left.session_id, right.session_id, "both callers name one session");
+		assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1, "the host was asked once");
+	}
+
+	/// A host that answers an id it never registered has not opened anything.
+	/// Recording the key against it would refuse every later retry instead of
+	/// opening, so the mapping is committed only after registration holds.
+	#[tokio::test]
+	async fn a_failed_open_leaves_its_key_free() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let wire = wire_with(
+			Arc::clone(&sessions),
+			Arc::new(RegisteringHost { sessions: Arc::clone(&sessions), register: false }),
+		);
+		let keyed = pb::OpenSessionRequest {
+			project_root: "/work/new".to_owned(),
+			idempotency_key: "first-failed".to_owned(),
+			kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+			..pb::OpenSessionRequest::default()
+		};
+		wire
+			.open_session(owner(), keyed.clone())
+			.await
+			.expect_err("an unregistered id is not a session");
+
+		let refusal = wire
+			.open_session(owner(), keyed)
+			.await
+			.expect_err("the key is free, so the retry opens again and fails again");
+		assert!(
+			matches!(refusal, SessionControlError::UnknownSession { .. }),
+			"a stale mapping would have refused differently",
+		);
 	}
 
 	/// The RPC projection gates `Open` on `control`, but the authority is
