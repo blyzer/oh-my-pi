@@ -1566,8 +1566,7 @@ mod tests {
 			session::ConversationSessionPlanner,
 		};
 		use omp_catalog::{
-			ManagementCapabilities, OperationBits, OperationKind,
-			snapshot::SnapshotProvenance,
+			ManagementCapabilities, OperationBits, OperationKind, snapshot::SnapshotProvenance,
 		};
 		use omp_proto::inference::v1::inference_server::InferenceServer;
 		use tower::ServiceExt as _;
@@ -1575,17 +1574,25 @@ mod tests {
 		let mut compiled = Catalog::embedded().compiled().clone();
 		for provider in &mut compiled.providers {
 			provider.management = ManagementCapabilities {
-				operations: OperationBits::empty(),
+				operations:        OperationBits::empty(),
 				multiple_accounts: false,
-				refresh: false,
-				principal_quota: false,
+				refresh:           false,
+				principal_quota:   false,
 			};
 		}
-		let snapshot = Catalog::encode(compiled, SnapshotProvenance { source_digest: [0; 32] }).unwrap();
+		let snapshot =
+			Catalog::encode(compiled, SnapshotProvenance { source_digest: [0; 32] }).unwrap();
 		let catalog = Arc::new(Catalog::decode(&snapshot.postcard).unwrap());
-		let model = catalog.models().iter().find(|model| {
-			model.capabilities.operations.contains_kind(OperationKind::Chat)
-		}).unwrap();
+		let model = catalog
+			.models()
+			.iter()
+			.find(|model| {
+				model
+					.capabilities
+					.operations
+					.contains_kind(OperationKind::Chat)
+			})
+			.unwrap();
 		let model_key = Str::new(model.key.as_str());
 		let route_id = model.routes.first().unwrap().clone();
 		let route = catalog.route(&route_id).unwrap();
@@ -1594,29 +1601,37 @@ mod tests {
 			Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
 			Ok(ChatEvent::TextDelta { index: 0, text: Str::new_static("offline fixture reply") }),
 			Ok(ChatEvent::Completed(Completion {
-				reason: FinishReason::Stop,
-				blocks: 1,
-				usage: Usage::default(),
+				reason:  FinishReason::Stop,
+				blocks:  1,
+				usage:   Usage::default(),
 				receipt: ExecutionReceipt::default().into(),
 			})),
 		]));
-		let service = RouteProviderService::new(tower::service_fn(move |call: LayerCall<omp_ai::Call>| {
-			fake.clone().oneshot(call.payload)
-		}));
+		let service =
+			RouteProviderService::new(tower::service_fn(move |call: LayerCall<omp_ai::Call>| {
+				fake.clone().oneshot(call.payload)
+			}));
 		let mut registry = Registry::builder(Arc::clone(&catalog));
 		for route in catalog.routes() {
 			registry = if route.id == route_id {
 				registry.register_route(route.id.clone(), service.clone())
 			} else {
 				registry.register_unavailable(RouteUnavailable::new(
-					route.id.clone(), ReasonId(Str::new_static("open-test-route-only")), None,
+					route.id.clone(),
+					ReasonId(Str::new_static("open-test-route-only")),
+					None,
 				))
-			}.unwrap();
+			}
+			.unwrap();
 		}
-		let planner = ConversationSessionPlanner::open(root.join("gateway-sessions.db"), catalog).unwrap();
+		let planner =
+			ConversationSessionPlanner::open(root.join("gateway-sessions.db"), catalog).unwrap();
 		let (responses, incoming_responses) = flume::bounded(32);
 		let rpc = omp_serve::inference::InferenceRpc::new_for_test(
-			registry.build().unwrap(), planner, Arc::new(omp_tool::Registry::new()), responses,
+			registry.build().unwrap(),
+			planner,
+			Arc::new(omp_tool::Registry::new()),
+			responses,
 		);
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let endpoint = crate::endpoint::LocalEndpoint::tcp(listener.local_addr().unwrap());
@@ -1629,7 +1644,6 @@ mod tests {
 		});
 		(endpoint, model_key, incoming_responses, serving)
 	}
-
 
 	#[cfg(any(unix, windows))]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1655,11 +1669,8 @@ mod tests {
 		args.model = Some(model);
 		args.no_tools = true;
 		let sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
-		let host = crate::session_runner::AppOpenHost::new(
-			test_env(dir.path()),
-			args,
-			Arc::clone(&sessions),
-		);
+		let host =
+			crate::session_runner::AppOpenHost::new(test_env(dir.path()), args, Arc::clone(&sessions));
 		let id = host
 			.open_new(dir.path())
 			.await
@@ -1689,21 +1700,27 @@ mod tests {
 			let mut saw_reply = false;
 			let mut saw_stop = false;
 			while !saw_prompt || !saw_reply || !saw_stop {
-				let omp_dom::Event::Patch(patch) = events.recv_async().await.expect("the session stays live") else {
+				let omp_dom::Event::Patch(patch) =
+					events.recv_async().await.expect("the session stays live")
+				else {
 					continue;
 				};
 				for op in patch.ops {
 					match op {
 						omp_dom::Op::Ins { node, .. }
 							if node.tag == omp_dom::KnownTag::User.into()
-								&& node.content.as_ref().is_some_and(|text| text.as_str() == "open-host-test-prompt") =>
+								&& node
+									.content
+									.as_ref()
+									.is_some_and(|text| text.as_str() == "open-host-test-prompt") =>
 						{
 							saw_prompt = true;
 						},
 						omp_dom::Op::Set { prop, value: omp_dom::Value::Str(value), .. } => {
 							saw_reply |= prop == omp_dom::PropId::Text.into()
 								&& value.as_str() == "offline fixture reply";
-							saw_stop |= prop == omp_dom::PropId::StopReason.into() && value.as_str() == "stop";
+							saw_stop |=
+								prop == omp_dom::PropId::StopReason.into() && value.as_str() == "stop";
 						},
 						_ => {},
 					}
