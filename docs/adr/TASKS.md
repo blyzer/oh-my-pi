@@ -57,8 +57,13 @@ error. No council verdict is recorded.
   redundant field permutations. Implemented and verified; see the ADR 0048 section below.
 - **ADR 0048 B9:** prove the real worker launcher and WorkerHello path plus gateway Hello behavior,
   or authorize correcting stale documentation and missing production wiring.
-- **ADR 0048 acceptance:** confirm the Buf ignore list, especially `toolhost`; choose the B1
-  lenient-decode versus revision-bump variant. The required local Buf proof is no longer open:
+- **RESOLVED** **ADR 0048 acceptance:** the owner confirmed the Buf ignore list with `toolhost`
+  retained, and chose the lenient B1 decode variant (TASKS line 37, ADR "Required evidence").
+  The code records the same choice: `journal/src/data.rs:574-579` is a hand-written lenient
+  `Deserialize for ToolResult` whose `Wire` struct carries no `deny_unknown_fields`, with the
+  exactly-one-of `outcome`/`fault` check keeping it fail-closed. The revision-bump alternative is
+  unreachable: `Kind::is_known` at `journal/src/kind.rs:131-132` accepts only `rev == 1`, so a
+  `tool.result@2` would be refused as an unknown kind. The local Buf proof passes:
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
 
 ## Snapshot JSON byte preservation
