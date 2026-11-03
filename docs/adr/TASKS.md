@@ -135,7 +135,9 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 - **Progressed** FOLLOW-0035 error-format migration: ratchet 1042 → 639
   formatted sites after PRs #414–#417.
 - **STILL OPEN** `reattach_execution` backend call
-  (`crates/agent/src/jobs.rs:979` TODO; blocked on ADR 0039 Part B).
+  (`crates/agent/src/jobs.rs:1246-1257` TODO; the design is ADR 0040, whose
+  `reattach` handle and `WaitExecution` path it waits on. ADR 0039 Part B has no
+  reattach text and ADR 0039 R2 does not unblock it).
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).
 
@@ -146,7 +148,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
 - **IN PROGRESS** ADR 0039 mutating verbs. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. A named session still answers `UNIMPLEMENTED`. The verbs do not drive a session yet.
-- **BLOCKED** ADR 0041 `screen`, `flow`, and `TERN_BLOB_DIR`. The ADR does not name their node shape. No surface code until it does.
+- **BLOCKED** ADR 0041 `screen` and `flow`. The ADR does not name their node shape. No surface code until it does. `TERN_BLOB_DIR` is not a node and exists only in prose: no code defines or reads it. It needs a definition against `Query::Blobs` and `Encoder::blob`, or removal from the ADR (audit row 0041-D).
 
 Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
 

@@ -1624,8 +1624,10 @@ mod tests {
 		);
 	}
 
-	/// Resume and fork are not served by this host, and an id it does not hold
-	/// is no session, so both answer `UnknownSession` rather than invent one.
+	/// Resume and fork look the id up before anything else, so an id this host
+	/// does not hold is no session and both answer `UnknownSession` rather than
+	/// invent one. A live id is a different case: neither kind is served yet, so
+	/// that lookup answers `HostUnavailable`, which this test does not cover.
 	#[tokio::test]
 	async fn resuming_or_forking_a_session_that_is_not_live_is_unknown() {
 		let sessions = Arc::new(SessionRegistry::new());

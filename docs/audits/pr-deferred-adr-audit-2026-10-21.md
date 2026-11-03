@@ -83,7 +83,7 @@ Phases 0–4 are partially landed. Phase 3 (native editor events, autocomplete, 
 | 0041-A | Phase 3: native `editor` editing events (`edit`, `undo`, `send`), autocomplete overlay, `picker`, `prefs`, `effort` nodes | PP | Partial — #344 merged (editor edit/undo/send, autocomplete, picker for TSP phase 3); re-verify exact coverage | AD (likely) | Yes — isolated to `crates/chat/src/tsp.rs` |
 | 0041-B | Phase 3: `screen` surfaces | PP | No — not found | AN | Yes — chat crate only |
 | 0041-C | Phase 4: `flow` surfaces for print mode | PP | No | AN | Yes — chat and app crates |
-| 0041-D | Phase 4: `TERN_BLOB_DIR` integration | PP | No | AN | Yes |
+| 0041-D | Phase 4: `TERN_BLOB_DIR` integration | OD | No. A repo-wide search (2026-11-03) finds `TERN_BLOB_DIR` only in prose: ADR 0041 (§Phases and §Status in omp), this audit and `docs/adr/TASKS.md`. No code defines or reads it, and it is not a TSP node. The nearest machinery is `Query::Blobs` (`crates/tui/src/tsp/wire.rs:457`) and `Encoder::blob` (`crates/tui/src/tsp/frame.rs:146-158`, which has no production caller). It needs a definition against those, or removal from the ADR | BD | No — waits on the definition |
 | 0041-E | Phase 4: Windows ConPTY input decoding | EX | No — Windows CI does not run | BD | Yes |
 | 0041-F | ADR 0034 amendment for TSP viewport cutover | OD | No — ADR 0034 still has `cl_resize_policy` convar and no geometry (status row says "Yes" owner decision needed) | BD | Yes — docs only |
 | 0041-G | GUI host decision (deferred in ADR) | OD | No | BD | — |
@@ -276,8 +276,8 @@ Source: `docs/adr/0043-native-cli-integration.md` §Amendment 2026-10-20.
 | Classification | Count |
 |----------------|-------|
 | AD (already done, ADR text stale) | 28 (25 confirmed, 3 marked "likely") |
-| AN (actionable now) | 23 (19 confirmed, 4 marked "verify") |
-| BD (blocked on named dependency) | 43 |
+| AN (actionable now) | 22 (18 confirmed, 4 marked "verify") |
+| BD (blocked on named dependency) | 44 |
 | ST (stale/obsolete) | 1 |
 | **Total rows** | **95**, counted from the tables by the classification column. 7 rows (`AD (likely)`, `AN (verify)`) are not verified. Refreshed 2026-10-21 after #368: 0043-A/B/C moved from actionable to blocked; the F11 rows are now confirmed |
 
