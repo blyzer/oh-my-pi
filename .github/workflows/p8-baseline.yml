@@ -54,7 +54,13 @@ jobs:
             runner: macos-15
     # Hosted isolation keeps recording off the required test runner.
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # Only a hung run is worth killing. Recording cannot starve the required
+    # jobs any more, so this bound sits far above a real run rather than near
+    # it: a job-level timeout cancels the job red whatever the steps say, and
+    # the last self-hosted recording took 83 minutes WARM, where this builds
+    # cold on slower hosted hardware. NOT MEASURED on hosted; raise it rather
+    # than let a red recorder train people to ignore a non-gating signal.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
