@@ -271,14 +271,32 @@ fn fixture_journals() -> Vec<PathBuf> {
 
 /// Opens every checked-in journal and requires the fold to equal the recorded
 /// snapshot. An empty or short corpus is a failure, never a pass.
+///
+/// The corpus on disk and the registry in `corpus()` must name the same
+/// families. A count check cannot see a family swapped for another, nor a
+/// builder added with no fixture committed beside it.
 #[test]
 fn golden_journals_open_and_fold_to_their_recorded_snapshots() {
 	let journals = fixture_journals();
-	assert!(
-		journals.len() >= MIN_FIXTURES,
-		"fixtures/journal/ holds {} journal(s) but the golden corpus needs at least {MIN_FIXTURES}; \
-		 generate and commit them with: {REGENERATE}",
-		journals.len(),
+	let found = journals
+		.iter()
+		.map(|path| {
+			path
+				.file_stem()
+				.and_then(|stem| stem.to_str())
+				.expect("fixture name")
+				.to_owned()
+		})
+		.collect::<Vec<_>>();
+	let mut registered = corpus()
+		.iter()
+		.map(|(name, _)| (*name).to_owned())
+		.collect::<Vec<_>>();
+	registered.sort();
+	assert_eq!(
+		found, registered,
+		"fixtures/journal/ and corpus() name different families; generate and commit the missing \
+		 pairs with: {REGENERATE}",
 	);
 	for fixture in journals {
 		let name = fixture
