@@ -233,14 +233,22 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 		.output()
 		.unwrap();
 	success(refresh);
-	for _ in 0..100 {
+	// `refresh` must return before the analyzer's sleep finishes. The start
+	// marker can still land later: the detached update is scheduled beside the
+	// rest of the suite, and on a busy self-hosted Mac that exceeded the old
+	// 2s poll (run 41351939491).
+	assert!(!finished.exists(), "refresh must not wait for the analyzer");
+	for _ in 0..1500 {
 		if started.exists() {
 			break;
 		}
 		std::thread::sleep(std::time::Duration::from_millis(20));
 	}
-	assert!(started.exists());
-	assert!(!finished.exists(), "refresh must not wait for the analyzer");
+	assert!(
+		started.exists(),
+		"detached refresh did not start the analyzer\n{}",
+		fs::read_to_string(root.join(".git/omp-kb/refresh.log")).unwrap_or_default()
+	);
 	assert_eq!(query(root, "helper")["stale"], true);
 	assert_eq!(first, fs::read(&index).unwrap(), "refresh must keep serving the last good index");
 	for _ in 0..200 {

@@ -145,11 +145,14 @@ Things that keep this honest:
 `Package macOS`, `PR labels` and the P8 recorder are not required and are not
 gated by `changes`.
 
-If the ruleset requires `Rust workspace and acceptance proofs` while the
-`MACOS_RUNNER` variable points that job at a self-hosted Mac, an outage of that
-runner leaves the check pending and blocks every merge that touches CI paths.
-The escape hatch is the ruleset's admin bypass: merge as an admin, or unset
-`MACOS_RUNNER` so the job falls back to the hosted `macos-15` runner.
+`Rust workspace and acceptance proofs` is the only required job that uses the
+self-hosted Mac registered on this repository (`vars.MACOS_RUNNER`). It keeps
+the persistent compile cache. Every other required job, including
+`Lint workspace (macOS)`, runs on a GitHub-hosted runner so that Mac is not
+occupied by work that does not reuse the cache. A pull request from another
+repository is forced to hosted `macos-15`. If the Mac is offline, this one
+job waits; the escape hatch is the ruleset's admin bypass, or unsetting
+`MACOS_RUNNER`. See `docs/research/ci-macos-runner-fallback.md`.
 
 Measured on the hosted runner (run 37329841934, `macos-15-arm64`): the job builds and
 links the whole workspace in about 52 minutes (against about 15 on a warm self-hosted

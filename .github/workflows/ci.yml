@@ -305,15 +305,16 @@ jobs:
     # format still reports, and fails, its own required check.
     needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
-    # somewhere else. Set it to a JSON label array to send this job to a
-    # self-hosted Apple silicon machine, which is the only way to give it more
-    # than a hosted runner's disk — every test binary statically links the
-    # ~650 MB CPython, so a full link is large:
-    #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
-    # Unset, and the expression falls back, so a repository with no runner
-    # registered keeps the hosted behaviour rather than queueing forever.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    # This is the job that keeps a persistent target dir (incremental Rust +
+    # embedded CPython) on the self-hosted Mac registered on THIS repository
+    # (`vars.MACOS_RUNNER`, e.g. ["self-hosted","macOS","ARM64"]). Every other
+    # CI job stays on GitHub-hosted runners so that Mac is not occupied by
+    # work that does not reuse that cache. Unset MACOS_RUNNER → macos-15.
+    # A pull request whose head is a different repository (not a branch of
+    # this one) is forced to hosted here in the workflow file, so untrusted
+    # code never runs on the Mac. Do not use head.repo.fork for that: this
+    # repository can itself be a GitHub fork and still own the runner.
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"macos-15"' || vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -448,7 +449,9 @@ jobs:
   # a required check (docs/research/ci-test-acceleration.md, Phase 3): moving
   # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
   # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
-  # cold one (371-912 s).
+  # cold one (371-912 s). It does not use the self-hosted target dir, so it
+  # stays on GitHub-hosted macos-15 and leaves the Mac free for `rust`.
+  # Linux clippy still cannot see #[cfg(target_os = "macos")].
   lint_macos:
     name: Lint workspace (macOS)
     env:
@@ -457,7 +460,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
