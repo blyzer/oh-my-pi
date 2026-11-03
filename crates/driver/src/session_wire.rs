@@ -7,10 +7,12 @@
 //! `omp-serve` projects over gRPC. Serve never names a driver type, because
 //! driver already depends on serve.
 //!
-//! R1 is read-only and owner-local. The socket is the authenticator: the `run`
-//! directory is 0700 and the socket 0600, so no other OS user can connect.
-//! Mutation, device authentication and TCP belong to later phases, and the
-//! projection answers their verbs `UNIMPLEMENTED` until then.
+//! R1 is owner-local. The socket is the authenticator: the `run` directory is
+//! 0700 and the socket 0600, so no other OS user can connect. The reads and
+//! `Open` of a new session are served, the latter only for a context holding
+//! [`ControlScope::Control`], which the owner socket grants. Device
+//! authentication and TCP belong to later phases, and the projection answers
+//! the remaining mutating verbs `UNIMPLEMENTED` until then.
 //!
 //! Redaction is a property of the caller, not of the bridge: a context without
 //! [`ControlScope::ObserveHostLocal`] is served through [`ControlVisibility`],
@@ -35,6 +37,7 @@ use omp_serve::{
 	},
 };
 use parking_lot::Mutex;
+use strum::VariantArray as _;
 use tonic::Status;
 
 use crate::{
@@ -122,6 +125,18 @@ pub struct SessionWire {
 	limits:    BridgeLimits,
 	redaction: Arc<ControlVisibility>,
 	heartbeat: Duration,
+	open_host: Option<std::sync::Arc<dyn OpenHost>>,
+}
+
+/// Composes and registers a new session. `SessionWire` does not construct a
+/// kernel.
+#[tonic::async_trait]
+pub trait OpenHost: Send + Sync + 'static {
+	/// Registers the new kernel on the shared registry and returns its id.
+	async fn open_new(
+		&self,
+		project_root: &std::path::Path,
+	) -> Result<SessionId, SessionControlError>;
 }
 
 impl SessionWire {
@@ -136,7 +151,7 @@ impl SessionWire {
 		redaction: Arc<ControlVisibility>,
 		heartbeat: Duration,
 	) -> Self {
-		Self { sessions, bridges: Mutex::default(), limits, redaction, heartbeat }
+		Self { sessions, bridges: Mutex::default(), limits, redaction, heartbeat, open_host: None }
 	}
 
 	/// Builds an authority with every bound read from `ctx`.
@@ -155,6 +170,13 @@ impl SessionWire {
 			Arc::new(ControlVisibility::from_ctx(ctx)?),
 			heartbeat,
 		))
+	}
+
+	/// Installs the host `Open` of a new session calls.
+	#[must_use]
+	pub fn with_open_host(mut self, host: std::sync::Arc<dyn OpenHost>) -> Self {
+		self.open_host = Some(host);
+		self
 	}
 
 	/// The epoch of this session's bridge, or zero when none has started.
@@ -241,19 +263,26 @@ impl SessionWire {
 /// Establishes the caller's identity for a request on the owner socket.
 ///
 /// The socket is the authenticator: its directory is 0700 and the socket 0600,
-/// so only the owning OS user can have reached this point. R1 therefore grants
-/// the whole read-only scope set and inserts it where handlers read identity
-/// from, which no request field can reach.
+/// so only the owning OS user can have reached this point. The owner holds the
+/// scopes ADR 0039 A4 grants this socket, written as an explicit set rather
+/// than every variant: `admin` is "never grantable" and `approve_persist` is
+/// "never granted" by default, so deriving from the enum would hand a later
+/// variant authority nobody decided to give it. Adding a scope here is a
+/// deliberate act, and `the_owner_socket_grants_only_its_decided_scopes` fails
+/// until it is made.
 #[cfg(unix)]
 fn owner_identity(mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
-	request.extensions_mut().insert(ControlContext::new(
-		OWNER_PRINCIPAL,
-		[ControlScope::Observe, ControlScope::ObserveHostLocal]
-			.into_iter()
-			.collect(),
-	));
+	request
+		.extensions_mut()
+		.insert(ControlContext::new(OWNER_PRINCIPAL, OWNER_SCOPES.iter().copied().collect()));
 	Ok(request)
 }
+
+/// The scopes the owner socket grants, smallest set that serves every verb this
+/// revision answers there. It is deliberately not `ControlScope::VARIANTS`.
+#[cfg(unix)]
+const OWNER_SCOPES: &[ControlScope] =
+	&[ControlScope::Observe, ControlScope::ObserveHostLocal, ControlScope::Control];
 
 /// Principal every caller on the owner socket speaks for.
 #[cfg(unix)]
@@ -354,9 +383,14 @@ fn resume_cursor(session: &SessionId, request: &pb::AttachRequest) -> Option<Cur
 }
 
 /// The scopes a welcome frame reports back to the caller.
+///
+/// A grant is a ceiling the client is entitled to read back (ADR 0039 A4), so
+/// this walks every `ControlScope` rather than a hand-kept list: a scope added
+/// for a new verb is advertised by construction instead of being dropped here.
 fn granted_scopes(context: &ControlContext) -> Vec<String> {
-	[ControlScope::Observe, ControlScope::ObserveHostLocal]
-		.into_iter()
+	ControlScope::VARIANTS
+		.iter()
+		.copied()
 		.filter(|scope| context.scopes().contains(*scope))
 		.map(|scope| <&'static str>::from(scope).to_owned())
 		.collect()
@@ -562,6 +596,47 @@ impl SessionControlAuthority for SessionWire {
 			opening,
 		))
 	}
+
+	async fn open_session(
+		&self,
+		context: ControlContext,
+		request: pb::OpenSessionRequest,
+	) -> Result<pb::SessionRef, SessionControlError> {
+		// The authority is public, so a projection other than
+		// `SessionControlRpc` can reach this directly. Minting a session is a
+		// mutation (ADR 0039 A4 grants `Open` to `control`), so the grant is
+		// checked here too rather than trusting every future caller to have
+		// run its own gate.
+		if !context.scopes().contains(ControlScope::Control) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Control });
+		}
+		let opens_new = matches!(request.kind, Some(pb::open_session_request::Kind::NewSession(_)));
+		if !opens_new {
+			let id = SessionId::from_ref(request.session_id.as_str());
+			return if self.sessions.lookup(id).is_none() {
+				Err(SessionControlError::UnknownSession {
+					session_id: Str::new(request.session_id.as_str()),
+				})
+			} else {
+				Err(SessionControlError::HostUnavailable)
+			};
+		}
+		let host = self
+			.open_host
+			.as_ref()
+			.ok_or(SessionControlError::HostUnavailable)?;
+		let id = host
+			.open_new(std::path::Path::new(request.project_root.as_str()))
+			.await?;
+		let handle =
+			self
+				.sessions
+				.lookup(&id)
+				.ok_or_else(|| SessionControlError::UnknownSession {
+					session_id: Str::new(id.as_str()),
+				})?;
+		Ok(session_ref(&handle, self.epoch_of(&handle.id)))
+	}
 }
 
 #[cfg(test)]
@@ -696,10 +771,18 @@ mod tests {
 		ControlContext::new("owner", ScopeSet::from_iter([ControlScope::Observe]))
 	}
 
+	/// The grant a caller on the owner socket actually arrives with. It mirrors
+	/// `OWNER_SCOPES`, which `the_owner_socket_grants_only_its_decided_scopes`
+	/// pins against the real interceptor: a helper that withheld `Control`
+	/// would make every verb below look reachable without it.
 	fn owner() -> ControlContext {
 		ControlContext::new(
 			"owner",
-			ScopeSet::from_iter([ControlScope::Observe, ControlScope::ObserveHostLocal]),
+			ScopeSet::from_iter([
+				ControlScope::Observe,
+				ControlScope::ObserveHostLocal,
+				ControlScope::Control,
+			]),
 		)
 	}
 
@@ -835,6 +918,56 @@ mod tests {
 				.any(|frame| matches!(frame, pb::attach_frame::Frame::SnapshotChunk(_))),
 			"a served cursor resends no snapshot, got {frames:?}"
 		);
+	}
+
+	/// A grant is a ceiling the client is entitled to read back (ADR 0039 A4).
+	/// The welcome used to list the two read scopes and nothing else, so a
+	/// caller holding `control` was told it held less than it did. A fresh
+	/// attach and a resumed one build their welcome apart, so both must report
+	/// the grant exactly.
+	#[tokio::test]
+	async fn the_welcome_frame_reports_control_exactly_when_it_is_held() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (mut kernel, _) = registered(&sessions, "live", "/workspace/live");
+		let wire = wire(Arc::clone(&sessions));
+
+		let welcome_for = async |held: ScopeSet, resume: (u64, u64)| {
+			let mut stream = wire
+				.attach(ControlContext::new("device", held), pb::AttachRequest {
+					session_id: "live".to_owned(),
+					resume_epoch: resume.0,
+					resume_seq: resume.1,
+					..pb::AttachRequest::default()
+				})
+				.await
+				.expect("attaching succeeds");
+			let welcome = ready(&mut stream)
+				.await
+				.into_iter()
+				.find_map(|frame| match frame {
+					pb::attach_frame::Frame::Welcome(welcome) => Some(welcome),
+					_ => None,
+				})
+				.expect("an attachment opens with a welcome");
+			let mut names = welcome.granted_scopes.clone();
+			names.sort();
+			(welcome, names)
+		};
+
+		let controlling = ScopeSet::from_iter([ControlScope::Observe, ControlScope::Control]);
+		let observing = ScopeSet::from_iter([ControlScope::Observe]);
+
+		let (opened, controller_names) = welcome_for(controlling, (0, 0)).await;
+		assert_eq!(controller_names, ["control", "observe"], "a fresh attach lists control");
+		let (_, observer_names) = welcome_for(observing, (0, 0)).await;
+		assert_eq!(observer_names, ["observe"], "a fresh attach does not list it");
+
+		kernel.publish("after the detach");
+		let cursor = (opened.epoch, opened.head_seq);
+		let (_, controller_names) = welcome_for(controlling, cursor).await;
+		assert_eq!(controller_names, ["control", "observe"], "a resumed attach lists control");
+		let (_, observer_names) = welcome_for(observing, cursor).await;
+		assert_eq!(observer_names, ["observe"], "a resumed attach does not list it");
 	}
 
 	/// A bridge that lost its subscription is dead; caching it would kill
@@ -1123,6 +1256,127 @@ mod tests {
 		seam.abort();
 	}
 
+	struct RegisteringHost {
+		sessions: Arc<SessionRegistry>,
+		register: bool,
+	}
+
+	#[tonic::async_trait]
+	impl OpenHost for RegisteringHost {
+		async fn open_new(&self, _project_root: &Path) -> Result<SessionId, SessionControlError> {
+			if self.register {
+				registered(&self.sessions, "01JNEW", "/work/new");
+				Ok(SessionId::new("01JNEW"))
+			} else {
+				Ok(SessionId::new("not-registered"))
+			}
+		}
+	}
+
+	fn wire_with(sessions: Arc<SessionRegistry>, host: Arc<RegisteringHost>) -> SessionWire {
+		SessionWire::new(
+			sessions,
+			BridgeLimits::default(),
+			Arc::new(
+				ControlVisibility::from_entries(["*/provider"]).expect("the seeded table parses"),
+			),
+			Duration::from_secs(60),
+		)
+		.with_open_host(host)
+	}
+
+	#[tokio::test]
+	async fn open_new_returns_only_a_registered_session() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let wire = wire_with(
+			Arc::clone(&sessions),
+			Arc::new(RegisteringHost { sessions: Arc::clone(&sessions), register: true }),
+		);
+		let opened = wire
+			.open_session(owner(), pb::OpenSessionRequest {
+				project_root: "/work/new".to_owned(),
+				kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+				..pb::OpenSessionRequest::default()
+			})
+			.await
+			.expect("a registered kernel is a session");
+		assert_eq!(opened.session_id, "01JNEW");
+		assert!(sessions.lookup(&SessionId::new("01JNEW")).is_some());
+
+		let missing = wire_with(
+			Arc::clone(&sessions),
+			Arc::new(RegisteringHost { sessions: Arc::clone(&sessions), register: false }),
+		);
+		let refusal = missing
+			.open_session(owner(), pb::OpenSessionRequest {
+				project_root: "/work/new".to_owned(),
+				kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+				..pb::OpenSessionRequest::default()
+			})
+			.await
+			.expect_err("an unregistered id is not a session");
+		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+	}
+
+	/// The RPC projection gates `Open` on `control`, but the authority is
+	/// public and a second projection would reach it directly. A caller holding
+	/// only the read scopes must be refused here, not merely at the seam that
+	/// happens to front it today, and the host must never be asked to mint
+	/// anything for it.
+	#[tokio::test]
+	async fn opening_without_the_control_scope_is_refused_at_the_authority() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let host = Arc::new(RegisteringHost { sessions: Arc::clone(&sessions), register: true });
+		let wire = wire_with(Arc::clone(&sessions), Arc::clone(&host));
+		let observing = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::ObserveHostLocal]),
+		);
+
+		let refusal = wire
+			.open_session(observing, pb::OpenSessionRequest {
+				project_root: "/work/new".to_owned(),
+				kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession {})),
+				..pb::OpenSessionRequest::default()
+			})
+			.await
+			.expect_err("an observe grant does not open a session");
+
+		assert!(matches!(refusal, SessionControlError::MissingScope {
+			scope: ControlScope::Control,
+		}));
+		assert!(
+			sessions.lookup(&SessionId::new("01JNEW")).is_none(),
+			"a refused open never reaches the host"
+		);
+	}
+
+	/// Resume and fork are not served by this host, and an id it does not hold
+	/// is no session, so both answer `UnknownSession` rather than invent one.
+	#[tokio::test]
+	async fn resuming_or_forking_a_session_that_is_not_live_is_unknown() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let wire = wire(Arc::clone(&sessions));
+
+		for kind in [
+			pb::open_session_request::Kind::Resume(pb::ResumeSession {}),
+			pb::open_session_request::Kind::Fork(pb::ForkSession::default()),
+		] {
+			let refusal = wire
+				.open_session(owner(), pb::OpenSessionRequest {
+					session_id: "absent".to_owned(),
+					kind: Some(kind),
+					..pb::OpenSessionRequest::default()
+				})
+				.await
+				.expect_err("resume and fork need a session this host holds");
+			assert!(
+				matches!(refusal, SessionControlError::UnknownSession { .. }),
+				"an id that is not live is unknown, got {refusal:?}"
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn attaching_to_an_unknown_session_is_not_found() {
 		let sessions = Arc::new(SessionRegistry::new());
@@ -1137,6 +1391,39 @@ mod tests {
 			.err()
 			.expect("an unknown session cannot be attached");
 		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+	}
+
+	/// ADR 0039 A4 decides what the owner socket grants. `admin` is "never
+	/// grantable" and `approve_persist` is "never granted" by default, so the
+	/// grant is a list, not `ControlScope::VARIANTS`: deriving it would hand a
+	/// later variant authority nobody chose. Every scope is a row below, so a
+	/// variant added to the enum fails here until someone decides whether the
+	/// owner holds it, and a swapped scope fails where a count would still pass.
+	#[cfg(unix)]
+	#[test]
+	fn the_owner_socket_grants_only_its_decided_scopes() {
+		use std::collections::BTreeMap;
+
+		let request = owner_identity(tonic::Request::new(()))
+			.expect("a caller that reached the owner socket is the owner");
+		let context = request
+			.extensions()
+			.get::<ControlContext>()
+			.expect("the interceptor inserts the caller's identity");
+
+		let held = ControlScope::VARIANTS
+			.iter()
+			.map(|&scope| (scope, context.scopes().contains(scope)))
+			.collect::<BTreeMap<_, _>>();
+		assert_eq!(
+			held,
+			BTreeMap::from([
+				(ControlScope::Observe, true),
+				(ControlScope::ObserveHostLocal, true),
+				(ControlScope::Control, true),
+			]),
+			"the owner socket holds exactly the scopes ADR 0039 A4 decided",
+		);
 	}
 
 	#[tokio::test]
