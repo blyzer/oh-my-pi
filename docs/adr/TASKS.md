@@ -62,8 +62,9 @@ error. No council verdict is recorded.
   The code records the same choice: `journal/src/data.rs:574-579` is a hand-written lenient
   `Deserialize for ToolResult` whose `Wire` struct carries no `deny_unknown_fields`, with the
   exactly-one-of `outcome`/`fault` check keeping it fail-closed. The revision-bump alternative is
-  unreachable: `Kind::is_known` at `journal/src/kind.rs:131-132` accepts only `rev == 1`, so a
-  `tool.result@2` would be refused as an unknown kind. The local Buf proof passes:
+  not viable under the current revision gate: `Kind::is_known` at `journal/src/kind.rs:131-132`
+  accepts only `rev == 1`, so a `tool.result@2` is refused as an unknown kind by every reader
+  today. Choosing it later would require implementing and verifying revision-2 support first.
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
 
 ## Snapshot JSON byte preservation
