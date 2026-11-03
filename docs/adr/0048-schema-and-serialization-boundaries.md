@@ -171,7 +171,7 @@ These are implementation items, not CI, and none changes a format.
 | B2 | Replace the whole-journal `UnknownKind` failure (and the silent index skip) with a typed "written by a newer revision" error that is still fail-closed; validate or delete the unread `Genesis.version` | `journal/src/kind.rs`; `driver/src/sessions.rs:336-339`; `session/src/session.rs:229-230` |
 | B3 | Cap or stream `Journal::open`/`scan`; fail unterminated frames at `DATA_HARD_CAP` | `journal/src/lib.rs`; `journal/src/sse.rs:15` |
 | B4 | Call `bounds::validate_host_frame`/`validate_worker_frame` before prost decode on ext-host/worker paths, or delete them | `proto/src/bounds.rs:172-182`; `envd/src/worker.rs:77` |
-| B5 | Check in a golden `.oms` fixture corpus with a replay test | none exists today |
+| B5 | Check in a golden `.oms` fixture corpus with a replay test | `session/tests/golden_journals.rs:250-258`; `fixtures/journal/*.oms` |
 | B6 | Version the postcard conversation DB (`user_version` or MAGIC+`SCHEMA_VERSION`) | `ai/src/session/store.rs:329-345`; `catalog/src/snapshot.rs:30-33` |
 | B7 | Set tonic `max_decoding/encoding_message_size` explicitly | `app/src/daemon.rs:346-358` |
 | B8 | Delete dead `cache::backend` | `cache/src/backend.rs:195` |
@@ -218,12 +218,12 @@ Benchmarks in the research document stay plans (UNVERIFIED) and do not gate CI.
 
 ## Status in omp
 
-**Status: Partially implemented.** The owner accepted the format-preservation decision and the Buf check plus most hardening items are implemented. B5 remains implementation work; B9 Variant 1 is selected but its daemon-context authority verification remains open.
+**Status: Partially implemented.** The owner accepted the format-preservation decision, and the Buf check plus every hardening item except B9 is implemented. B9 Variant 1 is selected but its daemon-context authority verification remains open.
 
-- **Done:** Buf breaking configuration and CI, B1, B2, B3, B4, B6, B7, and B8.
-- **Partial:** B5 is authorized to expand the golden corpus by durable behavior family, including compaction, tool.update and patch, without redundant field permutations.
+- **Done:** Buf breaking configuration and CI, B1, B2, B3, B4, B5, B6, B7, and B8.
+- **Done:** B5 landed in `ee0371931f`. The corpus covers one durable behavior family per fixture, `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool-update` and `patch`, with no redundant field permutations as the owner directed. `corpus()` and `MIN_FIXTURES` in `session/tests/golden_journals.rs` pin the count, so a family cannot be dropped silently. `golden_journals_open_and_fold_to_their_recorded_snapshots` replays every checked-in `.oms` against its recorded snapshot: `just test-pkg omp-session`, 63 passed.
 - **Open:** B9 fixes the Python schema revision drift, but
   `docs/architecture/processes.md` still contains the stale
   `WorkerProcess::spawn` description and issue filing for WorkerHello and
   gateway Hello is not established.
-- **Open verification:** B5 fixture expansion and B9 daemon-context authority verification.
+- **Open verification:** B9 daemon-context authority verification.
