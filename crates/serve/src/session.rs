@@ -5,15 +5,16 @@
 //! frames carry canonical `omp_dom` bytes the authority produced; serve only
 //! moves them.
 //!
-//! R1 (ADR 0039) serves the two read verbs. The four mutating verbs are
-//! answered with `unimplemented` rather than half-wired: on a versioned wire
-//! that is the correct response for a verb this revision does not grant.
+//! R1 (ADR 0039) serves the two read verbs and `Open` of a new session, which
+//! needs the `control` scope. Resume, fork, and the remaining mutating verbs
+//! are answered with `unimplemented` rather than half-wired: on a versioned
+//! wire that is the correct response for a verb this revision does not grant.
 
 use std::sync::Arc;
 
 use omp_core::Str;
 use omp_proto::session::v1 as pb;
-use strum::{Display, EnumString, IntoStaticStr};
+use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use tonic::{Request, Response, Status};
 
 use crate::inference::RpcStream;
@@ -22,12 +23,24 @@ use crate::inference::RpcStream;
 ///
 /// ADR 0039 section A4 defines the full ladder (`observe`,
 /// `observe_host_local`, `prompt`, `interrupt`, `approve`, `approve_persist`,
-/// `control`, `worker`, `admin`). R1 grants no mutation verb, so only the two
-/// read scopes are declared here; the remaining variants land with the verbs
+/// `control`, `worker`, `admin`). R1 grants no mutation verb beyond `Open`,
+/// so only the two read scopes and `control` are declared here; the remaining
+/// variants land with the verbs
 /// they authorize. Parsing rejects every string outside this set, so a grant
 /// naming a future scope is refused rather than silently ignored.
 #[derive(
-	Clone, Copy, Debug, Display, EnumString, Eq, Hash, IntoStaticStr, Ord, PartialEq, PartialOrd,
+	Clone,
+	Copy,
+	Debug,
+	Display,
+	EnumString,
+	Eq,
+	Hash,
+	IntoStaticStr,
+	Ord,
+	PartialEq,
+	PartialOrd,
+	VariantArray,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum ControlScope {
@@ -36,6 +49,8 @@ pub enum ControlScope {
 	/// Unredacted snapshots and events: cwd, env facts, advisor subtrees, and
 	/// raw provider metadata.
 	ObserveHostLocal,
+	/// `Open` of a new session, and the mutation verbs that land with it.
+	Control,
 }
 
 impl ControlScope {
@@ -177,7 +192,7 @@ impl From<SessionControlError> for Status {
 
 /// Authoritative session reads, installed by the composition layer.
 ///
-/// Both verbs receive the authenticated [`ControlContext`] alongside the wire
+/// Every verb receives the authenticated [`ControlContext`] alongside the wire
 /// request; the implementation applies the caller's session set and redacts
 /// host-local props unless [`ControlScope::ObserveHostLocal`] is held.
 #[tonic::async_trait]
@@ -196,6 +211,14 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		context: ControlContext,
 		request: pb::AttachRequest,
 	) -> Result<RpcStream<pb::AttachFrame>, SessionControlError>;
+
+	/// Opens a new session. Resume and fork of an id that is not live is
+	/// [`SessionControlError::UnknownSession`]. This does not submit a prompt.
+	async fn open_session(
+		&self,
+		context: ControlContext,
+		request: pb::OpenSessionRequest,
+	) -> Result<pb::SessionRef, SessionControlError>;
 }
 
 /// gRPC projection of [`SessionControlAuthority`].
@@ -214,8 +237,8 @@ impl SessionControlRpc {
 /// Rejection for a verb this revision does not serve.
 fn read_only(verb: &str) -> Status {
 	Status::unimplemented(format!(
-		"session control R1 is read-only: {verb} is not served; only ListSessions and Attach are \
-		 (ADR 0039)"
+		"session control R1 does not serve {verb}: ListSessions, Attach and Open of a new session \
+		 are (ADR 0039)"
 	))
 }
 
@@ -250,6 +273,21 @@ fn observer<T>(request: &Request<T>) -> Result<ControlContext, Status> {
 		Ok(context)
 	} else {
 		Err(SessionControlError::MissingScope { scope: ControlScope::Observe }.into())
+	}
+}
+
+/// Extracts the identity and checks the control scope.
+///
+/// `Open` mints a session, so an observe grant is not enough: a read-only
+/// principal that could create one would escape the ceiling its grant names
+/// (ADR 0039 A4). The observe check still runs first, so a principal with no
+/// read scope is refused for the scope it is most obviously missing.
+fn controller<T>(request: &Request<T>) -> Result<ControlContext, Status> {
+	let context = observer(request)?;
+	if context.scopes().contains(ControlScope::Control) {
+		Ok(context)
+	} else {
+		Err(SessionControlError::MissingScope { scope: ControlScope::Control }.into())
 	}
 }
 
@@ -306,13 +344,19 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 		&self,
 		request: Request<pb::OpenSessionRequest>,
 	) -> Result<Response<pb::SessionRef>, Status> {
-		let _context = observer(&request)?;
 		let inner = request.get_ref();
 		let opens_new = matches!(inner.kind, Some(pb::open_session_request::Kind::NewSession(_)));
 		if !opens_new {
+			let _context = observer(&request)?;
 			require_session(inner.session_id.as_str())?;
+			return Err(read_only("Open"));
 		}
-		Err(read_only("Open"))
+		let context = controller(&request)?;
+		let opened = self
+			.authority
+			.open_session(context, request.into_inner())
+			.await?;
+		Ok(Response::new(opened))
 	}
 }
 
@@ -399,6 +443,17 @@ mod tests {
 				})),
 			};
 			Ok(Box::pin(futures::stream::once(async move { Ok(welcome) })))
+		}
+
+		async fn open_session(
+			&self,
+			context: ControlContext,
+			request: pb::OpenSessionRequest,
+		) -> Result<pb::SessionRef, SessionControlError> {
+			self.record(context)?;
+			Err(SessionControlError::UnknownSession {
+				session_id: omp_core::Str::new(request.session_id.as_str()),
+			})
 		}
 	}
 
@@ -523,6 +578,63 @@ mod tests {
 		assert_eq!(rpc.list_sessions(request).await.unwrap_err().code(), Code::PermissionDenied,);
 	}
 
+	/// `Open` mints a session, so the observe grant that serves every read verb
+	/// must not reach it (ADR 0039 A4). A control grant does, which is how this
+	/// separates the scope check from the verb being refused outright.
+	#[tokio::test]
+	async fn opening_a_new_session_needs_the_control_scope() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let new_session = pb::OpenSessionRequest {
+			kind: Some(pb::open_session_request::Kind::NewSession(pb::NewSession::default())),
+			..pb::OpenSessionRequest::default()
+		};
+
+		let observing = authenticated(
+			new_session.clone(),
+			ControlContext::new("device", ScopeSet::from_iter([ControlScope::Observe])),
+		);
+		assert_eq!(rpc.open(observing).await.unwrap_err().code(), Code::PermissionDenied);
+
+		let controlling = authenticated(
+			new_session,
+			ControlContext::new(
+				"device",
+				ScopeSet::from_iter([ControlScope::Observe, ControlScope::Control]),
+			),
+		);
+		// The fake answers `UnknownSession`, so reaching it at all proves the
+		// gate passed rather than the verb being refused.
+		assert_eq!(rpc.open(controlling).await.unwrap_err().code(), Code::NotFound);
+	}
+
+	/// Only a new session is served. Resume and fork answer `UNIMPLEMENTED`
+	/// even to a caller holding `control`, and never reach the authority.
+	#[tokio::test]
+	async fn resume_and_fork_are_refused_even_for_a_caller_holding_control() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let controlling = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Control]),
+		);
+
+		for kind in [
+			pb::open_session_request::Kind::Resume(pb::ResumeSession::default()),
+			pb::open_session_request::Kind::Fork(pb::ForkSession::default()),
+		] {
+			let request = authenticated(
+				pb::OpenSessionRequest {
+					session_id: "01JSESSION".to_owned(),
+					kind: Some(kind),
+					..pb::OpenSessionRequest::default()
+				},
+				controlling.clone(),
+			);
+			assert_eq!(rpc.open(request).await.unwrap_err().code(), Code::Unimplemented);
+		}
+		assert!(authority.seen.lock().is_none(), "a refused verb never reaches the authority");
+	}
+
 	#[tokio::test]
 	async fn authority_failures_map_to_the_documented_codes() {
 		let session_id = omp_core::Str::from("01JSESSION");
@@ -556,11 +668,13 @@ mod tests {
 	fn scopes_round_trip_and_reject_names_this_revision_does_not_grant() {
 		assert_eq!(ControlScope::ObserveHostLocal.to_string(), "observe_host_local");
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
-		assert!(ControlScope::from_str("control").is_err());
+		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
+		assert!(ControlScope::from_str("prompt").is_err());
 
 		let granted = ScopeSet::from_iter([ControlScope::Observe]);
 		assert!(granted.contains(ControlScope::Observe));
 		assert!(!granted.contains(ControlScope::ObserveHostLocal));
+		assert!(!granted.contains(ControlScope::Control));
 		assert!(ScopeSet::EMPTY.is_empty());
 	}
 	#[tokio::test]

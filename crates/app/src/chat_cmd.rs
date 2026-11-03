@@ -160,6 +160,7 @@ pub(crate) fn prompt_overrides(
 /// Process facts a launch resolves before lowering its arguments: the data
 /// directory, the operator's home, and the catalog authority. Tests supply
 /// scratch directories and the embedded catalog.
+#[derive(Clone)]
 pub(crate) struct LaunchEnv {
 	pub data_dir:        PathBuf,
 	pub home:            PathBuf,
@@ -290,6 +291,23 @@ impl Launch {
 		args: ChatArgs,
 		ctx: Arc<omp_con::Ctx>,
 		env: LaunchEnv,
+	) -> miette::Result<Self> {
+		Self::prepare_with_presentation(args, ctx, env, true).await
+	}
+
+	pub(crate) async fn prepare_headless(
+		args: ChatArgs,
+		ctx: Arc<omp_con::Ctx>,
+		env: LaunchEnv,
+	) -> miette::Result<Self> {
+		Self::prepare_with_presentation(args, ctx, env, false).await
+	}
+
+	async fn prepare_with_presentation(
+		args: ChatArgs,
+		ctx: Arc<omp_con::Ctx>,
+		env: LaunchEnv,
+		presentation: bool,
 	) -> miette::Result<Self> {
 		let approval = args.effective_approval();
 		let ChatArgs {
@@ -461,8 +479,11 @@ impl Launch {
 		for warning in &active_skills.warnings {
 			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
-		let (theme, light_theme, theme_catalog) =
-			resolve_theme(&ctx, &theme, &config_root, &project)?;
+		let (theme, light_theme, theme_catalog) = if presentation {
+			resolve_theme(&ctx, &theme, &config_root, &project)?
+		} else {
+			(None, None, Arc::new(omp_tui::ThemeCatalog::default()))
+		};
 
 		let resuming = continue_session || resume.is_some() || fork.is_some();
 		let settings = ModelSettings::from_con(&ctx).resolve_path_scopes(&project, &home);
@@ -1119,6 +1140,11 @@ pub(crate) async fn run(
 	if presentation == ChatPresentation::Terminal {
 		env.workspace_trust = Some(trust::ask(&project, &env.data_dir, &env.home).await?);
 	}
+	#[cfg(unix)]
+	let open_args = args.clone();
+	#[cfg(unix)]
+	let open_env = env.clone();
+
 	let mut launch = Launch::prepare(args, ctx, env).await?;
 	let resuming = launch.resuming || imported;
 	// Prompt templates are `/name` console commands; a template named like a
@@ -1295,49 +1321,15 @@ pub(crate) async fn run(
 		Err(error) => tracing::warn!(%error, "collaboration host registry directory is unresolved"),
 	}
 	let _collab_owner = omp_driver::collab::session::spawn_session_owner(collab_authority);
-	let (services, mutations): (
-		Arc<dyn omp_chat::overlays::Services>,
-		Arc<dyn omp_chat::overlays::services::Mutations>,
-	) = {
-		let composed = kernel.inference();
-		let environment = composed.environment();
-		let state_dir = omp_env::project_state::directory(data_dir, project).into_diagnostic()?;
-		let services =
-			Arc::new(crate::chat_services::AppServices::new(crate::chat_services::ServiceState {
-				data_dir: data_dir.clone(),
-				project: project.clone(),
-				approval_override: launch.options.approval_mode,
-				plugin_dirs: launch.options.extensions.native_roots.clone(),
-				workspace_trust: composed.workspace_trust().trust(),
-				sessions_dir: sessions_dir
-					.clone()
-					.unwrap_or_else(|| state_dir.join("sessions")),
-				state_dir,
-				journal: session.journal_path().to_path_buf(),
-				live_journal: Arc::clone(&live_journal),
-				model: model.clone(),
-				catalog: composed.live_catalog(),
-				discovery,
-				registry: Arc::clone(kernel.tool_registry()),
-				con: Arc::clone(ctx),
-				sessions: Arc::clone(live_sessions),
-				collab: collab.clone(),
-				env: composed.environment_client().clone(),
-				mcp: environment.mcp_inspector(),
-				reload: environment.extension_reload_handle(),
-				memory: environment.memory_runtime(),
-				stack: composed
-					.production_stack()
-					.map(crate::chat_services::StackHandles::from_stack),
-				trace,
-				theme_catalog: Arc::clone(&launch.theme_catalog),
-				runtime: tokio::runtime::Handle::current(),
-			}));
-		(
-			Arc::clone(&services) as Arc<dyn omp_chat::overlays::Services>,
-			services as Arc<dyn omp_chat::overlays::services::Mutations>,
-		)
-	};
+	let (services, mutations) = crate::session_runner::services(
+		&launch,
+		&kernel,
+		&session,
+		&collab,
+		&live_journal,
+		discovery,
+		trace,
+	)?;
 	// The vocalizer synthesizes through the Environment's media bridge; the
 	// mode itself (`cl_speech_mode`) is read by the host per event.
 	let speech: Option<Arc<dyn omp_chat::notices::voice::SpeechSynth>> =
@@ -1352,6 +1344,13 @@ pub(crate) async fn run(
 	#[cfg(unix)]
 	match omp_driver::SessionWire::from_ctx(Arc::clone(live_sessions), ctx) {
 		Ok(wire) => {
+			let host = Arc::new(crate::session_runner::AppOpenHost::new(
+				open_env,
+				open_args,
+				Arc::clone(live_sessions),
+			));
+			let wire = wire.with_open_host(host);
+
 			let socket_dir = data_dir.clone();
 			tokio::spawn(async move {
 				if let Err(error) = Arc::new(wire).serve(&socket_dir).await {
@@ -1547,6 +1546,274 @@ mod tests {
 			catalog:         embedded(),
 			workspace_trust: None,
 		}
+	}
+
+	#[cfg(any(unix, windows))]
+	fn isolate_test_home(root: &Path) {
+		let home = root.join("home");
+		fs::create_dir_all(&home).unwrap();
+		// SAFETY: nextest runs each test in its own process.
+		unsafe {
+			std::env::set_var("HOME", &home);
+			std::env::set_var("OMP_CONFIG_DIR", root.join("config"));
+			std::env::set_var("OMP_DATA_DIR", root.join("data"));
+			std::env::set_var("OMP_STATE_DIR", root.join("state"));
+			std::env::set_var("OMP_CACHE_DIR", root.join("cache"));
+			std::env::remove_var("OMP_PROFILE");
+			std::env::remove_var("OMP_CONFIG_FILES");
+		}
+	}
+
+	#[cfg(any(unix, windows))]
+	async fn fake_gateway(
+		root: &Path,
+		hold_open: bool,
+	) -> (
+		crate::endpoint::LocalEndpoint,
+		Str,
+		flume::Receiver<omp_ai::event::WorkflowResponse>,
+		flume::Receiver<()>,
+		tokio::task::JoinHandle<()>,
+	) {
+		use omp_ai::{
+			BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, Usage,
+			layer::{LayerCall, stack::RouteProviderService},
+			provider::fake::{FakeProvider, FakeScript},
+			receipt::ReasonId,
+			registry::RouteUnavailable,
+			session::ConversationSessionPlanner,
+		};
+		use omp_catalog::{
+			ManagementCapabilities, OperationBits, OperationKind, snapshot::SnapshotProvenance,
+		};
+		use omp_proto::inference::v1::inference_server::InferenceServer;
+		use tower::ServiceExt as _;
+
+		let mut compiled = Catalog::embedded().compiled().clone();
+		for provider in &mut compiled.providers {
+			provider.management = ManagementCapabilities {
+				operations:        OperationBits::empty(),
+				multiple_accounts: false,
+				refresh:           false,
+				principal_quota:   false,
+			};
+		}
+		let snapshot =
+			Catalog::encode(compiled, SnapshotProvenance { source_digest: [0; 32] }).unwrap();
+		let catalog = Arc::new(Catalog::decode(&snapshot.postcard).unwrap());
+		let model = catalog
+			.models()
+			.iter()
+			.find(|model| {
+				model
+					.capabilities
+					.operations
+					.contains_kind(OperationKind::Chat)
+			})
+			.unwrap();
+		let model_key = Str::new(model.key.as_str());
+		let route_id = model.routes.first().unwrap().clone();
+		let route = catalog.route(&route_id).unwrap();
+		let fake = FakeProvider::new(route.provider.clone(), route_id.clone());
+		if hold_open {
+			let (pending, _cancellation) = FakeScript::cancellable(OperationKind::Chat);
+			fake.push(pending);
+		} else {
+			fake.push(FakeScript::chat(vec![
+				Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
+				Ok(ChatEvent::TextDelta { index: 0, text: Str::new_static("offline fixture reply") }),
+				Ok(ChatEvent::Completed(Completion {
+					reason:  FinishReason::Stop,
+					blocks:  1,
+					usage:   Usage::default(),
+					receipt: ExecutionReceipt::default().into(),
+				})),
+			]));
+		}
+		let (started, request_started) = flume::bounded(1);
+		let service =
+			RouteProviderService::new(tower::service_fn(move |call: LayerCall<omp_ai::Call>| {
+				if hold_open {
+					let _ = started.send(());
+				}
+				fake.clone().oneshot(call.payload)
+			}));
+		let mut registry = Registry::builder(Arc::clone(&catalog));
+		for route in catalog.routes() {
+			registry = if route.id == route_id {
+				registry.register_route(route.id.clone(), service.clone())
+			} else {
+				registry.register_unavailable(RouteUnavailable::new(
+					route.id.clone(),
+					ReasonId(Str::new_static("open-test-route-only")),
+					None,
+				))
+			}
+			.unwrap();
+		}
+		let planner =
+			ConversationSessionPlanner::open(root.join("gateway-sessions.db"), catalog).unwrap();
+		let (responses, incoming_responses) = flume::bounded(32);
+		let rpc = omp_serve::inference::InferenceRpc::new_for_test(
+			registry.build().unwrap(),
+			planner,
+			Arc::new(omp_tool::Registry::new()),
+			responses,
+		);
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let endpoint = crate::endpoint::LocalEndpoint::tcp(listener.local_addr().unwrap());
+		let serving = tokio::spawn(async move {
+			tonic::transport::Server::builder()
+				.add_service(InferenceServer::new(rpc))
+				.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+				.await
+				.unwrap();
+		});
+		(endpoint, model_key, incoming_responses, request_started, serving)
+	}
+
+	#[cfg(any(unix, windows))]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn open_new_registers_a_live_session() {
+		use omp_driver::session_wire::OpenHost;
+
+		let dir = tempfile::tempdir().unwrap();
+		isolate_test_home(dir.path());
+		let (endpoint, model, _responses, _request_started, gateway) =
+			fake_gateway(dir.path(), false).await;
+		let mut args = ChatArgs::default_interactive();
+		args.gateway = Some(endpoint);
+		args.model = Some(model);
+		args.no_tools = true;
+		let sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
+		let host =
+			crate::session_runner::AppOpenHost::new(test_env(dir.path()), args, Arc::clone(&sessions));
+		let id = host
+			.open_new(dir.path())
+			.await
+			.expect("a new session opens");
+		let handle = sessions
+			.lookup(&id)
+			.expect("the returned session is registered");
+		assert_eq!(handle.project_root.as_ref(), dir.path().canonicalize().unwrap());
+
+		let (reply, subscription) = flume::bounded(1);
+		handle
+			.idle_subscribe
+			.expect("idle controller accepts subscribers")
+			.send(reply)
+			.unwrap();
+		let (_, events) = tokio::time::timeout(Duration::from_secs(15), subscription.recv_async())
+			.await
+			.expect("the idle controller replies")
+			.expect("the subscription remains live");
+		host
+			.commands(&id)
+			.expect("the session command sender is retained")
+			.send(omp_chat::HostCommand::Submit(Str::new_static("open-host-test-prompt")))
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(15), async {
+			let mut saw_prompt = false;
+			let mut saw_reply = false;
+			let mut saw_stop = false;
+			while !saw_prompt || !saw_reply || !saw_stop {
+				let omp_dom::Event::Patch(patch) =
+					events.recv_async().await.expect("the session stays live")
+				else {
+					continue;
+				};
+				for op in patch.ops {
+					match op {
+						omp_dom::Op::Ins { node, .. }
+							if node.tag == omp_dom::KnownTag::User.into()
+								&& node
+									.content
+									.as_ref()
+									.is_some_and(|text| text.as_str() == "open-host-test-prompt") =>
+						{
+							saw_prompt = true;
+						},
+						omp_dom::Op::Set { prop, value: omp_dom::Value::Str(value), .. } => {
+							saw_reply |= prop == omp_dom::PropId::Text.into()
+								&& value.as_str() == "offline fixture reply";
+							saw_stop |=
+								prop == omp_dom::PropId::StopReason.into() && value.as_str() == "stop";
+						},
+						_ => {},
+					}
+				}
+			}
+		})
+		.await
+		.expect("the controller journals the prompt and the fixture reply");
+		gateway.abort();
+	}
+
+	#[cfg(any(unix, windows))]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn open_new_interrupts_a_live_turn() {
+		use omp_driver::session_wire::OpenHost;
+
+		let dir = tempfile::tempdir().unwrap();
+		isolate_test_home(dir.path());
+		let (endpoint, model, _responses, request_started, gateway) =
+			fake_gateway(dir.path(), true).await;
+		let mut args = ChatArgs::default_interactive();
+		args.gateway = Some(endpoint);
+		args.model = Some(model);
+		args.no_tools = true;
+		let sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
+		let host =
+			crate::session_runner::AppOpenHost::new(test_env(dir.path()), args, Arc::clone(&sessions));
+		let id = host
+			.open_new(dir.path())
+			.await
+			.expect("a new session opens");
+		let handle = sessions
+			.lookup(&id)
+			.expect("the returned session is registered");
+		let (reply, subscription) = flume::bounded(1);
+		handle
+			.idle_subscribe
+			.expect("idle controller accepts subscribers")
+			.send(reply)
+			.unwrap();
+		let (_, events) = tokio::time::timeout(Duration::from_secs(15), subscription.recv_async())
+			.await
+			.expect("the idle controller replies")
+			.expect("the subscription remains live");
+		let commands = host
+			.commands(&id)
+			.expect("the session command sender is retained");
+		commands
+			.send(omp_chat::HostCommand::Submit(Str::new_static("open-host-interrupt-test-prompt")))
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(15), request_started.recv_async())
+			.await
+			.expect("the gateway receives the in-flight inference request")
+			.expect("the gateway remains live");
+		commands.send(omp_chat::HostCommand::Interrupt).unwrap();
+		let notice = tokio::time::timeout(Duration::from_secs(15), async {
+			loop {
+				let omp_dom::Event::Patch(patch) =
+					events.recv_async().await.expect("the session stays live")
+				else {
+					continue;
+				};
+				for op in patch.ops {
+					if let omp_dom::Op::Ins { node, .. } = op
+						&& node.tag == omp_dom::KnownTag::Notice.into()
+						&& let Some(content) = node.content
+					{
+						return content;
+					}
+				}
+			}
+		})
+		.await
+		.expect("the interrupted turn journals a notice");
+		assert_eq!(notice.as_str(), "Turn interrupted");
+		gateway.abort();
 	}
 
 	#[tokio::test]
