@@ -11,19 +11,12 @@ name: Package macOS
 # CPython bundle) is far too slow for every push.
 on:
   workflow_dispatch:
-  # Only to prove changes to this workflow and the scripts it runs.
-  pull_request:
-    branches: [omp2]
-    paths:
-      - ".github/workflows/package-macos.yml"
-      - "scripts/package-macos.sh"
-      - "scripts/install-smoke-macos.sh"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -34,10 +27,8 @@ jobs:
   package:
     name: Package and install-smoke omp (macOS arm64)
     runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
-    # The release LTO build can exceed three hours on a cold/self-hosted
-    # Apple-silicon runner; cancellation at the old limit produced no compiler
-    # diagnostic and left the package job inconclusive.
-    timeout-minutes: 240
+    # Bound manual runner occupancy while leaving time to upload artifacts.
+    timeout-minutes: 120
     env:
       # The `secrets` context is not available in a step `if` (the run never
       # even parsed: GitHub recorded a job-less failure on every push). The
@@ -87,7 +78,7 @@ jobs:
           echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Build release omp
-        timeout-minutes: 220
+        timeout-minutes: 105
         env:
           CARGO_BUILD_JOBS: "4"
         run: |

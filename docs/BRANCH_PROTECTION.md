@@ -10,8 +10,11 @@ code; apply them once in the GitHub UI.
 | Workflow | What it does | Gating |
 |---|---|---|
 | `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below) |
-| `Package macOS` (`package-macos.yml`) | Release build, package, install smoke; only when the workflow or its scripts change | Not required |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
+
+`Package macOS` runs only by manual dispatch. P8's macOS recording uses hosted `macos-15`.
+A manual package run can still occupy the self-hosted Mac and delay required
+pull request checks.
 
 The label workflow runs on `pull_request_target`, so it can label pull
 requests from forks. It checks out nothing and runs no code from the pull

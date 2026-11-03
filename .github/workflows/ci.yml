@@ -311,9 +311,12 @@ jobs:
     # CI job stays on GitHub-hosted runners so that Mac is not occupied by
     # work that does not reuse that cache. Unset MACOS_RUNNER → macos-15.
     # A pull request whose head is a different repository (not a branch of
-    # this one) is forced to hosted here in the workflow file, so untrusted
-    # code never runs on the Mac. Do not use head.repo.fork for that: this
-    # repository can itself be a GitHub fork and still own the runner.
+    # this one) is ROUTED to hosted here. Read that as routing, not a trust
+    # boundary: `pull_request` evaluates this workflow from the PR's own merge
+    # ref, so a fork can edit this line. What actually keeps fork code off the
+    # Mac is the repository's fork-PR approval policy. Do not use
+    # head.repo.fork here: this repository can itself be a GitHub fork and
+    # still own the runner, so `fork` would be true for trusted branches.
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"macos-15"' || vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
     env:
@@ -354,7 +357,7 @@ jobs:
         run: cargo nextest show-config version
 
       # Target dir outside the checkout on a self-hosted runner, embedded
-      # CPython on both; shared with the P8 baseline workflow.
+      # CPython on both.
       - uses: ./.github/actions/macos-build-state
         with:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
@@ -460,14 +463,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
     needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    # Clippy needs macOS coverage, not the dedicated test runner.
     runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Clear sccache on self-hosted runners
-        if: runner.environment != 'github-hosted'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Select pinned Rust toolchain
         run: |
@@ -484,10 +484,8 @@ jobs:
 
       # sccache via GitHub Actions Cache for github-hosted runners.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        if: runner.environment == 'github-hosted'
 
       - name: Restore Cargo registry
-        if: runner.environment == 'github-hosted'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
