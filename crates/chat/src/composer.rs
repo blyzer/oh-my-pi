@@ -959,11 +959,18 @@ impl Composer {
 			.unwrap_or_default()
 	}
 
-	/// Applies a native TSP edit: replaces `range` (UTF-8 bytes) with `text`.
-	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+	/// Applies a TSP `edit` Tern made over the displayed draft, in UTF-16
+	/// offsets (see [`omp_tui::tsp::edit::resolve`]); a stale one is dropped.
+	pub fn apply_tsp_edit(&mut self, from: u32, to: u32, text: &str, cursor: u32, len: u32) {
 		self
 			.ui
-			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| pane.apply_edit(range, text));
+			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
+				let resolved =
+					omp_tui::tsp::edit::resolve(pane.displayed_text(), from, to, text, cursor, len);
+				if let Some(edit) = resolved {
+					pane.apply_native_edit(&edit);
+				}
+			});
 	}
 
 	/// Undoes the last edit (native TSP undo).
