@@ -301,4 +301,7 @@ message CommandReceipt {
   // Sequence number of the journal entry created by this command. Zero
   // for duplicate idempotent commands.
   uint64 seq = 3;
+  // The journal entry created by the original command, also present on replay.
+  string entry_id = 4;
+
 }
