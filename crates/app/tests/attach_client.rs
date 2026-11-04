@@ -31,6 +31,7 @@ fn registered(sessions: &SessionRegistry, id: &'static str, root: &Path) {
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
 		idle_subscribe: None,
+		ask: None,
 		project_root: Arc::from(root),
 	});
 }

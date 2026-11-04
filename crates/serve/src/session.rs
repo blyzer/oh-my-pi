@@ -5,8 +5,8 @@
 //! frames carry canonical `omp_dom` bytes the authority produced; serve only
 //! moves them.
 //!
-//! Reads, new-session `Open`, and approval decisions are served here. Resume,
-//! fork, and the remaining mutating verbs remain unimplemented.
+//! Reads, new-session `Open`, approval decisions, and UI answers are served
+//! here. Resume, fork, and the remaining mutating verbs remain unimplemented.
 
 use std::sync::Arc;
 
@@ -212,6 +212,40 @@ pub enum SessionControlError {
 	/// A timed-out mutation may have committed; retry using the same key.
 	#[error("the mutation outcome is unknown; retry with the same idempotency key")]
 	MutationOutcomeUnknown,
+	/// The session has no UI route, so no request on it can wait for an
+	/// answer.
+	#[error("session {session_id} has no UI answer route")]
+	NoUiRoute {
+		/// The requested session.
+		session_id: Str,
+	},
+	/// No UI request with this identity is waiting on the session.
+	///
+	/// This conflates three cases the route cannot tell apart: an identity it
+	/// never registered, a request already answered, and a request whose turn
+	/// was interrupted. Separating them needs either a bounded record of
+	/// settled identities written when a waiting entry is removed, or an
+	/// outcome enum returned by `AskRoute::answer` in place of its `bool`.
+	#[error("UI request {request_id} is not waiting")]
+	UiRequestNotWaiting {
+		/// The UI request identity.
+		request_id: Str,
+	},
+	/// The UI answer names no request.
+	#[error("the UI request identity is empty")]
+	InvalidUiRequestId,
+	/// The UI answer payload is empty or does not decode.
+	///
+	/// The payload encoding is provisional (ADR 0039 R2), so the source names
+	/// the decoder in use rather than a stable wire contract.
+	#[error("the answer for UI request {request_id} does not decode")]
+	InvalidUiAnswer {
+		/// The UI request identity.
+		request_id: Str,
+		/// The provisional decoder's failure.
+		#[source]
+		source:     serde_json::Error,
+	},
 	/// A mutating verb arrived with no session selected.
 	#[error("no session is selected")]
 	NoSessionSelected,
@@ -232,6 +266,10 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::SessionNotLive`] | `failed_precondition` |
 	/// | [`SessionControlError::OutOfGrant`] | `permission_denied` |
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
+	/// | [`SessionControlError::NoUiRoute`] | `unimplemented` |
+	/// | [`SessionControlError::UiRequestNotWaiting`] | `not_found` |
+	/// | [`SessionControlError::InvalidUiRequestId`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidUiAnswer`] | `invalid_argument` |
 	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
 	/// | [`SessionControlError::InvalidApprovalScope`] | `invalid_argument` |
 	/// | [`SessionControlError::InvalidIdempotencyKey`] | `invalid_argument` |
@@ -256,7 +294,11 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
-			SessionControlError::NoSessionSelected
+			SessionControlError::NoUiRoute { .. } => Self::unimplemented(message),
+			SessionControlError::UiRequestNotWaiting { .. } => Self::not_found(message),
+			SessionControlError::InvalidUiRequestId
+			| SessionControlError::InvalidUiAnswer { .. }
+			| SessionControlError::NoSessionSelected
 			| SessionControlError::InvalidApprovalScope { .. }
 			| SessionControlError::InvalidIdempotencyKey { .. } => Self::invalid_argument(message),
 			SessionControlError::EpochMismatch { .. } => Self::failed_precondition(message),
@@ -307,6 +349,17 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		request: pb::ApproveRequest,
 		lifetime: ApprovalScope,
 		key: IdempotencyKey,
+	) -> Result<pb::CommandReceipt, SessionControlError>;
+
+	/// Delivers an answer to a UI request waiting on a live session.
+	///
+	/// Answering appends nothing to the journal, so the receipt's `seq` is zero
+	/// and its `entry_id` empty. A retried answer finds nothing waiting and is
+	/// [`SessionControlError::UiRequestNotWaiting`].
+	async fn answer_ui(
+		&self,
+		context: ControlContext,
+		request: pb::UiAnswer,
 	) -> Result<pb::CommandReceipt, SessionControlError>;
 
 	/// Opens a new session. Resume and fork of an id that is not live is
@@ -446,9 +499,16 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 		&self,
 		request: Request<pb::UiAnswer>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
-		let _context = observer(&request)?;
+		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
-		Err(read_only("AnswerUi"))
+		if !context.scopes().contains(ControlScope::AnswerUi) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::AnswerUi }.into());
+		}
+		let receipt = self
+			.authority
+			.answer_ui(context, request.into_inner())
+			.await?;
+		Ok(Response::new(receipt))
 	}
 
 	async fn open(
@@ -571,6 +631,19 @@ mod tests {
 				idempotency_key: key.as_str().to_owned(),
 				accepted: true,
 				seq: 1,
+				..pb::CommandReceipt::default()
+			})
+		}
+
+		async fn answer_ui(
+			&self,
+			context: ControlContext,
+			request: pb::UiAnswer,
+		) -> Result<pb::CommandReceipt, SessionControlError> {
+			self.record(context)?;
+			Ok(pb::CommandReceipt {
+				idempotency_key: request.idempotency_key,
+				accepted: true,
 				..pb::CommandReceipt::default()
 			})
 		}
@@ -1007,5 +1080,52 @@ mod tests {
 			code(SessionControlError::EpochMismatch { expected: 3, actual: 4 }),
 			Code::FailedPrecondition
 		);
+	}
+
+	fn ui_answer_request() -> pb::UiAnswer {
+		pb::UiAnswer {
+			session_id: "live".to_owned(),
+			idempotency_key: "answer-1".to_owned(),
+			request_id: "call-1".to_owned(),
+			..pb::UiAnswer::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn answer_ui_holder_reaches_the_authority() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let holder = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::AnswerUi]),
+		);
+		let receipt = rpc
+			.answer_ui(authenticated(ui_answer_request(), holder))
+			.await
+			.expect("an answer_ui holder reaches the authority")
+			.into_inner();
+		assert_eq!(receipt.idempotency_key, "answer-1");
+		assert_eq!(authority.principal(), "device");
+	}
+
+	#[tokio::test]
+	async fn answer_ui_is_refused_without_its_own_scope() {
+		for (holder, scopes) in [
+			("prompt", [ControlScope::Observe, ControlScope::Prompt].as_slice()),
+			("control", [ControlScope::Observe, ControlScope::Control].as_slice()),
+			("observer", [ControlScope::Observe].as_slice()),
+		] {
+			let authority = FakeAuthority::ok();
+			let rpc =
+				SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+			let context = ControlContext::new("device", scopes.iter().copied().collect());
+			let error = rpc
+				.answer_ui(authenticated(ui_answer_request(), context))
+				.await
+				.expect_err("answer_ui is a grant of its own");
+			assert_eq!(error.code(), Code::PermissionDenied, "{holder}");
+			assert_eq!(error.message(), "the caller does not hold the answer_ui scope", "{holder}");
+			assert!(authority.seen.lock().is_none(), "a {holder} holder never reaches the authority");
+		}
 	}
 }
