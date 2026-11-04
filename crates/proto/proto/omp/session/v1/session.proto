@@ -303,5 +303,4 @@ message CommandReceipt {
   uint64 seq = 3;
   // The journal entry created by the original command, also present on replay.
   string entry_id = 4;
-
 }
