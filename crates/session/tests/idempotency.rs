@@ -201,3 +201,54 @@ fn rewinding_past_a_keyed_message_frees_its_key_and_reopen_agrees() {
 		.expect("retry after reopen");
 	assert_eq!(again, AppendOutcome::Replayed(live), "the index follows the live chain");
 }
+
+
+#[test]
+fn keyed_patches_replay_after_reopen_and_share_the_user_key_index() {
+	use omp_dom::{Op, PropKey, Txn, Value};
+
+	fn change(session: &Session) -> Txn {
+		Txn {
+			cause: session.head().expect("session has a head"),
+			label: Some(Str::new_static("approval.decide")),
+			ops: vec![Op::Set {
+				h: session.dom().meta(),
+				prop: PropKey::Custom(Str::new_static("keyed-test")),
+				value: Value::Str(Str::new_static("changed")),
+			}],
+		}
+	}
+
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("patch-replay.oms");
+	let mut session = create(&path);
+	let key = IdempotencyKey::new_static("K");
+	let first = session.patch_keyed(change(&session), key.clone(), &"allow").expect("first patch");
+	let AppendOutcome::Appended(id) = first else { panic!("first patch must append") };
+	let entries = session.entries().len();
+	let retry = session.patch_keyed(change(&session), key.clone(), &"allow").expect("retry");
+	assert_eq!(retry, AppendOutcome::Replayed(id));
+	assert_eq!(session.entries().len(), entries);
+	assert!(matches!(
+		session.patch_keyed(change(&session), key.clone(), &"deny"),
+		Err(SessionError::KeyConflict { existing, .. }) if existing == id
+	));
+	assert!(matches!(
+		session.user_authored("allow", Vec::new(), "Ada", Some(key.clone())),
+		Err(SessionError::KeyConflict { existing, .. }) if existing == id
+	));
+	drop(session);
+
+	let mut reopened = reopen(&path);
+	let entries = reopened.entries().len();
+	assert_eq!(
+		reopened.replay_keyed_patch(&key, "approval.decide", &"allow").expect("lookup"),
+		Some(id)
+	);
+	assert_eq!(
+		reopened.patch_keyed(change(&reopened), key, &"allow").expect("replay"),
+		AppendOutcome::Replayed(id)
+	);
+	assert_eq!(reopened.entries().len(), entries);
+}
+

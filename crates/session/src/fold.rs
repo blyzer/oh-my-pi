@@ -89,7 +89,7 @@ impl Session {
 		}
 		self.insert_last(entry, turn, node)?;
 		if let Some(key) = payload.key {
-			self.user_keys.entry(key).or_insert(entry.id);
+			self.mutation_keys.entry(key).or_insert(entry.id);
 		}
 		Ok(())
 	}
@@ -525,14 +525,10 @@ impl Session {
 	fn fold_patch(&mut self, entry: &Entry) -> Result<(), SessionError> {
 		let payload: Patch = serde_json::from_str(entry.data.as_str())?;
 		let ops: Vec<Op> = serde_json::from_str(payload.ops.get())?;
-		let Some(boundary) = self.head else {
-			return self.apply_ops(entry, ops);
-		};
-		let meta = self.dom.meta();
-		let after = self.dom.children(meta).last().copied();
-		let ops = ops
-			.into_iter()
-			.map(|op| match op {
+		let ops = if let Some(boundary) = self.head {
+			let meta = self.dom.meta();
+			let after = self.dom.children(meta).last().copied();
+			ops.into_iter().map(|op| match op {
 				Op::Ins { parent, after: sibling, node } => match legacy_handoff_document(&node) {
 					Some(summary) => Op::Ins {
 						parent: meta,
@@ -547,9 +543,15 @@ impl Session {
 					None => Op::Ins { parent, after: sibling, node },
 				},
 				other => other,
-			})
-			.collect();
-		self.apply_ops(entry, ops)
+			}).collect()
+		} else {
+			ops
+		};
+		self.apply_ops(entry, ops)?;
+		if let Some(identity) = payload.idempotency {
+			self.mutation_keys.entry(identity.key).or_insert(entry.id);
+		}
+		Ok(())
 	}
 
 	fn fold_compaction(&mut self, entry: &Entry) -> Result<(), SessionError> {
