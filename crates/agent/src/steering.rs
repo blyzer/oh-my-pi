@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use omp_core::Str;
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_journal::{data::{Attachment, Compaction, IrcTraffic}, idempotency::IdempotencyKey};
+use omp_journal::{
+	data::{Attachment, Compaction, IrcTraffic},
+	idempotency::IdempotencyKey,
+};
 use omp_session::{Session, SessionError};
 
 use crate::SteeringMode;
@@ -113,29 +116,33 @@ pub enum ApprovalOutcome {
 		/// Identity of the committed journal entry.
 		entry: omp_journal::EntryId,
 		/// One-based index of the appended journal entry.
-		seq: u64,
+		seq:   u64,
 	},
 	/// The same keyed decision was already durably appended.
 	Duplicate {
 		/// Identity of the original journal entry.
 		entry: omp_journal::EntryId,
 	},
-	/// No pending approval has this identity.
+	/// No approval with this identity is pending: it is unknown, already
+	/// decided, or withdrawn.
 	NotPending,
 }
 
-/// Where an approval reply receiver lives and whether its decision is keyed.
+/// Whether anyone waits for an approval's outcome, and how a retry is known.
 #[derive(Clone, Debug)]
 pub enum ApprovalDelivery {
-	/// The mailbox owns the local receiver until it processes the decision.
-	Local {
-		/// Retains the receiver without creating a background task.
-		receiver: flume::Receiver<Result<ApprovalOutcome, crate::ApprovalError>>,
-	},
-	/// The remote caller owns the receiver and the journal key identifies the request.
+	/// A local host decided; nothing waits for the outcome.
+	Local,
+	/// An authenticated remote caller waits for the durable outcome.
+	///
+	/// A reply receiver dropped before the dispatcher observes the message
+	/// cancels it. Dropped after, the decision may still commit: the durable
+	/// write has no time bound.
 	Remote {
-		/// Idempotency key supplied by the authenticated caller.
-		key: IdempotencyKey,
+		/// Client key journaled with the decision, so a retry replays it.
+		key:   IdempotencyKey,
+		/// Receives the durable outcome or the typed approval failure.
+		reply: flume::Sender<Result<ApprovalOutcome, crate::ApprovalError>>,
 	},
 }
 
@@ -213,18 +220,12 @@ pub enum Up {
 	/// drain that receives it, answered by [`Up::Approve`].
 	Approval(crate::ApprovalRequest),
 	/// Resolves a journal-backed approval prompt.
-	///
-	/// If the reply receiver is dropped before the dispatcher observes this
-	/// message, it makes no mutation. If it drops after observation, the
-	/// decision may still commit; the durable write has no time bound.
 	Approve {
 		/// Stable prompt identity.
 		id:       Str,
 		/// Idempotent first decision.
 		decision: crate::ApprovalDecision,
-		/// Receives the durable outcome or the typed approval failure.
-		reply:    flume::Sender<Result<ApprovalOutcome, crate::ApprovalError>>,
-		/// Defines the reply receiver lifetime and remote idempotency key.
+		/// Whether the decision is keyed and who waits for its outcome.
 		delivery: ApprovalDelivery,
 	},
 	/// Requests a live `(Snapshot, Receiver<Event>)` pair over the session the
@@ -233,15 +234,14 @@ pub enum Up {
 	Subscribe(flume::Sender<DomSubscription>),
 }
 
-
 impl Up {
-	/// Creates a local approval whose reply receiver stays in the mailbox message.
+	/// Resolves a prompt for a local host that does not wait for the outcome.
 	#[must_use]
-	pub fn approve_local(id: Str, decision: crate::ApprovalDecision) -> Self {
-		let (reply, receiver) = flume::bounded(1);
-		Self::Approve { id, decision, reply, delivery: ApprovalDelivery::Local { receiver } }
+	pub const fn approve_local(id: Str, decision: crate::ApprovalDecision) -> Self {
+		Self::Approve { id, decision, delivery: ApprovalDelivery::Local }
 	}
 }
+
 /// The `<queues><steering>` element.
 pub(crate) fn steering_queue(session: &Session) -> Result<Handle, SessionError> {
 	session
