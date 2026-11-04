@@ -575,13 +575,29 @@ The owner answered the questions that blocked phase R1. The answers bind R1 only
 
 ## Amendment (2026-11-04)
 
-`AnswerUi` requires its own `answer_ui` scope. The agent chooses each UI request at runtime,
-so a grant cannot bound its content or the consequences of an answer. Combining this authority
-with `prompt` or `approve` would make those grants open-ended.
+The owner decided how R2 authorizes `AnswerUi` and what the owner socket grants. A4 changed in
+place, and its scope table gained the `answer_ui` row.
 
-The owner socket holds `answer_ui`; devices do not receive it in R3b. The owner already answers
-UI requests locally through the chat controller. Withholding this authority over the owner socket
-would make that socket weaker than the owner's terminal without a security benefit.
+1. **`AnswerUi` requires `answer_ui`.** The verb is served only to a caller that holds this scope,
+   checked inline where `Approve` checks `approve`. No configuration selects another scope for it.
+   A4 separates authority by command class, and a UI answer fits no class cleanly. It can be plain
+   input, like a prompt, or a confirmation that authorizes an action, like an approval. The agent
+   chooses each UI request at runtime, so a grant cannot bound what an answer will mean. Folding
+   the verb into `prompt`, `approve`, or `control` would make that grant open-ended, and A4
+   splits authority per command so that every grant stays bounded.
+2. **The owner socket grants every declared scope except `approve_persist`.** It grants
+   `observe`, `observe_host_local`, `prompt`, `interrupt`, `approve`, `answer_ui`, and
+   `control`. The owner already does each of these in its own terminal, so withholding one over
+   the socket would make the socket weaker than the terminal for no security gain.
+   `approve_persist` stays withheld. A persisted decision outlives the session and becomes policy,
+   and A4 grants it to no one by default. It adds to `approve` and never replaces it, so a holder
+   of `approve_persist` without `approve` decides nothing. `worker` and `admin` are not declared
+   yet, and each needs its own decision when its verbs land. The grant is an explicit list, never
+   derived from the enum, so a scope declared later is granted only by a decision. Devices hold
+   none of these scopes until R3b decides their grants.
+3. **Only the encoding of `UiAnswer.answer` is undecided.** The field stays opaque bytes with no
+   `oneof`. One private typed decoder reads it, and its encoding is provisional. The alternatives
+   are a proto `oneof`, a typed sub-message, or the provisional JSON.
 
 ## Status in omp
 
@@ -609,6 +625,42 @@ Checked as still open: no `omp.fleet.v1` proto, no `crates/fleet`, no `omp-serve
 projection, no driver `session_wire.rs`, no `omp attach`, and `omp_rpc::server_tls` has no caller
 outside `crates/rpc`. See the ADR 0039 entry in `TASKS.md` for the two files that PR #342 merged
 but never delivered to `omp2`.
+
+### R2 status (2026-11-04)
+
+**`Approve` is served over the owner socket.** `SessionControlRpc::approve`
+(`crates/serve/src/session.rs`) authorizes before it parses. It requires `approve`, then parses
+the lifetime with `ApprovalScope::parse_external`, which refuses an unknown string as
+`INVALID_ARGUMENT` instead of accepting it as a custom scope. A `persist` lifetime also requires
+`approve_persist`, and the idempotency key is parsed at the same boundary.
+`SessionWire::approve` (`crates/driver/src/session_wire.rs`) checks the grant again and honours
+`expected_epoch`. It decides as the authenticated principal, so `decided_by` comes from the
+transport and never from a request field. It sends `Up::Approve` with
+`ApprovalDelivery::Remote`, which carries the key and the reply sender. A local host's
+`Up::approve_local` carries neither. The dispatcher (`CallControl::handle` and
+`ApprovalDesk::decide_keyed`, `crates/agent`) journals the decision and its key in one
+`approval.decide` patch (`Patch.idempotency`) before it replies.
+
+An applied decision answers `accepted = true`, its journal position as `seq`, and its
+`entry_id`. A retry with the same key and the same decision answers `accepted = false`,
+`seq = 0`, and the original `entry_id`. The retry answers the same after the session reopens,
+because the fold rebuilds the key index from the journal. The proof is
+`a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` in
+`crates/agent/src/dispatch.rs`. It reads the journal from disk at the instant the outcome is sent.
+The same key with a different decision is `ALREADY_EXISTS`. An answer to a ticket that is not
+pending is `NOT_FOUND`, so a later answer loses to the first one, as A5 requires.
+
+The wire waits at most `APPROVE_BUDGET` (5 s) for the outcome. When the budget elapses, the wire
+answers `DEADLINE_EXCEEDED` and reports the outcome as unknown. It never reports that the
+decision was not applied. A decision the kernel has observed may still be committing, because the
+journal's durable write (`file.sync_data()`) has no time bound. Giving up cancels the message
+only if the kernel has not observed it yet. Recovery is a retry under the same key.
+
+Three gaps remain. The kernel drains its mailbox only inside a turn, so an `Approve` sent between
+turns times out the same way, and a retry is answered only while a turn runs. The key is not
+projected into the DOM. A retry consults the index that the fold rebuilds from the journal, not
+the DOM lookup that A5 describes. `RemotePrincipal` has no origin yet, so `decided_by` is the
+principal string alone, and R3b adds the origin.
 
 ### Implementation plan (PR-sized, value first)
 
