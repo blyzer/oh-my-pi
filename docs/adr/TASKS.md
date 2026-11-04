@@ -66,6 +66,16 @@ error. No council verdict is recorded.
   accepts only `rev == 1`, so a `tool.result@2` is refused as an unknown kind by every reader
   today. Choosing it later would require implementing and verifying revision-2 support first.
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
+- **ADR 0040 success criteria:** with every client measured, the memory criterion (client peak
+  under 5% of the local peak, 130.8 MiB for `omp-envd`) cannot pass on `omp-envd`, and no omp
+  product path can produce the warm run that the wall criterion (≤ 1.5× warm local) compares.
+  Keep the thresholds and record that `omp-envd` cannot meet them, restate or retarget them, or
+  build a warm-state backend first (ADR 0040 open question 7).
+- **ADR 0040 production gate:** journal replay, crash handling and result persistence, the items
+  of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no product path
+  creates one. Build the producer and a real reattach before acceptance, or narrow the gate to
+  the ADW path (ADR 0040 open question 8). ADR 0040 "Gap to acceptance" lists what each piece
+  takes and buys.
 
 ## Snapshot JSON byte preservation
 
@@ -135,9 +145,12 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 - **Progressed** FOLLOW-0035 error-format migration: ratchet 1042 → 639
   formatted sites after PRs #414–#417.
 - **STILL OPEN** `reattach_execution` backend call
-  (`crates/agent/src/jobs.rs:1246-1257` TODO; the design is ADR 0040, whose
-  `reattach` handle and `WaitExecution` path it waits on. ADR 0039 Part B has no
-  reattach text and ADR 0039 R2 does not unblock it).
+  (`crates/agent/src/jobs.rs:1246-1257` TODO). The pieces it waited on exist: the
+  versioned `ReattachHandle` (`crates/exec/src/handle.rs`, `01f8151003`) and the
+  `WaitExecution` reattach in `crates/exec-reapi/src/execute.rs:ReapiBackend::reattach`.
+  It now waits on a `JobKind::Execution` producer, because without one no handle is
+  stored (ADR 0040 "Gap to acceptance", items 1 and 2). ADR 0039 Part B has no
+  reattach text and ADR 0039 R2 does not unblock it.
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).
 
@@ -147,7 +160,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
-- **IN PROGRESS** ADR 0040 execution. Routing exists in `crates/exec/src/place.rs:place`. The recorded remote envd run failed three process-lifecycle tests (`docs/audits/remote-verification-trial.md` §G1; `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`). [UNVERIFIED] Current remote result was not rerun.
+- **BLOCKED** ADR 0040 execution, re-verified 2026-11-04 at `1578b1204c`. Slice 1 is composed. `crates/driver/src/adw/production.rs:ProductionAdwHost::run_command` places eligible ADW code phases without `crates/exec/src/place.rs:place`, and `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote` runs them over `ReapiBackend`. The 2026-10-31 production gate is unmet. Nothing produces a `JobKind::Execution` job (`crates/session/src/components/jobs.rs:insert_execution` and `accept_execution` have no caller), and `crates/agent/src/jobs.rs:reattach_execution` is a stub. The wall-time and client-memory criteria fail on every measured `omp-envd` arm (`docs/audits/remote-verification-trial.md` §G1). Acceptance waits on the two ADR 0040 owner decisions in the decision matrix above. The remote envd failures (three process-lifecycle tests, including `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`) stay open and undiagnosed.
 - **DONE** ADR 0039 R2. Submit, Approve, and AnswerUi are served by `crates/serve/src/session.rs:SessionControlRpc::{submit,approve,answer_ui}` and `crates/driver/src/session_wire.rs:SessionWire::{submit,approve,answer_ui}`. New-session Open is served by `SessionControlRpc::open` and `SessionWire::open_session`; resume and fork remain `UNIMPLEMENTED` in `SessionControlRpc::open`. R2 landed on `omp2` in `3410f1e74f` (#478) and `19c807d686` (#477).
 - **IN PROGRESS** ADR 0041 `screen` and `flow`. `crates/chat/src/tsp.rs:Surface::new` supports the modes, but `crates/chat/src/host.rs:Host` constructs an inline surface. [UNVERIFIED] Production screen and flow callers were not established in the checked chat host and `crates/app/src/print_mode.rs`.
 - **[UNVERIFIED]** ADR 0041 `TERN_BLOB_DIR`. The checked `crates/chat/src/tsp.rs:Surface::new` and `crates/app/src/print_mode.rs` did not establish a reader; its repository-wide status was not verified.
