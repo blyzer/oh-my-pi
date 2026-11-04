@@ -708,4 +708,89 @@ mod tests {
 		);
 		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::Unimplemented);
 	}
+
+	fn approval_request(scope: &str) -> pb::ApproveRequest {
+		pb::ApproveRequest {
+			session_id: "live".to_owned(),
+			idempotency_key: "request-1".to_owned(),
+			ticket_id: "ticket-1".to_owned(),
+			approved: true,
+			scope: scope.to_owned(),
+			..pb::ApproveRequest::default()
+		}
+	}
+
+	fn approval_context(scopes: &[ControlScope]) -> ControlContext {
+		ControlContext::new("remote-principal", scopes.iter().copied().collect())
+	}
+
+	#[tokio::test]
+	async fn approve_holder_decides_a_session_scoped_approval() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(approval_request("session"), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
+		assert!(rpc.approve(request).await.expect("approval reaches authority").into_inner().accepted);
+		assert_eq!(authority.principal(), "remote-principal");
+	}
+
+	#[tokio::test]
+	async fn control_holder_without_approve_is_refused() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(approval_request("session"), approval_context(&[ControlScope::Observe, ControlScope::Control]));
+		let error = rpc.approve(request).await.expect_err("control alone cannot approve");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve"));
+	}
+
+	#[tokio::test]
+	async fn approve_persist_without_approve_is_refused() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::ApprovePersist]));
+		let error = rpc.approve(request).await.expect_err("persist is additive");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve scope"));
+	}
+
+	#[tokio::test]
+	async fn approve_holder_cannot_decide_persist_and_error_names_approve_persist() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
+		let error = rpc.approve(request).await.expect_err("persist needs the additional grant");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve_persist"));
+	}
+
+	#[tokio::test]
+	async fn approve_and_approve_persist_holder_decides_persist() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::Approve, ControlScope::ApprovePersist]));
+		assert!(rpc.approve(request).await.expect("persist reaches authority").into_inner().accepted);
+	}
+
+	#[tokio::test]
+	async fn unrecognized_approval_scope_is_refused_at_the_wire() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		for scope in ["", "unknown-scope"] {
+			let request = authenticated(approval_request(scope), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
+			let error = rpc.approve(request).await.expect_err("unknown scope is refused");
+			assert_eq!(error.code(), Code::InvalidArgument);
+			assert!(error.message().contains(scope));
+		}
+		assert!(authority.seen.lock().is_none(), "no unknown scope reaches the authority");
+	}
+
+	#[tokio::test]
+	async fn observer_cannot_approve() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(approval_request("secret-invalid-scope"), observing("device"));
+		let error = rpc.approve(request).await.expect_err("observer cannot approve");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve"));
+		assert!(!error.message().contains("secret-invalid-scope"));
+		assert!(authority.seen.lock().is_none());
+	}
+
 }
