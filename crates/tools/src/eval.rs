@@ -12,6 +12,7 @@ use std::{
 	future,
 	future::Future,
 	path::PathBuf,
+	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -29,8 +30,9 @@ use omp_env::EnvClient;
 use omp_proto::inference::v1::{InvokeInput, invoke_input, invoke_input::chunk};
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, DocEffects, Effects, Ev,
-	ExecEffects, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, ParamError, Part,
-	PromptCaps, Rev, Tool, ToolSpec, ToolTerminal, Usd,
+	ExecEffects, HostToolExecutor, HostToolInvocation, HostToolResult, HostToolSpec,
+	HostToolUpdateSink, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, ParamError,
+	Part, PromptCaps, Registry, RegistryError, Rev, Tool, ToolSpec, ToolTerminal, Usd,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -1226,6 +1228,61 @@ impl EvalSessionControl {
 		}
 	}
 
+	/// Hosts `roster`'s eval-defined tools in `registry` as host tools, one
+	/// claim per registration: each call runs its exact handler registration
+	/// in `owner`'s retained kernel.
+	///
+	/// # Errors
+	///
+	/// Returns the registry's refusal of a registration's claim.
+	pub fn host_tools(
+		&self,
+		registry: &Registry,
+		owner: &Str,
+		roster: &EvalToolRoster,
+	) -> Result<(), RegistryError> {
+		let executor: Arc<dyn HostToolExecutor> = Arc::new(EvalForwardExecutor {
+			owner:         owner.clone(),
+			control:       self.clone(),
+			registrations: Arc::new(
+				roster
+					.tools
+					.iter()
+					.cloned()
+					.map(|registration| (registration.name.clone(), registration))
+					.collect(),
+			),
+		});
+		for registration in &roster.tools {
+			let claimant = sf!(
+				"eval/{}/{}/{}/{}/{}",
+				owner,
+				registration.generation,
+				registration.name,
+				registration.rev,
+				registration.handler
+			);
+			registry.replace_host_tools(
+				claimant,
+				1,
+				vec![HostToolSpec {
+					name:        registration.name.clone(),
+					description: registration.description.clone(),
+					parameters:  registration.parameters.clone(),
+					rev:         Some(Rev {
+						family: sf!("eval-{}-{}", registration.generation, registration.handler),
+						n:      registration.rev,
+					}),
+					// An eval-defined tool declares no envelope: it registers
+					// the unknown ceiling, so its calls are the exec tier.
+					effects:     None,
+				}],
+				Arc::clone(&executor),
+			)?;
+		}
+		Ok(())
+	}
+
 	/// Disposes every live process and makes each owner's next cell fresh.
 	pub fn request_reset(&self) {
 		match self.inner.as_ref() {
@@ -1252,6 +1309,47 @@ impl EvalSessionControl {
 			EvalSessionControlInner::Remote { .. } => 0,
 		}
 	}
+}
+
+/// Runs the eval-defined tools [`EvalSessionControl::host_tools`] hosted in a
+/// registry, each call in its owner's retained kernel.
+struct EvalForwardExecutor {
+	owner:         Str,
+	control:       EvalSessionControl,
+	registrations: Arc<BTreeMap<Str, EvalToolRegistration>>,
+}
+
+impl HostToolExecutor for EvalForwardExecutor {
+	fn execute(
+		&self,
+		invocation: HostToolInvocation,
+		_updates: HostToolUpdateSink,
+		cancellation: CancellationToken,
+	) -> Pin<Box<dyn Future<Output = Result<HostToolResult, Str>> + Send + 'static>> {
+		let owner = self.owner.clone();
+		let control = self.control.clone();
+		let registration = self.registrations.get(&invocation.name).cloned();
+		Box::pin(async move {
+			let registration = registration
+				.ok_or_else(|| sf!("eval-defined tool registration is no longer available"))?;
+			let result = control
+				.invoke_tool(
+					owner.as_str(),
+					&registration,
+					Value::Object(invocation.arguments),
+					cancellation,
+				)
+				.await
+				.map_err(forward_fault)?;
+			Ok(HostToolResult { result: result.value, is_error: result.is_error })
+		})
+	}
+}
+
+/// Renders a forwarded call's control failure once, as the host tool's fault
+/// text.
+fn forward_fault(cause: EvalToolControlError) -> Str {
+	sf!("{cause}")
 }
 
 /// Constructs `py_eval@1` over the shared killable eval resource.

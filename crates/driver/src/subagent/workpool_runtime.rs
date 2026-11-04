@@ -1,18 +1,14 @@
 //! Production persistent child-kernel runtime for workpool workers.
 
-use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use omp_agent::{JobBoard, JobSettlement, RunControl, TurnInput, TurnStop};
 use omp_core::{Str, sf};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_session::components::jobs;
-use omp_tool::{
-	HostToolExecutor, HostToolInvocation, HostToolResult, HostToolSpec, HostToolUpdateSink,
-	Registry, Rev,
-};
-use omp_tools::eval::{EvalSessionControl, EvalToolRegistration, EvalToolRoster};
-use serde_json::Value as Json;
+use omp_tool::Registry;
+use omp_tools::eval::{EvalSessionControl, EvalToolRoster};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -87,87 +83,16 @@ impl KernelWorkpoolLauncher {
 		roster: &EvalToolRoster,
 	) -> Result<Arc<Registry>, WorkpoolSchedulerError> {
 		let base = &self.registry;
-		let control = self.eval.clone();
 		let names = base.live_names();
 		let child = base.restrict(names.iter().map(Str::as_str));
-		let registrations = roster
-			.tools
-			.iter()
-			.cloned()
-			.map(|registration| (registration.name.clone(), registration))
-			.collect::<BTreeMap<_, _>>();
-		let executor: Arc<dyn HostToolExecutor> = Arc::new(EvalForwardExecutor {
-			owner: request.owner.clone(),
-			control,
-			registrations: Arc::new(registrations),
-		});
-		for registration in &roster.tools {
-			let claimant = sf!(
-				"eval/{}/{}/{}/{}/{}",
-				request.owner,
-				registration.generation,
-				registration.name,
-				registration.rev,
-				registration.handler
-			);
-			child
-				.replace_host_tools(
-					claimant,
-					1,
-					vec![HostToolSpec {
-						name:        registration.name.clone(),
-						description: registration.description.clone(),
-						parameters:  registration.parameters.clone(),
-						rev:         Some(Rev {
-							family: sf!("eval-{}-{}", registration.generation, registration.handler),
-							n:      registration.rev,
-						}),
-						// An eval-defined tool declares no envelope: it registers
-						// the unknown ceiling, so its calls are the exec tier.
-						effects:     None,
-					}],
-					Arc::clone(&executor),
-				)
-				.map_err(|source| WorkpoolSchedulerError::EvalRegistry {
-					id: request.id.clone(),
-					source,
-				})?;
-		}
+		self
+			.eval
+			.host_tools(&child, &request.owner, roster)
+			.map_err(|source| WorkpoolSchedulerError::EvalRegistry {
+				id: request.id.clone(),
+				source,
+			})?;
 		Ok(Arc::new(child))
-	}
-}
-
-#[derive(Clone)]
-struct EvalForwardExecutor {
-	owner:         Str,
-	control:       EvalSessionControl,
-	registrations: Arc<BTreeMap<Str, EvalToolRegistration>>,
-}
-
-impl HostToolExecutor for EvalForwardExecutor {
-	fn execute(
-		&self,
-		invocation: HostToolInvocation,
-		_updates: HostToolUpdateSink,
-		cancellation: CancellationToken,
-	) -> Pin<Box<dyn Future<Output = Result<HostToolResult, Str>> + Send + 'static>> {
-		let owner = self.owner.clone();
-		let control = self.control.clone();
-		let registration = self.registrations.get(&invocation.name).cloned();
-		Box::pin(async move {
-			let registration = registration
-				.ok_or_else(|| sf!("eval-defined tool registration is no longer available"))?;
-			let result = control
-				.invoke_tool(
-					owner.as_str(),
-					&registration,
-					Json::Object(invocation.arguments),
-					cancellation,
-				)
-				.await
-				.map_err(crate::fault)?;
-			Ok(HostToolResult { result: result.value, is_error: result.is_error })
-		})
 	}
 }
 
