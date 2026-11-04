@@ -678,9 +678,10 @@ Two gaps remain for `Submit`. An idle session refuses a retry too, so a client r
 (`crates/serve/src/session.rs`) requires `observe` and a selected session, then `answer_ui`,
 inline where `Approve` requires `approve`. No configuration selects another scope.
 `SessionWire::answer_ui` (`crates/driver/src/session_wire.rs`) checks the grant again, refuses an
-empty `request_id`, decodes the payload, and calls `AskRoute::answer` on the session's route
-(`KernelHandle::ask`). That is the route the owner's terminal answers through: the chat
-controller installs it on every live handle with `SessionHome::with_ask`. The answer never enters
+empty `request_id`, decodes the payload, honours `expected_epoch` as `Approve` and `Submit` do,
+and calls `AskRoute::answer` on the session's route (`KernelHandle::ask`). That is the route the
+owner's terminal answers through: the chat controller installs it on every live handle with
+`SessionHome::with_ask`. The answer never enters
 the kernel mailbox, and the wire neither waits on the kernel nor touches the session. There is no
 `Up` variant for it. That choice is not forced by a deadlock: a tool call that
 `Dispatcher::drive` runs with a `CallControl` keeps the mailbox live (`crates/agent/src/dispatch.rs`).
@@ -688,20 +689,28 @@ The route is used because it is the owner's own path and needs no kernel round t
 answers from one thread while another holds the session and an undrained mailbox: the presenter
 resolves within its 5 s bound, the mailbox stays empty, and the held session gains no entry.
 
-An answered request returns `accepted = true`, `seq = 0` and an empty `entry_id`, because the
-wire appends nothing to the journal. An empty `request_id`, or an empty or undecodable payload, is
-`INVALID_ARGUMENT`. An unknown session is `NOT_FOUND`. A session whose owner presents no UI has
-no route and is `UNIMPLEMENTED`. A request that is not waiting is `NOT_FOUND`, which conflates
-three cases: an identity the route never registered, a request already answered, and a request
-whose turn was interrupted. A bounded record of settled identities written when a waiting entry is
-removed, or an outcome enum returned by `AskRoute::answer` in place of its `bool`, would separate
-them. Until then a retry after success answers `NOT_FOUND`, not a duplicate receipt.
+An answered or dismissed request returns `accepted = true`, `seq = 0` and an empty `entry_id`,
+because the wire appends nothing to the journal. An empty `request_id`, or an empty or
+undecodable payload, is `INVALID_ARGUMENT`. An unknown session is `NOT_FOUND`. An
+`expected_epoch` that differs from the session's bridge epoch is `FAILED_PRECONDITION`, and the
+waiting request stays untouched. The epoch names the bridge start the caller's view came from. A
+request identity read from an earlier start can name a dialog that no longer waits, or a newer one
+the route registered under the same identity. A session whose owner presents no UI has no route
+and is `UNIMPLEMENTED`. A request that is not waiting is `NOT_FOUND`, which conflates three cases:
+an identity the route never registered, a request already answered, and a request whose turn was
+interrupted. A bounded record of settled identities written when a waiting entry is removed, or an
+outcome enum returned by `AskRoute::answer` in place of its `bool`, would separate them. Until
+then a retry after success answers `NOT_FOUND`, not a duplicate receipt.
 
-The `UiAnswer.answer` encoding stays owner-undecided. It ships provisionally as JSON
-`{"answers": [Selection, ...]}`, read by one private typed decoder (`ProvisionalUiAnswer`, no
-untyped traversal). The alternatives are a proto `oneof`, a typed sub-message, or this JSON. No
-test pins the byte shape: tests encode through the same private type. Two gaps remain. The
-provisional shape cannot dismiss a dialog, and `expected_epoch` is not checked for `AnswerUi`.
+The `UiAnswer.answer` encoding stays owner-undecided. It ships provisionally as JSON read by one
+private typed decoder (`ProvisionalUiAnswer`, no untyped traversal).
+`{"answers": [Selection, ...]}` answers the dialog, and `"cancelled"` dismisses it. A dismissal
+reaches the waiting request as `AskReply::Cancelled`, the reply the owner's terminal sends on Esc.
+The presenter fails with `Fault::cancelled()`, never with the fault a host that went away leaves.
+`the_owner_socket_dismisses_a_waiting_ui_request` proves this over the production owner socket,
+and a retry of the dismissal is `NOT_FOUND`. The alternatives are a proto `oneof`, a typed
+sub-message, or this JSON. Carrying dismissal does not settle the choice. No test pins the byte
+shape: tests encode through the same private type.
 
 ### Implementation plan (PR-sized, value first)
 
