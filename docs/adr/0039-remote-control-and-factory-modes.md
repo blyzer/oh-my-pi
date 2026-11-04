@@ -569,9 +569,9 @@ The owner answered the questions that blocked phase R1. The answers bind R1 only
 4. **Dead `omp.control.v1` session messages.** They stay. The deletion that A2 and Consequences
    proposed is cancelled, and the "hence the deletion of the `omp.control.v1` session messages"
    clause above no longer applies. Nothing in omp2 is required to stop reading them.
-5. **Multiple controllers.** R1 is owner-local and read-only, so it grants no mutation verb and
-   needs no controller arbitration. `Submit`, `Approve`, `AnswerUi`, and `Open` answer
-   `UNIMPLEMENTED` with a reason until R2 builds mutation. Open question 3 stays open for R2.
+5. **Multiple controllers.** R1 was owner-local and read-only, so it granted no mutation verb and
+   needed no controller arbitration. At the R1 milestone, `Submit`, `Approve`, `AnswerUi`, and
+   `Open` answered `UNIMPLEMENTED`. See the current status below for subsequent changes.
 
 ## Amendment (2026-11-04)
 
@@ -601,7 +601,7 @@ place, and its scope table gained the `answer_ui` row.
 
 ## Status in omp
 
-**Status: Partially implemented.** Local attach is wired through `crates/driver/src/session_wire.rs:SessionWire` and `crates/app/src/attach_cmd.rs:run`. Submit is served by `crates/driver/src/session_wire.rs:SessionWire::submit`, and Approve and AnswerUi by `SessionWire::approve` and `SessionWire::answer_ui`, as the R2 status below records. [UNVERIFIED] Fleet and network phases were not reassessed.
+**Status: Partially implemented.** R2 is complete: Submit, Approve, and AnswerUi are served by `crates/serve/src/session.rs:SessionControlRpc::{submit,approve,answer_ui}` and `crates/driver/src/session_wire.rs:SessionWire::{submit,approve,answer_ui}`. Local attach uses `crates/app/src/attach_cmd.rs:run`. New-session Open is served by `crates/serve/src/session.rs:SessionControlRpc::open` and `crates/driver/src/session_wire.rs:SessionWire::open_session`; resume and fork remain `UNIMPLEMENTED` in `SessionControlRpc::open`. Remaining phases are R3a, R3b, R4 and F1-F4; network and fleet status was not reassessed.
 
 Phase S0 (spectator proof and headless hosting) landed in commit `38c4e04ff3`: guest-mutation
 admission moved into `crates/driver/src/collab/admission.rs`; `host.rs` (`HeadlessRoom`) and
@@ -612,7 +612,7 @@ defect 1 is fixed); `crates/app/src/chat_control.rs` was changed in the same com
 
 R1 projects sessions through `crates/serve/src/session.rs:SessionControlRpc` and `crates/driver/src/session_wire.rs:SessionWire`; the local attach client is `crates/app/src/attach_cmd.rs:run`. R2 Submit, Approve, and AnswerUi route to the session authority (`crates/serve/src/session.rs:SessionControlRpc::submit`, `SessionControlRpc::approve`, and `SessionControlRpc::answer_ui`).
 
-### R2 status (2026-11-04)
+### R2 status (2026-11-04, complete on omp2)
 
 **`Approve` is served over the owner socket.** `SessionControlRpc::approve`
 (`crates/serve/src/session.rs`) authorizes before it parses. It requires `approve`, then parses
