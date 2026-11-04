@@ -3985,6 +3985,39 @@ mod approval_tests {
 		);
 		assert!(ApprovalBook::new().pending(&session).is_empty());
 	}
+
+	#[test]
+	fn disconnected_remote_approval_is_not_applied_when_dispatch_observes_it() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session = Session::create(directory.path().join("approve.oms"), ComponentRegistry::standard()).expect("session");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let ticket = desk.file_spec(&mut session, Str::new_static("call-1"), spec()).expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let (reply, receiver) = flume::bounded(1);
+		drop(receiver);
+		let request = Up::Approve {
+			id: ticket.ticket_id.clone(),
+			decision: external(Some("ada")),
+			reply,
+			delivery: crate::ApprovalDelivery::Remote { key: omp_journal::idempotency::IdempotencyKey::new_static("request-1") },
+		};
+		assert_eq!(control.handle(&mut session, request).expect("abandoned message is ignored"), Received::None);
+		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
+	}
+
+	#[test]
+	fn queued_local_approvals_keep_their_replies_without_tasks() {
+		let messages: Vec<_> = (0..32).map(|_| Up::approve_local(Str::new_static("ticket"), external(Some("ada")))).collect();
+		for message in &messages {
+			let Up::Approve { reply, delivery: crate::ApprovalDelivery::Local { .. }, .. } = message else {
+				panic!("local approval owns its reply receiver");
+			};
+			assert!(!reply.is_disconnected());
+		}
+	}
+
 }
 
 fn projection_blob(blob: &BlobRef) -> ToolBlobRef {
