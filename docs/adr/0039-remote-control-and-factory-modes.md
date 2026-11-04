@@ -249,6 +249,7 @@ service SessionControl {
 | `interrupt` | `Submit{interrupt, abort_tools, pause}` |
 | `approve` | `Approve` with scope ≤ `session` |
 | `approve_persist` | `Approve` with scope `persist` (default: never granted to a device) |
+| `answer_ui` | `AnswerUi` for pending host UI requests |
 | `control` | `Submit{cancel}`, `Open`, model/thinking switches |
 | `worker` | fleet worker protocol only (Part B); no session verbs |
 | `admin` | enrol/revoke/pair; **local UDS only**, never grantable |
@@ -571,6 +572,16 @@ The owner answered the questions that blocked phase R1. The answers bind R1 only
 5. **Multiple controllers.** R1 is owner-local and read-only, so it grants no mutation verb and
    needs no controller arbitration. `Submit`, `Approve`, `AnswerUi`, and `Open` answer
    `UNIMPLEMENTED` with a reason until R2 builds mutation. Open question 3 stays open for R2.
+
+## Amendment (2026-11-04)
+
+`AnswerUi` requires its own `answer_ui` scope. The agent chooses each UI request at runtime,
+so a grant cannot bound its content or the consequences of an answer. Combining this authority
+with `prompt` or `approve` would make those grants open-ended.
+
+The owner socket holds `answer_ui`; devices do not receive it in R3b. The owner already answers
+UI requests locally through the chat controller. Withholding this authority over the owner socket
+would make that socket weaker than the owner's terminal without a security benefit.
 
 ## Status in omp
 
