@@ -678,6 +678,24 @@ mod tests {
 		assert!(ScopeSet::EMPTY.is_empty());
 	}
 	#[tokio::test]
+	async fn observer_cannot_submit_a_steer() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(
+			pb::ControlCommand {
+				session_id: "01JSESSION".to_owned(),
+				idempotency_key: "key".to_owned(),
+				command: Some(pb::control_command::Command::Steer(pb::SteerCommand {
+					text: "redirect".to_owned(),
+				})),
+				..pb::ControlCommand::default()
+			},
+			observing("observer"),
+		);
+		assert_eq!(rpc.submit(request).await.unwrap_err().code(), Code::PermissionDenied);
+	}
+
+
+	#[tokio::test]
 	async fn mutating_verbs_refuse_when_no_session_is_selected() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
 		let submit = authenticated(pb::ControlCommand::default(), observing("owner"));
