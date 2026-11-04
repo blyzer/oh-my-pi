@@ -656,11 +656,52 @@ decision was not applied. A decision the kernel has observed may still be commit
 journal's durable write (`file.sync_data()`) has no time bound. Giving up cancels the message
 only if the kernel has not observed it yet. Recovery is a retry under the same key.
 
-Three gaps remain. The kernel drains its mailbox only inside a turn, so an `Approve` sent between
-turns times out the same way, and a retry is answered only while a turn runs. The key is not
-projected into the DOM. A retry consults the index that the fold rebuilds from the journal, not
-the DOM lookup that A5 describes. `RemotePrincipal` has no origin yet, so `decided_by` is the
-principal string alone, and R3b adds the origin.
+Three gaps remain for `Approve`. The kernel drains its mailbox only inside a turn, so an
+`Approve` sent between turns times out the same way, and a retry is answered only while a turn
+runs. The key is not projected into the DOM. A retry consults the index that the fold rebuilds
+from the journal, not the DOM lookup that A5 describes. `RemotePrincipal` has no origin yet, so
+`decided_by` is the principal string alone, and R3b adds the origin.
+
+**`Submit` is served over the owner socket.** `SessionControlRpc::submit` (`crates/serve/src/session.rs`) authorizes per command arm with `ControlContext::require_submit`: `prompt` for prompt, steer, and queue; `interrupt` for interrupt, abort tools, and pause; `control` for cancel. The check reads the request alone, so a caller without the arm's scope gets the same `PERMISSION_DENIED` whether or not the session exists. `SessionWire::submit` (`crates/driver/src/session_wire.rs`) checks the grant again before the registry, parses the idempotency key, and honours `expected_epoch`. It sends `Up::Submit` with the authenticated principal as the author. The dispatcher (`CallControl::handle` and `submit::journal`, `crates/agent`) journals the command and its key in one keyed patch (`Session::patch_keyed`) before it replies. A steer lands in `<queues><steering>` and a queue in `<queues><prompts>`, through the transaction builders the local verbs use. Interrupt, abort tools, and cancel journal an empty keyed patch (`control.interrupt`, `control.abort_tools`, `control.cancel`) and then run the local verb's own dispatch arm, so a retried key replays and never acts on a later turn.
+
+One index serves every keyed record. `Session::mutation_keys` names keyed `msg.user` entries, keyed submit patches, and keyed approval decisions, and the fold rebuilds it from the journal. A key reused for another arm or record kind is `SessionError::KeyConflict`, answered `ALREADY_EXISTS`.
+
+The receipt carries no disposition. That is sound only while the arm alone decides where a command lands. `CallControl` routes steer and queue with no degradation path, and the keyed patch records the arm's label and request, so a replay always describes an original with the same arm. The `receipt_without_disposition` tests in `crates/agent/src/dispatch.rs` pin cross-arm key reuse in both directions and a same-arm replay after reopen; routing a steer into the prompts queue, or a queue into the steering queue, turns them red. A routing change that breaks them needs a disposition on the receipt first.
+
+`CommandReceipt.entry_id` (field 4) names the original entry on every answer. A client that lost its first receipt retries under the same key and gets `accepted = false` and `seq = 0`. No DOM node carries the key and no RPC looks one up, so the entry id is its only way back, and the attach stream names that id as the patch's cause. `a_lost_receipt_is_recovered_by_its_entry_and_survives_a_restart` (`crates/driver/tests/session_submit.rs`) drives a held real turn through the wire and recovers the steer from the replay's entry. It then replays the same key from a second kernel over the reopened journal, which still holds the keyed steer once.
+
+Nothing behind the wire starts a turn (`TurnRequest` is private to `crates/app`), so `prompt` is refused with `FAILED_PRECONDITION`, while idle and while a turn runs alike, because the verb is idle-only. Every other arm needs a running turn. `KernelHandle::turn_activity` refuses an idle session at once. It is a fast path, not a guarantee: a turn can end between the check and its next mailbox drain, so the wire waits at most `SUBMIT_BUDGET` (5 s). Past it, or on a dropped reply, the wire answers `DEADLINE_EXCEEDED` and reports the outcome as unknown, never as not applied. Giving up drops the reply receiver, so a later drain withdraws the command unapplied. A kernel that already took it may still commit it, and recovery is a retry under the same key. A subagent's idle loop answers `FAILED_PRECONDITION` itself.
+
+Two gaps remain for `Submit`. An idle session refuses a retry too, so a client recovers a lost receipt only while a turn runs. `Kernel::retry_tool_tail` runs a turn without raising `turn_activity`, so a submit during it reads as idle and is refused.
+
+**`AnswerUi` is served over the owner socket.** `SessionControlRpc::answer_ui`
+(`crates/serve/src/session.rs`) requires `observe` and a selected session, then `answer_ui`,
+inline where `Approve` requires `approve`. No configuration selects another scope.
+`SessionWire::answer_ui` (`crates/driver/src/session_wire.rs`) checks the grant again, refuses an
+empty `request_id`, decodes the payload, and calls `AskRoute::answer` on the session's route
+(`KernelHandle::ask`). That is the route the owner's terminal answers through: the chat
+controller installs it on every live handle with `SessionHome::with_ask`. The answer never enters
+the kernel mailbox, and the wire neither waits on the kernel nor touches the session. There is no
+`Up` variant for it. That choice is not forced by a deadlock: a tool call that
+`Dispatcher::drive` runs with a `CallControl` keeps the mailbox live (`crates/agent/src/dispatch.rs`).
+The route is used because it is the owner's own path and needs no kernel round trip. A test
+answers from one thread while another holds the session and an undrained mailbox: the presenter
+resolves within its 5 s bound, the mailbox stays empty, and the held session gains no entry.
+
+An answered request returns `accepted = true`, `seq = 0` and an empty `entry_id`, because the
+wire appends nothing to the journal. An empty `request_id`, or an empty or undecodable payload, is
+`INVALID_ARGUMENT`. An unknown session is `NOT_FOUND`. A session whose owner presents no UI has
+no route and is `UNIMPLEMENTED`. A request that is not waiting is `NOT_FOUND`, which conflates
+three cases: an identity the route never registered, a request already answered, and a request
+whose turn was interrupted. A bounded record of settled identities written when a waiting entry is
+removed, or an outcome enum returned by `AskRoute::answer` in place of its `bool`, would separate
+them. Until then a retry after success answers `NOT_FOUND`, not a duplicate receipt.
+
+The `UiAnswer.answer` encoding stays owner-undecided. It ships provisionally as JSON
+`{"answers": [Selection, ...]}`, read by one private typed decoder (`ProvisionalUiAnswer`, no
+untyped traversal). The alternatives are a proto `oneof`, a typed sub-message, or this JSON. No
+test pins the byte shape: tests encode through the same private type. Two gaps remain. The
+provisional shape cannot dismiss a dialog, and `expected_epoch` is not checked for `AnswerUi`.
 
 ### Implementation plan (PR-sized, value first)
 
