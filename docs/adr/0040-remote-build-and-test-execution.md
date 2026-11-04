@@ -1174,6 +1174,29 @@ interleaved with the local arm. The `bb remote` reps do not record runner cache 
 `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`. The audit labels executor
 process semantics as an inference, not a diagnosis.
 
+**The client CPU and peak-memory figures above may undercount, because client work can run
+outside the measured process tree (2026-11-04).** `scripts/measure-recipe.py` sums the command
+PID and its descendants, and `/usr/bin/time -l` reports a descendant too, but input capture does
+not necessarily run there. `crates/driver/src/adw/remote.rs:438` calls
+`EnvClient::capture_inputs`; `crates/env/src/client.rs:1546` sends a Workspace request;
+`crates/env/src/partition.rs:462` routes it to the remote environment;
+`crates/envd/src/server.rs:6964` runs `WorkspaceOperations::capture_inputs` on that owner; and
+`crates/envd/src/workspace/operations.rs:905` does the enumeration, scanning and hashing.
+`ProjectEnvironment::attach` (`crates/envd/src/lib.rs:813`, `attach_owner:2010`) reconnects an
+existing live owner before it spawns, and `spawn_project_daemon_with:2240` uses
+`kill_on_drop(false)`, so a spawned envd survives as an orphan and a later repetition attaches it.
+On an attached repetition the capture work definitely runs in that pre-existing outside-tree
+process, unless the documented embedded fallback occurs.
+
+Two consequences. First, the §G1 runs did not record per-repetition attachment mode, so it is not
+known which repetitions attached and which spawned; repetitions measured across different process
+boundaries cannot be averaged as though they were the same measurement. Second, the omission runs
+in the flattering direction: excluded client work makes the client look cheaper and moves both
+ratios toward passing. Until the accounting boundary is settled, these rows are not a measurement
+of client cost, and no client-ratio verdict should be drawn from them. A rerun must attribute
+envd explicitly, discovering it whether or not it is a descendant, and report client cost both
+in-tree and including envd rather than folding the two together.
+
 ### Gap to acceptance (2026-11-04)
 
 None of the items below was built on 2026-11-04. Items 1 and 2 are substantial. Items 3 and 4
