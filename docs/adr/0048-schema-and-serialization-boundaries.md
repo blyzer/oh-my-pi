@@ -221,7 +221,7 @@ Benchmarks in the research document stay plans (UNVERIFIED) and do not gate CI.
 **Status: Partially implemented.** The owner accepted the format-preservation decision, and the Buf check plus every hardening item except B9 is implemented. B9 Variant 1 is selected but its daemon-context authority verification remains open.
 
 - **Done:** Buf breaking configuration and CI, B1, B2, B3, B4, B5, B6, B7, and B8.
-- **Done:** B5 landed in `ee0371931f`. The corpus covers one durable behavior family per fixture, `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool-update` and `patch`, with no redundant field permutations as the owner directed. `corpus()` and `MIN_FIXTURES` in `session/tests/golden_journals.rs` pin the count, so a family cannot be dropped silently. `golden_journals_open_and_fold_to_their_recorded_snapshots` replays every checked-in `.oms` against its recorded snapshot: `just test-pkg omp-session`, 63 passed.
+- **Done:** B5 replay checks that the discovered fixture names equal the registered `corpus()` names, then folds each journal and compares it with its recorded snapshot (`crates/session/tests/golden_journals.rs:golden_journals_open_and_fold_to_their_recorded_snapshots`).
 - **Open:** B9 fixes the Python schema revision drift, but
   `docs/architecture/processes.md` still contains the stale
   `WorkerProcess::spawn` description and issue filing for WorkerHello and

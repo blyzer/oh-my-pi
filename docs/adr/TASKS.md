@@ -104,9 +104,9 @@ Completed implementation items:
 Active items:
 
 - **DONE** B4. `validate_worker_frame` guards the worker process and readiness-ping decode paths, and `validate_host_frame` guards the host-frame child path. `just test-pkg omp-proto` passed 33 tests plus one doctest.
-- **DONE** B5. The golden corpus landed in `ee0371931f` with one fixture per durable behavior family, `chat-stream`, `tool-calls-and-rewind`, `compaction`, `tool-update` and `patch`, and no redundant field permutations. `corpus()` and `MIN_FIXTURES` in `crates/session/tests/golden_journals.rs:36,250-258` pin the count. `golden_journals_open_and_fold_to_their_recorded_snapshots` replays every checked-in `fixtures/journal/*.oms` against its recorded snapshot: `just test-pkg omp-session` passed 63 tests. The ledger carried this as OPEN until 2026-11-03 because the status update did not land with the code.
+- **DONE** B5 corpus replay and family identity: `crates/session/tests/golden_journals.rs:golden_journals_open_and_fold_to_their_recorded_snapshots` compares fixture names with `corpus()` and replays each against its snapshot.
 
-- **OPEN** golden-corpus replay/registry divergence. `golden_journals_open_and_fold_to_their_recorded_snapshots` globs `fixtures/journal/*.oms` and never consults `corpus()`. `MIN_FIXTURES` pins the count but not the identity, so a family added to `corpus()` whose fixture is missing, or a checked-in fixture dropped from `corpus()`, diverges silently in one direction. Found 2026-11-03 while verifying B5.
+- **RESOLVED** golden-corpus replay/registry divergence. `crates/session/tests/golden_journals.rs:golden_journals_open_and_fold_to_their_recorded_snapshots` compares the sorted registered names with the discovered fixture names.
 - **OPEN** branch-protection documentation drift. `.github/rulesets/omp2-protected.json` requires 11 status contexts; `docs/BRANCH_PROTECTION.md` lists 10, omitting `Protobuf format and lint`. Found 2026-11-03.
 - **NOTE** a docs-only diff skips every code job: `.github/ci-paths.txt` gates `rust`, `remote_linux`, `protobuf` and the lint jobs out, observed on PR #466 (run 41594072179). Only `Detect CI-relevant changes` and the labelers run.
 
@@ -147,9 +147,10 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
-- **IN PROGRESS** ADR 0039 mutating verbs. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. A named session still answers `UNIMPLEMENTED`. The verbs do not drive a session yet.
-- **RESOLVED** ADR 0041 `screen` and `flow` (2026-11-03). Neither needed a node shape: a TSP node joins `wire::Kind`, and `Mode::Screen` and `Mode::Flow` were already typed in the wire module, so both are placement decisions. `Surface` (`crates/chat/src/tsp.rs`) is built for a `Mode`, `crates/chat/src/host.rs` covers the pane with a `screen` surface for a full-screen panel that describes itself natively, and the reference applier (`crates/tui/src/tsp/doc.rs`) closes each mode as the specification says. Nothing opens a `flow` surface yet: print mode (`crates/app/src/print_mode.rs`) has no probe epoch and does not use the chat projection.
-- **BLOCKED** ADR 0041 `TERN_BLOB_DIR`. It is not a node and exists only in prose: no code defines or reads it. It needs a definition against `Query::Blobs` and `Encoder::blob`, or removal from the ADR (audit row 0041-D).
+- **IN PROGRESS** ADR 0040 execution. Routing exists in `crates/exec/src/place.rs:place`. The recorded remote envd run failed three process-lifecycle tests (`docs/audits/remote-verification-trial.md` §G1; `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`). [UNVERIFIED] Current remote result was not rerun.
+- **IN PROGRESS** ADR 0039 R2. Submit is served by `crates/serve/src/session.rs:SessionControlRpc::submit` and `crates/driver/src/session_wire.rs:SessionWire::submit`. Approve and AnswerUi remain unimplemented in `crates/serve/src/session.rs:SessionControlRpc::approve` and `SessionControlRpc::answer_ui` at this baseline; PR #477 is in flight. [UNVERIFIED] Resume and fork were not reassessed.
+- **IN PROGRESS** ADR 0041 `screen` and `flow`. `crates/chat/src/tsp.rs:Surface::new` supports the modes, but `crates/chat/src/host.rs:Host` constructs an inline surface. [UNVERIFIED] Production screen and flow callers were not established in the checked chat host and `crates/app/src/print_mode.rs`.
+- **[UNVERIFIED]** ADR 0041 `TERN_BLOB_DIR`. The checked `crates/chat/src/tsp.rs:Surface::new` and `crates/app/src/print_mode.rs` did not establish a reader; its repository-wide status was not verified.
 
 Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
 
@@ -158,7 +159,7 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   rather than restored, and its `attach_cmd::run` stub that parked on
   `std::future::pending()` was never reinstated. R1 landed as PRs #433 through #442 and the
   P14 proof: `omp_dom::wire`/`redact`, `ControlVisibility`, `SessionBridge`, `SessionWire`
-  on the owner socket, `SessionControlRpc` with its four `UNIMPLEMENTED` verbs, the
+  on the owner socket, `SessionControlRpc` (Submit is now served by `crates/serve/src/session.rs:SessionControlRpc::submit`), the
   `omp attach --observe` client, and the idle-session subscription seam. The unit queue and
   what each unit carries are below; `origin/feat/session-host` holds nothing `omp2` needs.
 - **NO ACTION** Codex `auth_required` object-form classification. PR #366

@@ -275,11 +275,7 @@ Surface modes, phases 3 and 4 (`crates/tui/src/tsp/doc.rs`, `crates/chat/src/tsp
   scrollback: it never listens, so Tern sends it no acks and its frames never wait for credits; it needs
   the `flow` feature (`present` refuses with `Unsupported` without it) and mounts no composer or
   status band;
-- a full-screen panel that describes itself natively (`PanelAnchor::Full` with a `tsp_node`, today the
-  settings form) covers the pane with a `screen` surface (`Surface::present_cover`) while the inline
-  session stays live underneath, as the specification's "screen over inline" says; nothing is resent
-  when the cover closes. Pickers and the forms of smaller panels stay in the session `layer`. A view the
-  terminal does not draw, kind by kind, keeps its overlay in cells;
+- [UNVERIFIED] A production screen cover was not found in `crates/chat/src/host.rs:Host`; its terminal epoch constructs an inline `Surface`. `crates/chat/src/tsp.rs:Surface::new` accepts a screen mode.
 - the reference applier knows the mode a document opened in: `Document::close(keep)` discards a screen
   surface whatever `keep` says and keeps the `main` of an inline or flow one. The specification's own
   frames and its static `ls` table run through it in every mode.
@@ -288,9 +284,7 @@ Not started, checked against the code on `omp2`:
 - phase 3: native `editor` editing (`edit`, `undo`, `send` events), the autocomplete overlay at the
   caret, `picker`, `prefs` and `effort` nodes (the model hub and the other overlays still use the
   cell UI), and native descriptions for the full-screen panels that have none;
-- phase 4: a `flow` surface opened from print mode (`crates/app/src/print_mode.rs` has no probe epoch and
-  does not use the chat projection), `TERN_BLOB_DIR` (not a node: no code defines or reads it), and
-  Windows ConPTY input. The amendment of 0034 that the Consequences section asks for is also not written.
+- phase 4: [UNVERIFIED] A production flow caller and a `TERN_BLOB_DIR` reader were not established in `crates/app/src/print_mode.rs` or `crates/chat/src/host.rs:Host`; `crates/chat/src/tsp.rs:Surface::new` accepts flow mode.
 
 ## Not verified
 
