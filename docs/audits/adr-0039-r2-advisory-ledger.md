@@ -66,14 +66,26 @@ infer-from-intent error the ledger's closing section describes.
 | 24 | C | `local://` artifacts are unreadable by subagents | Share via absolute paths under `/tmp/omp-research/` |
 
 ---
-| 25 | A | **PENDING** | A schema comment states intent, not behaviour; prove `accepted`/`seq` by test | Behavioural proof required on the approval path: assert by value, verify key-in-journal ordering before the first receipt returns, drop/reopen/retry | feat/r2-approve |
-| 26 | A | **PENDING** | Generic `Session::commit` ordering does not prove the APPROVAL path journals its key | **Ledger item 2 REOPENED**; closes only when the approval-specific test passes including reopen | feat/r2-approve |
+| 25 | A | **CLOSED** | A schema comment states intent, not behaviour; prove `accepted`/`seq` by test | Behavioural proof required on the approval path: assert by value, verify key-in-journal ordering before the first receipt returns, drop/reopen/retry | feat/r2-approve |
+| 26 | A | **CLOSED** | Generic `Session::commit` ordering does not prove the APPROVAL path journals its key | **Ledger item 2 REOPENED**; closes only when the approval-specific test passes including reopen | feat/r2-approve |
 | 27 | A | **PENDING** | The new scope must be an explicit ADR amendment, not only a code variant | A4 table row, owner-grant policy, reasoning, dated Amendment section, plus VARIANTS / welcome-frame / granted-vs-refused tests | feat/r2-approve |
 | 28 | A | "A4 rows" vs "R2 status line" is not independent at merge time: one physical file, two worktrees | **VerbApproveD is sole editor** of ADR 0039 this wave; VerbAnswerUiE sends finished prose plus anchor instead of editing | both slices |
 | 29 | A | `/tmp` ledger is not durable; land it in the repo | Landed as `docs/audits/adr-0039-r2-advisory-ledger.md`, **PR #474, merged** | this file |
 | 30 | R | Independent review: the disposition refusal rested on an unverified premise, untested on the REPLAY path | Premise then verified in code (`CallControl` does not degrade; cross-arm key reuse conflicts), so the refusal stands **on evidence, not on the original argument** | feat/r2-submit |
 | 31 | I | **PENDING** | `entry_id`: a client that loses its first receipt cannot re-derive its entry (no key in the DOM, no lookup-by-key RPC, `seq = 0` on replay) | **Field ADDED** on a new number, after being refused twice on two different arguments | feat/r2-submit |
 | 32 | A | **PENDING** | Pin the no-degradation invariant with executable tests, not a comment | Cross-arm key reuse in BOTH directions plus same-arm reopen replay, asserted by variant and by value | feat/r2-submit |
+
+## Closed by passing tests (PR #477)
+
+Rows 25 and 26 are closed by `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen`
+on `feat/r2-approve`. It runs the real `CallControl::handle` with Remote delivery, asserts
+`Applied{entry: head, seq: 3}` **by value**, and a waker **reads the journal from disk inside
+`reply.send`**, so the decision entry and its key are proven on disk BEFORE the outcome is
+sent. It then drops the session, reopens, retries the same key and asserts `Duplicate{entry}`
+with no new entry. An in-memory index answers `NotPending` there.
+
+`just check` exit 0; `0 failed` across omp-agent 351, omp-app 462, omp-driver 601, omp-e2e 68
+(1 skipped), omp-journal 58 (3 skipped), omp-proto 33, omp-serve 44, omp-session 71 (1 skipped).
 
 ## Open: owner decisions and unproven work
 
