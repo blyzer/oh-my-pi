@@ -59,17 +59,38 @@ coordinator), **C** = coordinator self-correction.
 | 24 | C | `local://` artifacts are unreadable by subagents | Share via absolute paths under `/tmp/omp-research/` |
 
 ---
+| 25 | A | A schema comment states intent, not behaviour; prove `accepted`/`seq` by test | Behavioural proof required on the approval path: assert by value, verify key-in-journal ordering before the first receipt returns, drop/reopen/retry | feat/r2-approve |
+| 26 | A | Generic `Session::commit` ordering does not prove the APPROVAL path journals its key | **Ledger item 2 REOPENED**; closes only when the approval-specific test passes including reopen | feat/r2-approve |
+| 27 | A | The new scope must be an explicit ADR amendment, not only a code variant | A4 table row, owner-grant policy, reasoning, dated Amendment section, plus VARIANTS / welcome-frame / granted-vs-refused tests | feat/r2-approve |
+| 28 | A | "A4 rows" vs "R2 status line" is not independent at merge time: one physical file, two worktrees | **VerbApproveD is sole editor** of ADR 0039 this wave; VerbAnswerUiE sends finished prose plus anchor instead of editing | both slices |
+| 29 | A | `/tmp` ledger is not durable; land it in the repo | Landed as `docs/audits/adr-0039-r2-advisory-ledger.md`, **PR #474, merged** | this file |
+| 30 | R | Independent review: the disposition refusal rested on an unverified premise, untested on the REPLAY path | Premise then verified in code (`CallControl` does not degrade; cross-arm key reuse conflicts), so the refusal stands **on evidence, not on the original argument** | feat/r2-submit |
+| 31 | I | `entry_id`: a client that loses its first receipt cannot re-derive its entry (no key in the DOM, no lookup-by-key RPC, `seq = 0` on replay) | **Field ADDED** on a new number, after being refused twice on two different arguments | feat/r2-submit |
+| 32 | A | Pin the no-degradation invariant with executable tests, not a comment | Cross-arm key reuse in BOTH directions plus same-arm reopen replay, asserted by variant and by value | feat/r2-submit |
 
 ## Still open
 
-1. **`AnswerUi` scope** — owner decision. A4 names none. Slice ships refused behind a
-   fail-closed seam. Options: fold into `approve`, fold into `prompt`, or its own scope
-   (coordinator recommends the last: a UI request can carry a confirmation that
-   authorizes something a steerer never intended).
-2. **#9 / #18** — persisted journal keys across all three record kinds, in flight.
-3. **claude-bridge OAuth** — expired; the installed binary has no `auth` subcommand, and
-   `claude-bridge` appears nowhere in `crates/`, so binary and config disagree about
-   which providers exist.
+1. **Ledger item 2 / #9 / #26** — the approval path must journal its idempotency key
+   **durably**, with a test that applies, drops, reopens from the journal, retries the
+   same key, and asserts `accepted` and `seq` by value. Until that test passes, the
+   indeterminate-retry contract is unproven. An in-memory index passes everything else.
+2. **`UiAnswer` encoding** — still owner-undecided. Shipping provisionally behind ONE
+   private typed decoder (no `Value` traversal, no `json!`), recorded as provisional,
+   alternatives named: a proto `oneof`, a typed sub-message, or the provisional JSON.
+3. **claude-bridge OAuth** — expired. The installed binary has no `auth` subcommand
+   (both `omp auth login --help` and `omp auth --help` fall through to `launch` help),
+   and `claude-bridge` appears nowhere in `crates/`, so the binary and `config.yml`
+   disagree about which providers exist. `omp auth login <provider>` exists only in
+   `omp2` source (`crates/app/src/auth_cli.rs`).
+
+## Resolved since the first revision
+
+- **`AnswerUi` scope**: its own scope `answer_ui`, owner socket holds it, devices do
+  not (R3b). A UI request's content is chosen by the agent at runtime, so the blast
+  radius of answering is not bounded at grant time; folding it into `prompt` or
+  `approve` would make that grant open-ended by construction. Amended into A4.
+- **Submit receipt**: `disposition` out (no degradation path, verified), `entry_id` in
+  (lost-receipt recovery, verified).
 
 ## The recurring coordinator error
 Inferring behaviour from the existence of a name: a field called `idempotency_key`
