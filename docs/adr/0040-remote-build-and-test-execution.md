@@ -1079,11 +1079,159 @@ top of it in PR 1d.
 
 ## Status in omp
 
-**Status: Partially implemented.** Re-verified against `omp2` at `9e0c073d04`.
+**Status: Partially implemented.** Re-verified 2026-11-04 against `omp2` at `1578b1204c` by reading
+code, tests and `docs/audits/remote-verification-trial.md`. No build, test, remote run or
+measurement was repeated for this re-verification. The record stays `proposed`. The production
+gate of the 2026-10-31 amendment is unmet. The wall-time and client-memory success criteria in
+"Measurement plan" fail on every measured `omp-envd` arm.
 
-Implemented: `omp-exec` domain crate (`crates/exec/`) with `BuildReport`, `BuildStatus`, `place()`, `CargoJust` adapter, and `ExecutionPolicy`; REAPI client backend (`crates/exec-reapi/`); BuildBuddy Run API backend (`crates/exec-buildbuddy/`); local backend (`crates/exec-local/`); SSH backend (`crates/exec-ssh/`). Operator convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_remote_endpoint`, `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`, `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`, `sv_exec_fallback_local`. Telemetry: `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`, `omp.exec.run`, `omp.exec.download` spans emitted; `ExecutedActionMetadata` fields captured in `omp.exec.worker.*` tracing events (PR #351). `BuildReport`/`BuildStatus` added PR #350. Client CPU and memory measurement via `scripts/measure-recipe.py` (PRs #352, #353). Gate 2 proven 2026-10-19: `bb remote` dispatched `just remote-test-pkg omp-exec-reapi` to a Linux runner, 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af` (PR #339; `docs/audits/remote-verification-trial.md`).
+Composed into a product path (Part L Slice 1 and the Slice 2 local path):
 
-The later remote `omp-envd` run is recorded in `docs/audits/remote-verification-trial.md` §G1. Both repetitions failed three process-lifecycle tests, including `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`; the audit labels executor process semantics as an inference, not a diagnosis. [UNVERIFIED] Current remote behavior and acceptance criteria were not rerun. `crates/exec/src/place.rs:place` implements placement.
+- The ADW remote code phase. `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote`
+  captures inputs through envd, plans the command through `crates/exec/src/cargo_just.rs:CargoJust`,
+  and runs one `ReapiBackend` Action (`crates/exec-reapi/`) under the `reapi` or `buildbuddy`
+  profile. BuildBuddy invocation cancel is `omp_exec_reapi::buildbuddy_cancel::BuildBuddyCanceller`,
+  built with the `buildbuddy-cancel` feature.
+- ADW placement and fallback. `crates/driver/src/adw/production.rs:ProductionAdwHost::run_command`
+  sends a phase remote under `remote-only` and `remote-preferred` when
+  `crates/driver/src/adw/remote.rs:eligible` accepts its `just` recipe. It falls back to local only
+  under `remote-preferred` with `sv_exec_fallback_local` on, and only after
+  `RemoteError::PreAcceptanceFailed`. `crates/exec/src/error.rs:fallback_eligible` is false for
+  every error after acceptance, so the ADW path never starts a second action for an accepted one.
+  ADW placement does not call `crates/exec/src/place.rs:place`. Its policy type is
+  `AdwExecPolicy`, not `omp_exec::ExecutionPolicy`.
+- The local backend (`crates/exec-local/`). `run_command` and
+  `crates/driver/src/cleanse/production.rs:run_checker` compose `LocalBackend`. `run_checker` is
+  the one product caller of `place`. It offers no backend, so the call can only refuse an
+  unplaceable request, and every admitted checker runs locally.
+- Operator convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`,
+  `sv_exec_remote_endpoint`, `sv_exec_remote_cache`, `sv_exec_remote_profile`,
+  `sv_exec_remote_credential`, `sv_exec_remote_image`, `sv_exec_upload_exclude`,
+  `sv_exec_upload_allow`, `sv_exec_fallback_local`.
+- Telemetry. The `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`,
+  `omp.exec.run` and `omp.exec.download` spans are emitted. `ExecutedActionMetadata` fields are
+  captured in `omp.exec.worker.*` tracing events (PR #351).
+- Measurement. `scripts/measure-recipe.py` records client wall time, CPU and process-tree RSS
+  (PRs #352, #353). Gate 2 was proven 2026-10-19: `bb remote` dispatched
+  `just remote-test-pkg omp-exec-reapi` to a Linux runner, and 54 of 54 tests passed, invocation
+  `03d524aa-71d2-40ed-b92f-f1da843c63af` (PR #339; `docs/audits/remote-verification-trial.md`).
+
+Present, but used by no product path:
+
+- `BuildReport` and `BuildStatus` (`crates/exec/src/report.rs`, PR #350). Nothing outside
+  `crates/exec/` uses them.
+- The BuildBuddy Run API backend (`crates/exec-buildbuddy/`). No workspace crate depends on
+  `omp-exec-buildbuddy`.
+- The SSH backend (`crates/exec-ssh/`). `crates/driver/Cargo.toml` declares `omp-exec-ssh`, but no
+  driver source uses `omp_exec_ssh`.
+
+The 2026-10-31 production gate is unmet:
+
+- Nothing produces a `JobKind::Execution` job (`crates/agent/src/jobs.rs:JobKind::Execution`).
+  `crates/session/src/components/jobs.rs:insert_execution` is the only writer of an execution job
+  node, and it has no caller. `crates/session/src/components/jobs.rs:accept_execution` has no
+  caller. No `jobs::insert` call passes the kind `execution`. `JobBoard::attach_execution_run` and
+  `JobBoard::attach_execution_task` (`crates/agent/src/jobs.rs`) have no caller. `run_remote`
+  drops the handle carried by `ExecutionEvent::Accepted` and journals nothing. The ADW code
+  (`crates/driver/src/adw/`, `crates/adw/src/`) owns no session journal and no job board.
+- The execution branch of the persistence code is unreachable from any product path.
+  `crates/agent/src/jobs.rs:commit_settlement` writes `execution_state`, `backend`,
+  `reattach_schema`, `reattach_handle`, a bounded `execution_result`, and `execution_failure` only
+  for a settlement that carries an `ExecutionSettlement`. Only `supervise_execution` and the
+  accepted-handle step of `JobBoard::poll` build one, and both need a run attached through
+  `JobBoard::attach_execution_run`. `crates/agent/src/jobs.rs:supervise_execution` maps a run that
+  ends, or is cancelled, after acceptance to `ExecutionState::EffectsUnknown`. Its unit test
+  `accepted_run_without_terminal_event_is_effects_unknown` is the only behavior test of the
+  lifecycle.
+- Reattach is a stub. `crates/agent/src/jobs.rs:reattach_execution` returns the stored handle text
+  and carries `// TODO: call backend.reattach(&handle) to reconnect the live run.` Its one caller,
+  `crates/app/src/jobs_cmd.rs:attach` (`omp jobs attach`), prints that text.
+  `ExecutionBackend::reattach` (`crates/exec/src/backend.rs`) has four implementations and no call
+  site. `ReapiBackend` reports `ResumeSupport::Reattach` and implements `reattach` with
+  `WaitExecution`, but no test calls it. The test
+  `a_dropped_execute_stream_reattaches_with_wait_execution` covers the reconnect inside one
+  `ReapiRun`, not a resume from a stored handle.
+- A restart after acceptance does not record EffectsUnknown. `JobBoard::rebuild` marks the live
+  execution job orphaned (`restart_orphan`). `JobBoard::poll` then settles it `failed` with
+  `ORPHANED_EXECUTION_JOB` and no execution settlement, so `execution_state` stays `accepted`.
+- No test covers execution-job journal replay, accepted-action crash handling, or typed result
+  persistence. The 2026-10-31 change (`01f8151003`) edited `crates/agent/tests/jobs.rs` and
+  `crates/agent/tests/turn.rs` only to add `execution: None`.
+
+The wall-time and client-memory criteria fail on both arms. Client CPU passes on the `bb remote`
+arm and fails on rep 1 of the omp REAPI backend arm. The local arm is warm
+`just test-pkg omp-envd` on 2026-10-20: 168.4 s wall, 100.3 s CPU, and a 2616.6 MiB process-tree
+peak.
+
+| Remote arm | Wall (≤ 1.5× local) | Client CPU (< 5%) | Client peak memory (< 5%) |
+|---|---|---|---|
+| `bb remote`, 2026-10-20, 3 reps | 1.83× mean; rep 3 alone 1.25× | 1.5% | 7.7% (201.9 MiB) |
+| omp REAPI backend, 2026-10-24, reps 1 and 2, cold, cache off | 3.1×, 2.6× | 5.2%, 3.6% | 11.1%, 8.2% (290.0, 215.4 MiB) |
+
+Both rows come from `docs/audits/remote-verification-trial.md` §G1. Neither remote arm is
+interleaved with the local arm. The `bb remote` reps do not record runner cache state. Both
+2026-10-24 reps failed the same three envd process-lifecycle tests remotely, including
+`crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`. The audit labels executor
+process semantics as an inference, not a diagnosis.
+
+### Gap to acceptance (2026-11-04)
+
+None of the items below was built on 2026-11-04. Items 1 and 2 are substantial. Items 3 and 4
+are small, but they only matter once item 1 exists, and none of the four changes what the success
+criteria measure. Whether acceptance needs them is open question 8 for the owner.
+
+1. **A `JobKind::Execution` producer.** A product caller mints an `ExecutionSpec`, appends
+   `insert_execution` to its session, and hands the run to `JobBoard::attach_execution_run`. Part L
+   files agent-initiated remote runs as jobs (ADR 0010) under "Later", and no caller is specified.
+   The ADW path cannot be that caller as it stands, because it owns no session journal and no job
+   board. Part A.1 already routes ADW results to "a CLI report for ADW today". The producer also
+   needs the backend composition in `run_remote` moved where a kernel can build a `ReapiBackend`
+   from the same `sv_exec_*` cfg, and the operator approval that Part A.3 requires for
+   agent-initiated remote runs. It buys a durable accepted-action record, which every other gate
+   item depends on.
+2. **A real reattach.** `reattach_execution` parses the stored `ReattachHandle`, composes the
+   backend that `ReattachHandle::backend` names from operator cfg, calls
+   `ExecutionBackend::reattach`, and attaches the resumed run with `attach_execution_run` so that
+   its settlement is journaled. `crates/app/src/jobs_cmd.rs:run` opens the journal and never writes
+   to it, so `omp jobs attach` would have to own the session it writes. Only `ReapiBackend` can
+   resume. Every other backend reports `ResumeSupport::Unsupported` and needs a typed refusal. It
+   buys recovery of an accepted remote run without a rerun (R5). For `omp-envd` that saves one cold
+   remote run, 442.7 s to 518.9 s of client wall on 2026-10-24. It depends on item 1, because
+   without a producer no handle is ever stored.
+3. **EffectsUnknown on restart.** When a live `JobKind::Execution` job has a stored handle, the
+   orphan step of `JobBoard::poll` settles it with `ExecutionState::EffectsUnknown`, the stored
+   handle, and `ExecutionError::EffectsUnknown`, not with a plain `failed`. It buys the
+   amendment's accepted-action rule across a restart.
+4. **The gate tests.** An execution job survives journal replay. A restart after acceptance
+   leaves EffectsUnknown and starts no second action. A typed result round-trips through
+   `execution_result`, including the CAS spill of an oversized result. These belong in
+   `crates/agent/tests/jobs.rs` and should drive the producer from item 1. Written against the
+   current tree, they would test functions that no product path calls.
+
+Whether the success criteria can be met:
+
+- **Client CPU (< 5%).** Reachable. The `bb` client used 1.5%. The omp client used 5.2% on rep 1
+  and 3.6% on rep 2, so it failed once.
+- **Warm wall time (≤ 1.5× warm local, so 252.6 s for `omp-envd`).** Not shown to be
+  unreachable, but no omp product path can reach it. One `bb remote` rep met it (210.9 s, 1.25×)
+  and the three-rep mean (308.7 s) did not, and the reps do not record whether a runner was cold.
+  `bb remote` is an operator tool, not omp product code. Both `omp-envd` runs through the omp REAPI
+  backend paid a cold remote build. [INFERENCE] On BuildBuddy no omp REAPI run can be warm. The
+  2026-10-10 recycling probe found a fresh boot on each of four sequential raw REAPI actions with
+  `recycle-runner=true`, and `crates/driver/src/adw/remote.rs:validate_cache_policy` refuses the
+  action cache under the `buildbuddy` profile. A warm omp run needs a warm-state backend. The
+  candidate is the BuildBuddy Run API backend, which no product path composes and whose snapshot
+  contract the 2026-10-31 amendment lists as UNVERIFIED.
+- **Client peak memory (< 5% of the local peak).** Unreachable for `omp-envd` with every client
+  measured. Five percent of 2616.6 MiB is 130.8 MiB. The lowest client peak recorded is
+  201.9 MiB, from the `bb` client, and the omp client peaked at 215.4 MiB and 290.0 MiB. A client
+  with a fixed floor F passes only on a recipe whose local peak exceeds 20 × F. That is about
+  3.9 GiB for the `bb` client and 4.2 GiB to 5.7 GiB for the omp client. [INFERENCE] A release
+  `omp` client may peak lower. The audit names the 2026-10-20 omp client as the debug binary and
+  does not record the build of the 2026-10-24 client, so no measurement is known to come from a
+  release client.
+- The thresholds are owner adjustable ("Measurement plan"). Whether to keep, restate, or retarget
+  them is open question 7 for the owner.
 
 ### BuildBuddy coverage of REAPI
 
@@ -1411,7 +1559,8 @@ None touches a backend.
 ### Not verified
 
 - Whether `vars.MACOS_RUNNER` still targets this laptop.
-- Peak RSS and swap of any recipe.
+- Swap of any recipe. Peak process-tree RSS is measured for `omp-envd` and `omp-core`
+  (`docs/audits/remote-verification-trial.md` §G1).
 - BuildBuddy Cloud specifics:
   - message-size limit;
   - maximum action timeout;
@@ -1429,7 +1578,9 @@ None touches a backend.
   - how a same-host snapshot resume is metered (that snapshots are billed transfer is documented);
   - Team prices, and the terms of managed Mac executors.
 - The scope of the GitHub App token BuildBuddy passes to the runner.
-- Everything in the Slice 0 and 0b sketches: none of it was run.
+- The Slice 0 and 0b sketches as written. Slice 0 later ran as `just remote-test-pkg` and
+  `just remote-seed`, and the 2026-10-10 recycling probe ran `bb execute`
+  (`docs/audits/remote-verification-trial.md`).
 - Whether `bb remote --container_image` accepts the `ubuntu-24.04` alias.
 - Pants or Reclient on BuildBuddy.
 - The licenses of the vendored protos.
@@ -1450,6 +1601,20 @@ None touches a backend.
    or Team? Should BuildBuddy be asked about managed Mac cores (R4b) for the macOS proofs?
 6. **`.gitignore`.** Change `/vendor/` to `/vendor`, so the worktrees' `vendor` symlink stops
    showing as untracked? It is a separate one-line change.
+7. **Success criteria for `omp-envd`.** With every client measured, the memory criterion cannot
+   pass on `omp-envd`, and no omp product path can produce the warm run that the wall criterion
+   compares ("Gap to acceptance"). Choose one. Keep the thresholds and record that `omp-envd`
+   cannot meet them. Restate memory as an absolute client ceiling or as relief (local peak minus
+   client peak), and restate wall time for a cold remote run. Judge the criteria on a recipe with a
+   larger local peak (`just clippy` and `just e2e-build` are unmeasured). Or build a warm-state
+   backend first.
+8. **Scope of the production gate.** Journal replay, crash handling and result persistence, the
+   items of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no
+   product path creates one. Part L files that producer under "Later", and no caller is specified.
+   Library tests alone would meet the gate's wording while testing functions that no product path
+   calls. Either build the producer and a real reattach before this record can be accepted, or
+   narrow the gate to the ADW path. That path journals nothing and enforces the accepted-action
+   rule in-process through `crates/exec/src/error.rs:fallback_eligible`.
 
 ### Review record (2026-10-08)
 
@@ -1497,16 +1662,20 @@ The ADR0040-K adversarial review selected Design A over backend-owned durable ru
 returned **REVISE DESIGN A** before production approval. Journal and CAS remain the only durable
 authority. The runtime job board remains a disposable index.
 
-The accepted-action rule is now explicit. A backend-neutral execution lifecycle records
+The accepted-action rule is now explicit. A backend-neutral execution lifecycle MUST record the
 requested, accepted, settled, and effects-unknown states. An accepted execution carries a
 versioned opaque reattach handle. If the watcher loses the terminal effect after acceptance,
-the journal records EffectsUnknown and the system MUST NOT start a second action. Provider
+the journal MUST record EffectsUnknown and the system MUST NOT start a second action. Provider
 idempotency or lookup is REQUIRED before any retry can be considered safe.
 
-The first implementation slice persists backend identity, the opaque handle, typed failure class,
-and a compact bounded execution result projection through the existing session journal/CAS path.
-Local and BuildBuddy Run API snapshot resume remain unsupported until their contracts are verified.
-Generic REAPI reattachment remains the only supported remote resume path in this slice.
+The first implementation slice (`01f8151003`) added the code that persists backend identity, the
+opaque handle, the typed failure class, and a compact bounded execution result projection through
+the existing session journal and CAS path (`crates/session/src/components/jobs.rs:insert_execution`,
+`crates/agent/src/jobs.rs:commit_settlement`). No product path calls that code, because nothing
+creates a `JobKind::Execution` job. No execution is persisted (see "Status in omp"). The local,
+SSH and BuildBuddy Run API backends report `ResumeSupport::Unsupported` until their contracts are
+verified. Generic REAPI is the only backend that reports `ResumeSupport::Reattach`. Nothing
+resumes a run, because `crates/agent/src/jobs.rs:reattach_execution` is a stub.
 
 The following BuildBuddy Run API facts remain **UNVERIFIED** and are not part of the supported
 contract: client-supplied idempotency or invocation lookup, snapshot request and response fields,
