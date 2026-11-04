@@ -10,7 +10,8 @@
 //! R1 is owner-local. The socket is the authenticator: the `run` directory is
 //! 0700 and the socket 0600, so no other OS user can connect. The reads and
 //! `Open` of a new session are served, the latter only for a context holding
-//! [`ControlScope::Control`], which the owner socket grants. Device
+//! [`ControlScope::Control`], and so are approval decisions, for one holding
+//! [`ControlScope::Approve`]; the owner socket grants both. Device
 //! authentication and TCP belong to later phases, and the projection answers
 //! the remaining mutating verbs `UNIMPLEMENTED` until then.
 //!
@@ -26,9 +27,13 @@ use std::{
 	time::Duration,
 };
 
-use omp_agent::{Up, steering::DomSubscription};
+use omp_agent::{
+	ApprovalDecision, ApprovalDelivery, ApprovalOutcome, ApprovalScope, Up,
+	steering::DomSubscription,
+};
 use omp_core::{FastHashMap, Str};
 use omp_dom::redact::PropPolicy;
+use omp_journal::idempotency::IdempotencyKey;
 use omp_proto::session::v1 as pb;
 use omp_serve::{
 	inference::RpcStream,
@@ -71,6 +76,15 @@ const CONTROL_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// A kernel mid-turn answers from its mailbox as soon as the turn yields, so
 /// this bounds a wedged kernel rather than a busy one.
 const SUBSCRIBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// How long a kernel has to answer [`Up::Approve`] before the outcome is
+/// reported unknown.
+///
+/// Elapsing proves nothing about the decision. A kernel drains its mailbox
+/// only inside a turn, and a decision it has observed may still be
+/// committing: the journal's durable write has no time bound. The caller
+/// recovers by retrying under the same idempotency key.
+const APPROVE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Failure to bind or serve the owner-only session socket.
 #[derive(Debug, thiserror::Error)]
@@ -117,8 +131,8 @@ pub enum SessionWireError {
 	},
 }
 
-/// Reads the live session registry, owns one bridge per attached session, and
-/// answers the read-only session-control verbs.
+/// Reads the live session registry, owns one bridge per attached session,
+/// answers the read-only session-control verbs, and relays approval decisions.
 pub struct SessionWire {
 	sessions:  Arc<SessionRegistry>,
 	bridges:   Mutex<FastHashMap<SessionId, Arc<SessionBridge>>>,
@@ -640,6 +654,71 @@ impl SessionControlAuthority for SessionWire {
 		))
 	}
 
+	async fn approve(
+		&self,
+		context: ControlContext,
+		request: pb::ApproveRequest,
+		lifetime: ApprovalScope,
+		key: IdempotencyKey,
+	) -> Result<pb::CommandReceipt, SessionControlError> {
+		// Checked here as well, as `open_session` checks `control`: the
+		// authority is public, so a projection other than `SessionControlRpc`
+		// can reach it without running that gate.
+		context.require_approve(&lifetime)?;
+		let handle = self
+			.sessions
+			.lookup(SessionId::from_ref(request.session_id.as_str()))
+			.ok_or_else(|| SessionControlError::UnknownSession {
+				session_id: Str::new(request.session_id.as_str()),
+			})?;
+		if let Some(expected) = request.expected_epoch {
+			let actual = self.epoch_of(&handle.id);
+			if expected != actual {
+				return Err(SessionControlError::EpochMismatch { expected, actual });
+			}
+		}
+		let ticket_id = Str::new(request.ticket_id.as_str());
+		let reason = (!request.reason.is_empty()).then(|| Str::new(request.reason.as_str()));
+		let decision = ApprovalDecision::external(
+			request.approved,
+			lifetime,
+			context.principal().clone(),
+			reason,
+		);
+		let (reply, outcome) = flume::bounded(1);
+		handle
+			.up
+			.send(Up::Approve {
+				id: ticket_id.clone(),
+				decision,
+				delivery: ApprovalDelivery::Remote { key, reply },
+			})
+			.map_err(|_| SessionControlError::SessionNotLive {
+				session_id: handle.id.clone().into(),
+			})?;
+		// Giving up drops `outcome`, which cancels a message the kernel has
+		// not observed yet. One it has observed may still commit, and a kernel
+		// that drops the message unanswered may have stopped mid-commit, so
+		// neither case can claim the decision was not applied.
+		let outcome = match tokio::time::timeout(APPROVE_BUDGET, outcome.recv_async()).await {
+			Ok(Ok(outcome)) => outcome?,
+			Ok(Err(_)) | Err(_) => return Err(SessionControlError::MutationOutcomeUnknown),
+		};
+		let (accepted, seq, entry) = match outcome {
+			ApprovalOutcome::Applied { entry, seq } => (true, seq, entry),
+			ApprovalOutcome::Duplicate { entry } => (false, 0, entry),
+			ApprovalOutcome::NotPending => {
+				return Err(SessionControlError::ApprovalNotPending { ticket_id });
+			},
+		};
+		Ok(pb::CommandReceipt {
+			idempotency_key: request.idempotency_key,
+			accepted,
+			seq,
+			entry_id: entry.to_string(),
+		})
+	}
+
 	async fn open_session(
 		&self,
 		context: ControlContext,
@@ -1042,14 +1121,38 @@ mod tests {
 		let observing = ScopeSet::from_iter([ControlScope::Observe]);
 
 		let (opened, controller_names) = welcome_for(controlling, (0, 0)).await;
-		assert_eq!(controller_names, ["answer_ui", "approve", "control", "interrupt", "observe", "observe_host_local", "prompt"], "a fresh attach lists the owner grant");
+		assert_eq!(
+			controller_names,
+			[
+				"answer_ui",
+				"approve",
+				"control",
+				"interrupt",
+				"observe",
+				"observe_host_local",
+				"prompt"
+			],
+			"a fresh attach lists the owner grant"
+		);
 		let (_, observer_names) = welcome_for(observing, (0, 0)).await;
 		assert_eq!(observer_names, ["observe"], "a fresh attach does not list it");
 
 		kernel.publish("after the detach");
 		let cursor = (opened.epoch, opened.head_seq);
 		let (_, controller_names) = welcome_for(controlling, cursor).await;
-		assert_eq!(controller_names, ["answer_ui", "approve", "control", "interrupt", "observe", "observe_host_local", "prompt"], "a resumed attach lists the owner grant");
+		assert_eq!(
+			controller_names,
+			[
+				"answer_ui",
+				"approve",
+				"control",
+				"interrupt",
+				"observe",
+				"observe_host_local",
+				"prompt"
+			],
+			"a resumed attach lists the owner grant"
+		);
 		let (_, observer_names) = welcome_for(observing, cursor).await;
 		assert_eq!(observer_names, ["observe"], "a resumed attach does not list it");
 	}
@@ -1714,6 +1817,206 @@ mod tests {
 		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
 	}
 
+	/// Registers a session whose mailbox the test reads, so the test answers
+	/// every `Up::Approve` the wire sends as the kernel would.
+	fn approving(sessions: &SessionRegistry) -> flume::Receiver<Up> {
+		let (up, mailbox) = flume::unbounded();
+		sessions.register(Str::new_static("live"), KernelHandle {
+			id: SessionId::new("live"),
+			name: Str::new_static("live"),
+			up,
+			snapshot: Arc::new(RwLock::new(Dom::new().snapshot())),
+			topology: omp_agent::SessionTopology::main(Str::new_static("live")),
+			relay: IrcRelayPolicy::default(),
+			autoreply: None,
+			idle_subscribe: None,
+			project_root: Arc::from(Path::new("/workspace/live")),
+		});
+		mailbox
+	}
+
+	fn approval(key: &str) -> pb::ApproveRequest {
+		pb::ApproveRequest {
+			session_id: "live".to_owned(),
+			idempotency_key: key.to_owned(),
+			ticket_id: "ticket-1".to_owned(),
+			approved: true,
+			scope: "session".to_owned(),
+			reason: "looks right".to_owned(),
+			..pb::ApproveRequest::default()
+		}
+	}
+
+	/// Decides one approval through the wire while the kernel side answers it
+	/// with `answer`, after checking the decision the wire asked for.
+	async fn decided(
+		wire: &SessionWire,
+		mailbox: &flume::Receiver<Up>,
+		answer: Result<ApprovalOutcome, omp_agent::ApprovalError>,
+	) -> Result<pb::CommandReceipt, SessionControlError> {
+		let kernel = async {
+			let Ok(Up::Approve { id, decision, delivery: ApprovalDelivery::Remote { key, reply } }) =
+				mailbox.recv_async().await
+			else {
+				panic!("the wire sends the kernel a keyed approval");
+			};
+			assert_eq!(id.as_str(), "ticket-1");
+			assert_eq!(
+				decision,
+				ApprovalDecision::external(
+					true,
+					ApprovalScope::Session,
+					Str::new_static("owner"),
+					Some(Str::new_static("looks right")),
+				),
+				"the authenticated principal decides, never the request"
+			);
+			assert_eq!(key.as_str(), "approve-7");
+			reply.send(answer).expect("the wire is waiting");
+		};
+		let request = approval("approve-7");
+		let key = IdempotencyKey::new_static("approve-7");
+		tokio::join!(wire.approve(owner(), request, ApprovalScope::Session, key), kernel).0
+	}
+
+	/// Advisory ledger item 9 at the wire: an applied decision answers its
+	/// journal position, and a retry the kernel recognizes answers the same
+	/// entry with none.
+	#[tokio::test]
+	async fn an_approval_answers_its_journal_entry_and_a_retry_the_same_entry() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let mailbox = approving(&sessions);
+		let wire = wire(Arc::clone(&sessions));
+		let entry = EntryId::default();
+
+		let applied = decided(&wire, &mailbox, Ok(ApprovalOutcome::Applied { entry, seq: 4 }))
+			.await
+			.expect("the decision applies");
+		assert_eq!(applied, pb::CommandReceipt {
+			idempotency_key: "approve-7".to_owned(),
+			accepted:        true,
+			seq:             4,
+			entry_id:        entry.to_string(),
+		});
+		let replayed = decided(&wire, &mailbox, Ok(ApprovalOutcome::Duplicate { entry }))
+			.await
+			.expect("the retry replays");
+		assert_eq!(replayed, pb::CommandReceipt {
+			idempotency_key: "approve-7".to_owned(),
+			accepted:        false,
+			seq:             0,
+			entry_id:        entry.to_string(),
+		});
+
+		let refused = decided(&wire, &mailbox, Ok(ApprovalOutcome::NotPending))
+			.await
+			.expect_err("a ticket that is not pending is refused");
+		assert!(
+			matches!(&refused, SessionControlError::ApprovalNotPending { ticket_id } if ticket_id.as_str() == "ticket-1"),
+			"{refused:?}"
+		);
+		let reused = omp_session::SessionError::KeyConflict {
+			key:      IdempotencyKey::new_static("approve-7"),
+			existing: entry,
+		};
+		let conflict = decided(&wire, &mailbox, Err(reused.into()))
+			.await
+			.expect_err("a key reused for another decision is refused");
+		assert_eq!(Status::from(conflict).code(), tonic::Code::AlreadyExists);
+	}
+
+	/// A kernel that never answers, or drops the message unanswered, leaves the
+	/// outcome unknown rather than refused. Giving up cancels the message for
+	/// a kernel that has not observed it yet.
+	#[tokio::test(start_paused = true)]
+	async fn an_unanswered_approval_reports_an_unknown_outcome() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let mailbox = approving(&sessions);
+		let wire = wire(Arc::clone(&sessions));
+
+		let unanswered = wire
+			.approve(
+				owner(),
+				approval("approve-7"),
+				ApprovalScope::Session,
+				IdempotencyKey::new_static("approve-7"),
+			)
+			.await;
+		assert!(
+			matches!(unanswered, Err(SessionControlError::MutationOutcomeUnknown)),
+			"{unanswered:?}"
+		);
+		let Ok(Up::Approve { delivery: ApprovalDelivery::Remote { reply, .. }, .. }) =
+			mailbox.try_recv()
+		else {
+			panic!("the approval is still queued for the kernel");
+		};
+		assert!(reply.is_disconnected(), "a kernel that drains it later finds its caller gone");
+
+		let dropped = tokio::join!(
+			wire.approve(
+				owner(),
+				approval("approve-8"),
+				ApprovalScope::Session,
+				IdempotencyKey::new_static("approve-8"),
+			),
+			async {
+				mailbox.recv_async().await.expect("the wire dispatches");
+			},
+		)
+		.0;
+		assert!(matches!(dropped, Err(SessionControlError::MutationOutcomeUnknown)), "{dropped:?}");
+	}
+
+	/// Every refusal the wire can decide alone happens before the kernel sees
+	/// anything.
+	#[tokio::test]
+	async fn approvals_without_their_grant_session_or_epoch_never_reach_the_kernel() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let mailbox = approving(&sessions);
+		let wire = wire(Arc::clone(&sessions));
+		let key = || IdempotencyKey::new_static("approve-7");
+		let controlling = ControlContext::new(
+			"owner",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Control]),
+		);
+
+		let refusal = wire
+			.approve(controlling, approval("approve-7"), ApprovalScope::Session, key())
+			.await
+			.expect_err("control does not decide approvals");
+		assert!(
+			matches!(refusal, SessionControlError::MissingScope { scope: ControlScope::Approve }),
+			"{refusal:?}"
+		);
+		let refusal = wire
+			.approve(owner(), approval("approve-7"), ApprovalScope::Persist, key())
+			.await
+			.expect_err("the owner socket does not persist approvals");
+		assert!(
+			matches!(refusal, SessionControlError::MissingScope {
+				scope: ControlScope::ApprovePersist,
+			}),
+			"{refusal:?}"
+		);
+		let absent = pb::ApproveRequest { session_id: "absent".to_owned(), ..approval("approve-7") };
+		let refusal = wire
+			.approve(owner(), absent, ApprovalScope::Session, key())
+			.await
+			.expect_err("an unknown session is refused");
+		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }), "{refusal:?}");
+		let stale = pb::ApproveRequest { expected_epoch: Some(9), ..approval("approve-7") };
+		let refusal = wire
+			.approve(owner(), stale, ApprovalScope::Session, key())
+			.await
+			.expect_err("a stale epoch is refused");
+		assert!(
+			matches!(refusal, SessionControlError::EpochMismatch { expected: 9, actual: 0 }),
+			"{refusal:?}"
+		);
+		assert!(mailbox.is_empty(), "no refused approval reached the kernel");
+	}
+
 	/// ADR 0039 A4 decides what the owner socket grants. `admin` is "never
 	/// grantable" and `approve_persist` is "never granted" by default, so the
 	/// grant is a list, not `ControlScope::VARIANTS`: deriving it would hand a
@@ -1741,11 +2044,17 @@ mod tests {
 			BTreeMap::from([
 				(ControlScope::Observe, true),
 				(ControlScope::ObserveHostLocal, true),
+				// The owner prompts, steers, and queues from its own terminal.
 				(ControlScope::Prompt, true),
+				// Interrupting its own turn is the owner's Ctrl-C.
 				(ControlScope::Interrupt, true),
+				// The owner answers its own prompts, for at most the session.
 				(ControlScope::Approve, true),
-				// Persisted policy changes are not granted by default.
+				// A persisted decision outlives the session and becomes policy;
+				// A4 grants it to nobody by default, the owner socket included.
 				(ControlScope::ApprovePersist, false),
+				// The owner answers UI requests in its own terminal, so
+				// withholding this here would weaken the socket for no gain.
 				(ControlScope::AnswerUi, true),
 				(ControlScope::Control, true),
 			]),
