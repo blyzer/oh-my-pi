@@ -14,6 +14,11 @@
 //! authentication and TCP belong to later phases, and the projection answers
 //! the remaining mutating verbs `UNIMPLEMENTED` until then.
 //!
+//! `Submit` (R2) reaches a running turn through the kernel mailbox, gated by
+//! the scope its command arm needs. Nothing on this side starts a turn, so an
+//! idle session refuses it at once; a turn that ends before draining it is
+//! covered by a bounded wait that reports the outcome unknown, not refused.
+//!
 //! Redaction is a property of the caller, not of the bridge: a context without
 //! [`ControlScope::ObserveHostLocal`] is served through [`ControlVisibility`],
 //! and one that holds it is served unredacted. The policy is polled, never
@@ -22,13 +27,14 @@
 
 use std::{
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, atomic::Ordering},
 	time::Duration,
 };
 
-use omp_agent::{Up, steering::DomSubscription};
+use omp_agent::{SubmitCommand, SubmitReceipt, TurnControl, Up, steering::DomSubscription};
 use omp_core::{FastHashMap, Str};
 use omp_dom::redact::PropPolicy;
+use omp_journal::idempotency::IdempotencyKey;
 use omp_proto::session::v1 as pb;
 use omp_serve::{
 	inference::RpcStream,
@@ -71,6 +77,17 @@ const CONTROL_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// A kernel mid-turn answers from its mailbox as soon as the turn yields, so
 /// this bounds a wedged kernel rather than a busy one.
 const SUBSCRIBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// How long a kernel has to answer [`Up::Submit`] before the authority reports
+/// the outcome unknown.
+///
+/// A turn drains its mailbox at every safe point, so this bounds the race in
+/// which the turn ends between the activity check and the drain. The command
+/// then waits for the next turn, which drops it unapplied once this caller has
+/// stopped waiting. A kernel that already took it may still commit it, because
+/// the journal write has no time bound, so the answer is "unknown" and the
+/// recovery is a retry under the same key.
+const SUBMIT_BUDGET: Duration = Duration::from_secs(5);
 
 /// Failure to bind or serve the owner-only session socket.
 #[derive(Debug, thiserror::Error)]
@@ -403,6 +420,41 @@ async fn subscribe(handle: &KernelHandle) -> Result<DomSubscription, SessionCont
 	}
 }
 
+/// The kernel command a wire arm asks for, or the refusal of an arm this host
+/// cannot run now.
+///
+/// `prompt` starts a turn, which nothing behind this wire can do, and it is
+/// idle-only, so it is refused either way. Every other arm needs a running
+/// turn to journal it.
+fn submit_command(
+	command: Option<pb::control_command::Command>,
+	active: bool,
+) -> Result<SubmitCommand, SessionControlError> {
+	use pb::control_command::Command;
+	match command.ok_or(SessionControlError::MissingCommand)? {
+		Command::Prompt(_) if active => Err(SessionControlError::SessionBusy),
+		Command::Prompt(_) => Err(SessionControlError::SessionIdle),
+		_ if !active => Err(SessionControlError::SessionIdle),
+		Command::Steer(pb::SteerCommand { text }) => Ok(SubmitCommand::Steer(Str::from(text))),
+		Command::Queue(pb::QueueCommand { text }) => Ok(SubmitCommand::Queue(Str::from(text))),
+		Command::Interrupt(_) => Ok(SubmitCommand::Turn(TurnControl::Interrupt)),
+		Command::AbortTools(_) => Ok(SubmitCommand::Turn(TurnControl::AbortTools)),
+		Command::Pause(pb::PauseCommand { pause }) => Ok(SubmitCommand::Pause(pause)),
+		Command::Cancel(_) => Ok(SubmitCommand::Turn(TurnControl::Cancel)),
+	}
+}
+
+/// Projects the kernel's receipt onto the wire. A replay keeps the original
+/// entry: with `seq` zero and the key absent from the DOM, it is the one answer
+/// that leads a client back to a submission whose first receipt it lost.
+fn command_receipt(idempotency_key: String, receipt: SubmitReceipt) -> pb::CommandReceipt {
+	let (accepted, seq) = match receipt {
+		SubmitReceipt::Applied { seq, .. } => (true, seq),
+		SubmitReceipt::Duplicate { .. } => (false, 0),
+	};
+	pb::CommandReceipt { idempotency_key, accepted, seq, entry_id: receipt.entry().to_string() }
+}
+
 /// Projects one live handle into its wire reference.
 fn session_ref(handle: &KernelHandle, epoch: u64) -> pb::SessionRef {
 	pb::SessionRef {
@@ -716,6 +768,52 @@ impl SessionControlAuthority for SessionWire {
 		}
 		Ok(session_ref(&handle, self.epoch_of(&handle.id)))
 	}
+
+	async fn submit(
+		&self,
+		context: ControlContext,
+		request: pb::ControlCommand,
+	) -> Result<pb::CommandReceipt, SessionControlError> {
+		// Checked here as well as in the projection, because the authority is
+		// public, and before the registry: a caller without the arm's scope
+		// cannot tell a live session from an absent one.
+		context.require_submit(&request)?;
+		let key = IdempotencyKey::parse(&request.idempotency_key)
+			.map_err(|source| SessionControlError::Mutation { source: source.into() })?;
+		let handle = self
+			.sessions
+			.lookup(SessionId::from_ref(request.session_id.as_str()))
+			.ok_or_else(|| SessionControlError::UnknownSession {
+				session_id: Str::new(request.session_id.as_str()),
+			})?;
+		if let Some(expected) = request.expected_epoch {
+			let actual = self.epoch_of(&handle.id);
+			if expected != actual {
+				return Err(SessionControlError::EpochMismatch { expected, actual });
+			}
+		}
+		// A fast path, not a guarantee: the turn can end between this load and
+		// its next mailbox drain, which the bounded wait below covers.
+		let active = handle.turn_activity.load(Ordering::Acquire);
+		let command = submit_command(request.command, active)?;
+		let (reply, answer) = flume::bounded(1);
+		handle
+			.up
+			.send(Up::Submit { command, author: context.principal().clone(), key, reply })
+			.map_err(|_| SessionControlError::SessionNotLive {
+				session_id: handle.id.clone().into(),
+			})?;
+		match tokio::time::timeout(SUBMIT_BUDGET, answer.recv_async()).await {
+			Ok(Ok(Ok(receipt))) => Ok(command_receipt(request.idempotency_key, receipt)),
+			Ok(Ok(Err(omp_session::SessionError::NoActiveTurn))) => {
+				Err(SessionControlError::SessionIdle)
+			},
+			Ok(Ok(Err(source))) => Err(SessionControlError::Mutation { source }),
+			// Unanswered in time, or dropped unanswered: the kernel may already
+			// have journaled the command, and that write has no time bound.
+			Ok(Err(_)) | Err(_) => Err(SessionControlError::MutationOutcomeUnknown),
+		}
+	}
 }
 
 #[cfg(test)]
@@ -794,6 +892,7 @@ mod tests {
 			relay: IrcRelayPolicy::default(),
 			autoreply: None,
 			idle_subscribe: None,
+			turn_activity: Arc::default(),
 			project_root: Arc::from(Path::new(root)),
 		});
 		(FakeKernel { dom, drain, to, _serve: serve }, detached)
@@ -1301,6 +1400,7 @@ mod tests {
 		sessions.register(Str::new("live"), KernelHandle {
 			up: stalled,
 			idle_subscribe: Some(idle_tx),
+			turn_activity: Arc::default(),
 			..handle
 		});
 		let seam = {
@@ -1707,6 +1807,251 @@ mod tests {
 			.err()
 			.expect("an unknown session cannot be attached");
 		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+	}
+
+	/// A grant for every `Submit` arm, without the owner's host-local scope.
+	fn submitter() -> ControlContext {
+		ControlContext::new(
+			"owner",
+			ScopeSet::from_iter([
+				ControlScope::Observe,
+				ControlScope::Prompt,
+				ControlScope::Interrupt,
+				ControlScope::Control,
+			]),
+		)
+	}
+
+	/// Registers a session whose mailbox the test reads, inside a turn when
+	/// `active`.
+	fn mailbox(sessions: &SessionRegistry, id: &'static str, active: bool) -> flume::Receiver<Up> {
+		let (up, mailbox) = flume::unbounded();
+		sessions.register(Str::new(id), KernelHandle {
+			id: SessionId::new(id),
+			name: Str::new(id),
+			up,
+			snapshot: Arc::new(RwLock::new(Dom::new().snapshot())),
+			topology: omp_agent::SessionTopology::main(Str::new(id)),
+			relay: IrcRelayPolicy::default(),
+			autoreply: None,
+			idle_subscribe: None,
+			turn_activity: Arc::new(std::sync::atomic::AtomicBool::new(active)),
+			project_root: Arc::from(Path::new("/workspace")),
+		});
+		mailbox
+	}
+
+	fn command(session_id: &str, command: pb::control_command::Command) -> pb::ControlCommand {
+		pb::ControlCommand {
+			session_id: session_id.to_owned(),
+			idempotency_key: "01JSUBMIT".to_owned(),
+			command: Some(command),
+			..pb::ControlCommand::default()
+		}
+	}
+
+	fn steer(session_id: &str) -> pb::ControlCommand {
+		command(
+			session_id,
+			pb::control_command::Command::Steer(pb::SteerCommand { text: "redirect".to_owned() }),
+		)
+	}
+
+	fn prompt(session_id: &str) -> pb::ControlCommand {
+		command(
+			session_id,
+			pb::control_command::Command::Prompt(pb::PromptCommand { text: "start".to_owned() }),
+		)
+	}
+
+	#[tokio::test]
+	async fn submit_answers_the_missing_scope_before_the_registry() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "live", true);
+		let wire = wire(Arc::clone(&sessions));
+		let prompting = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Prompt]),
+		);
+
+		for session_id in ["live", "absent"] {
+			let interrupt =
+				command(session_id, pb::control_command::Command::Interrupt(pb::InterruptCommand {}));
+			let refusal = wire
+				.submit(prompting.clone(), interrupt)
+				.await
+				.expect_err("a prompt grant does not interrupt");
+			assert!(
+				matches!(refusal, SessionControlError::MissingScope { scope: ControlScope::Interrupt }),
+				"{session_id}: the same refusal whether or not the session exists, got {refusal:?}"
+			);
+		}
+		assert!(kernel.is_empty(), "a refused command never reaches the kernel");
+	}
+
+	#[tokio::test]
+	async fn an_idle_session_refuses_a_submit_without_reaching_the_kernel() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "idle", false);
+		let wire = wire(Arc::clone(&sessions));
+
+		for request in [steer("idle"), prompt("idle")] {
+			let refusal = wire
+				.submit(submitter(), request)
+				.await
+				.expect_err("nothing here runs a turn");
+			assert!(matches!(refusal, SessionControlError::SessionIdle), "got {refusal:?}");
+		}
+		assert!(kernel.is_empty(), "an idle refusal is immediate, never enqueued");
+	}
+
+	#[tokio::test]
+	async fn a_prompt_during_a_turn_is_refused_as_busy() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "live", true);
+		let wire = wire(Arc::clone(&sessions));
+
+		let refusal = wire
+			.submit(submitter(), prompt("live"))
+			.await
+			.expect_err("a prompt is idle-only");
+		assert!(matches!(refusal, SessionControlError::SessionBusy), "got {refusal:?}");
+		assert!(kernel.is_empty());
+	}
+
+	/// The flag read `true` but the turn ended before draining. The answer is
+	/// unknown, and the parked command has lost its receiver, so the next drain
+	/// withdraws it instead of applying it unannounced.
+	#[tokio::test(start_paused = true)]
+	async fn a_submit_no_turn_drains_is_outcome_unknown_after_the_bound() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "ending", true);
+		let wire = wire(Arc::clone(&sessions));
+
+		let started = tokio::time::Instant::now();
+		let refusal = wire
+			.submit(submitter(), steer("ending"))
+			.await
+			.expect_err("no turn answers");
+		assert!(matches!(refusal, SessionControlError::MutationOutcomeUnknown), "got {refusal:?}");
+		assert_eq!(started.elapsed(), SUBMIT_BUDGET, "the wait is bounded, not open-ended");
+		let Ok(Up::Submit { reply, .. }) = kernel.try_recv() else {
+			panic!("the steer was sent to the kernel");
+		};
+		assert!(reply.is_disconnected(), "no receiver is left for a late drain to answer");
+	}
+
+	#[tokio::test]
+	async fn the_receipt_keeps_the_original_entry_on_replay() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "live", true);
+		let wire = wire(Arc::clone(&sessions));
+		let entry = EntryId::from(omp_core::Ulid::generate());
+		let answers = [SubmitReceipt::Applied { entry, seq: 7 }, SubmitReceipt::Duplicate { entry }];
+		let serve = tokio::spawn(async move {
+			for answer in answers {
+				let Ok(Up::Submit { command, author, key, reply }) = kernel.recv_async().await else {
+					panic!("the authority sends the command");
+				};
+				assert!(matches!(&command, SubmitCommand::Steer(text) if text.as_str() == "redirect"));
+				assert_eq!((author.as_str(), key.as_str()), ("owner", "01JSUBMIT"));
+				reply.send(Ok(answer)).expect("the authority is waiting");
+			}
+		});
+
+		let first = wire
+			.submit(submitter(), steer("live"))
+			.await
+			.expect("applied");
+		let replay = wire
+			.submit(submitter(), steer("live"))
+			.await
+			.expect("replayed");
+		serve.await.expect("the kernel answered both");
+		assert_eq!(first, pb::CommandReceipt {
+			idempotency_key: "01JSUBMIT".to_owned(),
+			accepted:        true,
+			seq:             7,
+			entry_id:        entry.to_string(),
+		});
+		assert_eq!(replay, pb::CommandReceipt {
+			idempotency_key: "01JSUBMIT".to_owned(),
+			accepted:        false,
+			seq:             0,
+			entry_id:        entry.to_string(),
+		});
+	}
+
+	#[tokio::test]
+	async fn a_kernel_refusal_keeps_its_type_on_the_wire() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "live", true);
+		let wire = wire(Arc::clone(&sessions));
+		let existing = EntryId::from(omp_core::Ulid::generate());
+		let serve = tokio::spawn(async move {
+			let answers =
+				[omp_session::SessionError::NoActiveTurn, omp_session::SessionError::KeyConflict {
+					key: IdempotencyKey::new_static("01JSUBMIT"),
+					existing,
+				}];
+			for answer in answers {
+				let Ok(Up::Submit { reply, .. }) = kernel.recv_async().await else {
+					panic!("the authority sends the command");
+				};
+				reply.send(Err(answer)).expect("the authority is waiting");
+			}
+		});
+
+		let ended = wire
+			.submit(submitter(), steer("live"))
+			.await
+			.expect_err("the turn ended");
+		assert!(matches!(ended, SessionControlError::SessionIdle), "got {ended:?}");
+		let reused = wire
+			.submit(submitter(), steer("live"))
+			.await
+			.expect_err("the key is taken");
+		assert!(
+			matches!(
+				&reused,
+				SessionControlError::Mutation {
+					source: omp_session::SessionError::KeyConflict { existing: named, .. }
+				} if *named == existing
+			),
+			"got {reused:?}"
+		);
+		serve.await.expect("the kernel answered both");
+	}
+
+	#[tokio::test]
+	async fn a_stale_epoch_or_an_invalid_key_never_reaches_the_kernel() {
+		let sessions = Arc::new(SessionRegistry::new());
+		let kernel = mailbox(&sessions, "live", true);
+		let wire = wire(Arc::clone(&sessions));
+
+		let stale = pb::ControlCommand { expected_epoch: Some(3), ..steer("live") };
+		let refusal = wire
+			.submit(submitter(), stale)
+			.await
+			.expect_err("no bridge has epoch 3");
+		assert!(
+			matches!(refusal, SessionControlError::EpochMismatch { expected: 3, actual: 0 }),
+			"got {refusal:?}"
+		);
+		let keyless = pb::ControlCommand { idempotency_key: String::new(), ..steer("live") };
+		let refusal = wire
+			.submit(submitter(), keyless)
+			.await
+			.expect_err("every mutation is keyed");
+		assert!(
+			matches!(refusal, SessionControlError::Mutation {
+				source: omp_session::SessionError::InvalidIdempotencyKey(
+					omp_journal::idempotency::IdempotencyKeyError::Empty
+				),
+			}),
+			"got {refusal:?}"
+		);
+		assert!(kernel.is_empty());
 	}
 
 	/// ADR 0039 A4 decides what the owner socket grants. `admin` is "never

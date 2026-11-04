@@ -95,6 +95,7 @@ fn await_send_hands_authenticated_envelope_to_recipient_actor() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Child"), KernelHandle {
@@ -109,6 +110,7 @@ fn await_send_hands_authenticated_envelope_to_recipient_actor() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      Some(actor.clone()),
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 
@@ -157,6 +159,7 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		relay:          policy.clone(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Alpha"), KernelHandle {
@@ -168,6 +171,7 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Beta"), KernelHandle {
@@ -182,6 +186,7 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 
@@ -273,6 +278,7 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		relay:          policy.clone(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Console 2"), KernelHandle {
@@ -284,6 +290,7 @@ fn third_party_relay_is_authenticated_display_only_and_replay_stable() {
 		relay:          policy,
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.remove(SessionId::from_ref("root-1"));
@@ -352,6 +359,7 @@ async fn send_lands_in_child_steering_and_inbox_reads_it() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	sessions.register(Str::new_static("Child"), KernelHandle {
@@ -363,6 +371,7 @@ async fn send_lands_in_child_steering_and_inbox_reads_it() {
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 

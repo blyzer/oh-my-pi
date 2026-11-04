@@ -93,6 +93,7 @@ async fn run_inner(args: ChatArgs, ui_enabled: bool) -> miette::Result<()> {
 		&launch.options,
 		launch.model.clone(),
 		kernel.mailbox(),
+		kernel.turn_activity(),
 	)
 	.into_diagnostic()?
 	.with_workspace_trust(kernel.inference().workspace_trust().clone());
