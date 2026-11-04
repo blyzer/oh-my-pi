@@ -101,6 +101,7 @@ fn register(sessions: &SessionRegistry, kernel: &Kernel<Held>, session: &Session
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: None,
+		ask:            None,
 		turn_activity:  kernel.turn_activity(),
 		project_root:   Arc::from(Path::new("/workspace")),
 	});

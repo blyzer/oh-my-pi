@@ -148,7 +148,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
 - **IN PROGRESS** ADR 0040 execution. Routing exists in `crates/exec/src/place.rs:place`. The recorded remote envd run failed three process-lifecycle tests (`docs/audits/remote-verification-trial.md` §G1; `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`). [UNVERIFIED] Current remote result was not rerun.
-- **IN PROGRESS** ADR 0039 R2. Submit is served by `crates/serve/src/session.rs:SessionControlRpc::submit` and `crates/driver/src/session_wire.rs:SessionWire::submit`. Approve and AnswerUi remain unimplemented in `crates/serve/src/session.rs:SessionControlRpc::approve` and `SessionControlRpc::answer_ui` at this baseline; PR #477 is in flight. [UNVERIFIED] Resume and fork were not reassessed.
+- **IN PROGRESS** ADR 0039 R2. Submit is served by `crates/serve/src/session.rs:SessionControlRpc::submit` and `crates/driver/src/session_wire.rs:SessionWire::submit`. Approve and AnswerUi are served by `SessionControlRpc::approve` and `SessionControlRpc::answer_ui` and by `SessionWire::approve` and `SessionWire::answer_ui`, as the ADR's R2 status records. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. `Open` resume and fork still answer `UNIMPLEMENTED` for a named session (`SessionControlRpc::open`) and do not drive a session yet.
 - **IN PROGRESS** ADR 0041 `screen` and `flow`. `crates/chat/src/tsp.rs:Surface::new` supports the modes, but `crates/chat/src/host.rs:Host` constructs an inline surface. [UNVERIFIED] Production screen and flow callers were not established in the checked chat host and `crates/app/src/print_mode.rs`.
 - **[UNVERIFIED]** ADR 0041 `TERN_BLOB_DIR`. The checked `crates/chat/src/tsp.rs:Surface::new` and `crates/app/src/print_mode.rs` did not establish a reader; its repository-wide status was not verified.
 
@@ -159,7 +159,7 @@ Deltas verified 2026-10-25 against `omp2` at `1776c5cd25` (after PR #429):
   rather than restored, and its `attach_cmd::run` stub that parked on
   `std::future::pending()` was never reinstated. R1 landed as PRs #433 through #442 and the
   P14 proof: `omp_dom::wire`/`redact`, `ControlVisibility`, `SessionBridge`, `SessionWire`
-  on the owner socket, `SessionControlRpc` (Submit is now served by `crates/serve/src/session.rs:SessionControlRpc::submit`), the
+  on the owner socket, `SessionControlRpc` (Submit, Approve, and AnswerUi are now served by `crates/serve/src/session.rs:SessionControlRpc`), the
   `omp attach --observe` client, and the idle-session subscription seam. The unit queue and
   what each unit carries are below; `origin/feat/session-host` holds nothing `omp2` needs.
 - **NO ACTION** Codex `auth_required` object-form classification. PR #366

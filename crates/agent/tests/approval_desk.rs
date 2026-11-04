@@ -229,7 +229,7 @@ async fn run(
 				if let KernelEvent::ApprovalRequested(ticket) = event {
 					seen.lock().push(ticket.clone());
 					if let Some(decision) = answer(&ticket) {
-						let _ = mailbox.send(Up::Approve { id: ticket.ticket_id.clone(), decision });
+						let _ = mailbox.send(Up::approve_local(ticket.ticket_id.clone(), decision));
 					}
 				}
 			}

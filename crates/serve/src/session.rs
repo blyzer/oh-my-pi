@@ -11,11 +11,15 @@
 //! wire that is the correct response for a verb this revision does not grant.
 //!
 //! R2 serves `Submit`, authorized per command arm (ADR 0039 A4) by
-//! [`ControlContext::require_submit`] before the authority is consulted.
+//! [`ControlContext::require_submit`], approval decisions under `approve` and
+//! [`ControlContext::require_approve`], and UI answers under `answer_ui`, each
+//! before the authority is consulted.
 
 use std::sync::Arc;
 
+use omp_agent::{ApprovalError, ApprovalScope, UnknownApprovalScope};
 use omp_core::Str;
+use omp_journal::idempotency::{IdempotencyKey, IdempotencyKeyError};
 use omp_proto::session::v1 as pb;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use tonic::{Request, Response, Status};
@@ -28,6 +32,7 @@ use crate::inference::RpcStream;
 /// `observe_host_local`, `prompt`, `interrupt`, `approve`, `approve_persist`,
 /// `control`, `worker`, `admin`). Only scopes for served or imminent verbs are
 /// declared here; the remaining variants land with the verbs they authorize.
+/// `answer_ui` is a separate grant for runtime-chosen UI requests.
 /// Parsing rejects every string outside this set rather than ignoring a grant
 /// naming a future scope.
 #[derive(
@@ -59,6 +64,8 @@ pub enum ControlScope {
 	Approve,
 	/// Additionally permits persisted approval decisions.
 	ApprovePersist,
+	/// Answer a pending host UI request.
+	AnswerUi,
 	/// `Open` of a new session, and the mutation verbs that land with it.
 	Control,
 }
@@ -127,6 +134,24 @@ impl ControlContext {
 		self.scopes
 	}
 
+	/// Requires what deciding an approval with this lifetime needs: `approve`,
+	/// and for [`ApprovalScope::Persist`] also `approve_persist`, which adds to
+	/// `approve` rather than replacing it.
+	///
+	/// # Errors
+	/// [`SessionControlError::MissingScope`] naming the first missing grant.
+	pub fn require_approve(&self, lifetime: &ApprovalScope) -> Result<(), SessionControlError> {
+		if !self.scopes.contains(ControlScope::Approve) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Approve });
+		}
+		if matches!(lifetime, ApprovalScope::Persist)
+			&& !self.scopes.contains(ControlScope::ApprovePersist)
+		{
+			return Err(SessionControlError::MissingScope { scope: ControlScope::ApprovePersist });
+		}
+		Ok(())
+	}
+
 	/// Requires the scope ADR 0039 A4 assigns to this command's arm: `prompt`
 	/// for prompt, steer and queue, `interrupt` for interrupt, abort tools and
 	/// pause, `control` for cancel. It reads the request alone, so it runs
@@ -182,6 +207,68 @@ pub enum SessionControlError {
 		/// The scope the verb requires.
 		scope: ControlScope,
 	},
+	/// The requested approval lifetime is not a named scope.
+	#[error(transparent)]
+	InvalidApprovalScope {
+		/// Strict parser failure.
+		#[from]
+		source: UnknownApprovalScope,
+	},
+	/// The idempotency key is empty or longer than the durable bound.
+	#[error(transparent)]
+	InvalidIdempotencyKey {
+		/// Strict parser failure.
+		#[from]
+		source: IdempotencyKeyError,
+	},
+	/// No approval with this ticket is pending: it is unknown, already
+	/// decided, or withdrawn.
+	#[error("approval ticket {ticket_id} is not pending")]
+	ApprovalNotPending {
+		/// The requested ticket.
+		ticket_id: Str,
+	},
+	/// The session refused the decision.
+	#[error(transparent)]
+	Approval {
+		/// Typed approval failure.
+		#[from]
+		source: ApprovalError,
+	},
+	/// The session has no UI route, so no request on it can wait for an
+	/// answer.
+	#[error("session {session_id} has no UI answer route")]
+	NoUiRoute {
+		/// The requested session.
+		session_id: Str,
+	},
+	/// No UI request with this identity is waiting on the session.
+	///
+	/// This conflates three cases the route cannot tell apart: an identity it
+	/// never registered, a request already answered, and a request whose turn
+	/// was interrupted. Separating them needs either a bounded record of
+	/// settled identities written when a waiting entry is removed, or an
+	/// outcome enum returned by `AskRoute::answer` in place of its `bool`.
+	#[error("UI request {request_id} is not waiting")]
+	UiRequestNotWaiting {
+		/// The UI request identity.
+		request_id: Str,
+	},
+	/// The UI answer names no request.
+	#[error("the UI request identity is empty")]
+	InvalidUiRequestId,
+	/// The UI answer payload is empty or does not decode.
+	///
+	/// The payload encoding is provisional (ADR 0039 R2), so the source names
+	/// the decoder in use rather than a stable wire contract.
+	#[error("the answer for UI request {request_id} does not decode")]
+	InvalidUiAnswer {
+		/// The UI request identity.
+		request_id: Str,
+		/// The provisional decoder's failure.
+		#[source]
+		source:     serde_json::Error,
+	},
 	/// A mutating verb arrived with no session selected.
 	#[error("no session is selected")]
 	NoSessionSelected,
@@ -235,7 +322,15 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::Mutation`] | `already_exists`, `invalid_argument`, or `internal` |
 	/// | [`SessionControlError::OutOfGrant`] | `permission_denied` |
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
+	/// | [`SessionControlError::NoUiRoute`] | `unimplemented` |
+	/// | [`SessionControlError::UiRequestNotWaiting`] | `not_found` |
+	/// | [`SessionControlError::InvalidUiRequestId`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidUiAnswer`] | `invalid_argument` |
 	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidApprovalScope`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidIdempotencyKey`] | `invalid_argument` |
+	/// | [`SessionControlError::ApprovalNotPending`] | `not_found` |
+	/// | [`SessionControlError::Approval`] | `already_exists` for a reused key, else `internal` |
 	/// | [`SessionControlError::HostUnavailable`] | `unavailable` |
 	/// | [`SessionControlError::Backend`] | `internal` |
 	/// The codes are diagnostic, not protective. R1 serves one principal, the
@@ -253,12 +348,24 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
-			SessionControlError::NoSessionSelected | SessionControlError::MissingCommand => {
-				Self::invalid_argument(message)
-			},
+			SessionControlError::NoUiRoute { .. } => Self::unimplemented(message),
+			SessionControlError::UiRequestNotWaiting { .. } => Self::not_found(message),
+			SessionControlError::InvalidUiRequestId
+			| SessionControlError::InvalidUiAnswer { .. }
+			| SessionControlError::NoSessionSelected
+			| SessionControlError::MissingCommand
+			| SessionControlError::InvalidApprovalScope { .. }
+			| SessionControlError::InvalidIdempotencyKey { .. } => Self::invalid_argument(message),
 			SessionControlError::SessionIdle
 			| SessionControlError::SessionBusy
 			| SessionControlError::EpochMismatch { .. } => Self::failed_precondition(message),
+			SessionControlError::ApprovalNotPending { .. } => Self::not_found(message),
+			SessionControlError::Approval {
+				source: ApprovalError::Session(omp_session::SessionError::KeyConflict { .. }),
+			} => Self::already_exists(message),
+			SessionControlError::Approval { .. } | SessionControlError::Backend(_) => {
+				Self::internal(message)
+			},
 			SessionControlError::MutationOutcomeUnknown => Self::deadline_exceeded(message),
 			SessionControlError::Mutation {
 				source: omp_session::SessionError::KeyConflict { .. },
@@ -268,7 +375,6 @@ impl From<SessionControlError> for Status {
 			} => Self::invalid_argument(message),
 			SessionControlError::Mutation { .. } => Self::internal(message),
 			SessionControlError::HostUnavailable => Self::unavailable(message),
-			SessionControlError::Backend(_) => Self::internal(message),
 		}
 	}
 }
@@ -294,6 +400,31 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		context: ControlContext,
 		request: pb::AttachRequest,
 	) -> Result<RpcStream<pb::AttachFrame>, SessionControlError>;
+
+	/// Decides a pending approval as the caller's principal.
+	///
+	/// `lifetime` and `key` arrive parsed from the wire. An answer the
+	/// authority stops waiting for is
+	/// [`SessionControlError::MutationOutcomeUnknown`], never a refusal: the
+	/// decision may still commit, and a retry under the same key reports it.
+	async fn approve(
+		&self,
+		context: ControlContext,
+		request: pb::ApproveRequest,
+		lifetime: ApprovalScope,
+		key: IdempotencyKey,
+	) -> Result<pb::CommandReceipt, SessionControlError>;
+
+	/// Delivers an answer to a UI request waiting on a live session.
+	///
+	/// Answering appends nothing to the journal, so the receipt's `seq` is zero
+	/// and its `entry_id` empty. A retried answer finds nothing waiting and is
+	/// [`SessionControlError::UiRequestNotWaiting`].
+	async fn answer_ui(
+		&self,
+		context: ControlContext,
+		request: pb::UiAnswer,
+	) -> Result<pb::CommandReceipt, SessionControlError>;
 
 	/// Opens a new session. Resume and fork of an id that is not live is
 	/// [`SessionControlError::UnknownSession`]. This does not submit a prompt.
@@ -326,8 +457,7 @@ impl SessionControlRpc {
 /// Rejection for a verb this revision does not serve.
 fn read_only(verb: &str) -> Status {
 	Status::unimplemented(format!(
-		"session control R1 does not serve {verb}: ListSessions, Attach and Open of a new session \
-		 are (ADR 0039)"
+		"session control does not serve {verb} in this revision (ADR 0039)"
 	))
 }
 
@@ -417,18 +547,40 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 		&self,
 		request: Request<pb::ApproveRequest>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
-		let _context = observer(&request)?;
+		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
-		Err(read_only("Approve"))
+		// Authorized before parsing, so a caller without `approve` learns
+		// nothing about how its input would have been read.
+		if !context.scopes().contains(ControlScope::Approve) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Approve }.into());
+		}
+		let request = request.into_inner();
+		let lifetime =
+			ApprovalScope::parse_external(&request.scope).map_err(SessionControlError::from)?;
+		context.require_approve(&lifetime)?;
+		let key =
+			IdempotencyKey::parse(&request.idempotency_key).map_err(SessionControlError::from)?;
+		let receipt = self
+			.authority
+			.approve(context, request, lifetime, key)
+			.await?;
+		Ok(Response::new(receipt))
 	}
 
 	async fn answer_ui(
 		&self,
 		request: Request<pb::UiAnswer>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
-		let _context = observer(&request)?;
+		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
-		Err(read_only("AnswerUi"))
+		if !context.scopes().contains(ControlScope::AnswerUi) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::AnswerUi }.into());
+		}
+		let receipt = self
+			.authority
+			.answer_ui(context, request.into_inner())
+			.await?;
+		Ok(Response::new(receipt))
 	}
 
 	async fn open(
@@ -456,7 +608,10 @@ mod tests {
 	use std::{str::FromStr as _, sync::Arc};
 
 	use futures::StreamExt as _;
-	use tonic::{Code, Request, metadata::MetadataValue};
+	use omp_agent::{ApprovalError, ApprovalScope};
+	use omp_journal::{EntryId, idempotency::IdempotencyKey};
+	use omp_session::SessionError;
+	use tonic::{Code, Request, Status, metadata::MetadataValue};
 
 	use super::{
 		ControlContext, ControlScope, RpcStream, ScopeSet, SessionControlAuthority,
@@ -534,6 +689,35 @@ mod tests {
 				})),
 			};
 			Ok(Box::pin(futures::stream::once(async move { Ok(welcome) })))
+		}
+
+		async fn approve(
+			&self,
+			context: ControlContext,
+			_request: pb::ApproveRequest,
+			_lifetime: ApprovalScope,
+			key: IdempotencyKey,
+		) -> Result<pb::CommandReceipt, SessionControlError> {
+			self.record(context)?;
+			Ok(pb::CommandReceipt {
+				idempotency_key: key.as_str().to_owned(),
+				accepted: true,
+				seq: 1,
+				..pb::CommandReceipt::default()
+			})
+		}
+
+		async fn answer_ui(
+			&self,
+			context: ControlContext,
+			request: pb::UiAnswer,
+		) -> Result<pb::CommandReceipt, SessionControlError> {
+			self.record(context)?;
+			Ok(pb::CommandReceipt {
+				idempotency_key: request.idempotency_key,
+				accepted: true,
+				..pb::CommandReceipt::default()
+			})
 		}
 
 		async fn open_session(
@@ -769,7 +953,7 @@ mod tests {
 		assert_eq!(ControlScope::ObserveHostLocal.to_string(), "observe_host_local");
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
 		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
-		for name in ["prompt", "interrupt", "approve", "approve_persist"] {
+		for name in ["prompt", "interrupt", "approve", "approve_persist", "answer_ui"] {
 			assert_eq!(
 				ControlScope::from_str(name)
 					.expect("scope parses")
@@ -857,5 +1041,224 @@ mod tests {
 			observing("owner"),
 		);
 		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::InvalidArgument);
+	}
+
+	fn approval_request(scope: &str) -> pb::ApproveRequest {
+		pb::ApproveRequest {
+			session_id: "live".to_owned(),
+			idempotency_key: "request-1".to_owned(),
+			ticket_id: "ticket-1".to_owned(),
+			approved: true,
+			scope: scope.to_owned(),
+			..pb::ApproveRequest::default()
+		}
+	}
+
+	fn approval_context(scopes: &[ControlScope]) -> ControlContext {
+		ControlContext::new("remote-principal", scopes.iter().copied().collect())
+	}
+
+	#[tokio::test]
+	async fn approve_holder_decides_a_session_scoped_approval() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(
+			approval_request("session"),
+			approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+		);
+		assert!(
+			rpc.approve(request)
+				.await
+				.expect("approval reaches authority")
+				.into_inner()
+				.accepted
+		);
+		assert_eq!(authority.principal(), "remote-principal");
+	}
+
+	#[tokio::test]
+	async fn control_holder_without_approve_is_refused() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(
+			approval_request("session"),
+			approval_context(&[ControlScope::Observe, ControlScope::Control]),
+		);
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("control alone cannot approve");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve"));
+	}
+
+	#[tokio::test]
+	async fn approve_persist_without_approve_is_refused() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[ControlScope::Observe, ControlScope::ApprovePersist]),
+		);
+		let error = rpc.approve(request).await.expect_err("persist is additive");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve scope"));
+	}
+
+	#[tokio::test]
+	async fn approve_holder_cannot_decide_persist_and_error_names_approve_persist() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+		);
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("persist needs the additional grant");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve_persist"));
+	}
+
+	#[tokio::test]
+	async fn approve_and_approve_persist_holder_decides_persist() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[
+				ControlScope::Observe,
+				ControlScope::Approve,
+				ControlScope::ApprovePersist,
+			]),
+		);
+		assert!(
+			rpc.approve(request)
+				.await
+				.expect("persist reaches authority")
+				.into_inner()
+				.accepted
+		);
+	}
+
+	#[tokio::test]
+	async fn unrecognized_approval_scope_is_refused_at_the_wire() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		for scope in ["", "unknown-scope"] {
+			let request = authenticated(
+				approval_request(scope),
+				approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+			);
+			let error = rpc
+				.approve(request)
+				.await
+				.expect_err("unknown scope is refused");
+			assert_eq!(error.code(), Code::InvalidArgument);
+			assert!(error.message().contains(&format!("{scope:?}")));
+		}
+		assert!(authority.seen.lock().is_none(), "no unknown scope reaches the authority");
+	}
+
+	#[tokio::test]
+	async fn observer_cannot_approve() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let request = authenticated(approval_request("secret-invalid-scope"), observing("device"));
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("observer cannot approve");
+		assert_eq!(error.code(), Code::PermissionDenied);
+		assert!(error.message().contains("approve"));
+		assert!(!error.message().contains("secret-invalid-scope"));
+		assert!(authority.seen.lock().is_none());
+	}
+
+	#[tokio::test]
+	async fn an_invalid_idempotency_key_is_refused_before_the_authority() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let oversized = "k".repeat(IdempotencyKey::MAX_BYTES + 1);
+		for key in ["", oversized.as_str()] {
+			let mut request = approval_request("session");
+			key.clone_into(&mut request.idempotency_key);
+			let request = authenticated(
+				request,
+				approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+			);
+			let error = rpc
+				.approve(request)
+				.await
+				.expect_err("an unusable key is refused");
+			assert_eq!(error.code(), Code::InvalidArgument);
+			assert!(error.message().starts_with("idempotency key is"), "{}", error.message());
+		}
+		assert!(authority.seen.lock().is_none(), "no unkeyed approval reaches the authority");
+	}
+
+	#[test]
+	fn approval_failures_answer_stable_codes() {
+		let code = |error: SessionControlError| Status::from(error).code();
+		let reused = SessionError::KeyConflict {
+			key:      IdempotencyKey::new_static("approve-7"),
+			existing: EntryId::default(),
+		};
+		assert_eq!(code(SessionControlError::from(ApprovalError::from(reused))), Code::AlreadyExists);
+		assert_eq!(code(SessionControlError::from(ApprovalError::MissingPrompts)), Code::Internal);
+		assert_eq!(
+			code(SessionControlError::ApprovalNotPending { ticket_id: "ticket-1".into() }),
+			Code::NotFound
+		);
+		assert_eq!(code(SessionControlError::MutationOutcomeUnknown), Code::DeadlineExceeded);
+		assert_eq!(
+			code(SessionControlError::EpochMismatch { expected: 3, actual: 4 }),
+			Code::FailedPrecondition
+		);
+	}
+
+	fn ui_answer_request() -> pb::UiAnswer {
+		pb::UiAnswer {
+			session_id: "live".to_owned(),
+			idempotency_key: "answer-1".to_owned(),
+			request_id: "call-1".to_owned(),
+			..pb::UiAnswer::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn answer_ui_holder_reaches_the_authority() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let holder = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::AnswerUi]),
+		);
+		let receipt = rpc
+			.answer_ui(authenticated(ui_answer_request(), holder))
+			.await
+			.expect("an answer_ui holder reaches the authority")
+			.into_inner();
+		assert_eq!(receipt.idempotency_key, "answer-1");
+		assert_eq!(authority.principal(), "device");
+	}
+
+	#[tokio::test]
+	async fn answer_ui_is_refused_without_its_own_scope() {
+		for (holder, scopes) in [
+			("prompt", [ControlScope::Observe, ControlScope::Prompt].as_slice()),
+			("control", [ControlScope::Observe, ControlScope::Control].as_slice()),
+			("observer", [ControlScope::Observe].as_slice()),
+		] {
+			let authority = FakeAuthority::ok();
+			let rpc =
+				SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+			let context = ControlContext::new("device", scopes.iter().copied().collect());
+			let error = rpc
+				.answer_ui(authenticated(ui_answer_request(), context))
+				.await
+				.expect_err("answer_ui is a grant of its own");
+			assert_eq!(error.code(), Code::PermissionDenied, "{holder}");
+			assert_eq!(error.message(), "the caller does not hold the answer_ui scope", "{holder}");
+			assert!(authority.seen.lock().is_none(), "a {holder} holder never reaches the authority");
+		}
 	}
 }

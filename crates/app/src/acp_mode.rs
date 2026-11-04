@@ -420,7 +420,7 @@ where
 				(Some(id), Some(answer)) => {
 					if let Some((prompt_id, answer)) = client.answer(&id, answer) {
 						let decision = permission_decision(answer);
-						let _ = mailbox.send(Up::Approve { id: prompt_id, decision });
+						let _ = mailbox.send(Up::approve_local(prompt_id, decision));
 					}
 				},
 				(Some(id), None) => {
@@ -730,7 +730,7 @@ where
 			"session/approve" => match approval(&params) {
 				Ok((id, decision)) => {
 					if active.is_some() {
-						let _ = mailbox.send(Up::Approve { id, decision });
+						let _ = mailbox.send(Up::approve_local(id, decision));
 					}
 					Ok(json!({}))
 				},
@@ -876,7 +876,7 @@ async fn drain_write_backs<R: AsyncBufRead + Unpin>(
 					Some((id, answer)) => {
 						if let Some((prompt_id, answer)) = client.answer(&id, answer) {
 							let decision = permission_decision(answer);
-							let _ = mailbox.send(Up::Approve { id: prompt_id, decision });
+							let _ = mailbox.send(Up::approve_local(prompt_id, decision));
 						}
 					},
 					None => deferred.push_back(lines.line().to_vec()),

@@ -124,6 +124,44 @@ impl std::fmt::Debug for SessionMutation {
 	}
 }
 
+/// The result of a remote approval decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalOutcome {
+	/// A decision was durably appended at this journal index.
+	Applied {
+		/// Identity of the committed journal entry.
+		entry: omp_journal::EntryId,
+		/// One-based index of the appended journal entry.
+		seq:   u64,
+	},
+	/// The same keyed decision was already durably appended.
+	Duplicate {
+		/// Identity of the original journal entry.
+		entry: omp_journal::EntryId,
+	},
+	/// No approval with this identity is pending: it is unknown, already
+	/// decided, or withdrawn.
+	NotPending,
+}
+
+/// Whether anyone waits for an approval's outcome, and how a retry is known.
+#[derive(Clone, Debug)]
+pub enum ApprovalDelivery {
+	/// A local host decided; nothing waits for the outcome.
+	Local,
+	/// An authenticated remote caller waits for the durable outcome.
+	///
+	/// A reply receiver dropped before the dispatcher observes the message
+	/// cancels it. Dropped after, the decision may still commit: the durable
+	/// write has no time bound.
+	Remote {
+		/// Client key journaled with the decision, so a retry replays it.
+		key:   IdempotencyKey,
+		/// Receives the durable outcome or the typed approval failure.
+		reply: flume::Sender<Result<ApprovalOutcome, crate::ApprovalError>>,
+	},
+}
+
 /// Control sent to a running kernel turn.
 #[derive(Clone, Debug)]
 pub enum Up {
@@ -217,11 +255,21 @@ pub enum Up {
 		id:       Str,
 		/// Idempotent first decision.
 		decision: crate::ApprovalDecision,
+		/// Whether the decision is keyed and who waits for its outcome.
+		delivery: ApprovalDelivery,
 	},
 	/// Requests a live `(Snapshot, Receiver<Event>)` pair over the session the
 	/// kernel is driving (an actor rendering a child session never reads its
 	/// `.oms`, ADR 0005). Dropped silently when the requester is gone.
 	Subscribe(flume::Sender<DomSubscription>),
+}
+
+impl Up {
+	/// Resolves a prompt for a local host that does not wait for the outcome.
+	#[must_use]
+	pub const fn approve_local(id: Str, decision: crate::ApprovalDecision) -> Self {
+		Self::Approve { id, decision, delivery: ApprovalDelivery::Local }
+	}
 }
 
 /// The `<queues><steering>` element.

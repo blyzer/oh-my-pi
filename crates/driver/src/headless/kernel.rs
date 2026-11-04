@@ -3126,6 +3126,7 @@ pub async fn compose_kernel(
 		relay,
 		autoreply,
 		idle_subscribe: None,
+		ask: None,
 		turn_activity: kernel.turn_activity(),
 		project_root: Arc::from(project_root.as_path()),
 	});
@@ -3239,6 +3240,11 @@ pub struct SessionHome {
 	/// Set by the owner that runs an idle loop over the session; a headless
 	/// composition that has none leaves it `None`.
 	pub idle_subscribe:  Option<flume::Sender<flume::Sender<omp_agent::steering::DomSubscription>>>,
+	/// Pairs every session's waiting UI requests with remote answers.
+	///
+	/// Set by the owner that presents the session's UI; a composition that
+	/// presents none leaves it `None`.
+	pub ask:             Option<crate::headless::AskRoute>,
 	/// The workspace trust decision the kernel was composed under; every
 	/// session this home creates or opens journals it once. `None` journals
 	/// nothing (a home over another workspace, whose trust nobody decided).
@@ -3279,6 +3285,7 @@ impl SessionHome {
 			rules: None,
 			workspace_trust: None,
 			idle_subscribe: None,
+			ask: None,
 		})
 	}
 
@@ -3303,6 +3310,26 @@ impl SessionHome {
 			}
 		}
 		self.idle_subscribe = Some(idle);
+		self
+	}
+
+	/// Installs the route the owner answers this kernel's UI requests on, so a
+	/// remote `AnswerUi` reaches the same waiting request.
+	///
+	/// Like [`Self::with_idle_subscribe`], it patches the handle
+	/// `compose_kernel` registered before the owner existed as well as every
+	/// later one.
+	#[must_use]
+	pub fn with_ask(mut self, ask: crate::headless::AskRoute) -> Self {
+		for live in self.live.list() {
+			if live.up.same_channel(&self.up) {
+				let name = live.name.clone();
+				self
+					.live
+					.register(name, crate::sessions::KernelHandle { ask: Some(ask.clone()), ..live });
+			}
+		}
+		self.ask = Some(ask);
 		self
 	}
 
@@ -3473,6 +3500,7 @@ impl SessionHome {
 				relay,
 				autoreply,
 				idle_subscribe: self.idle_subscribe.clone(),
+				ask: self.ask.clone(),
 				turn_activity: Arc::clone(&self.turn_activity),
 				project_root: Arc::from(self.project_root.as_path()),
 			});
@@ -5336,6 +5364,7 @@ mod tests {
 		let home = SessionHome {
 			sessions_dir:    sessions_dir.clone(),
 			idle_subscribe:  None,
+			ask:             None,
 			project_root:    scratch.path().to_path_buf(),
 			model:           Str::new_static("provider/model"),
 			prompt:          PromptOverrides::default(),
@@ -5645,10 +5674,11 @@ mod tests {
 		));
 	}
 
-	/// The session is registered before its owner exists, so installing the
-	/// seam has to patch the live handle rather than wait for a re-register.
-	#[test]
-	fn installing_the_idle_seam_patches_the_live_handle_in_place() {
+	/// The session is registered before its owner exists, so installing an
+	/// owner seam (the idle subscription channel, the UI answer route) has to
+	/// patch the live handle rather than wait for a re-register.
+	#[tokio::test]
+	async fn installing_owner_seams_patches_the_live_handle_in_place() {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let sessions_dir = scratch.path().join("sessions");
 		std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
@@ -5665,12 +5695,14 @@ mod tests {
 			relay:          crate::sessions::IrcRelayPolicy::default(),
 			autoreply:      None,
 			idle_subscribe: None,
+			ask:            None,
 			turn_activity:  std::sync::Arc::default(),
 			project_root:   std::sync::Arc::from(scratch.path()),
 		});
 		let home = super::SessionHome {
 			sessions_dir,
 			idle_subscribe: None,
+			ask: None,
 			project_root: scratch.path().to_path_buf(),
 			model: omp_core::Str::new_static("provider/model"),
 			prompt: super::PromptOverrides::default(),
@@ -5684,7 +5716,8 @@ mod tests {
 		};
 
 		let (idle_tx, _idle_rx) = flume::unbounded();
-		let home = home.with_idle_subscribe(idle_tx);
+		let route = crate::headless::AskRoute::new();
+		let home = home.with_idle_subscribe(idle_tx).with_ask(route.clone());
 
 		assert_eq!(live.list().len(), 1, "the handle is patched, not duplicated");
 		let patched = live
@@ -5693,6 +5726,25 @@ mod tests {
 		assert!(patched.idle_subscribe.is_some(), "the live handle carries the seam");
 		assert_eq!(patched.name.as_str(), "main", "the routing name is unchanged");
 		assert!(home.idle_subscribe.is_some(), "later registrations carry it too");
+
+		let questions = [omp_tools::ask::Question {
+			id:          omp_core::Str::new_static("q"),
+			question:    omp_core::Str::new_static("Pick one"),
+			header:      None,
+			options:     Vec::new(),
+			multi:       false,
+			recommended: None,
+		}];
+		let mut waiting = omp_tools::ask::AskPresenter::present(&route, &questions, Some("call-1"));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		for (holder, ask) in [("the live handle", patched.ask), ("a later registration", home.ask)] {
+			let ask = ask.unwrap_or_else(|| panic!("{holder} lacks the ask route"));
+			assert_eq!(
+				ask.pending(),
+				[omp_core::Str::new_static("call-1")],
+				"{holder} shares the owner's route"
+			);
+		}
 	}
 
 	#[test]

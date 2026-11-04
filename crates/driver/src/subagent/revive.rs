@@ -321,6 +321,7 @@ async fn drive(
 		relay: composed.relay,
 		autoreply,
 		idle_subscribe: None,
+		ask: None,
 		turn_activity: kernel.turn_activity(),
 		project_root: Arc::clone(&composed.project_root),
 	};

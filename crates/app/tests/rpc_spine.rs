@@ -105,6 +105,7 @@ fn session_home(temp: &tempfile::TempDir, kernel: &Kernel<ScriptedInference>) ->
 	SessionHome {
 		sessions_dir:    temp.path().join("sessions"),
 		idle_subscribe:  None,
+		ask:             None,
 		project_root:    temp.path().to_path_buf(),
 		model:           Str::new_static("scripted/test"),
 		prompt:          Default::default(),

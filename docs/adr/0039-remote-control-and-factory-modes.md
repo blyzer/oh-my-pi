@@ -249,6 +249,7 @@ service SessionControl {
 | `interrupt` | `Submit{interrupt, abort_tools, pause}` |
 | `approve` | `Approve` with scope ≤ `session` |
 | `approve_persist` | `Approve` with scope `persist` (default: never granted to a device) |
+| `answer_ui` | `AnswerUi` for pending host UI requests |
 | `control` | `Submit{cancel}`, `Open`, model/thinking switches |
 | `worker` | fleet worker protocol only (Part B); no session verbs |
 | `admin` | enrol/revoke/pair; **local UDS only**, never grantable |
@@ -572,9 +573,35 @@ The owner answered the questions that blocked phase R1. The answers bind R1 only
    needs no controller arbitration. `Submit`, `Approve`, `AnswerUi`, and `Open` answer
    `UNIMPLEMENTED` with a reason until R2 builds mutation. Open question 3 stays open for R2.
 
+## Amendment (2026-11-04)
+
+The owner decided how R2 authorizes `AnswerUi` and what the owner socket grants. A4 changed in
+place, and its scope table gained the `answer_ui` row.
+
+1. **`AnswerUi` requires `answer_ui`.** The verb is served only to a caller that holds this scope,
+   checked inline where `Approve` checks `approve`. No configuration selects another scope for it.
+   A4 separates authority by command class, and a UI answer fits no class cleanly. It can be plain
+   input, like a prompt, or a confirmation that authorizes an action, like an approval. The agent
+   chooses each UI request at runtime, so a grant cannot bound what an answer will mean. Folding
+   the verb into `prompt`, `approve`, or `control` would make that grant open-ended, and A4
+   splits authority per command so that every grant stays bounded.
+2. **The owner socket grants every declared scope except `approve_persist`.** It grants
+   `observe`, `observe_host_local`, `prompt`, `interrupt`, `approve`, `answer_ui`, and
+   `control`. The owner already does each of these in its own terminal, so withholding one over
+   the socket would make the socket weaker than the terminal for no security gain.
+   `approve_persist` stays withheld. A persisted decision outlives the session and becomes policy,
+   and A4 grants it to no one by default. It adds to `approve` and never replaces it, so a holder
+   of `approve_persist` without `approve` decides nothing. `worker` and `admin` are not declared
+   yet, and each needs its own decision when its verbs land. The grant is an explicit list, never
+   derived from the enum, so a scope declared later is granted only by a decision. Devices hold
+   none of these scopes until R3b decides their grants.
+3. **Only the encoding of `UiAnswer.answer` is undecided.** The field stays opaque bytes with no
+   `oneof`. One private typed decoder reads it, and its encoding is provisional. The alternatives
+   are a proto `oneof`, a typed sub-message, or the provisional JSON.
+
 ## Status in omp
 
-**Status: Partially implemented.** Local attach is wired through `crates/driver/src/session_wire.rs:SessionWire` and `crates/app/src/attach_cmd.rs:run`. Submit is served by `crates/driver/src/session_wire.rs:SessionWire::submit`; Approve and AnswerUi remain stubs in `crates/serve/src/session.rs:SessionControlRpc::approve` and `SessionControlRpc::answer_ui` at this baseline. [UNVERIFIED] Fleet and network phases were not reassessed.
+**Status: Partially implemented.** Local attach is wired through `crates/driver/src/session_wire.rs:SessionWire` and `crates/app/src/attach_cmd.rs:run`. Submit is served by `crates/driver/src/session_wire.rs:SessionWire::submit`, and Approve and AnswerUi by `SessionWire::approve` and `SessionWire::answer_ui`, as the R2 status below records. [UNVERIFIED] Fleet and network phases were not reassessed.
 
 Phase S0 (spectator proof and headless hosting) landed in commit `38c4e04ff3`: guest-mutation
 admission moved into `crates/driver/src/collab/admission.rs`; `host.rs` (`HeadlessRoom`) and
@@ -583,7 +610,93 @@ defect 1 is fixed); `crates/app/src/chat_control.rs` was changed in the same com
 `crates/e2e/tests/p11_collab_spectator.rs` over the in-process `omp_collab::test_relay`
 (`crates/collab/test_relay.rs`), gated by `just e2e-p11` and `.github/workflows/ci.yml`.
 
-R1 projects sessions through `crates/serve/src/session.rs:SessionControlRpc` and `crates/driver/src/session_wire.rs:SessionWire`; the local attach client is `crates/app/src/attach_cmd.rs:run`. R2 Submit routes to the session authority (`crates/serve/src/session.rs:SessionControlRpc::submit`).
+R1 projects sessions through `crates/serve/src/session.rs:SessionControlRpc` and `crates/driver/src/session_wire.rs:SessionWire`; the local attach client is `crates/app/src/attach_cmd.rs:run`. R2 Submit, Approve, and AnswerUi route to the session authority (`crates/serve/src/session.rs:SessionControlRpc::submit`, `SessionControlRpc::approve`, and `SessionControlRpc::answer_ui`).
+
+### R2 status (2026-11-04)
+
+**`Approve` is served over the owner socket.** `SessionControlRpc::approve`
+(`crates/serve/src/session.rs`) authorizes before it parses. It requires `approve`, then parses
+the lifetime with `ApprovalScope::parse_external`, which refuses an unknown string as
+`INVALID_ARGUMENT` instead of accepting it as a custom scope. A `persist` lifetime also requires
+`approve_persist`, and the idempotency key is parsed at the same boundary.
+`SessionWire::approve` (`crates/driver/src/session_wire.rs`) checks the grant again and honours
+`expected_epoch`. It decides as the authenticated principal, so `decided_by` comes from the
+transport and never from a request field. It sends `Up::Approve` with
+`ApprovalDelivery::Remote`, which carries the key and the reply sender. A local host's
+`Up::approve_local` carries neither. The dispatcher (`CallControl::handle` and
+`ApprovalDesk::decide_keyed`, `crates/agent`) journals the decision and its key in one
+`approval.decide` patch (`Patch.idempotency`) before it replies.
+
+An applied decision answers `accepted = true`, its journal position as `seq`, and its
+`entry_id`. A retry with the same key and the same decision answers `accepted = false`,
+`seq = 0`, and the original `entry_id`. The retry answers the same after the session reopens,
+because the fold rebuilds the key index from the journal. The proof is
+`a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` in
+`crates/agent/src/dispatch.rs`. It reads the journal from disk at the instant the outcome is sent.
+The same key with a different decision is `ALREADY_EXISTS`. An answer to a ticket that is not
+pending is `NOT_FOUND`, so a later answer loses to the first one, as A5 requires.
+
+The wire waits at most `APPROVE_BUDGET` (5 s) for the outcome. When the budget elapses, the wire
+answers `DEADLINE_EXCEEDED` and reports the outcome as unknown. It never reports that the
+decision was not applied. A decision the kernel has observed may still be committing, because the
+journal's durable write (`file.sync_data()`) has no time bound. Giving up cancels the message
+only if the kernel has not observed it yet. Recovery is a retry under the same key.
+
+Three gaps remain for `Approve`. The kernel drains its mailbox only inside a turn, so an
+`Approve` sent between turns times out the same way, and a retry is answered only while a turn
+runs. The key is not projected into the DOM. A retry consults the index that the fold rebuilds
+from the journal, not the DOM lookup that A5 describes. `RemotePrincipal` has no origin yet, so
+`decided_by` is the principal string alone, and R3b adds the origin.
+
+**`Submit` is served over the owner socket.** `SessionControlRpc::submit` (`crates/serve/src/session.rs`) authorizes per command arm with `ControlContext::require_submit`: `prompt` for prompt, steer, and queue; `interrupt` for interrupt, abort tools, and pause; `control` for cancel. The check reads the request alone, so a caller without the arm's scope gets the same `PERMISSION_DENIED` whether or not the session exists. `SessionWire::submit` (`crates/driver/src/session_wire.rs`) checks the grant again before the registry, parses the idempotency key, and honours `expected_epoch`. It sends `Up::Submit` with the authenticated principal as the author. The dispatcher (`CallControl::handle` and `submit::journal`, `crates/agent`) journals the command and its key in one keyed patch (`Session::patch_keyed`) before it replies. A steer lands in `<queues><steering>` and a queue in `<queues><prompts>`, through the transaction builders the local verbs use. Interrupt, abort tools, and cancel journal an empty keyed patch (`control.interrupt`, `control.abort_tools`, `control.cancel`) and then run the local verb's own dispatch arm, so a retried key replays and never acts on a later turn.
+
+One index serves every keyed record. `Session::mutation_keys` names keyed `msg.user` entries, keyed submit patches, and keyed approval decisions, and the fold rebuilds it from the journal. A key reused for another arm or record kind is `SessionError::KeyConflict`, answered `ALREADY_EXISTS`.
+
+The receipt carries no disposition. That is sound only while the arm alone decides where a command lands. `CallControl` routes steer and queue with no degradation path, and the keyed patch records the arm's label and request, so a replay always describes an original with the same arm. The `receipt_without_disposition` tests in `crates/agent/src/dispatch.rs` pin cross-arm key reuse in both directions and a same-arm replay after reopen; routing a steer into the prompts queue, or a queue into the steering queue, turns them red. A routing change that breaks them needs a disposition on the receipt first.
+
+`CommandReceipt.entry_id` (field 4) names the original entry on every answer. A client that lost its first receipt retries under the same key and gets `accepted = false` and `seq = 0`. No DOM node carries the key and no RPC looks one up, so the entry id is its only way back, and the attach stream names that id as the patch's cause. `a_lost_receipt_is_recovered_by_its_entry_and_survives_a_restart` (`crates/driver/tests/session_submit.rs`) drives a held real turn through the wire and recovers the steer from the replay's entry. It then replays the same key from a second kernel over the reopened journal, which still holds the keyed steer once.
+
+Nothing behind the wire starts a turn (`TurnRequest` is private to `crates/app`), so `prompt` is refused with `FAILED_PRECONDITION`, while idle and while a turn runs alike, because the verb is idle-only. Every other arm needs a running turn. `KernelHandle::turn_activity` refuses an idle session at once. It is a fast path, not a guarantee: a turn can end between the check and its next mailbox drain, so the wire waits at most `SUBMIT_BUDGET` (5 s). Past it, or on a dropped reply, the wire answers `DEADLINE_EXCEEDED` and reports the outcome as unknown, never as not applied. Giving up drops the reply receiver, so a later drain withdraws the command unapplied. A kernel that already took it may still commit it, and recovery is a retry under the same key. A subagent's idle loop answers `FAILED_PRECONDITION` itself.
+
+Two gaps remain for `Submit`. An idle session refuses a retry too, so a client recovers a lost receipt only while a turn runs. `Kernel::retry_tool_tail` runs a turn without raising `turn_activity`, so a submit during it reads as idle and is refused.
+
+**`AnswerUi` is served over the owner socket.** `SessionControlRpc::answer_ui`
+(`crates/serve/src/session.rs`) requires `observe` and a selected session, then `answer_ui`,
+inline where `Approve` requires `approve`. No configuration selects another scope.
+`SessionWire::answer_ui` (`crates/driver/src/session_wire.rs`) checks the grant again, refuses an
+empty `request_id`, decodes the payload, honours `expected_epoch` as `Approve` and `Submit` do,
+and calls `AskRoute::answer` on the session's route (`KernelHandle::ask`). That is the route the
+owner's terminal answers through: the chat controller installs it on every live handle with
+`SessionHome::with_ask`. The answer never enters
+the kernel mailbox, and the wire neither waits on the kernel nor touches the session. There is no
+`Up` variant for it. That choice is not forced by a deadlock: a tool call that
+`Dispatcher::drive` runs with a `CallControl` keeps the mailbox live (`crates/agent/src/dispatch.rs`).
+The route is used because it is the owner's own path and needs no kernel round trip. A test
+answers from one thread while another holds the session and an undrained mailbox: the presenter
+resolves within its 5 s bound, the mailbox stays empty, and the held session gains no entry.
+
+An answered or dismissed request returns `accepted = true`, `seq = 0` and an empty `entry_id`,
+because the wire appends nothing to the journal. An empty `request_id`, or an empty or
+undecodable payload, is `INVALID_ARGUMENT`. An unknown session is `NOT_FOUND`. An
+`expected_epoch` that differs from the session's bridge epoch is `FAILED_PRECONDITION`, and the
+waiting request stays untouched. The epoch names the bridge start the caller's view came from. A
+request identity read from an earlier start can name a dialog that no longer waits, or a newer one
+the route registered under the same identity. A session whose owner presents no UI has no route
+and is `UNIMPLEMENTED`. A request that is not waiting is `NOT_FOUND`, which conflates three cases:
+an identity the route never registered, a request already answered, and a request whose turn was
+interrupted. A bounded record of settled identities written when a waiting entry is removed, or an
+outcome enum returned by `AskRoute::answer` in place of its `bool`, would separate them. Until
+then a retry after success answers `NOT_FOUND`, not a duplicate receipt.
+
+The `UiAnswer.answer` encoding stays owner-undecided. It ships provisionally as JSON read by one
+private typed decoder (`ProvisionalUiAnswer`, no untyped traversal).
+`{"answers": [Selection, ...]}` answers the dialog, and `"cancelled"` dismisses it. A dismissal
+reaches the waiting request as `AskReply::Cancelled`, the reply the owner's terminal sends on Esc.
+The presenter fails with `Fault::cancelled()`, never with the fault a host that went away leaves.
+`the_owner_socket_dismisses_a_waiting_ui_request` proves this over the production owner socket,
+and a retry of the dismissal is `NOT_FOUND`. The alternatives are a proto `oneof`, a typed
+sub-message, or this JSON. Carrying dismissal does not settle the choice. No test pins the byte
+shape: tests encode through the same private type.
 
 ### Implementation plan (PR-sized, value first)
 

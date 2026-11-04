@@ -8924,6 +8924,7 @@ dependencies = [
  "flume",
  "futures",
  "im",
+ "omp-agent",
  "omp-ai",
  "omp-catalog",
  "omp-core",

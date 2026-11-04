@@ -3589,9 +3589,9 @@ fn approve_response(
 		.unwrap_or("once")
 		.parse::<omp_agent::ApprovalScope>()
 		.expect("approval scope parsing is infallible");
-	let _ = mailbox.send(Up::Approve {
-		id:       Str::new(prompt_id),
-		decision: omp_agent::ApprovalDecision::external(
+	let _ = mailbox.send(Up::approve_local(
+		Str::new(prompt_id),
+		omp_agent::ApprovalDecision::external(
 			approved,
 			scope,
 			params
@@ -3601,7 +3601,7 @@ fn approve_response(
 				.map_or(Str::new_static(STDIO_DECIDER), Str::new),
 			params.get("reason").and_then(Value::as_str).map(Str::new),
 		),
-	});
+	));
 	RpcResponse::success(id, command, json!({ "queued": true }))
 		.expect("static approval response serializes")
 }
@@ -3787,7 +3787,7 @@ mod tests {
 			let params = params.as_object().expect("params object").clone();
 			let _ = super::approve_response(None, "approve", &params, &mailbox);
 			match queue.try_recv().expect("approve is queued") {
-				omp_agent::Up::Approve { id, decision } => (id, decision),
+				omp_agent::Up::Approve { id, decision, .. } => (id, decision),
 				other => panic!("unexpected mailbox message {other:?}"),
 			}
 		};
@@ -3838,7 +3838,8 @@ mod tests {
 		let params = serde_json::json!({"promptId": ticket.ticket_id, "approved": true});
 		let _ =
 			super::approve_response(None, "approve", params.as_object().expect("params"), &mailbox);
-		let omp_agent::Up::Approve { id, decision } = queue.try_recv().expect("approve is queued")
+		let omp_agent::Up::Approve { id, decision, .. } =
+			queue.try_recv().expect("approve is queued")
 		else {
 			panic!("approve queues Up::Approve");
 		};

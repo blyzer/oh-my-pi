@@ -543,7 +543,7 @@ impl CallControl {
 				}
 				Ok(Received::None)
 			},
-			Up::Approve { id, decision } => {
+			Up::Approve { id, decision, delivery: crate::ApprovalDelivery::Local } => {
 				match self.approvals.decide(session, id.as_str(), decision) {
 					Ok(ticket) => Ok(Received::Approved(ticket)),
 					Err(error @ crate::ApprovalError::MissingDecider { .. }) => {
@@ -555,6 +555,28 @@ impl CallControl {
 						Ok(Received::None)
 					},
 				}
+			},
+			Up::Approve { id, decision, delivery: crate::ApprovalDelivery::Remote { key, reply } } => {
+				// A caller that stopped waiting before dispatch observed the
+				// message has cancelled it; nothing is journaled.
+				if reply.is_disconnected() {
+					return Ok(Received::None);
+				}
+				let (outcome, received) =
+					match self
+						.approvals
+						.decide_keyed(session, id.as_str(), decision, key)
+					{
+						Ok((outcome, ticket)) => {
+							(Ok(outcome), ticket.map_or(Received::None, Received::Approved))
+						},
+						Err(crate::ApprovalError::UnknownTicket { .. }) => {
+							(Ok(crate::ApprovalOutcome::NotPending), Received::None)
+						},
+						Err(error) => (Err(error), Received::None),
+					};
+				let _ = reply.send(outcome);
+				Ok(received)
 			},
 			Up::Subscribe(reply) => {
 				let _ = reply.send(session.subscribe());
@@ -3943,13 +3965,23 @@ mod checkpoint_tests {
 
 #[cfg(test)]
 mod approval_tests {
+	use std::{
+		future::Future as _,
+		path::PathBuf,
+		pin::pin,
+		sync::{Arc, OnceLock},
+		task::{Context, Poll, Wake, Waker},
+	};
+
 	use omp_core::Str;
-	use omp_session::{ComponentRegistry, Session};
+	use omp_journal::idempotency::IdempotencyKey;
+	use omp_session::{ComponentRegistry, Session, SessionError};
 
 	use super::{CallControl, Received};
 	use crate::{
-		ApprovalBook, ApprovalDecision, ApprovalDesk, ApprovalScope, ApprovalSource, ApprovalSpec,
-		CancelTree, TicketState, Up, events::KernelEvents,
+		ApprovalBook, ApprovalDecision, ApprovalDelivery, ApprovalDesk, ApprovalError,
+		ApprovalOutcome, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket, CancelTree,
+		SubmitCommand, SubmitReceipt, TicketState, Up, events::KernelEvents,
 	};
 
 	fn spec() -> ApprovalSpec {
@@ -4000,13 +4032,13 @@ mod approval_tests {
 		let id = ticket.ticket_id.clone();
 
 		let refused = control
-			.handle(&mut session, Up::Approve { id: id.clone(), decision: external(None) })
+			.handle(&mut session, Up::approve_local(id.clone(), external(None)))
 			.expect("a refused answer is not an error");
 		assert_eq!(refused, Received::None);
 		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
 
 		let accepted = control
-			.handle(&mut session, Up::Approve { id, decision: external(Some("ada")) })
+			.handle(&mut session, Up::approve_local(id, external(Some("ada"))))
 			.expect("a named answer decides");
 		let Received::Approved(decided) = accepted else {
 			panic!("a named answer is journaled: {accepted:?}");
@@ -4017,6 +4049,221 @@ mod approval_tests {
 			Some(Str::new_static("ada"))
 		);
 		assert!(ApprovalBook::new().pending(&session).is_empty());
+	}
+
+	/// A remote answer for `ticket` under one fixed key.
+	fn remote(
+		ticket: &ApprovalTicket,
+		reply: flume::Sender<Result<ApprovalOutcome, ApprovalError>>,
+	) -> Up {
+		Up::Approve {
+			id:       ticket.ticket_id.clone(),
+			decision: external(Some("ada")),
+			delivery: ApprovalDelivery::Remote { key: IdempotencyKey::new_static("approve-7"), reply },
+		}
+	}
+
+	#[test]
+	fn disconnected_remote_approval_is_not_applied_when_dispatch_observes_it() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session =
+			Session::create(directory.path().join("approve.oms"), ComponentRegistry::standard())
+				.expect("session");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let ticket = desk
+			.file_spec(&mut session, Str::new_static("call-1"), spec())
+			.expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let (reply, receiver) = flume::bounded(1);
+		drop(receiver);
+		assert_eq!(
+			control
+				.handle(&mut session, remote(&ticket, reply))
+				.expect("abandoned message is ignored"),
+			Received::None
+		);
+		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
+	}
+
+	/// Approve and Submit key into one journal-backed index: a key either verb
+	/// journaled is a conflict for the other, in both orders, and the refused
+	/// mutation journals nothing.
+	#[test]
+	fn approve_and_submit_refuse_each_others_keys() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session =
+			Session::create(directory.path().join("approve.oms"), ComponentRegistry::standard())
+				.expect("session");
+		session.begin_turn().expect("turn");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let decided = desk
+			.file_spec(&mut session, Str::new_static("call-1"), spec())
+			.expect("prompt files");
+		let waiting = desk
+			.file_spec(&mut session, Str::new_static("call-2"), spec())
+			.expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let steer = |session: &mut Session, key: &'static str| {
+			let (reply, receipt) = flume::bounded(1);
+			control
+				.handle(session, Up::Submit {
+					command: SubmitCommand::Steer(Str::new_static("redirect")),
+					author: Str::new_static("owner"),
+					key: IdempotencyKey::new_static(key),
+					reply,
+				})
+				.expect("a remote command never fails the turn");
+			receipt
+				.recv()
+				.expect("the kernel answers every submit it takes")
+		};
+
+		let (reply, outcome) = flume::bounded(1);
+		control
+			.handle(&mut session, remote(&decided, reply))
+			.expect("the decision dispatches");
+		let Ok(ApprovalOutcome::Applied { entry: approval, .. }) =
+			outcome.recv().expect("the decision is answered")
+		else {
+			panic!("the remote approval applies");
+		};
+		let entries = session.entry_count();
+		let refused = steer(&mut session, "approve-7");
+		assert!(
+			matches!(&refused, Err(SessionError::KeyConflict { existing, .. }) if *existing == approval),
+			"a steer reusing an approval's key is refused, not applied: {refused:?}"
+		);
+		assert_eq!(session.entry_count(), entries, "the refused steer journals nothing");
+
+		let Ok(SubmitReceipt::Applied { entry: steered, .. }) = steer(&mut session, "steer-1") else {
+			panic!("a fresh key steers");
+		};
+		let entries = session.entry_count();
+		let (reply, outcome) = flume::bounded(1);
+		control
+			.handle(&mut session, Up::Approve {
+				id:       waiting.ticket_id.clone(),
+				decision: external(Some("ada")),
+				delivery: ApprovalDelivery::Remote {
+					key: IdempotencyKey::new_static("steer-1"),
+					reply,
+				},
+			})
+			.expect("a refused decision never fails the turn");
+		let refused = outcome.recv().expect("the decision is answered");
+		assert!(
+			matches!(
+				&refused,
+				Err(ApprovalError::Session(SessionError::KeyConflict { existing, .. }))
+					if *existing == steered
+			),
+			"an approval reusing a steer's key is refused, not applied: {refused:?}"
+		);
+		assert_eq!(session.entry_count(), entries, "the refused decision journals nothing");
+		assert_eq!(ApprovalBook::new().pending(&session), vec![waiting]);
+	}
+
+	/// Keeps the journal as it was on disk the first time it is woken. flume
+	/// wakes a waiting receiver from inside `send`, so this is the journal at
+	/// the instant the dispatcher reports an outcome.
+	struct JournalAtReply {
+		path:    PathBuf,
+		journal: OnceLock<String>,
+	}
+
+	impl Wake for JournalAtReply {
+		fn wake(self: Arc<Self>) {
+			self.wake_by_ref();
+		}
+
+		fn wake_by_ref(self: &Arc<Self>) {
+			let _ = self
+				.journal
+				.set(std::fs::read_to_string(&self.path).expect("the journal is readable"));
+		}
+	}
+
+	/// ADR 0039 A5 and advisory ledger item 9: the key is durable before the
+	/// outcome is reported, and outlives the session. A key index kept only in
+	/// memory passes every assertion before the reopen and fails the replay.
+	#[test]
+	fn a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let path = directory.path().join("approve.oms");
+		let mut session = Session::create(&path, ComponentRegistry::standard()).expect("session");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let ticket = desk
+			.file_spec(&mut session, Str::new_static("call-1"), spec())
+			.expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+
+		let probe = Arc::new(JournalAtReply { path: path.clone(), journal: OnceLock::new() });
+		let waker = Waker::from(Arc::clone(&probe));
+		let mut context = Context::from_waker(&waker);
+		let (reply, receiver) = flume::bounded(1);
+		let mut outcome = pin!(receiver.recv_async());
+		assert!(outcome.as_mut().poll(&mut context).is_pending(), "nothing is decided yet");
+
+		let received = control
+			.handle(&mut session, remote(&ticket, reply))
+			.expect("the decision dispatches");
+		assert!(
+			matches!(received, Received::Approved(_)),
+			"the waiting call learns it: {received:?}"
+		);
+		let decided = session.head().expect("the decision is the head");
+		let Poll::Ready(Ok(first)) = outcome.as_mut().poll(&mut context) else {
+			panic!("the outcome is sent before dispatch returns");
+		};
+		// The journal holds its genesis, the filed prompt, then the decision.
+		assert_eq!(first.expect("the decision applies"), ApprovalOutcome::Applied {
+			entry: decided,
+			seq:   3,
+		});
+		let journaled = probe
+			.journal
+			.get()
+			.expect("sending the outcome woke its receiver");
+		let frame = journaled
+			.split("\n\n")
+			.find(|frame| frame.contains(&format!("id: {decided}\n")))
+			.expect("the decision was on disk when its outcome was sent");
+		assert!(
+			frame.contains(r#""idempotency":{"key":"approve-7""#),
+			"the key is journaled in the decision's own entry: {frame}"
+		);
+		drop(control);
+		drop(session);
+
+		let mut reopened =
+			Session::open(&path, ComponentRegistry::standard()).expect("the journal reopens");
+		let entries = reopened.entry_count();
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let (reply, receiver) = flume::bounded(1);
+		assert_eq!(
+			control
+				.handle(&mut reopened, remote(&ticket, reply))
+				.expect("the retry dispatches"),
+			Received::None,
+			"a replay wakes no call"
+		);
+		assert_eq!(
+			receiver
+				.try_recv()
+				.expect("the retry is answered")
+				.expect("a replay is not an error"),
+			ApprovalOutcome::Duplicate { entry: decided }
+		);
+		assert_eq!(reopened.entry_count(), entries, "a replay journals nothing");
 	}
 }
 

@@ -253,17 +253,14 @@ async fn drive(
 	let host = tokio::spawn(async move {
 		while let Ok(event) = events.recv_async().await {
 			if let KernelEvent::ApprovalRequested(ticket) = event {
-				let _ = mailbox.send(Up::Approve {
-					id:       ticket.ticket_id,
-					decision: ApprovalDecision {
-						approved:   approve,
-						scope:      ApprovalScope::Once,
-						source:     ApprovalSource::User,
-						decided_by: None,
-						reason:     (!approve).then(|| Str::new_static("not today")),
-						audited:    false,
-					},
-				});
+				let _ = mailbox.send(Up::approve_local(ticket.ticket_id, ApprovalDecision {
+					approved:   approve,
+					scope:      ApprovalScope::Once,
+					source:     ApprovalSource::User,
+					decided_by: None,
+					reason:     (!approve).then(|| Str::new_static("not today")),
+					audited:    false,
+				}));
 			}
 		}
 	});

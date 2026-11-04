@@ -202,6 +202,7 @@ fn register<C>(sessions: &SessionRegistry, kernel: &Kernel<C>, root: &Path) -> O
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: Some(idle_tx),
+		ask:            None,
 		turn_activity:  Arc::default(),
 		project_root:   Arc::from(root),
 	});
@@ -458,6 +459,8 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 	);
 
 	// 7. Every mutating verb is refused, over the socket the owner trusts.
+	//    `AnswerUi` is served under the owner's `answer_ui` grant, so the request
+	//    naming no UI request is refused as malformed.
 	for (verb, status, expected) in [
 		(
 			"submit",
@@ -480,7 +483,8 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				})
 				.await
 				.err(),
-			tonic::Code::Unimplemented,
+			// Served since R2: a request naming no approval lifetime is malformed.
+			tonic::Code::InvalidArgument,
 		),
 		(
 			"answer_ui",
@@ -488,7 +492,7 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				.answer_ui(pb::UiAnswer { session_id: "p14".to_owned(), ..pb::UiAnswer::default() })
 				.await
 				.err(),
-			tonic::Code::Unimplemented,
+			tonic::Code::InvalidArgument,
 		),
 		(
 			"open",
