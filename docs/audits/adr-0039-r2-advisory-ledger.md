@@ -97,3 +97,49 @@ Inferring behaviour from the existence of a name: a field called `idempotency_ke
 implied dedupe; a reply channel implied cancellation on drop; a `turn_activity`
 accessor implied reachable liveness; `CommandReceipt` carrying a key implied safe
 retry. Each was wrong, and each was caught by an agent that read the code.
+---
+
+## Status of rows 25-32 (2026-11-04)
+
+A row closes only when its code and targeted tests have landed and PASSED together.
+Instructing an agent does not close an advisory; a green test does.
+
+| Row | Status | Evidence |
+|-----|--------|----------|
+| 25 | **CLOSED** | `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` (#477) |
+| 26 | **CLOSED** | same test: a waker reads the journal from disk inside `reply.send`, proving the key durable BEFORE the outcome is sent |
+| 27 | **CLOSED** | #477's dated Amendment (2026-11-04): A4 row, owner-grant policy and reason, why `AnswerUi` is its own scope |
+| 28 | **CLOSED** | single-ADR-owner rule held; #477 pasted both siblings' prose verbatim, no conflict |
+| 29 | **CLOSED** | this file, merged as #474 and #475 |
+| 30 | **CLOSED** | premise verified in code: `CallControl` does not degrade steer<->queue; cross-arm key reuse conflicts |
+| 31 | **CLOSED** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a real held kernel turn, then replays after restart (#478) |
+| 32 | **CLOSED** | mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red (#478) |
+
+### The A5 gap #473 shipped with is closed
+Steer and queue records now use the same journal-backed key index as `msg.user` and
+approval records (`patch_keyed` over `mutation_keys`). One mechanism, three record kinds,
+as ADR A5 requires. #473 keyed only `MsgUser`; that is no longer true.
+
+### Checks
+- **#477**: `just check` exit 0; `0 failed` across omp-agent 351, omp-app 462, omp-driver 601,
+  omp-e2e 68 (1 skipped), omp-journal 58 (3 skipped), omp-proto 33, omp-serve 44, omp-session 71 (1 skipped).
+- **#478**: `just check` exit 0; `0 failed` across journal 58, session 71, proto 33, serve 37,
+  agent 352, driver 606, app 462, plus `just e2e-p14`.
+- **#476**: `just check` exit 0; omp-serve 46, omp-driver 607, omp-app 462, omp-e2e 68.
+
+### Still open
+1. **`UiAnswer` encoding** — owner-undecided, shipped provisionally behind one private typed
+   decoder; alternatives named in the ADR.
+2. **AnswerUi has no idempotency index**, so a retry after success answers `NOT_FOUND` rather
+   than a duplicate receipt. A deliberate asymmetry with Submit and Approve: a UI answer
+   resolves a one-shot waiter rather than mutating durable state.
+3. **An Approve or Submit sent between turns times out**, because the mailbox drains only
+   inside a turn. Recorded in the ADR as a gap.
+4. **claude-bridge OAuth** — the installed binary has no `auth` subcommand.
+
+### Merge order
+#477 (base omp2) first. Then #478 rebased onto it, taking #477's `ControlScope` and
+`OWNER_SCOPES`, dropping its duplicate `MutationOutcomeUnknown`/`EpochMismatch`, and adding
+`turn_activity: Arc::default()` to `fn approving()` in the `session_wire.rs` tests, which
+fails to COMPILE rather than conflict textually. Then #476 rebased onto `omp2`, with its base
+retargeted from `feat/r2-approve`.
