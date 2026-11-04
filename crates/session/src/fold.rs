@@ -528,22 +528,24 @@ impl Session {
 		let ops = if let Some(boundary) = self.head {
 			let meta = self.dom.meta();
 			let after = self.dom.children(meta).last().copied();
-			ops.into_iter().map(|op| match op {
-				Op::Ins { parent, after: sibling, node } => match legacy_handoff_document(&node) {
-					Some(summary) => Op::Ins {
-						parent: meta,
-						after,
-						node: NodeSpec::new(KnownTag::Compaction)
-							.with_prop(PropId::Id, Value::Str(Str::new(entry.id.to_string())))
-							.with_prop(PropId::Cause, Value::Str(Str::new(entry.id.to_string())))
-							.with_prop(PropId::Boundary, Value::Str(Str::new(boundary.to_string())))
-							.with_prop(PropId::Summary, Value::Str(summary))
-							.with_prop(PropId::Method, Value::Str(Str::new_static("handoff"))),
+			ops.into_iter()
+				.map(|op| match op {
+					Op::Ins { parent, after: sibling, node } => match legacy_handoff_document(&node) {
+						Some(summary) => Op::Ins {
+							parent: meta,
+							after,
+							node: NodeSpec::new(KnownTag::Compaction)
+								.with_prop(PropId::Id, Value::Str(Str::new(entry.id.to_string())))
+								.with_prop(PropId::Cause, Value::Str(Str::new(entry.id.to_string())))
+								.with_prop(PropId::Boundary, Value::Str(Str::new(boundary.to_string())))
+								.with_prop(PropId::Summary, Value::Str(summary))
+								.with_prop(PropId::Method, Value::Str(Str::new_static("handoff"))),
+						},
+						None => Op::Ins { parent, after: sibling, node },
 					},
-					None => Op::Ins { parent, after: sibling, node },
-				},
-				other => other,
-			}).collect()
+					other => other,
+				})
+				.collect()
 		} else {
 			ops
 		};

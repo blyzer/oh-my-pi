@@ -1092,20 +1092,27 @@ impl Session {
 		let Some(&existing) = self.mutation_keys.get(key) else {
 			return Ok(None);
 		};
-		let entry = self.entry(existing).ok_or(SessionError::UnknownEntry { id: existing })?;
+		let entry = self
+			.entry(existing)
+			.ok_or(SessionError::UnknownEntry { id: existing })?;
 		if entry.kind.name.as_str() == omp_journal::kind::PATCH
 			&& entry.label.as_deref().unwrap_or_default() == label
 		{
 			let patch: Patch = serde_json::from_str(entry.data.as_str())?;
-			if patch.idempotency.as_ref().is_some_and(|identity| identity.request.get() == request.get()) {
+			if patch
+				.idempotency
+				.as_ref()
+				.is_some_and(|identity| identity.request.get() == request.get())
+			{
 				return Ok(Some(existing));
 			}
 		}
 		Err(SessionError::KeyConflict { key: key.clone(), existing })
 	}
 
-	/// Journals a patch and its key atomically, or returns the original entry on replay.
-	/// The request must contain the stable typed input, not transient DOM handles.
+	/// Journals a patch and its key atomically, or returns the original entry on
+	/// replay. The request must contain the stable typed input, not transient
+	/// DOM handles.
 	pub fn patch_keyed(
 		&mut self,
 		txn: Txn,
@@ -1113,12 +1120,14 @@ impl Session {
 		request: &impl Serialize,
 	) -> Result<AppendOutcome, SessionError> {
 		let request = serde_json::value::to_raw_value(request)?;
-		if let Some(existing) = self.replay_keyed_patch_raw(
-			&key, txn.label.as_deref().unwrap_or_default(), &request,
-		)? {
+		if let Some(existing) =
+			self.replay_keyed_patch_raw(&key, txn.label.as_deref().unwrap_or_default(), &request)?
+		{
 			return Ok(AppendOutcome::Replayed(existing));
 		}
-		self.commit_patch(txn, Some(PatchIdempotency { key, request })).map(AppendOutcome::Appended)
+		self
+			.commit_patch(txn, Some(PatchIdempotency { key, request }))
+			.map(AppendOutcome::Appended)
 	}
 
 	fn commit_patch(
@@ -1128,7 +1137,9 @@ impl Session {
 	) -> Result<EntryId, SessionError> {
 		let data = serde_json::to_string(&txn.ops)?;
 		let decoded = serde_json::from_str(&data)?;
-		self.dom.validate(&Txn { cause: txn.cause, label: txn.label.clone(), ops: decoded })?;
+		self
+			.dom
+			.validate(&Txn { cause: txn.cause, label: txn.label.clone(), ops: decoded })?;
 		let ops = RawValue::from_string(data)?;
 		self.commit(KindName::Patch, Some(txn.cause), txn.label, None, &Patch { ops, idempotency })
 	}
