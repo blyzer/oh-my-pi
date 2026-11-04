@@ -105,7 +105,9 @@ fn the_external_constructor_requires_a_decider() {
 fn local_and_automatic_answers_need_no_decider() {
 	for source in [
 		ApprovalSource::User,
+		ApprovalSource::Forwarded,
 		ApprovalSource::Config,
+		ApprovalSource::Extension,
 		ApprovalSource::Timeout,
 		ApprovalSource::Unavailable,
 	] {

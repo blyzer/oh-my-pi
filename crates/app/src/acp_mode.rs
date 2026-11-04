@@ -1700,6 +1700,39 @@ mod tests {
 		);
 	}
 
+	/// Every ACP answer names a decider: the client's `decidedBy` when it
+	/// sends one, else the ACP channel.
+	#[test]
+	fn acp_answers_always_name_a_decider() {
+		let selected =
+			|option: &str| Ok(json!({"outcome": {"outcome": "selected", "optionId": option}}));
+		for answer in [
+			selected("allow_once"),
+			selected("reject_always"),
+			Ok(json!({"outcome": {"outcome": "cancelled"}})),
+			Err(RpcError { code: -32603, message: Str::new_static("") }),
+		] {
+			let decision = permission_decision(answer);
+			assert_eq!(decision.source, omp_agent::ApprovalSource::External);
+			assert_eq!(decision.decided_by.as_deref(), Some("acp"));
+		}
+
+		let decided_by = |value: Value| {
+			let (_, decision) = approval(&params(value)).expect("approval parses");
+			decision.decided_by
+		};
+		assert_eq!(decided_by(json!({"promptId": "approval-1"})).as_deref(), Some("acp"));
+		assert_eq!(
+			decided_by(json!({"promptId": "approval-1", "decidedBy": "ada"})).as_deref(),
+			Some("ada")
+		);
+		assert_eq!(
+			decided_by(json!({"promptId": "approval-1", "decidedBy": "  "})).as_deref(),
+			Some("acp"),
+			"a blank name is no name"
+		);
+	}
+
 	/// A host-keyed fetch prompt reaches the editor as a `fetch` tool call;
 	/// the other approval kinds keep their ACP kinds.
 	#[test]

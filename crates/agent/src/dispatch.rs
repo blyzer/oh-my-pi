@@ -3908,6 +3908,85 @@ mod checkpoint_tests {
 	}
 }
 
+#[cfg(test)]
+mod approval_tests {
+	use omp_core::Str;
+	use omp_session::{ComponentRegistry, Session};
+
+	use super::{CallControl, Received};
+	use crate::{
+		ApprovalBook, ApprovalDecision, ApprovalDesk, ApprovalScope, ApprovalSource, ApprovalSpec,
+		CancelTree, TicketState, Up, events::KernelEvents,
+	};
+
+	fn spec() -> ApprovalSpec {
+		ApprovalSpec {
+			title:         Str::new_static("Run command"),
+			body:          Str::new_static("body"),
+			subject:       Str::new_static("printf ok"),
+			kind:          Str::new_static("exec"),
+			scopes:        vec![Str::new_static("once")],
+			default:       None,
+			route:         Str::new_static("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   Str::new_static("deny"),
+			require_human: true,
+			pattern:       None,
+			evidence:      Vec::new(),
+		}
+	}
+
+	fn external(decided_by: Option<&'static str>) -> ApprovalDecision {
+		ApprovalDecision {
+			approved:   true,
+			scope:      ApprovalScope::Once,
+			source:     ApprovalSource::External,
+			decided_by: decided_by.map(Str::new_static),
+			reason:     None,
+			audited:    false,
+		}
+	}
+
+	/// A refused unattributed answer is not a dispatch error: the mailbox
+	/// message is consumed, the batch learns nothing, and the prompt stays open
+	/// for an answer that names its decider.
+	#[test]
+	fn an_unattributed_external_answer_leaves_the_prompt_pending() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session =
+			Session::create(directory.path().join("approve.oms"), ComponentRegistry::standard())
+				.expect("session");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let ticket = desk
+			.file_spec(&mut session, Str::new_static("call-1"), spec())
+			.expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let id = ticket.ticket_id.clone();
+
+		let refused = control
+			.handle(&mut session, Up::Approve { id: id.clone(), decision: external(None) })
+			.expect("a refused answer is not an error");
+		assert_eq!(refused, Received::None);
+		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
+
+		let accepted = control
+			.handle(&mut session, Up::Approve { id, decision: external(Some("ada")) })
+			.expect("a named answer decides");
+		let Received::Approved(decided) = accepted else {
+			panic!("a named answer is journaled: {accepted:?}");
+		};
+		assert_eq!(decided.state, TicketState::Decided);
+		assert_eq!(
+			decided.decision.and_then(|decision| decision.decided_by),
+			Some(Str::new_static("ada"))
+		);
+		assert!(ApprovalBook::new().pending(&session).is_empty());
+	}
+}
+
 fn projection_blob(blob: &BlobRef) -> ToolBlobRef {
 	ToolBlobRef {
 		hash:       Str::new(blob.to_hex()),
