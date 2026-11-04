@@ -669,7 +669,10 @@ mod tests {
 		assert_eq!(ControlScope::ObserveHostLocal.to_string(), "observe_host_local");
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
 		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
-		assert!(ControlScope::from_str("prompt").is_err());
+		for name in ["prompt", "interrupt", "approve", "approve_persist"] {
+			assert_eq!(ControlScope::from_str(name).expect("scope parses").to_string(), name);
+		}
+		assert!(ControlScope::from_str("admin").is_err());
 
 		let granted = ScopeSet::from_iter([ControlScope::Observe]);
 		assert!(granted.contains(ControlScope::Observe));
