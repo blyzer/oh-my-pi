@@ -5,13 +5,12 @@
 //! frames carry canonical `omp_dom` bytes the authority produced; serve only
 //! moves them.
 //!
-//! R1 (ADR 0039) serves the two read verbs and `Open` of a new session, which
-//! needs the `control` scope. Resume, fork, and the remaining mutating verbs
-//! are answered with `unimplemented` rather than half-wired: on a versioned
-//! wire that is the correct response for a verb this revision does not grant.
+//! Reads, new-session `Open`, and approval decisions are served here. Resume,
+//! fork, and the remaining mutating verbs remain unimplemented.
 
 use std::sync::Arc;
 
+use omp_agent::{ApprovalScope, UnknownApprovalScope};
 use omp_core::Str;
 use omp_proto::session::v1 as pb;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
@@ -152,6 +151,13 @@ pub enum SessionControlError {
 		/// The scope the verb requires.
 		scope: ControlScope,
 	},
+	/// The requested approval lifetime is not a named scope.
+	#[error(transparent)]
+	InvalidApprovalScope {
+		/// Strict parser failure.
+		#[from]
+		source: UnknownApprovalScope,
+	},
 	/// A mutating verb arrived with no session selected.
 	#[error("no session is selected")]
 	NoSessionSelected,
@@ -173,6 +179,7 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::OutOfGrant`] | `permission_denied` |
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
 	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidApprovalScope`] | `invalid_argument` |
 	/// | [`SessionControlError::HostUnavailable`] | `unavailable` |
 	/// | [`SessionControlError::Backend`] | `internal` |
 	/// The codes are diagnostic, not protective. R1 serves one principal, the
@@ -190,7 +197,9 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
-			SessionControlError::NoSessionSelected => Self::invalid_argument(message),
+			SessionControlError::NoSessionSelected | SessionControlError::InvalidApprovalScope { .. } => {
+				Self::invalid_argument(message)
+			},
 			SessionControlError::HostUnavailable => Self::unavailable(message),
 			SessionControlError::Backend(_) => Self::internal(message),
 		}
@@ -219,6 +228,14 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		request: pb::AttachRequest,
 	) -> Result<RpcStream<pb::AttachFrame>, SessionControlError>;
 
+
+	/// Resolves a pending approval using a strictly parsed lifetime.
+	async fn approve(
+		&self,
+		context: ControlContext,
+		request: pb::ApproveRequest,
+		scope: ApprovalScope,
+	) -> Result<pb::CommandReceipt, SessionControlError>;
 	/// Opens a new session. Resume and fork of an id that is not live is
 	/// [`SessionControlError::UnknownSession`]. This does not submit a prompt.
 	async fn open_session(
@@ -333,9 +350,20 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 		&self,
 		request: Request<pb::ApproveRequest>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
-		let _context = observer(&request)?;
+		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
-		Err(read_only("Approve"))
+		if !context.scopes().contains(ControlScope::Approve) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Approve }.into());
+		}
+		let scope = ApprovalScope::parse_external(&request.get_ref().scope)
+			.map_err(SessionControlError::from)?;
+		if matches!(scope, ApprovalScope::Persist)
+			&& !context.scopes().contains(ControlScope::ApprovePersist)
+		{
+			return Err(SessionControlError::MissingScope { scope: ControlScope::ApprovePersist }.into());
+		}
+		let receipt = self.authority.approve(context, request.into_inner(), scope).await?;
+		Ok(Response::new(receipt))
 	}
 
 	async fn answer_ui(
@@ -370,6 +398,7 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 #[cfg(test)]
 mod tests {
 	use std::{str::FromStr as _, sync::Arc};
+	use omp_agent::ApprovalScope;
 
 	use futures::StreamExt as _;
 	use tonic::{Code, Request, metadata::MetadataValue};
@@ -452,6 +481,16 @@ mod tests {
 			Ok(Box::pin(futures::stream::once(async move { Ok(welcome) })))
 		}
 
+
+		async fn approve(
+			&self,
+			context: ControlContext,
+			request: pb::ApproveRequest,
+			_scope: ApprovalScope,
+		) -> Result<pb::CommandReceipt, SessionControlError> {
+			self.record(context)?;
+			Ok(pb::CommandReceipt { idempotency_key: request.idempotency_key, accepted: true, seq: 1 })
+		}
 		async fn open_session(
 			&self,
 			context: ControlContext,
@@ -776,7 +815,7 @@ mod tests {
 			let request = authenticated(approval_request(scope), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
 			let error = rpc.approve(request).await.expect_err("unknown scope is refused");
 			assert_eq!(error.code(), Code::InvalidArgument);
-			assert!(error.message().contains(scope));
+			assert!(error.message().contains(&format!("{scope:?}")));
 		}
 		assert!(authority.seen.lock().is_none(), "no unknown scope reaches the authority");
 	}

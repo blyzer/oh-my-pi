@@ -15,6 +15,7 @@ bytes.workspace = true
 flume.workspace = true
 futures.workspace = true
 im.workspace = true
+omp-agent.workspace = true
 omp-core.workspace = true
 omp-session.workspace = true
 omp-catalog.workspace = true
