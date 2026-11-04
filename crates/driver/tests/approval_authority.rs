@@ -372,7 +372,7 @@ impl Project {
 					let answer = if interrupt.swap(false, Ordering::SeqCst) {
 						Up::Interrupt
 					} else {
-						Up::Approve { id: ticket.ticket_id, decision: decision(approve) }
+						Up::approve_local(ticket.ticket_id, decision(approve))
 					};
 					let _ = mailbox.send(answer);
 				}
@@ -1493,9 +1493,9 @@ mod session_network_grants {
 				if let KernelEvent::ApprovalRequested(ticket) = event {
 					let _ =
 						asked.send((ticket.reasons[0].subject.clone(), ticket.reasons[0].scopes.clone()));
-					let _ = mailbox.send(Up::Approve {
-						id:       ticket.ticket_id,
-						decision: ApprovalDecision {
+					let _ = mailbox.send(Up::approve_local(
+						ticket.ticket_id,
+						ApprovalDecision {
 							approved:   true,
 							scope:      ApprovalScope::Session,
 							source:     ApprovalSource::User,
@@ -1503,7 +1503,7 @@ mod session_network_grants {
 							reason:     None,
 							audited:    false,
 						},
-					});
+					));
 				}
 			}
 		});
@@ -2072,9 +2072,9 @@ mod fetch_host_grants {
 								.map(|reason| reason.subject.clone())
 								.collect(),
 						);
-						let _ = mailbox.send(Up::Approve {
-							id:       ticket.ticket_id,
-							decision: ApprovalDecision {
+						let _ = mailbox.send(Up::approve_local(
+							ticket.ticket_id,
+							ApprovalDecision {
 								approved:   true,
 								scope:      ApprovalScope::Session,
 								source:     ApprovalSource::User,
@@ -2082,7 +2082,7 @@ mod fetch_host_grants {
 								reason:     None,
 								audited:    false,
 							},
-						});
+						));
 					}
 				}
 			}

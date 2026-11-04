@@ -714,9 +714,9 @@ async fn print_kernel_event(
 ) -> miette::Result<()> {
 	let value = match event {
 		KernelEvent::ApprovalRequested(ticket) => {
-			let _ = mailbox.send(Up::Approve {
-				id:       ticket.ticket_id,
-				decision: omp_agent::ApprovalDecision {
+			let _ = mailbox.send(Up::approve_local(
+				ticket.ticket_id,
+				omp_agent::ApprovalDecision {
 					approved:   false,
 					scope:      omp_agent::ApprovalScope::Once,
 					source:     omp_agent::ApprovalSource::Unavailable,
@@ -727,7 +727,7 @@ async fn print_kernel_event(
 					)),
 					audited:    false,
 				},
-			});
+			));
 			None
 		},
 		KernelEvent::InferenceRetry { attempt, max_attempts, delay, reason } => {

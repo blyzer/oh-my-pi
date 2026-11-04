@@ -492,7 +492,7 @@ mod tests {
 			_scope: ApprovalScope,
 		) -> Result<pb::CommandReceipt, SessionControlError> {
 			self.record(context)?;
-			Ok(pb::CommandReceipt { idempotency_key: request.idempotency_key, accepted: true, seq: 1 })
+			Ok(pb::CommandReceipt { idempotency_key: request.idempotency_key, accepted: true, seq: 1, ..pb::CommandReceipt::default() })
 		}
 		async fn open_session(
 			&self,

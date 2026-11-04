@@ -1132,7 +1132,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				Flow::Idle
 			},
 			HostCommand::Approve { id, decision } => {
-				let _ = self.up.send(Up::Approve { id, decision });
+				let _ = self.up.send(Up::approve_local(id, decision));
 				Flow::Idle
 			},
 			HostCommand::RunLocal { input, draft } => {
@@ -1341,7 +1341,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 							let _ = self.up.send(Up::Interrupt);
 						},
 						Ok(HostCommand::Approve { id, decision }) => {
-							let _ = self.up.send(Up::Approve { id, decision });
+							let _ = self.up.send(Up::approve_local(id, decision));
 						},
 						Ok(HostCommand::AskAnswer { id, answers }) => answer_ask(&ask, &id, answers),
 						Ok(HostCommand::ProcessSignal(signal)) => {
@@ -2250,7 +2250,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 							let _ = self.up.send(Up::Interrupt);
 						},
 						Ok(HostCommand::Approve { id, decision }) => {
-							let _ = self.up.send(Up::Approve { id, decision });
+							let _ = self.up.send(Up::approve_local(id, decision));
 						},
 						Ok(HostCommand::ProcessSignal(signal)) => {
 							self.exit_cause = Some(omp_session::ExitCause::Signal { signal });

@@ -510,16 +510,49 @@ impl CallControl {
 				}
 				Ok(Received::None)
 			},
-			Up::Approve { id, decision } => {
-				match self.approvals.decide(session, id.as_str(), decision) {
-					Ok(ticket) => Ok(Received::Approved(ticket)),
-					Err(error @ crate::ApprovalError::MissingDecider { .. }) => {
-						tracing::warn!(%error, ticket = %id, "external approval answer refused");
-						Ok(Received::None)
+			Up::Approve { id, decision, reply, delivery } => {
+				// A receiver dropped before dispatch observes the message cancels it.
+				if reply.is_disconnected() {
+					return Ok(Received::None);
+				}
+				match delivery {
+					crate::ApprovalDelivery::Local { receiver: _receiver } => {
+						let before = session.entry_count();
+						match self.approvals.decide(session, id.as_str(), decision) {
+							Ok(ticket) => {
+								let outcome = if session.entry_count() > before {
+									crate::ApprovalOutcome::Applied {
+										entry: session.head().expect("a decision has a journal head"),
+										seq: u64::try_from(session.entry_count()).expect("journal entry count fits in u64"),
+									}
+								} else {
+									crate::ApprovalOutcome::NotPending
+								};
+								let _ = reply.send(Ok(outcome));
+								Ok(Received::Approved(ticket))
+							},
+							Err(error) => {
+								tracing::debug!(%error, ticket = %id, "approval decision was refused");
+								let _ = reply.send(Err(error));
+								Ok(Received::None)
+							},
+						}
 					},
-					Err(error) => {
-						tracing::debug!(%error, ticket = %id, "approval decision targets no live prompt");
-						Ok(Received::None)
+					crate::ApprovalDelivery::Remote { key } => {
+						match self.approvals.decide_keyed(session, id.as_str(), decision, key) {
+							Ok((outcome, ticket)) => {
+								let _ = reply.send(Ok(outcome));
+								Ok(ticket.map_or(Received::None, Received::Approved))
+							},
+							Err(crate::ApprovalError::UnknownTicket { .. }) => {
+								let _ = reply.send(Ok(crate::ApprovalOutcome::NotPending));
+								Ok(Received::None)
+							},
+							Err(error) => {
+								let _ = reply.send(Err(error));
+								Ok(Received::None)
+							},
+						}
 					},
 				}
 			},
@@ -3967,13 +4000,13 @@ mod approval_tests {
 		let id = ticket.ticket_id.clone();
 
 		let refused = control
-			.handle(&mut session, Up::Approve { id: id.clone(), decision: external(None) })
+			.handle(&mut session, Up::approve_local(id.clone(), external(None)))
 			.expect("a refused answer is not an error");
 		assert_eq!(refused, Received::None);
 		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
 
 		let accepted = control
-			.handle(&mut session, Up::Approve { id, decision: external(Some("ada")) })
+			.handle(&mut session, Up::approve_local(id, external(Some("ada"))))
 			.expect("a named answer decides");
 		let Received::Approved(decided) = accepted else {
 			panic!("a named answer is journaled: {accepted:?}");

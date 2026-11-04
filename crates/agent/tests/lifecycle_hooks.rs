@@ -420,9 +420,9 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 					sf!("session_generation=3")
 				],);
 				mailbox
-					.send(Up::Approve {
-						id:       ticket.ticket_id,
-						decision: ApprovalDecision {
+					.send(Up::approve_local(
+						ticket.ticket_id,
+						ApprovalDecision {
 							approved:   true,
 							scope:      ApprovalScope::Once,
 							source:     ApprovalSource::User,
@@ -430,7 +430,7 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 							reason:     None,
 							audited:    true,
 						},
-					})
+					))
 					.expect("approve merged ticket");
 				break;
 			}

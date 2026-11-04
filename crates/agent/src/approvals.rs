@@ -12,7 +12,7 @@ use std::{
 
 use omp_core::{Str, StrMut, sf};
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_session::{Session, SessionError, components::prompts::prompts_handle};
+use omp_session::{AppendOutcome, Session, SessionError, components::prompts::prompts_handle};
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -207,6 +207,12 @@ pub struct ApprovalDecision {
 	pub audited:    bool,
 }
 
+#[derive(Serialize)]
+struct ApprovalIdentity<'a> {
+	ticket_id: &'a str,
+	decision: &'a ApprovalDecision,
+}
+
 impl ApprovalDecision {
 	/// An answer from an authenticated external approver.
 	///
@@ -394,6 +400,16 @@ impl ApprovalBook {
 		ticket_id: &str,
 		decision: ApprovalDecision,
 	) -> Result<ApprovalTicket, ApprovalError> {
+		self.decide_inner(session, ticket_id, decision, None).map(|(ticket, _)| ticket)
+	}
+
+	fn decide_inner(
+		&self,
+		session: &mut Session,
+		ticket_id: &str,
+		decision: ApprovalDecision,
+		key: Option<&omp_journal::idempotency::IdempotencyKey>,
+	) -> Result<(ApprovalTicket, Option<AppendOutcome>), ApprovalError> {
 		if decision.source == ApprovalSource::External && !decision.names_decider() {
 			return Err(ApprovalError::MissingDecider { id: Str::new(ticket_id) });
 		}
@@ -403,7 +419,7 @@ impl ApprovalBook {
 			ticket.decision = Some(decision.clone());
 			let encoded = serde_json::to_string(&ticket)?;
 			let decision_json = serde_json::to_string(&decision)?;
-			session.patch(Txn {
+			let txn = Txn {
 				cause: session.head().ok_or(ApprovalError::MissingPrompts)?,
 				label: Some(Str::new_static("approval.decide")),
 				ops:   vec![
@@ -438,9 +454,15 @@ impl ApprovalBook {
 						value: Value::Str(sf!(<&'static str>::from(decision.source))),
 					},
 				],
-			})?;
+			};
+			let outcome = if let Some(key) = key {
+				session.patch_keyed(txn, key.clone(), &ApprovalIdentity { ticket_id, decision: &decision })?
+			} else {
+				AppendOutcome::Appended(session.patch(txn)?)
+			};
+			return Ok((ticket, Some(outcome)));
 		}
-		Ok(ticket)
+		Ok((ticket, None))
 	}
 
 	/// Withdraws an unanswered prompt.
@@ -775,12 +797,40 @@ impl ApprovalDesk {
 		decision: ApprovalDecision,
 	) -> Result<ApprovalTicket, ApprovalError> {
 		let ticket = self.book.decide(session, ticket_id, decision.clone())?;
+		self.relay(ticket_id, &decision);
+		Ok(ticket)
+	}
+
+	pub(crate) fn decide_keyed(
+		&self,
+		session: &mut Session,
+		ticket_id: &str,
+		decision: ApprovalDecision,
+		key: omp_journal::idempotency::IdempotencyKey,
+	) -> Result<(crate::ApprovalOutcome, Option<ApprovalTicket>), ApprovalError> {
+		let identity = ApprovalIdentity { ticket_id, decision: &decision };
+		if let Some(entry) = session.replay_keyed_patch(&key, "approval.decide", &identity)? {
+			return Ok((crate::ApprovalOutcome::Duplicate { entry }, None));
+		}
+		let (ticket, outcome) = self.book.decide_inner(session, ticket_id, decision.clone(), Some(&key))?;
+		match outcome {
+			Some(AppendOutcome::Appended(entry)) => {
+				self.relay(ticket_id, &decision);
+				let seq = u64::try_from(session.entry_count()).expect("journal entry count fits in u64");
+				Ok((crate::ApprovalOutcome::Applied { entry, seq }, Some(ticket)))
+			},
+			Some(AppendOutcome::Replayed(entry)) => Ok((crate::ApprovalOutcome::Duplicate { entry }, None)),
+			None => Ok((crate::ApprovalOutcome::NotPending, None)),
+		}
+	}
+
+	fn relay(&self, ticket_id: &str, decision: &ApprovalDecision) {
 		let waiting = self.pending.lock().remove(ticket_id).unwrap_or_default();
 		for request in waiting {
 			let _ = request.respond(decision.clone());
 		}
-		Ok(ticket)
 	}
+
 
 	/// Withdraws every journaled prompt whose requesting policy stopped
 	/// waiting (route timeout, cancelled or finished invocation).
