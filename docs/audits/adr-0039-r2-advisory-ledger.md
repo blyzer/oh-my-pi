@@ -5,7 +5,14 @@ what it changed, and where the fix lives. Written because these existed only in 
 transcript and would not survive the session.
 
 Legend: **A** = reviewer advisory, **I** = implementer finding (agent correcting the
-coordinator), **C** = coordinator self-correction.
+coordinator), **C** = coordinator self-correction. **R** = independent review.
+
+**Status discipline.** A row closes only when its code and targeted tests have landed
+and PASSED together. Rows carrying **PENDING** hold an instruction that has been given
+and recorded, which is NOT executable evidence: dispatching a brief does not close an
+advisory, a green test on the verb branch does. This note exists because the first
+revision of this file labelled instructed work as "outcome", which is the same
+infer-from-intent error the ledger's closing section describes.
 
 ---
 
@@ -59,14 +66,14 @@ coordinator), **C** = coordinator self-correction.
 | 24 | C | `local://` artifacts are unreadable by subagents | Share via absolute paths under `/tmp/omp-research/` |
 
 ---
-| 25 | A | A schema comment states intent, not behaviour; prove `accepted`/`seq` by test | Behavioural proof required on the approval path: assert by value, verify key-in-journal ordering before the first receipt returns, drop/reopen/retry | feat/r2-approve |
-| 26 | A | Generic `Session::commit` ordering does not prove the APPROVAL path journals its key | **Ledger item 2 REOPENED**; closes only when the approval-specific test passes including reopen | feat/r2-approve |
-| 27 | A | The new scope must be an explicit ADR amendment, not only a code variant | A4 table row, owner-grant policy, reasoning, dated Amendment section, plus VARIANTS / welcome-frame / granted-vs-refused tests | feat/r2-approve |
+| 25 | A | **PENDING** | A schema comment states intent, not behaviour; prove `accepted`/`seq` by test | Behavioural proof required on the approval path: assert by value, verify key-in-journal ordering before the first receipt returns, drop/reopen/retry | feat/r2-approve |
+| 26 | A | **PENDING** | Generic `Session::commit` ordering does not prove the APPROVAL path journals its key | **Ledger item 2 REOPENED**; closes only when the approval-specific test passes including reopen | feat/r2-approve |
+| 27 | A | **PENDING** | The new scope must be an explicit ADR amendment, not only a code variant | A4 table row, owner-grant policy, reasoning, dated Amendment section, plus VARIANTS / welcome-frame / granted-vs-refused tests | feat/r2-approve |
 | 28 | A | "A4 rows" vs "R2 status line" is not independent at merge time: one physical file, two worktrees | **VerbApproveD is sole editor** of ADR 0039 this wave; VerbAnswerUiE sends finished prose plus anchor instead of editing | both slices |
 | 29 | A | `/tmp` ledger is not durable; land it in the repo | Landed as `docs/audits/adr-0039-r2-advisory-ledger.md`, **PR #474, merged** | this file |
 | 30 | R | Independent review: the disposition refusal rested on an unverified premise, untested on the REPLAY path | Premise then verified in code (`CallControl` does not degrade; cross-arm key reuse conflicts), so the refusal stands **on evidence, not on the original argument** | feat/r2-submit |
-| 31 | I | `entry_id`: a client that loses its first receipt cannot re-derive its entry (no key in the DOM, no lookup-by-key RPC, `seq = 0` on replay) | **Field ADDED** on a new number, after being refused twice on two different arguments | feat/r2-submit |
-| 32 | A | Pin the no-degradation invariant with executable tests, not a comment | Cross-arm key reuse in BOTH directions plus same-arm reopen replay, asserted by variant and by value | feat/r2-submit |
+| 31 | I | **PENDING** | `entry_id`: a client that loses its first receipt cannot re-derive its entry (no key in the DOM, no lookup-by-key RPC, `seq = 0` on replay) | **Field ADDED** on a new number, after being refused twice on two different arguments | feat/r2-submit |
+| 32 | A | **PENDING** | Pin the no-degradation invariant with executable tests, not a comment | Cross-arm key reuse in BOTH directions plus same-arm reopen replay, asserted by variant and by value | feat/r2-submit |
 
 ## Still open
 
