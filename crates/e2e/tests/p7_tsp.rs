@@ -31,7 +31,7 @@ use omp_core::Str;
 use omp_tui::tsp::{
 	doc::{Document, Rejected},
 	frame::{self, Incoming},
-	wire::{Close, Frame, Hello, Kind, Mode, Open, Reply},
+	wire::{Close, Event, Frame, Hello, Kind, Mode, Open, Query, Reply},
 };
 use serde_json::Value;
 
@@ -89,6 +89,8 @@ struct FakeTern {
 	messages:         Vec<Outgoing>,
 	rejected:         Vec<Rejected>,
 	queries:          usize,
+	/// The program features the `hello` query announced.
+	program_features: Vec<String>,
 	acked:            u64,
 	screen_acked:     u64,
 	/// When the `hello` reply goes out.
@@ -279,6 +281,7 @@ impl FakeTern {
 			messages: Vec::new(),
 			rejected: Vec::new(),
 			queries: 0,
+			program_features: Vec::new(),
 			acked: 0,
 			screen_acked: 0,
 			hello: script.hello,
@@ -330,6 +333,12 @@ impl FakeTern {
 			let message = match raw.verb {
 				"q" => {
 					self.queries += 1;
+					if let Ok(Query::Hello { features, .. }) = serde_json::from_slice(raw.body) {
+						self.program_features = features
+							.iter()
+							.map(|feature| feature.as_str().to_owned())
+							.collect();
+					}
 					Outgoing::Other
 				},
 				"o" => {
@@ -449,6 +458,11 @@ impl FakeTern {
 				Err(error) => panic!("PTY write failed: {error}"),
 			}
 		}
+	}
+
+	/// Writes one terminal → program event.
+	fn event(&self, event: &Event) {
+		self.write_apc(b"e", &serde_json::to_vec(event).expect("event body"));
 	}
 
 	/// Pumps until `ready` holds, or fails with the whole conversation.
@@ -717,6 +731,26 @@ fn prop(doc: &Document, id: &str, key: &str) -> Option<Value> {
 	doc.get(id)?.p.get(key).cloned()
 }
 
+/// The composer's text and UTF-16 caret in the oracle document.
+fn composer(tern: &FakeTern) -> (String, u64) {
+	let text = prop(&tern.doc, "composer", "text").and_then(|text| text.as_str().map(str::to_owned));
+	let cursor = prop(&tern.doc, "composer", "cursor").and_then(|cursor| cursor.as_u64());
+	(text.unwrap_or_default(), cursor.unwrap_or(u64::MAX))
+}
+
+/// An `edit` event over the composer, in UTF-16 offsets.
+fn edit(from: u32, to: u32, text: &str, cursor: u32, len: u32) -> Event {
+	Event::Edit {
+		sf: Str::new_static(SURFACE),
+		id: Str::new_static("composer"),
+		from,
+		to,
+		text: Str::new(text),
+		cursor,
+		len,
+	}
+}
+
 /// The handshake, regions, composer, status band, acks and clean close of a
 /// live surface, asserted against the reference document.
 #[test]
@@ -912,6 +946,44 @@ fn tsp_a_full_screen_panel_covers_the_pane_with_a_screen_surface() {
 	};
 	assert!(!close.keep, "a screen surface is discarded whatever keep says");
 	assert!(!tern.doc.suspended() && tern.doc.contains("composer"), "the session shows again");
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	tern.quit();
+}
+
+/// Native editing (ADR 0041 phase 3): the `hello` query announces `edit` and
+/// `undo`, an edit Tern made over its own selection round-trips through UTF-16
+/// offsets into the composer, whose text and caret come back in the next
+/// frame, and `undo` reverts that edit as one unit.
+#[test]
+fn tsp_native_edits_round_trip_through_utf16_offsets() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern());
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+	assert_eq!(
+		tern.program_features,
+		["edit", "undo"],
+		"the hello query announces native editing:\n{}",
+		tern.report()
+	);
+
+	let typed = "a\u{1f600}b w\u{f6}rld";
+	tern.write(typed.as_bytes());
+	tern.until("typed text mirrored", |tern| composer(tern) == (typed.to_owned(), 10));
+
+	let edited = "a\u{1f642}\u{1f642}b w\u{f6}rld";
+	tern.event(&edit(3, 1, "\u{1f642}\u{1f642}", 1, 10));
+	tern.until("two emoji replace units 1..3, sent reversed, with the caret before them", |tern| {
+		composer(tern) == (edited.to_owned(), 1)
+	});
+	tern.event(&edit(12, 12, "", 12, 12));
+	tern.until("an empty edit only moves the caret", |tern| {
+		composer(tern) == (edited.to_owned(), 12)
+	});
+	tern.event(&edit(0, 3, "", 0, 3));
+	tern.event(&Event::Undo { sf: Str::new_static(SURFACE), id: Str::new_static("composer") });
+	tern.until("the stale edit is dropped and one undo restores the typed text and caret", |tern| {
+		composer(tern) == (typed.to_owned(), 10)
+	});
 	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
 	tern.quit();
 }

@@ -18,8 +18,8 @@ use xutf::Text;
 
 use super::{ContextGaugeMode, Img, StatusPlacement, hr::truncate_to_width};
 use crate::{
-	Completion, EditBuffer, EditOutcome, Editor, EditorOptions, Icon, PickerRow, SuggestionDisplay,
-	anim,
+	Completion, EditBuffer, EditOutcome, Editor, EditorOptions, Icon, NativeEdit, PickerRow,
+	SuggestionDisplay, anim,
 	component::{
 		Cached, Component, EventCtx, Flow, Hit, HitTag, IntoComponent, PaintCtx, Slot, next_slot,
 	},
@@ -782,11 +782,12 @@ impl EditInput {
 		}
 	}
 
-	/// Applies a programmatic range replacement (native edit from TSP) and
-	/// re-queries completion state. `range` is a UTF-8 byte range.
-	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
-		self.editor.apply_edit(range, text);
-		self.refresh_keyword_spans();
+	/// Applies an edit Tern made over its own selection (TSP `edit`) and
+	/// refreshes the keyword spans it changed.
+	pub fn apply_native_edit(&mut self, edit: &NativeEdit) {
+		if self.editor.apply_native_edit(edit) == EditOutcome::Changed {
+			self.refresh_keyword_spans();
+		}
 	}
 
 	/// Reports whether the cursor is on the first logical line.
@@ -2880,10 +2881,9 @@ impl EditorPane {
 			.is_some_and(|input| input.editor.picker().is_some())
 	}
 
-	/// Applies a programmatic range replacement (native edit from TSP).
-	/// `range` is a UTF-8 byte range inside the current buffer text.
-	pub fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
-		self.input_mut().apply_edit(range, text);
+	/// Applies an edit Tern made over its own selection (TSP `edit`).
+	pub fn apply_native_edit(&mut self, edit: &NativeEdit) {
+		self.input_mut().apply_native_edit(edit);
 		self.children[0].invalidate();
 	}
 

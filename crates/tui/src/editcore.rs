@@ -392,6 +392,54 @@ impl EditBuffer {
 		self.break_sequence();
 	}
 
+	/// Applies an edit the terminal made natively over its own copy of the
+	/// text (a TSP `edit`, resolved by [`crate::tsp::edit::resolve`]): the
+	/// range is replaced and the caret goes where the terminal put it.
+	///
+	/// A non-empty range that touches an atomic marker widens to the whole
+	/// marker, and the caret is carried over the widening. A change is one
+	/// undo unit; an empty range with nothing to insert only moves the caret.
+	/// A range that does not fit the text is ignored.
+	pub fn apply_native_edit(&mut self, edit: &NativeEdit) -> BufferOutcome {
+		let (from, to) = (edit.range.start, edit.range.end);
+		if from > to || self.text.get(from..to).is_none() {
+			return BufferOutcome::Ignored;
+		}
+		let (start, end) = if from < to {
+			self.expand_to_atoms(from, to)
+		} else {
+			(from, to)
+		};
+		let inserted = edit.insert.len();
+		// Text a widened marker swallowed collapses onto the replacement's edges.
+		let caret = if edit.cursor <= start {
+			edit.cursor
+		} else if edit.cursor <= from {
+			start
+		} else if edit.cursor < from + inserted {
+			start + (edit.cursor - from)
+		} else {
+			start + inserted + (edit.cursor - from - inserted).saturating_sub(end - to)
+		};
+		let changed = start < end || inserted > 0;
+		if changed {
+			self.snapshot();
+			self.splice(start..end, &edit.insert);
+		}
+		let caret = self.text.floor_char_boundary(caret.min(self.text.len()));
+		let caret = self.snap_position(caret, caret >= self.cursor);
+		let moved = caret != self.cursor;
+		self.cursor = caret;
+		self.anchor = None;
+		self.desired = None;
+		self.break_sequence();
+		if changed || moved {
+			BufferOutcome::Changed
+		} else {
+			BufferOutcome::Ignored
+		}
+	}
+
 	fn restore_cursor_offset(&mut self, offset: usize) {
 		let cursor = self.cursor.saturating_add(offset).min(self.text.len());
 		if self.text.is_char_boundary(cursor) {
@@ -2038,6 +2086,20 @@ pub struct CompletionEdit {
 	pub insert: Str,
 }
 
+/// An edit the terminal made over its own copy of an editor's text (Tern's
+/// native selection), resolved to UTF-8 bytes by [`crate::tsp::edit::resolve`]
+/// and applied by [`EditBuffer::apply_native_edit`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeEdit {
+	/// Byte range of the current text to replace.
+	pub range:  ops::Range<usize>,
+	/// Replacement text, sanitized like a paste.
+	pub insert: String,
+	/// Caret afterwards: a byte offset into `text[..range.start]`, then
+	/// `insert`, then `text[range.end..]`.
+	pub cursor: usize,
+}
+
 /// Provider verdict for a Tab press, from [`EditorCompletion::tab`].
 pub enum TabAction {
 	/// Accept the selected dropdown row (no-op when none is open).
@@ -2696,6 +2758,26 @@ impl Editor {
 		self.history_query = None;
 		self.buffer.replace_range(range, insert);
 		self.refresh();
+	}
+
+	/// Applies an edit the terminal made over its own selection (see
+	/// [`EditBuffer::apply_native_edit`]). A change leaves history browsing and
+	/// re-queries completion like typing; a caret move keeps browsing, like a
+	/// motion key.
+	pub fn apply_native_edit(&mut self, edit: &NativeEdit) -> EditOutcome {
+		if self.buffer.apply_native_edit(edit) == BufferOutcome::Ignored {
+			return EditOutcome::Ignored;
+		}
+		if !edit.range.is_empty() || !edit.insert.is_empty() {
+			self.history_index = None;
+			self.history_query = None;
+		}
+		if self.history_index.is_some() {
+			self.refresh_recalled();
+		} else {
+			self.refresh();
+		}
+		EditOutcome::Changed
 	}
 
 	/// Shows or replaces one volatile speech-recognition preview.
@@ -5003,6 +5085,62 @@ mod tests {
 		fresh.buffer.replace_range(0..0, ">");
 		assert_eq!(fresh.text(), ">* #1");
 		assert_eq!(fresh.atom_ranges().as_slice(), &[(1, 5)]);
+	}
+
+	fn native(range: ops::Range<usize>, insert: &str, cursor: usize) -> NativeEdit {
+		NativeEdit { range, insert: insert.to_owned(), cursor }
+	}
+
+	#[test]
+	fn a_native_edit_replaces_its_range_and_places_the_terminal_caret() {
+		let mut buffer = EditBuffer::new("one\ntwo\nthree");
+		assert_eq!(buffer.apply_native_edit(&native(2..9, "X\nY", 5)), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "onX\nYhree");
+		assert_eq!((buffer.cursor(), buffer.cursor_line()), (5, 1));
+	}
+
+	#[test]
+	fn a_native_edit_is_one_undo_unit_and_a_caret_move_records_none() {
+		let mut buffer = EditBuffer::new("keep this text");
+		assert_eq!(buffer.apply_native_edit(&native(5..10, "", 5)), BufferOutcome::Changed);
+		assert_eq!((buffer.text(), buffer.cursor()), ("keep text", 5));
+		assert_eq!(buffer.apply_native_edit(&native(5..5, "", 0)), BufferOutcome::Changed);
+		assert_eq!((buffer.text(), buffer.cursor()), ("keep text", 0));
+		assert_eq!(
+			buffer.apply_native_edit(&native(0..0, "", 0)),
+			BufferOutcome::Ignored,
+			"a caret already in place does not move"
+		);
+		assert_eq!(buffer.handle(Key::Ctrl('_'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(
+			(buffer.text(), buffer.cursor()),
+			("keep this text", 14),
+			"one undo restores the text and the caret from before the edit"
+		);
+	}
+
+	#[test]
+	fn a_native_edit_into_a_marker_takes_the_whole_marker() {
+		let mut buffer = EditBuffer::new("a ");
+		buffer.insert_reference("[Image #1, 800x600]", "<ref image=1/>");
+		buffer.insert_text(" b");
+		// From after `a` into the middle of the marker, typed over with `Z`.
+		assert_eq!(buffer.apply_native_edit(&native(1..8, "Z", 2)), BufferOutcome::Changed);
+		assert_eq!((buffer.text(), buffer.cursor()), ("aZ b", 2));
+		assert!(buffer.atom_ranges().is_empty(), "the torn marker is dropped whole");
+	}
+
+	#[test]
+	fn a_native_edit_that_does_not_fit_the_text_is_ignored() {
+		let mut buffer = EditBuffer::new("a\u{1f600}");
+		for range in [0..99, 2..3, ops::Range { start: 3, end: 1 }] {
+			assert_eq!(
+				buffer.apply_native_edit(&native(range.clone(), "x", 0)),
+				BufferOutcome::Ignored,
+				"{range:?}"
+			);
+		}
+		assert_eq!((buffer.text(), buffer.cursor()), ("a\u{1f600}", 5));
 	}
 
 	#[test]

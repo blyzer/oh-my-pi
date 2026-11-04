@@ -4,7 +4,8 @@
 //!
 //! This module owns the wire: typed messages ([`wire`]), framing and
 //! chunking ([`frame`]), a reference document applier used as the test
-//! oracle ([`doc`]) and the JSONL recorder ([`record`]). Detection rides the
+//! oracle ([`doc`]), the JSONL recorder ([`record`]) and the `edit` event's
+//! UTF-16 offsets resolved for an editor ([`edit`]). Detection rides the
 //! startup probe: the `hello` query goes out just before the DA1 fence, and
 //! a reply that arrives before DA1 means the terminal speaks TSP
 //! ([`crate::ProbeResults::tsp`]). Live replies and events reach the host
@@ -13,6 +14,7 @@
 //! `OMP_TSP=0` turns TSP off: no probe, no surface, cell rendering only.
 
 pub mod doc;
+pub mod edit;
 pub mod frame;
 pub mod record;
 pub mod wire;
@@ -32,9 +34,10 @@ pub const DEFAULT_CREDITS: u32 = 2;
 pub const MAX_JOINED_BYTES: usize = 24 * 1024 * 1024;
 /// Environment variable that turns TSP off when set to `0`.
 pub const ENV: &str = "OMP_TSP";
-/// Program features omp announces in `hello`. Native editing (`edit`,
-/// `undo`, `send`) arrives in phase 3; until then every key stays omp's.
-pub const PROGRAM_FEATURES: &[&str] = &[];
+/// Program features omp announces in `hello`: it applies `edit` events, so
+/// Tern may keep a native selection in the composer, and `undo` events, so
+/// Tern may turn ⌃Z in it into one. `send` is not announced.
+pub const PROGRAM_FEATURES: &[&str] = &["edit", "undo"];
 
 /// Whether the environment allows TSP: anything but `OMP_TSP=0`.
 #[must_use]
@@ -80,7 +83,18 @@ mod tests {
 		let payload = &query[2..query.len() - 2];
 		let raw = frame::split(payload).expect("tsp");
 		let decoded: wire::Query = serde_json::from_slice(raw.body).expect("query");
-		assert!(matches!(decoded, wire::Query::Hello { ref v, .. } if v.as_slice() == [1]));
+		let wire::Query::Hello { v, features, .. } = decoded else {
+			panic!("a hello query");
+		};
+		assert_eq!(v.as_slice(), [1]);
+		assert_eq!(
+			features
+				.iter()
+				.map(|feature| feature.as_str())
+				.collect::<Vec<_>>(),
+			["edit", "undo"],
+			"omp applies native edits and undo, and accepts no send"
+		);
 	}
 
 	#[test]

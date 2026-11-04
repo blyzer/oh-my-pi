@@ -78,7 +78,7 @@ pub use context::{Appearance, Charset, Graphics, Grid, JamoWidth, Theme, UiConte
 pub use debug::{FramePngError, frame_ansi, frame_png, frame_text, respond_debug_query};
 pub use editcore::{
 	BufferOutcome, Command, CommandArgument, CompletionEdit, EditBuffer, EditOutcome, Editor,
-	EditorCompletion, EditorCompletion as Completion, EditorOptions, Picker, PickerRow,
+	EditorCompletion, EditorCompletion as Completion, EditorOptions, NativeEdit, Picker, PickerRow,
 	SlashCommands, Suggestion, SuggestionDisplay, SuggestionList, Suggestions, TabAction, VisualRow,
 };
 pub use frame::{
