@@ -478,7 +478,8 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				})
 				.await
 				.err(),
-			tonic::Code::Unimplemented,
+			// Served since R2: a request naming no approval lifetime is malformed.
+			tonic::Code::InvalidArgument,
 		),
 		(
 			"answer_ui",
