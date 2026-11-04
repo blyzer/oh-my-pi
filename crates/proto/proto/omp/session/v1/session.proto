@@ -301,6 +301,11 @@ message CommandReceipt {
   // Sequence number of the journal entry created by this command. Zero
   // for duplicate idempotent commands.
   uint64 seq = 3;
-  // The journal entry created by the original command, also present on replay.
+  // Identity of the journal entry the original command created, on the first
+  // answer and on every replay alike. It exists for one recovery case: a
+  // client that lost its first receipt retries under the same key and gets
+  // accepted = false and seq = 0, and no DOM node carries the key and no RPC
+  // looks an entry up by key, so without this id it cannot locate its own
+  // submission. The attach stream names the same id as the patch's cause.
   string entry_id = 4;
 }
