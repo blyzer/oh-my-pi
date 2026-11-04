@@ -762,7 +762,21 @@ const fn is_zero(value: &u64) -> bool {
 pub struct Patch {
 	/// Serialized array of DOM operations; `omp-dom` owns their Rust type.
 	pub ops: Box<RawValue>,
+	/// Client mutation identity, stored atomically with the patch when present.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub idempotency: Option<PatchIdempotency>,
+
 }
+/// Identity of a keyed mutation recorded in a patch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PatchIdempotency {
+	/// Client-chosen key.
+	pub key: IdempotencyKey,
+	/// Serialized typed request used to detect key reuse with different input.
+	pub request: Box<RawValue>,
+}
+
+
 
 /// Maximum snapcompact frames one compaction may retain.
 ///
