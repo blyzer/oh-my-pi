@@ -129,13 +129,13 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
 
 ### Phases
 
-| Phase | Scope | Exit criterion |
-| --- | --- | --- |
-| 0 | Wire module, probe arm, input routing, a port of v1's reference applier (`apply.ts`) as a test oracle, opt-out and recording | Unit tests: chunk cut rule (property), framing round-trip, probe demux; no user-visible change |
-| 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer as a minimal `editor` (caret, no native editing) and status band as `rows`; overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) |
-| 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, images via blobs (no palette `t`: Tern's theme applies) | Each card's description checked against the applier; `rows` count per frame logged |
-| 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI |
-| 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, `TERN_BLOB_DIR` | Owner decision per item |
+| Phase | Scope | Exit criterion | On `omp2` (2026-11-04) |
+| --- | --- | --- | --- |
+| 0 | Wire module, probe arm, input routing, a port of v1's reference applier (`apply.ts`) as a test oracle, opt-out and recording | Unit tests: chunk cut rule (property), framing round-trip, probe demux; no user-visible change | Done |
+| 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer as a minimal `editor` (caret, no native editing) and status band as `rows`; overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) | Done |
+| 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, images via blobs (no palette `t`: Tern's theme applies) | Each card's description checked against the applier; `rows` count per frame logged | Done, except the `rows` count per frame: nothing logs it |
+| 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI | Partial. Done: modal approvals, settings as `el` forms, `screen` covers, native `edit` and `undo` (the editor half of the criterion, proven in P7). Owed: `send`, the autocomplete overlay at the caret, data-first pickers (the picker half), `prefs` and `effort` |
+| 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, `TERN_BLOB_DIR` | Owner decision per item | Partial. Done: the typed `el` builder, OSC 877 input. Owed: a `flow` caller, a stylesheet caller, a `TERN_BLOB_DIR` reader |
 
 ## Consequences
 
@@ -237,7 +237,7 @@ Phase 1 done (`crates/chat/src/tsp.rs`, wired in `crates/chat/src/host.rs`):
   `text append` for streaming and `finalized` → `settle`;
 - credits and `ack`: never more than `credits` frames unacknowledged;
 - the composer as a minimal `editor` node (text, UTF-16 cursor, placeholder, `focus`), the status
-  band as `rows`, and every key still omp's;
+  band as `rows`, and every key still omp's (phase 3 adds Tern's native selection edits);
 - overlays suspend the surface and the existing renderer draws them;
 - the `tsp_stream_pacing raw|paced` convar, both modes implemented;
 - while a surface is live the slot ledger stays idle; it is admitted when an overlay hands the
@@ -252,21 +252,66 @@ Phase 2 done (`crates/chat/src/cards/`, `crates/chat/src/tsp.rs`; `5790db5f4e`):
   `hello.kinds`;
 - no palette is sent; nodes carry roles and tones only.
 
-Phase 3 partly done, through phase 4 forms (`fe1b29c476`, `dc9b310a76`):
+Phase 3 partly done:
 - the approval prompt is a surface-scoped `el` form in the `layer` region; Tern `action` events
-  are queued by the surface and routed to the same approval decision authority as the cell UI;
+  are queued by the surface and routed to the same approval decision authority as the cell UI
+  (`fe1b29c476`);
 - settings panels expose a surface-scoped `el` form; Tern `change` events lower through the
-  panel's existing `PreviewSetting` path, so validation and commit semantics are unchanged;
-- both fall back to the retained cell overlay when TSP is unavailable.
+  panel's existing `PreviewSetting` path, so validation and commit semantics are unchanged
+  (`dc9b310a76`);
+- both fall back to the retained cell overlay when TSP is unavailable;
+- a full-screen panel that describes itself natively covers the pane with a `screen` surface
+  (`d9684b4de9`, #472). `crates/chat/src/host.rs:Host::present_tsp` hands the `Panel::tsp_node`
+  of a `PanelAnchor::Full` panel the terminal draws to
+  `crates/chat/src/tsp.rs:Surface::present_cover`, which opens `omp-screen` in `screen` mode over
+  the live session and closes it with the panel. P7
+  `tsp_a_full_screen_panel_covers_the_pane_with_a_screen_surface` drives it through `/settings`.
+  Only the settings panel describes itself, so every other full-screen panel suspends the
+  surface and draws in cells;
+- native editing in the composer. The `hello` query announces the program features `edit` and
+  `undo` (`crates/tui/src/tsp/mod.rs:PROGRAM_FEATURES`), so Tern may keep a native selection in
+  the composer and turn ⌃Z there into `undo`. `crates/tui/src/tsp/edit.rs:resolve` drops an
+  `edit` whose `len` is not the displayed draft's UTF-16 length, clamps and orders its offsets,
+  takes the whole character when a range end falls inside a surrogate pair, sanitizes the text
+  like a paste, and carries Tern's caret onto the result.
+  `crates/tui/src/editcore.rs:EditBuffer::apply_native_edit` widens a range that touches an
+  attachment marker to the whole marker and records one undo unit, and none for a caret move.
+  `crates/chat/src/host.rs:Host::route_tsp_event` applies `edit` and `undo` to the composer. P7
+  `tsp_native_edits_round_trip_through_utf16_offsets` proves the round trip on a real PTY: this
+  is the editor half of the exit criterion;
+- `xutf` 1.6.0 has no offset conversion: its `convert` module exports `transcode`,
+  `transcode_into`, `transcode_with_case`, `transcoded_len` and `to_string`. Lengths go through
+  `transcoded_len::<Utf8, Utf16Le>`, and `resolve` maps offsets by walking the characters.
+
+Phase 3 not done, checked against the code on `omp2`:
+- `send`. omp does not announce it and the composer node has no `sendable` prop, so Tern sends
+  no `send`. It needs a path that submits explicit text the way Enter classifies a draft
+  (commands, local `!` and `$` input, prompts) and keeps the draft;
+- pickers (`3da28502f6`, #344). `crates/chat/src/overlays/models.rs:ModelPicker::tsp_node` and
+  `crates/chat/src/overlays/mod.rs:HistoryPicker::tsp_node` send a `picker` whose rows are
+  `item` children and whose `selected` is a row number. The data-first picker of v1
+  (`TspPickerProps` in `packages/wire/src/tsp.ts` at `579da1d661`) carries its rows in the
+  `items` prop, names the selected row by id, and holds that row's preview as children.
+  `Host::route_tsp_event` picks a model on `select`; v1 (`routeSelectListPicker` in
+  `packages/tui/src/native/picker.ts`) previews on `select` and picks on `activate` or the
+  `confirm` action. No proof sends a picker event, so the picker half of the exit criterion is
+  not met;
+- the autocomplete overlay. `crates/chat/src/composer.rs:Composer::autocomplete_node` sends the
+  dropdown as a `picker` in the `layer` region, not at the caret, and nothing routes its
+  events;
+- `prefs` and `effort` nodes. No presenter sends them; the model hub and the other overlays use
+  the cell UI.
 
 Phase 4 partly done (`f44c83c249`, `ee8b23083f`):
-- surface-scoped stylesheets, sent only when `hello` advertises the `styles` feature, with
-  validated names and Tern's 256 KiB per-surface budget;
-- a typed `ElementTag` builder that keeps Tern's tag vocabulary closed;
-- OSC 877 input is decoded in `crates/tui/src/tsp/frame.rs`.
+- a typed `ElementTag` builder (`crates/chat/src/tsp.rs:element_node`) keeps Tern's tag
+  vocabulary closed; the approval and settings forms use it;
+- OSC 877 input, Tern's framing through a Windows ConPTY, is decoded in
+  `crates/tui/src/tsp/frame.rs` (`OSC_PREFIX`);
+- surface-scoped stylesheets. `crates/chat/src/tsp.rs:Surface::set_stylesheet` sends one only
+  when `hello` advertises the `styles` feature, with validated names and Tern's 256 KiB
+  per-surface budget. Nothing calls it: `cargo check -p omp-chat` reports it as never used.
 
-Surface modes, phases 3 and 4 (`crates/tui/src/tsp/doc.rs`, `crates/chat/src/tsp.rs`,
-`crates/chat/src/host.rs`):
+Surface modes, phases 3 and 4 (`crates/tui/src/tsp/doc.rs`, `crates/chat/src/tsp.rs`):
 - `screen` and `flow` need no new node kind. A TSP node joins `wire::Kind`, and `Mode::Screen` and
   `Mode::Flow` were already typed in the wire module, so both are placement decisions over `Mode`. The
   ledger of 2026-11-01 blocked them on a node shape that none of them needs;
@@ -275,25 +320,27 @@ Surface modes, phases 3 and 4 (`crates/tui/src/tsp/doc.rs`, `crates/chat/src/tsp
   scrollback: it never listens, so Tern sends it no acks and its frames never wait for credits; it needs
   the `flow` feature (`present` refuses with `Unsupported` without it) and mounts no composer or
   status band;
-- [UNVERIFIED] A production screen cover was not found in `crates/chat/src/host.rs:Host`; its terminal epoch constructs an inline `Surface`. `crates/chat/src/tsp.rs:Surface::new` accepts a screen mode.
 - the reference applier knows the mode a document opened in: `Document::close(keep)` discards a screen
   surface whatever `keep` says and keeps the `main` of an inline or flow one. The specification's own
   frames and its static `ls` table run through it in every mode.
 
-Not started, checked against the code on `omp2`:
-- phase 3: native `editor` editing (`edit`, `undo`, `send` events), the autocomplete overlay at the
-  caret, `picker`, `prefs` and `effort` nodes (the model hub and the other overlays still use the
-  cell UI), and native descriptions for the full-screen panels that have none;
-- phase 4: [UNVERIFIED] A production flow caller and a `TERN_BLOB_DIR` reader were not established in `crates/app/src/print_mode.rs` or `crates/chat/src/host.rs:Host`; `crates/chat/src/tsp.rs:Surface::new` accepts flow mode.
+Phase 4 not done, checked against the code on `omp2`:
+- `flow`. No production code opens a flow surface. `crates/chat/src/host.rs:Host` builds its
+  surface inline, through `Surface::new` with `Mode::Inline` or `Surface::optimistic`; flow
+  surfaces are built only by the tests in `crates/chat/src/tsp.rs`; and
+  `crates/app/src/print_mode.rs` has no TSP code;
+- `TERN_BLOB_DIR`. Nothing in `crates/` reads it.
+
+The 0034 amendment that the Consequences section asks for is not written. Native editing does
+not change the transcript protocol, so it is still owed.
 
 ## Not verified
 
 - Appearance and fluidity in a real Tern: every proof here runs against a scripted fake Tern on a
   real PTY, with `omp_tui::tsp::doc` as the oracle. The `.jsonl` recordings (both pacing modes) are
   for the owner to replay with `surface-play`.
-- Whether `xutf` exposes UTF-8↔UTF-16 offset conversion. It has a `Utf16` codec type; an offset
-  API was not confirmed, so the presenter transcodes the prefix with
-  `xutf::transcoded_len::<Utf8, Utf16Le>`.
+- Which gestures make a real Tern send `edit`, and whether ⌃Z in the composer reaches omp as
+  `undo` rather than as the `cl_suspend` key. The P7 proof sends both events itself.
 - That a bracketed paste can never surface as a TSP response in omp2's decoder.
 - How many v1 components still fall back to `rows` at runtime.
 - How Tern's `md` treats omp's Markdown extensions (mermaid, graphviz).
