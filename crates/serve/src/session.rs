@@ -10,8 +10,9 @@
 
 use std::sync::Arc;
 
-use omp_agent::{ApprovalScope, UnknownApprovalScope};
+use omp_agent::{ApprovalError, ApprovalScope, UnknownApprovalScope};
 use omp_core::Str;
+use omp_journal::idempotency::{IdempotencyKey, IdempotencyKeyError};
 use omp_proto::session::v1 as pb;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use tonic::{Request, Response, Status};
@@ -125,6 +126,24 @@ impl ControlContext {
 	pub const fn scopes(&self) -> ScopeSet {
 		self.scopes
 	}
+
+	/// Requires what deciding an approval with this lifetime needs: `approve`,
+	/// and for [`ApprovalScope::Persist`] also `approve_persist`, which adds to
+	/// `approve` rather than replacing it.
+	///
+	/// # Errors
+	/// [`SessionControlError::MissingScope`] naming the first missing grant.
+	pub fn require_approve(&self, lifetime: &ApprovalScope) -> Result<(), SessionControlError> {
+		if !self.scopes.contains(ControlScope::Approve) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Approve });
+		}
+		if matches!(lifetime, ApprovalScope::Persist)
+			&& !self.scopes.contains(ControlScope::ApprovePersist)
+		{
+			return Err(SessionControlError::MissingScope { scope: ControlScope::ApprovePersist });
+		}
+		Ok(())
+	}
 }
 
 /// A control authority failure, mapped once to a gRPC status at this boundary.
@@ -161,6 +180,38 @@ pub enum SessionControlError {
 		#[from]
 		source: UnknownApprovalScope,
 	},
+	/// The idempotency key is empty or longer than the durable bound.
+	#[error(transparent)]
+	InvalidIdempotencyKey {
+		/// Strict parser failure.
+		#[from]
+		source: IdempotencyKeyError,
+	},
+	/// A command carried a stale bridge epoch.
+	#[error("expected session epoch {expected}, current epoch is {actual}")]
+	EpochMismatch {
+		/// The epoch supplied by the client.
+		expected: u64,
+		/// The epoch currently known to the host.
+		actual:   u64,
+	},
+	/// No approval with this ticket is pending: it is unknown, already
+	/// decided, or withdrawn.
+	#[error("approval ticket {ticket_id} is not pending")]
+	ApprovalNotPending {
+		/// The requested ticket.
+		ticket_id: Str,
+	},
+	/// The session refused the decision.
+	#[error(transparent)]
+	Approval {
+		/// Typed approval failure.
+		#[from]
+		source: ApprovalError,
+	},
+	/// A timed-out mutation may have committed; retry using the same key.
+	#[error("the mutation outcome is unknown; retry with the same idempotency key")]
+	MutationOutcomeUnknown,
 	/// A mutating verb arrived with no session selected.
 	#[error("no session is selected")]
 	NoSessionSelected,
@@ -183,6 +234,11 @@ impl From<SessionControlError> for Status {
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
 	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
 	/// | [`SessionControlError::InvalidApprovalScope`] | `invalid_argument` |
+	/// | [`SessionControlError::InvalidIdempotencyKey`] | `invalid_argument` |
+	/// | [`SessionControlError::EpochMismatch`] | `failed_precondition` |
+	/// | [`SessionControlError::ApprovalNotPending`] | `not_found` |
+	/// | [`SessionControlError::Approval`] | `already_exists` for a reused key, else `internal` |
+	/// | [`SessionControlError::MutationOutcomeUnknown`] | `deadline_exceeded` |
 	/// | [`SessionControlError::HostUnavailable`] | `unavailable` |
 	/// | [`SessionControlError::Backend`] | `internal` |
 	/// The codes are diagnostic, not protective. R1 serves one principal, the
@@ -200,11 +256,19 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
-			SessionControlError::NoSessionSelected | SessionControlError::InvalidApprovalScope { .. } => {
-				Self::invalid_argument(message)
+			SessionControlError::NoSessionSelected
+			| SessionControlError::InvalidApprovalScope { .. }
+			| SessionControlError::InvalidIdempotencyKey { .. } => Self::invalid_argument(message),
+			SessionControlError::EpochMismatch { .. } => Self::failed_precondition(message),
+			SessionControlError::ApprovalNotPending { .. } => Self::not_found(message),
+			SessionControlError::Approval {
+				source: ApprovalError::Session(omp_session::SessionError::KeyConflict { .. }),
+			} => Self::already_exists(message),
+			SessionControlError::Approval { .. } | SessionControlError::Backend(_) => {
+				Self::internal(message)
 			},
+			SessionControlError::MutationOutcomeUnknown => Self::deadline_exceeded(message),
 			SessionControlError::HostUnavailable => Self::unavailable(message),
-			SessionControlError::Backend(_) => Self::internal(message),
 		}
 	}
 }
@@ -231,14 +295,20 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		request: pb::AttachRequest,
 	) -> Result<RpcStream<pb::AttachFrame>, SessionControlError>;
 
-
-	/// Resolves a pending approval using a strictly parsed lifetime.
+	/// Decides a pending approval as the caller's principal.
+	///
+	/// `lifetime` and `key` arrive parsed from the wire. An answer the
+	/// authority stops waiting for is
+	/// [`SessionControlError::MutationOutcomeUnknown`], never a refusal: the
+	/// decision may still commit, and a retry under the same key reports it.
 	async fn approve(
 		&self,
 		context: ControlContext,
 		request: pb::ApproveRequest,
-		scope: ApprovalScope,
+		lifetime: ApprovalScope,
+		key: IdempotencyKey,
 	) -> Result<pb::CommandReceipt, SessionControlError>;
+
 	/// Opens a new session. Resume and fork of an id that is not live is
 	/// [`SessionControlError::UnknownSession`]. This does not submit a prompt.
 	async fn open_session(
@@ -264,8 +334,7 @@ impl SessionControlRpc {
 /// Rejection for a verb this revision does not serve.
 fn read_only(verb: &str) -> Status {
 	Status::unimplemented(format!(
-		"session control R1 does not serve {verb}: ListSessions, Attach and Open of a new session \
-		 are (ADR 0039)"
+		"session control does not serve {verb} in this revision (ADR 0039)"
 	))
 }
 
@@ -355,17 +424,21 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 	) -> Result<Response<pb::CommandReceipt>, Status> {
 		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
+		// Authorized before parsing, so a caller without `approve` learns
+		// nothing about how its input would have been read.
 		if !context.scopes().contains(ControlScope::Approve) {
 			return Err(SessionControlError::MissingScope { scope: ControlScope::Approve }.into());
 		}
-		let scope = ApprovalScope::parse_external(&request.get_ref().scope)
-			.map_err(SessionControlError::from)?;
-		if matches!(scope, ApprovalScope::Persist)
-			&& !context.scopes().contains(ControlScope::ApprovePersist)
-		{
-			return Err(SessionControlError::MissingScope { scope: ControlScope::ApprovePersist }.into());
-		}
-		let receipt = self.authority.approve(context, request.into_inner(), scope).await?;
+		let request = request.into_inner();
+		let lifetime =
+			ApprovalScope::parse_external(&request.scope).map_err(SessionControlError::from)?;
+		context.require_approve(&lifetime)?;
+		let key =
+			IdempotencyKey::parse(&request.idempotency_key).map_err(SessionControlError::from)?;
+		let receipt = self
+			.authority
+			.approve(context, request, lifetime, key)
+			.await?;
 		Ok(Response::new(receipt))
 	}
 
@@ -401,10 +474,12 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 #[cfg(test)]
 mod tests {
 	use std::{str::FromStr as _, sync::Arc};
-	use omp_agent::ApprovalScope;
 
 	use futures::StreamExt as _;
-	use tonic::{Code, Request, metadata::MetadataValue};
+	use omp_agent::{ApprovalError, ApprovalScope};
+	use omp_journal::{EntryId, idempotency::IdempotencyKey};
+	use omp_session::SessionError;
+	use tonic::{Code, Request, Status, metadata::MetadataValue};
 
 	use super::{
 		ControlContext, ControlScope, RpcStream, ScopeSet, SessionControlAuthority,
@@ -484,16 +559,22 @@ mod tests {
 			Ok(Box::pin(futures::stream::once(async move { Ok(welcome) })))
 		}
 
-
 		async fn approve(
 			&self,
 			context: ControlContext,
-			request: pb::ApproveRequest,
-			_scope: ApprovalScope,
+			_request: pb::ApproveRequest,
+			_lifetime: ApprovalScope,
+			key: IdempotencyKey,
 		) -> Result<pb::CommandReceipt, SessionControlError> {
 			self.record(context)?;
-			Ok(pb::CommandReceipt { idempotency_key: request.idempotency_key, accepted: true, seq: 1, ..pb::CommandReceipt::default() })
+			Ok(pb::CommandReceipt {
+				idempotency_key: key.as_str().to_owned(),
+				accepted: true,
+				seq: 1,
+				..pb::CommandReceipt::default()
+			})
 		}
+
 		async fn open_session(
 			&self,
 			context: ControlContext,
@@ -719,7 +800,12 @@ mod tests {
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
 		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
 		for name in ["prompt", "interrupt", "approve", "approve_persist", "answer_ui"] {
-			assert_eq!(ControlScope::from_str(name).expect("scope parses").to_string(), name);
+			assert_eq!(
+				ControlScope::from_str(name)
+					.expect("scope parses")
+					.to_string(),
+				name
+			);
 		}
 		assert!(ControlScope::from_str("admin").is_err());
 
@@ -770,16 +856,31 @@ mod tests {
 	async fn approve_holder_decides_a_session_scoped_approval() {
 		let authority = FakeAuthority::ok();
 		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
-		let request = authenticated(approval_request("session"), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
-		assert!(rpc.approve(request).await.expect("approval reaches authority").into_inner().accepted);
+		let request = authenticated(
+			approval_request("session"),
+			approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+		);
+		assert!(
+			rpc.approve(request)
+				.await
+				.expect("approval reaches authority")
+				.into_inner()
+				.accepted
+		);
 		assert_eq!(authority.principal(), "remote-principal");
 	}
 
 	#[tokio::test]
 	async fn control_holder_without_approve_is_refused() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
-		let request = authenticated(approval_request("session"), approval_context(&[ControlScope::Observe, ControlScope::Control]));
-		let error = rpc.approve(request).await.expect_err("control alone cannot approve");
+		let request = authenticated(
+			approval_request("session"),
+			approval_context(&[ControlScope::Observe, ControlScope::Control]),
+		);
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("control alone cannot approve");
 		assert_eq!(error.code(), Code::PermissionDenied);
 		assert!(error.message().contains("approve"));
 	}
@@ -787,7 +888,10 @@ mod tests {
 	#[tokio::test]
 	async fn approve_persist_without_approve_is_refused() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
-		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::ApprovePersist]));
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[ControlScope::Observe, ControlScope::ApprovePersist]),
+		);
 		let error = rpc.approve(request).await.expect_err("persist is additive");
 		assert_eq!(error.code(), Code::PermissionDenied);
 		assert!(error.message().contains("approve scope"));
@@ -796,8 +900,14 @@ mod tests {
 	#[tokio::test]
 	async fn approve_holder_cannot_decide_persist_and_error_names_approve_persist() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
-		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
-		let error = rpc.approve(request).await.expect_err("persist needs the additional grant");
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+		);
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("persist needs the additional grant");
 		assert_eq!(error.code(), Code::PermissionDenied);
 		assert!(error.message().contains("approve_persist"));
 	}
@@ -806,8 +916,21 @@ mod tests {
 	async fn approve_and_approve_persist_holder_decides_persist() {
 		let authority = FakeAuthority::ok();
 		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
-		let request = authenticated(approval_request("persist"), approval_context(&[ControlScope::Observe, ControlScope::Approve, ControlScope::ApprovePersist]));
-		assert!(rpc.approve(request).await.expect("persist reaches authority").into_inner().accepted);
+		let request = authenticated(
+			approval_request("persist"),
+			approval_context(&[
+				ControlScope::Observe,
+				ControlScope::Approve,
+				ControlScope::ApprovePersist,
+			]),
+		);
+		assert!(
+			rpc.approve(request)
+				.await
+				.expect("persist reaches authority")
+				.into_inner()
+				.accepted
+		);
 	}
 
 	#[tokio::test]
@@ -815,8 +938,14 @@ mod tests {
 		let authority = FakeAuthority::ok();
 		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
 		for scope in ["", "unknown-scope"] {
-			let request = authenticated(approval_request(scope), approval_context(&[ControlScope::Observe, ControlScope::Approve]));
-			let error = rpc.approve(request).await.expect_err("unknown scope is refused");
+			let request = authenticated(
+				approval_request(scope),
+				approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+			);
+			let error = rpc
+				.approve(request)
+				.await
+				.expect_err("unknown scope is refused");
 			assert_eq!(error.code(), Code::InvalidArgument);
 			assert!(error.message().contains(&format!("{scope:?}")));
 		}
@@ -828,11 +957,55 @@ mod tests {
 		let authority = FakeAuthority::ok();
 		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
 		let request = authenticated(approval_request("secret-invalid-scope"), observing("device"));
-		let error = rpc.approve(request).await.expect_err("observer cannot approve");
+		let error = rpc
+			.approve(request)
+			.await
+			.expect_err("observer cannot approve");
 		assert_eq!(error.code(), Code::PermissionDenied);
 		assert!(error.message().contains("approve"));
 		assert!(!error.message().contains("secret-invalid-scope"));
 		assert!(authority.seen.lock().is_none());
 	}
 
+	#[tokio::test]
+	async fn an_invalid_idempotency_key_is_refused_before_the_authority() {
+		let authority = FakeAuthority::ok();
+		let rpc = SessionControlRpc::new(Arc::clone(&authority) as Arc<dyn SessionControlAuthority>);
+		let oversized = "k".repeat(IdempotencyKey::MAX_BYTES + 1);
+		for key in ["", oversized.as_str()] {
+			let mut request = approval_request("session");
+			key.clone_into(&mut request.idempotency_key);
+			let request = authenticated(
+				request,
+				approval_context(&[ControlScope::Observe, ControlScope::Approve]),
+			);
+			let error = rpc
+				.approve(request)
+				.await
+				.expect_err("an unusable key is refused");
+			assert_eq!(error.code(), Code::InvalidArgument);
+			assert!(error.message().starts_with("idempotency key is"), "{}", error.message());
+		}
+		assert!(authority.seen.lock().is_none(), "no unkeyed approval reaches the authority");
+	}
+
+	#[test]
+	fn approval_failures_answer_stable_codes() {
+		let code = |error: SessionControlError| Status::from(error).code();
+		let reused = SessionError::KeyConflict {
+			key:      IdempotencyKey::new_static("approve-7"),
+			existing: EntryId::default(),
+		};
+		assert_eq!(code(SessionControlError::from(ApprovalError::from(reused))), Code::AlreadyExists);
+		assert_eq!(code(SessionControlError::from(ApprovalError::MissingPrompts)), Code::Internal);
+		assert_eq!(
+			code(SessionControlError::ApprovalNotPending { ticket_id: "ticket-1".into() }),
+			Code::NotFound
+		);
+		assert_eq!(code(SessionControlError::MutationOutcomeUnknown), Code::DeadlineExceeded);
+		assert_eq!(
+			code(SessionControlError::EpochMismatch { expected: 3, actual: 4 }),
+			Code::FailedPrecondition
+		);
+	}
 }
