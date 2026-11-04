@@ -1121,3 +1121,20 @@ impl ApprovalTicket {
 		}
 	}
 }
+
+#[cfg(test)]
+mod scope_tests {
+	use super::ApprovalScope;
+
+	#[test]
+	fn external_scope_parser_accepts_only_named_scopes() {
+		for name in ["once", "call", "turn", "session", "persist"] {
+			assert_eq!(ApprovalScope::parse_external(name).expect("named scope").as_str(), name);
+		}
+		for name in ["", "custom", "SESSION", "persist "] {
+			let error = ApprovalScope::parse_external(name).expect_err("unknown scope is refused");
+			assert_eq!(error.scope.as_str(), name);
+		}
+		assert!(matches!("custom".parse::<ApprovalScope>(), Ok(ApprovalScope::Custom(_))));
+	}
+}
