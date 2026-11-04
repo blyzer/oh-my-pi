@@ -1482,7 +1482,6 @@ mod tests {
 		sessions.register(Str::new("live"), KernelHandle {
 			up: stalled,
 			idle_subscribe: Some(idle_tx),
-			ask: None,
 			..handle
 		});
 		let seam = {
