@@ -317,8 +317,14 @@ fn owner_identity(mut request: tonic::Request<()>) -> Result<tonic::Request<()>,
 /// The scopes the owner socket grants, smallest set that serves every verb this
 /// revision answers there. It is deliberately not `ControlScope::VARIANTS`.
 #[cfg(unix)]
-const OWNER_SCOPES: &[ControlScope] =
-	&[ControlScope::Observe, ControlScope::ObserveHostLocal, ControlScope::Control];
+const OWNER_SCOPES: &[ControlScope] = &[
+	ControlScope::Observe,
+	ControlScope::ObserveHostLocal,
+	ControlScope::Prompt,
+	ControlScope::Interrupt,
+	ControlScope::Approve,
+	ControlScope::Control,
+];
 
 /// Principal every caller on the owner socket speaks for.
 #[cfg(unix)]
@@ -1730,6 +1736,11 @@ mod tests {
 			BTreeMap::from([
 				(ControlScope::Observe, true),
 				(ControlScope::ObserveHostLocal, true),
+				(ControlScope::Prompt, true),
+				(ControlScope::Interrupt, true),
+				(ControlScope::Approve, true),
+				// Persisted policy changes are not granted by default.
+				(ControlScope::ApprovePersist, false),
 				(ControlScope::Control, true),
 			]),
 			"the owner socket holds exactly the scopes ADR 0039 A4 decided",

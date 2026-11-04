@@ -23,11 +23,10 @@ use crate::inference::RpcStream;
 ///
 /// ADR 0039 section A4 defines the full ladder (`observe`,
 /// `observe_host_local`, `prompt`, `interrupt`, `approve`, `approve_persist`,
-/// `control`, `worker`, `admin`). R1 grants no mutation verb beyond `Open`,
-/// so only the two read scopes and `control` are declared here; the remaining
-/// variants land with the verbs
-/// they authorize. Parsing rejects every string outside this set, so a grant
-/// naming a future scope is refused rather than silently ignored.
+/// `control`, `worker`, `admin`). Only scopes for served or imminent verbs are
+/// declared here; the remaining variants land with the verbs they authorize.
+/// Parsing rejects every string outside this set rather than ignoring a grant
+/// naming a future scope.
 #[derive(
 	Clone,
 	Copy,
@@ -49,6 +48,14 @@ pub enum ControlScope {
 	/// Unredacted snapshots and events: cwd, env facts, advisor subtrees, and
 	/// raw provider metadata.
 	ObserveHostLocal,
+	/// Submit prompts, steering, and queued follow-ups.
+	Prompt,
+	/// Interrupt, abort tools, or pause a turn.
+	Interrupt,
+	/// Decide an approval for at most the current session.
+	Approve,
+	/// Additionally permits persisted approval decisions.
+	ApprovePersist,
 	/// `Open` of a new session, and the mutation verbs that land with it.
 	Control,
 }
