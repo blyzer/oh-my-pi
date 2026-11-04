@@ -335,12 +335,12 @@ async fn drive(
 	};
 	loop {
 		let next = match prompt.take() {
-			Some(text) => Idle::Prompt(text, Vec::new()),
+			Some(text) => Idle::Prompt(text, Vec::new(), None),
 			None => idle(&inbox_rx, &kernel_up, &mut session, &cancel, idle_ttl).await,
 		};
-		let (text, attachments, skill) = match next {
-			Idle::Prompt(text, attachments) => (text, attachments, None),
-			Idle::Skill(prompt) => (prompt.prompt_body.clone(), Vec::new(), Some(prompt)),
+		let (text, attachments, author, skill) = match next {
+			Idle::Prompt(text, attachments, author) => (text, attachments, author, None),
+			Idle::Skill(prompt) => (prompt.prompt_body.clone(), Vec::new(), None, Some(prompt)),
 			Idle::Park => break,
 			Idle::Cancelled => {
 				run.stop = TurnStop::Cancelled;
@@ -357,11 +357,17 @@ async fn drive(
 				Some(prompt) => {
 					futures::future::Either::Left(kernel.run_skill_turn(&mut session, prompt, control))
 				},
-				None => futures::future::Either::Right(kernel.run_turn(
-					&mut session,
-					TurnInput { text, attachments },
-					control,
-				)),
+				None => futures::future::Either::Right(async {
+					let input = TurnInput { text, attachments };
+					match author {
+						Some(author) => {
+							kernel
+								.run_authored_turn(&mut session, input, author, control)
+								.await
+						},
+						None => kernel.run_turn(&mut session, input, control).await,
+					}
+				}),
 			};
 			tokio::pin!(turn);
 			loop {
@@ -389,7 +395,7 @@ async fn drive(
 }
 
 enum Idle {
-	Prompt(Str, Vec<omp_journal::data::Attachment>),
+	Prompt(Str, Vec<omp_journal::data::Attachment>, Option<Str>),
 	Skill(omp_journal::data::SkillPrompt),
 	Park,
 	Cancelled,
@@ -413,13 +419,13 @@ async fn idle(
 			() = cancel.cancelled() => return Idle::Cancelled,
 			() = &mut park, if !omp_agent::pause_state(session.dom()).active => return Idle::Park,
 			message = inbox.recv_async() => match message {
-				Ok(Up::Steer { text, attachments } | Up::Queue { text, attachments }) => {
+				Ok(Up::Steer { text, attachments, author } | Up::Queue { text, attachments, author }) => {
 					if omp_agent::pause_state(session.dom()).active {
-						if let Err(error) = omp_agent::queue_prompt(session, text, &attachments) {
+						if let Err(error) = omp_agent::queue_prompt(session, text, &attachments, author) {
 							tracing::warn!(%error, "paused subagent prompt could not be journaled");
 						}
 					} else {
-						return Idle::Prompt(text, attachments);
+						return Idle::Prompt(text, attachments, author);
 					}
 				},
 				Ok(Up::SkillPrompt(prompt)) => {
@@ -428,6 +434,7 @@ async fn idle(
 							session,
 							prompt.prompt_body.clone(),
 							&[],
+							None,
 						) {
 							tracing::warn!(%error, "paused subagent skill prompt could not be queued");
 						}
@@ -437,11 +444,11 @@ async fn idle(
 				},
 				Ok(Up::Peer(text)) => {
 					if omp_agent::pause_state(session.dom()).active {
-						if let Err(error) = omp_agent::queue_prompt(session, text, &[]) {
+						if let Err(error) = omp_agent::queue_prompt(session, text, &[], None) {
 							tracing::warn!(%error, "paused subagent peer message could not be journaled");
 						}
 					} else {
-						return Idle::Prompt(text, Vec::new());
+						return Idle::Prompt(text, Vec::new(), None);
 					}
 				},
 				Ok(Up::Pause { active }) => {
@@ -452,8 +459,10 @@ async fn idle(
 						if let Some(ttl) = ttl {
 							park.as_mut().reset(tokio::time::Instant::now() + ttl);
 						}
-						if let Ok(Some((text, attachments))) = omp_agent::pop_queued_prompt(session) {
-							return Idle::Prompt(text, attachments);
+						if let Ok(Some(omp_agent::QueuedPrompt { text, attachments, author })) =
+							omp_agent::pop_queued_prompt(session)
+						{
+							return Idle::Prompt(text, attachments, author);
 						}
 					}
 				},
@@ -469,8 +478,7 @@ async fn idle(
 				Ok(Up::Cancel) => return Idle::Cancelled,
 				Ok(Up::Interrupt | Up::AbortTools(_)) => {},
 				Ok(
-					other @ (Up::SteerAuthored { .. }
-					| Up::Approval(_)
+					other @ (Up::Approval(_)
 					| Up::Approve { .. }
 					| Up::Env(_)
 					| Up::Autoreply { .. }),

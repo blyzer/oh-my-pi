@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::value::RawValue;
 use strum::{Display, EnumString, IntoStaticStr};
 
-use crate::{EntryId, blob::BlobRef};
+use crate::{EntryId, blob::BlobRef, idempotency::IdempotencyKey};
 
 /// Newest [`Genesis::version`] this build writes and reads.
 ///
@@ -112,6 +112,13 @@ pub struct MsgUser {
 	/// projection continues to consume `text` and `attachments`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub author:      Option<Str>,
+	/// Client-chosen key that makes this message exactly-once, absent for
+	/// local input and for entries written before keys existed.
+	///
+	/// It is committed in the same entry as the message, so replay can never
+	/// separate a message from the key that identifies it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub key:         Option<IdempotencyKey>,
 }
 
 /// One settled job in the typed payload of a journaled
@@ -838,6 +845,7 @@ mod tests {
 				mime: Str::new_static("image/png"),
 			}],
 			author:      None,
+			key:         None,
 		};
 		let json = serde_json::to_string(&payload).unwrap();
 		assert_eq!(
@@ -852,6 +860,21 @@ mod tests {
 		let bare: MsgUser = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
 		assert!(bare.attachments.is_empty());
 		assert!(bare.author.is_none());
+	}
+
+	#[test]
+	fn user_idempotency_key_rides_in_the_message_entry() {
+		let payload = MsgUser {
+			text:        Str::new_static("go"),
+			attachments: Vec::new(),
+			author:      Some(Str::new_static("Ada")),
+			key:         Some(IdempotencyKey::new_static("submit-7")),
+		};
+		let json = serde_json::to_string(&payload).unwrap();
+		assert_eq!(json, r#"{"text":"go","author":"Ada","key":"submit-7"}"#);
+		assert_eq!(serde_json::from_str::<MsgUser>(&json).unwrap(), payload);
+		let keyless: MsgUser = serde_json::from_str(r#"{"text":"go","author":"Ada"}"#).unwrap();
+		assert!(keyless.key.is_none());
 	}
 
 	#[test]

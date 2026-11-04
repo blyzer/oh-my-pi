@@ -69,10 +69,10 @@ impl StoredGuestPrompt {
 	/// enters model-facing content.
 	#[must_use]
 	pub fn into_steer(self) -> Up {
-		Up::SteerAuthored {
+		Up::Steer {
 			text:        self.input.text,
 			attachments: self.input.attachments,
-			author:      self.author,
+			author:      Some(self.author),
 		}
 	}
 }
@@ -280,10 +280,10 @@ mod tests {
 		.expect("store");
 		assert_eq!(stored.input.attachments.len(), 1);
 		match stored.into_steer() {
-			Up::SteerAuthored { text, attachments, author } => {
+			Up::Steer { text, attachments, author } => {
 				assert_eq!(text.as_str(), "hello");
 				assert_eq!(attachments.len(), 1);
-				assert_eq!(author.as_str(), "Ada");
+				assert_eq!(author.as_deref(), Some("Ada"));
 			},
 			other => panic!("unexpected {other:?}"),
 		}

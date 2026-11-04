@@ -27,13 +27,52 @@ pub enum CredentialTier {
 	FullAccess,
 }
 
-/// Authenticated collaboration peer stamped onto every admitted remote
-/// mutation.
+/// The credential that admitted a remote peer.
 ///
-/// The room credential itself is never retained. `token_digest` is an
-/// audit-linkage digest of the accepted token and is absent for read-only
-/// peers. The handle is Arc-backed because it crosses the Core, Environment,
-/// approval, and journal boundaries with every remote operation.
+/// Neither the room credential nor a device secret is ever retained: a room
+/// peer carries an audit-linkage digest of the write token it presented, and
+/// a device peer the id of the enrolled key that signed its challenge.
+#[derive(Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+	/// A collaboration room guest.
+	Room {
+		/// Stable room identifier.
+		room_id:      Str,
+		/// Digest of the accepted write token, absent for read-only peers.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		token_digest: Option<Hash32>,
+	},
+	/// An enrolled device.
+	Device {
+		/// Identifier of the enrolled key that signed the device's challenge.
+		key_id: Str,
+	},
+}
+
+impl fmt::Debug for Origin {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Room { token_digest, .. } => formatter
+				.debug_struct("Room")
+				.field("room_id", &"[redacted]")
+				.field("token_digest", &token_digest.map(|_| "[redacted]"))
+				.finish(),
+			Self::Device { .. } => formatter
+				.debug_struct("Device")
+				.field("key_id", &"[redacted]")
+				.finish(),
+		}
+	}
+}
+
+/// Authenticated remote peer, a collaboration guest or an enrolled device,
+/// stamped onto every admitted remote mutation.
+///
+/// The peer's [`Origin`] names the credential that admitted it; the
+/// credential itself is never retained. The handle is Arc-backed because it
+/// crosses the Core, Environment, approval, and journal boundaries with every
+/// remote operation.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct RemotePrincipal(Arc<RemotePrincipalData>);
 
@@ -42,8 +81,7 @@ struct RemotePrincipalData {
 	peer_id:         u32,
 	display_name:    Str,
 	credential_tier: CredentialTier,
-	room_id:         Str,
-	token_digest:    Option<Hash32>,
+	origin:          Origin,
 }
 
 const _: () =
@@ -55,16 +93,9 @@ impl RemotePrincipal {
 		peer_id: u32,
 		display_name: Str,
 		credential_tier: CredentialTier,
-		room_id: Str,
-		token_digest: Option<Hash32>,
+		origin: Origin,
 	) -> Self {
-		Self(Arc::new(RemotePrincipalData {
-			peer_id,
-			display_name,
-			credential_tier,
-			room_id,
-			token_digest,
-		}))
+		Self(Arc::new(RemotePrincipalData { peer_id, display_name, credential_tier, origin }))
 	}
 
 	/// Returns the relay-assigned peer identifier.
@@ -82,14 +113,9 @@ impl RemotePrincipal {
 		self.0.credential_tier
 	}
 
-	/// Returns the stable room identifier.
-	pub fn room_id(&self) -> &str {
-		self.0.room_id.as_str()
-	}
-
-	/// Returns the accepted write-token digest used for audit linkage.
-	pub fn token_digest(&self) -> Option<Hash32> {
-		self.0.token_digest
+	/// Returns the credential that admitted this peer.
+	pub fn origin(&self) -> &Origin {
+		&self.0.origin
 	}
 
 	/// Returns whether this peer may submit host mutations.
@@ -105,8 +131,7 @@ impl fmt::Debug for RemotePrincipal {
 			.field("peer_id", &self.0.peer_id)
 			.field("display_name", &self.0.display_name)
 			.field("credential_tier", &self.0.credential_tier)
-			.field("room_id", &"[redacted]")
-			.field("token_digest", &self.0.token_digest.map(|_| "[redacted]"))
+			.field("origin", &self.0.origin)
 			.finish()
 	}
 }
@@ -374,5 +399,86 @@ impl<'de> Deserialize<'de> for Provenance {
 		D: Deserializer<'de>,
 	{
 		ProvenanceData::deserialize(deserializer).map(|data| Self(Arc::new(data)))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn room(token_digest: Option<Hash32>) -> Origin {
+		Origin::Room { room_id: Str::new_static("room-1"), token_digest }
+	}
+
+	fn device() -> Origin {
+		Origin::Device { key_id: Str::new_static("key-9") }
+	}
+
+	fn admit(origin: Origin) -> RemotePrincipal {
+		RemotePrincipal::new(7, Str::new_static("guest"), CredentialTier::FullAccess, origin)
+	}
+
+	#[test]
+	fn room_origin_round_trips_with_its_token_digest() {
+		let origin = room(Some(Hash32::new([0xab; 32])));
+		let json = serde_json::to_string(&origin).unwrap();
+		assert_eq!(
+			json,
+			format!(r#"{{"kind":"room","room_id":"room-1","token_digest":"{}"}}"#, "ab".repeat(32))
+		);
+		assert_eq!(serde_json::from_str::<Origin>(&json).unwrap(), origin);
+	}
+
+	#[test]
+	fn read_only_room_origin_omits_the_digest() {
+		let origin = room(None);
+		let json = serde_json::to_string(&origin).unwrap();
+		assert_eq!(json, r#"{"kind":"room","room_id":"room-1"}"#);
+		assert_eq!(serde_json::from_str::<Origin>(&json).unwrap(), origin);
+	}
+
+	#[test]
+	fn device_origin_round_trips() {
+		let json = serde_json::to_string(&device()).unwrap();
+		assert_eq!(json, r#"{"kind":"device","key_id":"key-9"}"#);
+		assert_eq!(serde_json::from_str::<Origin>(&json).unwrap(), device());
+	}
+
+	#[test]
+	fn origin_refuses_unknown_kinds_and_missing_fields() {
+		assert!(serde_json::from_str::<Origin>(r#"{"kind":"bridge","room_id":"r"}"#).is_err());
+		assert!(serde_json::from_str::<Origin>(r#"{"kind":"room"}"#).is_err());
+		assert!(serde_json::from_str::<Origin>(r#"{"kind":"device"}"#).is_err());
+	}
+
+	#[test]
+	fn a_principal_reports_the_origin_that_admitted_it() {
+		for origin in [room(Some(Hash32::new([1; 32]))), room(None), device()] {
+			let principal = admit(origin.clone());
+			assert_eq!(principal.origin(), &origin);
+			assert_eq!(principal.clone().origin(), &origin);
+			assert_eq!(principal.peer_id(), 7);
+			assert!(principal.may_mutate());
+		}
+	}
+
+	#[test]
+	fn principals_with_different_origins_are_different_peers() {
+		assert_eq!(admit(room(None)), admit(room(None)));
+		assert_ne!(admit(room(None)), admit(room(Some(Hash32::new([1; 32])))));
+		assert_ne!(admit(room(None)), admit(device()));
+	}
+
+	#[test]
+	fn debug_never_discloses_the_origin() {
+		let shown = format!("{:?} {:?}", admit(room(Some(Hash32::new([0xcd; 32])))), device());
+		for secret in ["room-1", "cdcd", "key-9"] {
+			assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+		}
+	}
+
+	#[test]
+	fn the_handle_stays_clone_cheap() {
+		assert!(std::mem::size_of::<RemotePrincipal>() <= 16);
 	}
 }

@@ -3,9 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fs, io, mem, path::Path, sync::Arc};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_agent::{
-	ApprovalDecision, ApprovalScope, ApprovalSource, Inference, Kernel, RunControl, TurnInput, Up,
-};
+use omp_agent::{ApprovalDecision, ApprovalScope, Inference, Kernel, RunControl, TurnInput, Up};
 use omp_core::{Str, base64};
 use omp_driver::{headless::kernel::SessionHome, sessions::SessionIndex};
 use omp_session::{AttachmentInput, Session, SessionError};
@@ -901,6 +899,10 @@ fn client_answer(frame: &mut Value) -> Option<Answer> {
 	))
 }
 
+/// Decider recorded for an ACP answer that names none: the editor is a local
+/// peer of the owner's own process, so the channel is the only identity it has.
+const ACP_DECIDER: &str = "acp";
+
 /// Maps a `session/request_permission` answer to the kernel's decision:
 /// option ids `allow_once`/`allow_always`/`reject_once`/`reject_always`; an
 /// error, a `cancelled` outcome, a malformed answer, or an unknown option
@@ -921,14 +923,12 @@ fn permission_decision(answer: Answer) -> ApprovalDecision {
 			(false, ApprovalScope::Once)
 		},
 	};
-	ApprovalDecision {
+	ApprovalDecision::external(
 		approved,
 		scope,
-		source: ApprovalSource::External,
-		decided_by: None,
-		reason: (!approved).then(|| Str::new_static("rejected by ACP client")),
-		audited: false,
-	}
+		Str::new_static(ACP_DECIDER),
+		(!approved).then(|| Str::new_static("rejected by ACP client")),
+	)
 }
 
 /// The ACP `ToolKind` of a permission request for an approval requirement of
@@ -1563,16 +1563,10 @@ fn approval(params: &Map<String, Value>) -> Result<(Str, ApprovalDecision), &'st
 	let decided_by = params
 		.get("decidedBy")
 		.and_then(Value::as_str)
-		.map(Str::new);
+		.filter(|name| !name.trim().is_empty())
+		.map_or(Str::new_static(ACP_DECIDER), Str::new);
 	let reason = params.get("reason").and_then(Value::as_str).map(Str::new);
-	Ok((Str::new(id), ApprovalDecision {
-		approved,
-		scope,
-		source: ApprovalSource::External,
-		decided_by,
-		reason,
-		audited: false,
-	}))
+	Ok((Str::new(id), ApprovalDecision::external(approved, scope, decided_by, reason)))
 }
 
 fn session_update(session_id: &str, update: Value) -> Value {

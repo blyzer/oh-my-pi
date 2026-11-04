@@ -2575,7 +2575,7 @@ where
 												}) =>
 										{
 											if let Some((_, session)) = current.as_mut() {
-												omp_agent::queue_prompt(session, Str::new(text), &[])
+												omp_agent::queue_prompt(session, Str::new(text), &[], None)
 													.into_diagnostic()?;
 											}
 											RpcResponse::success(
@@ -2619,6 +2619,7 @@ where
 								let response = up_response(id, command.as_str(), &request.params, &mailbox, |text| Up::Steer {
 									text,
 									attachments: Vec::new(),
+									author: None,
 								});
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
@@ -2630,6 +2631,7 @@ where
 									up_response(id, command.as_str(), &request.params, &mailbox, |text| Up::Queue {
 										text,
 										attachments: Vec::new(),
+										author: None,
 									})
 								} else {
 									match message_text(&request.params) {
@@ -2641,7 +2643,7 @@ where
 												}) =>
 										{
 											if let Some((_, session)) = current.as_mut() {
-												omp_agent::queue_prompt(session, Str::new(text), &[])
+												omp_agent::queue_prompt(session, Str::new(text), &[], None)
 													.into_diagnostic()?;
 											}
 											RpcResponse::success(
@@ -2739,7 +2741,7 @@ where
 									if !active {
 										queued = omp_agent::pop_queued_prompt(session)
 											.into_diagnostic()?
-																							.map(|(text, attachments)| RpcTurnInput::Plain(TurnInput { text, attachments }));
+																							.map(|omp_agent::QueuedPrompt { text, attachments, .. }| RpcTurnInput::Plain(TurnInput { text, attachments }));
 									}
 									let response = RpcResponse::success(
 										id.clone(),
@@ -3001,7 +3003,7 @@ where
 					None if session_cancelled => None,
 					None => omp_agent::pop_queued_prompt(&mut turn_session)
 						.into_diagnostic()?
-						.map(|(text, attachments)| RpcTurnInput::Plain(TurnInput { text, attachments })),
+						.map(|omp_agent::QueuedPrompt { text, attachments, .. }| RpcTurnInput::Plain(TurnInput { text, attachments })),
 				};
 				current = Some((turn_kernel, turn_session));
 				match next {
@@ -3551,7 +3553,13 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 	}
 }
 
-/// `approve {promptId, approved, scope?, reason?}` → [`Up::Approve`].
+/// Decider recorded for a stdio `approve` that names none: the peer is the
+/// owner's own process, so the channel is the only identity it has.
+const STDIO_DECIDER: &str = "stdio";
+
+/// `approve {promptId, approved, scope?, reason?, decidedBy?}` →
+/// [`Up::Approve`]. The answer always names a decider: `decidedBy` when the
+/// client sends one, else the stdio channel.
 fn approve_response(
 	id: Option<RequestId>,
 	command: &str,
@@ -3582,17 +3590,16 @@ fn approve_response(
 		.expect("approval scope parsing is infallible");
 	let _ = mailbox.send(Up::Approve {
 		id:       Str::new(prompt_id),
-		decision: omp_agent::ApprovalDecision {
+		decision: omp_agent::ApprovalDecision::external(
 			approved,
 			scope,
-			source: omp_agent::ApprovalSource::External,
-			decided_by: params
+			params
 				.get("decidedBy")
 				.and_then(Value::as_str)
-				.map(Str::new),
-			reason: params.get("reason").and_then(Value::as_str).map(Str::new),
-			audited: false,
-		},
+				.filter(|name| !name.trim().is_empty())
+				.map_or(Str::new_static(STDIO_DECIDER), Str::new),
+			params.get("reason").and_then(Value::as_str).map(Str::new),
+		),
 	});
 	RpcResponse::success(id, command, json!({ "queued": true }))
 		.expect("static approval response serializes")
@@ -3768,5 +3775,79 @@ mod tests {
 			(Some("network"), Some("http:docs.rs:443")),
 			(Some("network"), Some("tool:read"))
 		]);
+	}
+
+	/// The stdio `approve` command always names a decider: the client's
+	/// `decidedBy` when it sends one, else the stdio channel.
+	#[test]
+	fn stdio_approve_always_names_a_decider() {
+		let (mailbox, queue) = flume::unbounded();
+		let approve = |params: serde_json::Value| {
+			let params = params.as_object().expect("params object").clone();
+			let _ = super::approve_response(None, "approve", &params, &mailbox);
+			match queue.try_recv().expect("approve is queued") {
+				omp_agent::Up::Approve { id, decision } => (id, decision),
+				other => panic!("unexpected mailbox message {other:?}"),
+			}
+		};
+
+		let (id, anonymous) =
+			approve(serde_json::json!({"promptId": "approval-1", "approved": true}));
+		assert_eq!(id.as_str(), "approval-1");
+		assert_eq!(anonymous.source, omp_agent::ApprovalSource::External);
+		assert_eq!(anonymous.decided_by.as_deref(), Some("stdio"));
+
+		let (_, named) = approve(serde_json::json!({"promptId": "approval-1", "decidedBy": "ada"}));
+		assert_eq!(named.decided_by.as_deref(), Some("ada"));
+
+		let (_, blank) = approve(serde_json::json!({"promptId": "approval-1", "decidedBy": "  "}));
+		assert_eq!(blank.decided_by.as_deref(), Some("stdio"), "a blank name is no name");
+	}
+
+	/// What `approve` queues passes the book's decider guard, so the journaled
+	/// decision carries its decider.
+	#[test]
+	fn a_stdio_answer_is_journaled_with_its_decider() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session = omp_session::Session::create(
+			directory.path().join("approve.oms"),
+			omp_session::ComponentRegistry::standard(),
+		)
+		.expect("session");
+		let book = omp_agent::ApprovalBook::new();
+		let ticket = book
+			.open(&mut session, ApprovalSpec {
+				title:         Str::new_static("Run command"),
+				body:          Str::new_static("body"),
+				subject:       Str::new_static("printf ok"),
+				kind:          Str::new_static("exec"),
+				scopes:        vec![Str::new_static("once")],
+				default:       None,
+				route:         Str::new_static("user"),
+				approver:      None,
+				timeout_ms:    0,
+				unreachable:   Str::new_static("deny"),
+				require_human: true,
+				pattern:       None,
+				evidence:      Vec::new(),
+			})
+			.expect("prompt opens");
+
+		let (mailbox, queue) = flume::unbounded();
+		let params = serde_json::json!({"promptId": ticket.ticket_id, "approved": true});
+		let _ =
+			super::approve_response(None, "approve", params.as_object().expect("params"), &mailbox);
+		let omp_agent::Up::Approve { id, decision } = queue.try_recv().expect("approve is queued")
+		else {
+			panic!("approve queues Up::Approve");
+		};
+
+		let decided = book
+			.decide(&mut session, id.as_str(), decision)
+			.expect("the guard admits an answer that names its decider");
+		assert_eq!(
+			decided.decision.and_then(|decision| decision.decided_by),
+			Some(Str::new_static("stdio"))
+		);
 	}
 }

@@ -178,12 +178,45 @@ pub struct ApprovalDecision {
 	pub scope:      ApprovalScope,
 	/// Source of the answer.
 	pub source:     ApprovalSource,
-	/// Optional authenticated decider.
+	/// Authenticated decider. [`ApprovalBook::decide`] refuses an
+	/// [`ApprovalSource::External`] answer that names none; the other sources
+	/// may leave it empty.
 	pub decided_by: Option<Str>,
 	/// Optional user-visible rationale.
 	pub reason:     Option<Str>,
 	/// Whether a fail-open result was durably audited.
 	pub audited:    bool,
+}
+
+impl ApprovalDecision {
+	/// An answer from an authenticated external approver.
+	///
+	/// The decider is a required argument, so an unattributed external answer
+	/// cannot be built by accident; [`ApprovalBook::decide`] still refuses a
+	/// hand-built one. The decider stays optional on the wire.
+	#[must_use]
+	pub const fn external(
+		approved: bool,
+		scope: ApprovalScope,
+		decided_by: Str,
+		reason: Option<Str>,
+	) -> Self {
+		Self {
+			approved,
+			scope,
+			source: ApprovalSource::External,
+			decided_by: Some(decided_by),
+			reason,
+			audited: false,
+		}
+	}
+
+	fn names_decider(&self) -> bool {
+		self
+			.decided_by
+			.as_deref()
+			.is_some_and(|name| !name.trim().is_empty())
+	}
 }
 
 /// Journal-derived approval prompt projection.
@@ -216,6 +249,12 @@ pub enum ApprovalError {
 	#[error("approval ticket {id} does not exist")]
 	UnknownTicket {
 		/// Missing ticket id.
+		id: Str,
+	},
+	/// An external answer did not name who decided it.
+	#[error("external answer to approval ticket {id} does not name its decider")]
+	MissingDecider {
+		/// Ticket the unattributed answer targeted.
 		id: Str,
 	},
 	/// Stored prompt JSON is malformed.
@@ -326,12 +365,19 @@ impl ApprovalBook {
 	}
 
 	/// Applies an idempotent first decision to a prompt.
+	///
+	/// An [`ApprovalSource::External`] answer must name its decider: one that
+	/// does not is refused with [`ApprovalError::MissingDecider`] and the prompt
+	/// stays pending.
 	pub fn decide(
 		&self,
 		session: &mut Session,
 		ticket_id: &str,
 		decision: ApprovalDecision,
 	) -> Result<ApprovalTicket, ApprovalError> {
+		if decision.source == ApprovalSource::External && !decision.names_decider() {
+			return Err(ApprovalError::MissingDecider { id: Str::new(ticket_id) });
+		}
 		let (handle, mut ticket) = find_ticket(session, ticket_id)?;
 		if ticket.state == TicketState::Pending {
 			ticket.state = TicketState::Decided;

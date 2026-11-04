@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use omp_agent::{
-	ApprovalBook, ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource, ApprovalSpec,
-	TicketState,
+	ApprovalBook, ApprovalDecision, ApprovalError, ApprovalRoute, ApprovalScope, ApprovalSource,
+	ApprovalSpec, TicketState,
 };
 use omp_core::{Str, sf};
 use omp_session::{ComponentRegistry, Session};
@@ -55,6 +55,72 @@ fn approvals_open_decide_round_trip_through_session_replay() {
 	let restored = Session::open(&path, ComponentRegistry::standard()).expect("replay");
 	assert_eq!(book.ticket(&restored, ticket.ticket_id.as_str()), Some(decided));
 	assert!(book.pending(&restored).is_empty());
+}
+
+fn external(decided_by: Option<&'static str>) -> ApprovalDecision {
+	ApprovalDecision {
+		source: ApprovalSource::External,
+		decided_by: decided_by.map(Str::new_static),
+		..decision()
+	}
+}
+
+#[test]
+fn an_external_answer_must_name_its_decider() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let mut session =
+		Session::create(temp.path().join("external.oms"), ComponentRegistry::standard())
+			.expect("session");
+	let book = ApprovalBook::new();
+	let ticket = book.open(&mut session, spec(0, None)).expect("open prompt");
+	let id = ticket.ticket_id.as_str();
+
+	for anonymous in [external(None), external(Some("")), external(Some("  "))] {
+		let error = book
+			.decide(&mut session, id, anonymous)
+			.expect_err("an unattributed external answer is refused");
+		assert!(
+			matches!(&error, ApprovalError::MissingDecider { id: refused } if refused.as_str() == id),
+			"{error:?}"
+		);
+	}
+	assert_eq!(book.pending(&session), vec![ticket.clone()], "a refusal leaves the prompt pending");
+
+	let decided = book
+		.decide(&mut session, id, external(Some("ada")))
+		.expect("a named external answer is journaled");
+	assert_eq!(decided.state, TicketState::Decided);
+	assert_eq!(decided.decision.and_then(|decision| decision.decided_by), Some(sf!("ada")));
+}
+
+#[test]
+fn the_external_constructor_requires_a_decider() {
+	let decision = ApprovalDecision::external(true, ApprovalScope::Session, sf!("ada"), None);
+	assert_eq!(decision.source, ApprovalSource::External);
+	assert_eq!(decision.decided_by, Some(sf!("ada")));
+	assert!(decision.approved && !decision.audited && decision.reason.is_none());
+}
+
+#[test]
+fn local_and_automatic_answers_need_no_decider() {
+	for source in [
+		ApprovalSource::User,
+		ApprovalSource::Config,
+		ApprovalSource::Timeout,
+		ApprovalSource::Unavailable,
+	] {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let mut session =
+			Session::create(temp.path().join("local.oms"), ComponentRegistry::standard())
+				.expect("session");
+		let book = ApprovalBook::new();
+		let ticket = book.open(&mut session, spec(0, None)).expect("open prompt");
+		let answer = ApprovalDecision { source, decided_by: None, ..decision() };
+		let decided = book
+			.decide(&mut session, ticket.ticket_id.as_str(), answer)
+			.expect("a non-external answer needs no decider");
+		assert_eq!(decided.state, TicketState::Decided, "{source}");
+	}
 }
 
 #[test]

@@ -64,7 +64,8 @@ pub use location::{
 pub use path::{NormalizePath, shorten_home_path};
 pub use phase::{ActivateReason, InvocationPhase, LifecyclePhase, Point, PointSet, RestartReason};
 pub use principal::{
-	ArtifactDigest, ArtifactDigestError, CredentialTier, Principal, Provenance, RemotePrincipal,
+	ArtifactDigest, ArtifactDigestError, CredentialTier, Origin, Principal, Provenance,
+	RemotePrincipal,
 };
 pub use qr::{QrCode, QrEc, QrOverflow};
 pub use secret::{ExposeSecret, Secret, SecretBox, SecretString, ct_eq};

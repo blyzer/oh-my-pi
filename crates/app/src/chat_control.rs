@@ -824,11 +824,10 @@ impl<C: omp_agent::Inference> Controller<C> {
 			// A queued prompt runs as soon as the controller is idle and
 			// not paused.
 			if !self.is_paused()
-				&& let Some(input) = self.pop_queued()?
+				&& let Some(request) = self.pop_queued()?
 			{
-				let quit = self
-					.run_turn(TurnRequest::User(input), &command_rx, None)
-					.await? || self.after_turn(&command_rx).await?;
+				let quit = self.run_turn(request, &command_rx, None).await?
+					|| self.after_turn(&command_rx).await?;
 				if quit {
 					self.shutdown().await?;
 					return Ok(());
@@ -1123,7 +1122,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 				Flow::Turn(TurnRequest::User(TurnInput { text, attachments }))
 			},
 			HostCommand::Steer(text) => {
-				let _ = self.up.send(Up::Steer { text, attachments: Vec::new() });
+				let _ = self
+					.up
+					.send(Up::Steer { text, attachments: Vec::new(), author: None });
 				Flow::Idle
 			},
 			HostCommand::Interrupt => {
@@ -1309,7 +1310,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					},
 					command = command_rx.recv_async() => match command {
 						Ok(HostCommand::Submit(text) | HostCommand::Steer(text)) => {
-							let _ = self.up.send(Up::Steer { text, attachments: Vec::new() });
+							let _ = self.up.send(Up::Steer { text, attachments: Vec::new(), author: None });
 						},
 						Ok(HostCommand::SkillPrompt(prompt)) => {
 							let _ = self.up.send(Up::SkillPrompt(prompt));
@@ -1318,7 +1319,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 							let stored = store_attachments(&blobs, attachments);
 							match stored {
 								Ok(attachments) => {
-									let _ = self.up.send(Up::Steer { text, attachments });
+									let _ = self.up.send(Up::Steer { text, attachments, author: None });
 								},
 								// The turn keeps running; the failure is journaled
 								// where the user sees it instead of silently dropping
@@ -1383,7 +1384,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 							let stored = store_attachments(&blobs, attachments);
 							match stored {
 								Ok(attachments) => {
-									let _ = self.up.send(Up::Queue { text: prompt, attachments });
+									let _ = self.up.send(Up::Queue { text: prompt, attachments, author: None });
 								},
 								Err(error) => {
 									let _ = self.up.send(Up::Env(omp_agent::EnvEvent::Notice {
@@ -1850,7 +1851,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 			HostCommand::Spawn { kind: SpawnKind::Btw, text } => {
 				// `/btw` streams through `Services::btw`; a stray spawn request
 				// is answered the same way without a panel.
-				let _ = self.up.send(Up::Steer { text, attachments: Vec::new() });
+				let _ = self
+					.up
+					.send(Up::Steer { text, attachments: Vec::new(), author: None });
 			},
 			HostCommand::Pause { active } => {
 				omp_agent::set_paused(&mut self.session, active).into_diagnostic()?;
@@ -2047,7 +2050,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 						})?;
 					live
 						.up
-						.send(Up::Steer { text, attachments: Vec::new() })
+						.send(Up::Steer { text, attachments: Vec::new(), author: None })
 						.map_err(|_| {
 							ServiceError::Failed(Str::new(format!("Agent \"{id}\" stopped listening")))
 						})?;
@@ -2259,7 +2262,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 							quit = true;
 						},
 						Ok(HostCommand::Submit(text) | HostCommand::Steer(text)) => {
-							let _ = self.up.send(Up::Steer { text, attachments: Vec::new() });
+							let _ = self.up.send(Up::Steer { text, attachments: Vec::new(), author: None });
 						},
 						Ok(HostCommand::SkillPrompt(prompt)) => {
 							let _ = self.up.send(Up::SkillPrompt(prompt));
@@ -2267,7 +2270,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 						Ok(HostCommand::SubmitWithAttachments { text, attachments }) => {
 							match store_attachments(&blobs, attachments) {
 								Ok(attachments) => {
-									let _ = self.up.send(Up::Steer { text, attachments });
+									let _ = self.up.send(Up::Steer { text, attachments, author: None });
 								},
 								Err(error) => {
 									let _ = self.up.send(Up::Env(omp_agent::EnvEvent::Notice {
@@ -2604,15 +2607,20 @@ impl<C: omp_agent::Inference> Controller<C> {
 	}
 
 	/// Takes the oldest pending `/queue` prompt with its attachments,
-	/// marking it sent.
-	fn pop_queued(&mut self) -> miette::Result<Option<TurnInput>> {
-		let Some((text, attachments)) =
+	/// marking it sent. A prompt a remote author queued comes back as an
+	/// authored turn, so attribution survives the queue.
+	fn pop_queued(&mut self) -> miette::Result<Option<TurnRequest>> {
+		let Some(omp_agent::QueuedPrompt { text, attachments, author }) =
 			omp_agent::pop_queued_prompt(&mut self.session).into_diagnostic()?
 		else {
 			return Ok(None);
 		};
 		self.record_loop_prompt(&text)?;
-		Ok(Some(TurnInput { text, attachments }))
+		let input = TurnInput { text, attachments };
+		Ok(Some(match author {
+			Some(author) => TurnRequest::Authored { input, author },
+			None => TurnRequest::User(input),
+		}))
 	}
 
 	/// `/loop` without a prompt records the next prompt as the loop prompt
@@ -3027,9 +3035,11 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let breadcrumb = TAN_DISPATCH
 			.replace("{{jobId}}", id.as_str())
 			.replace("{{work}}", work.as_str());
-		let _ = self
-			.up
-			.send(Up::Steer { text: Str::new(breadcrumb), attachments: Vec::new() });
+		let _ = self.up.send(Up::Steer {
+			text:        Str::new(breadcrumb),
+			attachments: Vec::new(),
+			author:      None,
+		});
 		self.reply(Severity::Info, format!("Dispatched background tan {id}"));
 
 		let data_dir = self.data_dir.clone();

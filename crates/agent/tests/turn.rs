@@ -366,7 +366,11 @@ async fn queued_follow_up_blocks_paused_completion_resample() {
 	);
 	kernel
 		.mailbox()
-		.send(Up::Queue { text: Str::new_static("next user turn"), attachments: Vec::new() })
+		.send(Up::Queue {
+			text:        Str::new_static("next user turn"),
+			attachments: Vec::new(),
+			author:      None,
+		})
 		.expect("follow-up queues");
 	let mut session = fresh_session(&journal_path);
 
@@ -686,6 +690,7 @@ async fn steering_is_drained_after_tool_results_before_the_yield_decision() {
 		.send(Up::Steer {
 			text:        Str::new_static("include the settled result"),
 			attachments: Vec::new(),
+			author:      None,
 		})
 		.expect("steering queues");
 	let mut session = fresh_session(&journal_path);
@@ -733,6 +738,71 @@ async fn steering_is_drained_after_tool_results_before_the_yield_decision() {
 
 	drop(session);
 	assert_all_entries_caused(&journal_entries(&journal_path));
+}
+
+/// A remote author is journaled on the steering node with the aside and
+/// survives the safe point, but never reaches the model-facing request.
+#[tokio::test]
+async fn authored_steering_keeps_its_author_out_of_the_request() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("steer-author.oms");
+	let (inference, requests) = ScriptedInference::new([
+		tool_script("echo-1", "echo", serde_json::json!({})),
+		text_script("steered answer"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	kernel
+		.mailbox()
+		.send(Up::Steer {
+			text:        Str::new_static("include the settled result"),
+			attachments: Vec::new(),
+			author:      Some(Str::new_static("Ada")),
+		})
+		.expect("steering queues");
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("use echo"), RunControl::default())
+		.await
+		.expect("steered turn completes");
+	assert_eq!(outcome.stop, TurnStop::Steered);
+
+	let steered = session
+		.dom()
+		.select("body turn user")
+		.expect("selector")
+		.find(|handle| {
+			session
+				.dom()
+				.get(*handle)
+				.is_some_and(|node| node.content.as_deref() == Some("include the settled result"))
+		})
+		.expect("steered user node");
+	assert_eq!(
+		session
+			.dom()
+			.get(steered)
+			.and_then(|node| node.prop(&PropKey::from(PropId::Author)))
+			.and_then(omp_dom::Value::as_str),
+		Some("Ada")
+	);
+	let requests = requests.lock();
+	assert!(
+		requests.iter().all(|request| {
+			request.messages.iter().all(|message| {
+				message
+					.content
+					.iter()
+					.all(|part| !matches!(part, ContentPart::Text { text, .. } if text.contains("Ada")))
+			})
+		}),
+		"attribution never enters model-facing content"
+	);
 }
 
 #[tokio::test]
@@ -1551,6 +1621,7 @@ async fn steered_image_attachment_reaches_the_next_request() {
 		.send(Up::Steer {
 			text:        Str::new_static("also look at [Image #1, 2x2]"),
 			attachments: vec![attachment],
+			author:      None,
 		})
 		.expect("steering queues");
 

@@ -1,7 +1,7 @@
 //! One upward mailbox for steering and cancellation.
 //!
 //! Steering is durable from the moment the kernel accepts it: every
-//! [`Up::Steer`] or [`Up::SteerAuthored`] lands in `<queues><steering>`
+//! [`Up::Steer`] lands in `<queues><steering>`
 //! through `patch@1` at the mailbox drain that receives it, so a crash or
 //! session switch while inference or a tool runs never loses accepted input.
 //! The safe point then moves the queued items into the current turn in one
@@ -116,18 +116,10 @@ pub enum Up {
 		text:        Str,
 		/// Media journaled beside it.
 		attachments: Vec<Attachment>,
-	},
-	/// Adds a host-authenticated remote user's steering aside.
-	///
-	/// Attribution is inserted atomically with the queued user node and moves
-	/// with it at the safe point; it never enters model-facing content.
-	SteerAuthored {
-		/// The aside.
-		text:        Str,
-		/// Media journaled beside it in relay order.
-		attachments: Vec<Attachment>,
-		/// Authenticated remote display name.
-		author:      Str,
+		/// Host-authenticated remote display name, or `None` for the local user.
+		/// Attribution is inserted atomically with the queued user node and moves
+		/// with it at the safe point; it never enters model-facing content.
+		author:      Option<Str>,
 	},
 	/// Adds a discovered skill prompt at the next safe point while preserving
 	/// its source metadata and exact model-facing body.
@@ -145,6 +137,11 @@ pub enum Up {
 		text:        Str,
 		/// Media journaled beside it.
 		attachments: Vec<Attachment>,
+		/// Host-authenticated remote display name, or `None` for the local user.
+		/// Attribution is inserted atomically with the queued prompt and returned
+		/// with it by [`pop_queued_prompt`]; it never enters model-facing
+		/// content.
+		author:      Option<Str>,
 	},
 	/// Hands back every steering aside not yet consumed at a safe point; the
 	/// host restores them to its composer.
@@ -212,27 +209,10 @@ pub(crate) fn steering_queue(session: &Session) -> Result<Handle, SessionError> 
 
 /// Journals one accepted steering message into `<queues><steering>`; its
 /// attachments ride the same `data` prop a `msg.user@1` fold writes, so the
-/// safe point moves them into the turn and the projection types them.
+/// safe point moves them into the turn and the projection types them. A
+/// remote `author` is inserted with the node itself, so attribution cannot be
+/// separated from the aside.
 pub(crate) fn queue_steering(
-	session: &mut Session,
-	text: Str,
-	attachments: &[Attachment],
-) -> Result<(), SessionError> {
-	queue_steering_with_author(session, text, attachments, None)
-}
-
-/// Journals one authenticated remote steering message with its author in the
-/// initial insertion.
-pub(crate) fn queue_authored_steering(
-	session: &mut Session,
-	text: Str,
-	attachments: &[Attachment],
-	author: Str,
-) -> Result<(), SessionError> {
-	queue_steering_with_author(session, text, attachments, Some(author))
-}
-
-fn queue_steering_with_author(
 	session: &mut Session,
 	text: Str,
 	attachments: &[Attachment],
@@ -284,11 +264,14 @@ pub(crate) fn queue_peer(session: &mut Session, text: Str) -> Result<(), Session
 /// Journals one follow-up prompt as `<prompt kind=queued status=pending>`
 /// under `<queues><prompts>` (the controller's `queue.push` shape); its
 /// attachments ride the same `data` prop a `msg.user@1` fold writes, so the
-/// controller's pop hands them to the next turn typed.
+/// controller's pop hands them to the next turn typed. A remote `author` is
+/// inserted with the prompt itself and handed back by the pop, so attribution
+/// cannot be separated from the follow-up.
 pub fn queue_prompt(
 	session: &mut Session,
 	text: Str,
 	attachments: &[Attachment],
+	author: Option<Str>,
 ) -> Result<(), SessionError> {
 	let prompts = omp_session::components::prompts::prompts_handle(session.dom())
 		.ok_or(SessionError::NoActiveTurn)?;
@@ -303,6 +286,9 @@ pub fn queue_prompt(
 		node =
 			node.with_prop(PropId::Data, Value::Json(serde_json::value::to_raw_value(attachments)?));
 	}
+	if let Some(author) = author {
+		node = node.with_prop(PropId::Author, Value::Str(author));
+	}
 	session.patch(Txn {
 		cause,
 		label: Some(Str::new_static("queue.push")),
@@ -315,14 +301,23 @@ pub fn queue_prompt(
 	Ok(())
 }
 
+/// One follow-up taken from `<queues><prompts>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueuedPrompt {
+	/// The follow-up prompt.
+	pub text:        Str,
+	/// Media journaled beside it.
+	pub attachments: Vec<Attachment>,
+	/// Host-authenticated remote display name, or `None` for the local user.
+	pub author:      Option<Str>,
+}
+
 /// Takes the oldest `<prompt kind=queued status=pending>` under
 /// `<queues><prompts>`, journaling it `sent`, and returns its text with the
-/// attachments [`queue_prompt`] stored. A follow-up runs "when the agent
-/// yields", so hosts call this once a turn settles and start the next turn
-/// from the result.
-pub fn pop_queued_prompt(
-	session: &mut Session,
-) -> Result<Option<(Str, Vec<Attachment>)>, SessionError> {
+/// attachments and author [`queue_prompt`] stored. A follow-up runs "when the
+/// agent yields", so hosts call this once a turn settles and start the next
+/// turn from the result, authored when `author` is set.
+pub fn pop_queued_prompt(session: &mut Session) -> Result<Option<QueuedPrompt>, SessionError> {
 	let Some(prompts) = omp_session::components::prompts::prompts_handle(session.dom()) else {
 		return Ok(None);
 	};
@@ -343,6 +338,13 @@ pub fn pop_queued_prompt(
 		Some(Value::Json(raw)) => serde_json::from_str(raw.get())?,
 		_ => Vec::new(),
 	};
+	let author = match dom
+		.get(handle)
+		.and_then(|node| node.prop(&PropKey::from(PropId::Author)))
+	{
+		Some(Value::Str(author)) => Some(author.clone()),
+		_ => None,
+	};
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
 	session.patch(Txn {
 		cause,
@@ -353,7 +355,7 @@ pub fn pop_queued_prompt(
 			value: Value::Str(Str::new_static("sent")),
 		}],
 	})?;
-	Ok(Some((text, attachments)))
+	Ok(Some(QueuedPrompt { text, attachments, author }))
 }
 
 fn is_peer(session: &Session, handle: Handle) -> bool {
@@ -754,8 +756,8 @@ mod tests {
 	fn one_at_a_time_consumes_one_item_per_safe_point() {
 		let directory = tempfile::tempdir().expect("temporary session directory");
 		let (mut session, turn) = session_with_turn(&directory.path().join("steer.oms"));
-		queue_steering(&mut session, Str::new_static("first"), &[]).expect("first queues");
-		queue_steering(&mut session, Str::new_static("second"), &[]).expect("second queues");
+		queue_steering(&mut session, Str::new_static("first"), &[], None).expect("first queues");
+		queue_steering(&mut session, Str::new_static("second"), &[], None).expect("second queues");
 
 		let consumed =
 			consume_steering(&mut session, turn, SteeringMode::OneAtATime).expect("first safe point");
@@ -779,8 +781,8 @@ mod tests {
 	fn all_consumes_every_item_at_one_safe_point() {
 		let directory = tempfile::tempdir().expect("temporary session directory");
 		let (mut session, turn) = session_with_turn(&directory.path().join("steer-all.oms"));
-		queue_steering(&mut session, Str::new_static("first"), &[]).expect("first queues");
-		queue_steering(&mut session, Str::new_static("second"), &[]).expect("second queues");
+		queue_steering(&mut session, Str::new_static("first"), &[], None).expect("first queues");
+		queue_steering(&mut session, Str::new_static("second"), &[], None).expect("second queues");
 
 		let consumed = consume_steering(&mut session, turn, SteeringMode::All).expect("safe point");
 		assert_eq!(consumed, [Str::new_static("first"), Str::new_static("second")]);
@@ -795,7 +797,7 @@ mod tests {
 	fn queue_journals_pending_prompt_under_queues_prompts() {
 		let directory = tempfile::tempdir().expect("temporary session directory");
 		let (mut session, _) = session_with_turn(&directory.path().join("queue.oms"));
-		queue_prompt(&mut session, Str::new_static("follow up"), &[]).expect("prompt queues");
+		queue_prompt(&mut session, Str::new_static("follow up"), &[], None).expect("prompt queues");
 
 		assert!(!steering_pending(&session), "a queued prompt is not steering");
 		let prompts = omp_session::components::prompts::prompts_handle(session.dom())
@@ -833,7 +835,7 @@ mod tests {
 			blob: omp_journal::blob::BlobRef { hash: omp_core::Hash32::new([0xab; 32]), size: 5 },
 			mime: Str::new_static("image/png"),
 		}];
-		queue_prompt(&mut session, Str::new_static("look [Image #1]"), &attachments)
+		queue_prompt(&mut session, Str::new_static("look [Image #1]"), &attachments, None)
 			.expect("prompt queues");
 
 		let prompts = omp_session::components::prompts::prompts_handle(session.dom())
@@ -861,14 +863,28 @@ mod tests {
 			blob: omp_journal::blob::BlobRef { hash: omp_core::Hash32::new([0xcd; 32]), size: 3 },
 			mime: Str::new_static("image/png"),
 		}];
-		queue_prompt(&mut session, Str::new_static("first [Image #1]"), &attachments)
+		queue_prompt(&mut session, Str::new_static("first [Image #1]"), &attachments, None)
 			.expect("first queues");
-		queue_prompt(&mut session, Str::new_static("second"), &[]).expect("second queues");
+		queue_prompt(&mut session, Str::new_static("second"), &[], None).expect("second queues");
 
 		let popped = pop_queued_prompt(&mut session).expect("pop journals");
-		assert_eq!(popped, Some((Str::new_static("first [Image #1]"), attachments)));
+		assert_eq!(
+			popped,
+			Some(QueuedPrompt {
+				text: Str::new_static("first [Image #1]"),
+				attachments,
+				author: None
+			})
+		);
 		let popped = pop_queued_prompt(&mut session).expect("pop journals");
-		assert_eq!(popped, Some((Str::new_static("second"), Vec::new())));
+		assert_eq!(
+			popped,
+			Some(QueuedPrompt {
+				text:        Str::new_static("second"),
+				attachments: Vec::new(),
+				author:      None,
+			})
+		);
 		assert_eq!(pop_queued_prompt(&mut session).expect("pop journals"), None);
 
 		let prompts = omp_session::components::prompts::prompts_handle(session.dom())
@@ -890,7 +906,7 @@ mod tests {
 	fn malformed_queue_data_is_not_silently_dropped() {
 		let directory = tempfile::tempdir().expect("temporary session directory");
 		let (mut session, _) = session_with_turn(&directory.path().join("queue-invalid-data.oms"));
-		queue_prompt(&mut session, Str::new_static("follow up [Image #1]"), &[])
+		queue_prompt(&mut session, Str::new_static("follow up [Image #1]"), &[], None)
 			.expect("prompt queues");
 		let prompts = omp_session::components::prompts::prompts_handle(session.dom())
 			.expect("prompt queue exists");
@@ -930,7 +946,7 @@ mod tests {
 		let directory = tempfile::tempdir().expect("temporary session directory");
 		let (mut session, turn) = session_with_turn(&directory.path().join("steer-peer.oms"));
 		queue_peer(&mut session, Str::new_static("hub hello")).expect("peer queues");
-		queue_steering(&mut session, Str::new_static("redirect"), &[]).expect("steer queues");
+		queue_steering(&mut session, Str::new_static("redirect"), &[], None).expect("steer queues");
 
 		let consumed =
 			consume_steering(&mut session, turn, SteeringMode::OneAtATime).expect("safe point");
@@ -938,5 +954,64 @@ mod tests {
 		assert!(!steering_pending(&session));
 		let steering = steering_queue(&session).expect("queue exists");
 		assert_eq!(session.dom().children(steering).len(), 1, "the peer message stays queued");
+	}
+
+	/// A remote author is committed with the queued aside and moves into the
+	/// turn with it at the safe point; a local aside stays unattributed.
+	#[test]
+	fn steering_author_moves_with_the_aside_at_the_safe_point() {
+		let directory = tempfile::tempdir().expect("temporary session directory");
+		let (mut session, turn) = session_with_turn(&directory.path().join("steer-author.oms"));
+		queue_steering(&mut session, Str::new_static("redirect"), &[], Some(Str::new_static("Ada")))
+			.expect("authored steer queues");
+		queue_steering(&mut session, Str::new_static("local"), &[], None)
+			.expect("local steer queues");
+
+		consume_steering(&mut session, turn, SteeringMode::All).expect("safe point");
+
+		let moved: Vec<_> = session
+			.dom()
+			.children(turn)
+			.iter()
+			.filter_map(|handle| session.dom().get(*handle))
+			.filter(|node| {
+				node
+					.prop(&PropKey::Custom(Str::new_static("steering")))
+					.is_some()
+			})
+			.map(|node| (node.content.clone(), node.prop(&PropKey::from(PropId::Author)).cloned()))
+			.collect();
+		assert_eq!(moved, vec![
+			(Some(Str::new_static("redirect")), Some(Value::Str(Str::new_static("Ada")))),
+			(Some(Str::new_static("local")), None)
+		]);
+	}
+
+	/// A remote author is committed with the queued prompt and comes back with
+	/// the pop, so the follow-up that starts the next turn stays attributed.
+	#[test]
+	fn pop_returns_the_author_journaled_with_the_prompt() {
+		let directory = tempfile::tempdir().expect("temporary session directory");
+		let (mut session, _) = session_with_turn(&directory.path().join("queue-author.oms"));
+		queue_prompt(&mut session, Str::new_static("remote"), &[], Some(Str::new_static("Ada")))
+			.expect("authored prompt queues");
+		queue_prompt(&mut session, Str::new_static("local"), &[], None).expect("local prompt queues");
+
+		assert_eq!(
+			pop_queued_prompt(&mut session).expect("pop journals"),
+			Some(QueuedPrompt {
+				text:        Str::new_static("remote"),
+				attachments: Vec::new(),
+				author:      Some(Str::new_static("Ada")),
+			})
+		);
+		assert_eq!(
+			pop_queued_prompt(&mut session).expect("pop journals"),
+			Some(QueuedPrompt {
+				text:        Str::new_static("local"),
+				attachments: Vec::new(),
+				author:      None,
+			})
+		);
 	}
 }

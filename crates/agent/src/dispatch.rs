@@ -444,12 +444,8 @@ impl CallControl {
 	/// interrupts routed to the cancellation tree.
 	pub fn handle(&self, session: &mut Session, message: Up) -> Result<Received, SessionError> {
 		match message {
-			Up::Steer { text, attachments } => {
-				steering::queue_steering(session, text, &attachments)?;
-				Ok(Received::Steering)
-			},
-			Up::SteerAuthored { text, attachments, author } => {
-				steering::queue_authored_steering(session, text, &attachments, author)?;
+			Up::Steer { text, attachments, author } => {
+				steering::queue_steering(session, text, &attachments, author)?;
 				Ok(Received::Steering)
 			},
 			Up::SkillPrompt(prompt) => {
@@ -460,8 +456,8 @@ impl CallControl {
 				steering::queue_peer(session, text)?;
 				Ok(Received::None)
 			},
-			Up::Queue { text, attachments } => {
-				steering::queue_prompt(session, text, &attachments)?;
+			Up::Queue { text, attachments, author } => {
+				steering::queue_prompt(session, text, &attachments, author)?;
 				Ok(Received::None)
 			},
 			Up::Unqueue(reply) => {
@@ -517,6 +513,10 @@ impl CallControl {
 			Up::Approve { id, decision } => {
 				match self.approvals.decide(session, id.as_str(), decision) {
 					Ok(ticket) => Ok(Received::Approved(ticket)),
+					Err(error @ crate::ApprovalError::MissingDecider { .. }) => {
+						tracing::warn!(%error, ticket = %id, "external approval answer refused");
+						Ok(Received::None)
+					},
 					Err(error) => {
 						tracing::debug!(%error, ticket = %id, "approval decision targets no live prompt");
 						Ok(Received::None)

@@ -182,11 +182,11 @@ reads the mailbox wherever it can safely act: while opening inference, inside th
 a tool batch runs, while paused, while awaiting a job, and at the boundary drains.
 `CallControl::handle` is the single interpreter, so a message means the same thing everywhere:
 
-- `Steer` and `SteerAuthored`: journaled into `<queues><steering>` on receipt (a crash never loses
-  accepted input), then moved into the turn in one atomic patch at the next safe point. During a
-  tool batch, steering skips every call that has not started.
+- `Steer`: journaled into `<queues><steering>` on receipt, with its `author` when a remote
+  principal sent it (a crash never loses accepted input), then moved into the turn in one atomic
+  patch at the next safe point. During a tool batch, steering skips every call that has not started.
 - `SkillPrompt`, `Queue`, `Peer`: a skill prompt joins at the next safe point; `Queue` journals a
-  follow-up prompt and `Peer` an inbox item, neither redirecting the active turn.
+  follow-up prompt (with its `author`) and `Peer` an inbox item; neither redirects the active turn.
 - `Pause`: flips the journal-derived pause gate; no continuation starts while paused.
 - `AbortTools(ToolScopedAbortReason)`: interrupts identified calls without cancelling siblings.
 - `Interrupt` and `Cancel`: cancel the turn scope, or the whole session.

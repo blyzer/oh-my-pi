@@ -1440,7 +1440,7 @@ mod tests {
 			mime: Str::new_static("image/png"),
 		};
 		session
-			.user_authored("show me main", vec![attachment(1, 64), attachment(2, 2_048)], "Ada")
+			.user_authored("show me main", vec![attachment(1, 64), attachment(2, 2_048)], "Ada", None)
 			.expect("authored user");
 
 		let mut panel = CopySelector::open(session.dom(), true, false, false, &UiContext::default());

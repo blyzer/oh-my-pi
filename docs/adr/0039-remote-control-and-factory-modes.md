@@ -264,7 +264,7 @@ service SessionControl {
 | Verb | Kernel path | Notes |
 | --- | --- | --- |
 | prompt (idle) | `TurnRequest::Authored` / `Session::user_authored` | same path as the collab prompt |
-| steer | `Up::Steer{…, author}` | `SteerAuthored` is folded into `Steer{author: Option<…>}` (clean cutover) |
+| steer | `Up::Steer{…, author}` | one `Steer` variant carries `author: Option<…>`; the separate authored variant is gone (clean cutover) |
 | queue (follow-up) | `Up::Queue{…, author}` | gains the same author field |
 | interrupt | `Up::Interrupt` | |
 | abort tools | `Up::AbortTools` | scoped; siblings continue (0011) |
@@ -620,7 +620,8 @@ parallel. F2 needs R1. F3 needs R3b.
 - **R2 — Steering and approvals over the UDS**
   - Crates: `crates/agent`, `crates/session`, `crates/journal`, `crates/driver`, `crates/serve`,
     `crates/core`, `crates/app`.
-  - `Submit`/`Approve`/`AnswerUi`. `Steer`/`Queue` gain `author` (clean cutover of `SteerAuthored`).
+  - `Submit`/`Approve`/`AnswerUi`. `Steer`/`Queue` gain `author` (clean cutover of the separate
+    authored-steer variant).
   - The idempotency key is journaled; `decided_by` is always set, including by stdio `approve`;
     `RemotePrincipal` gains an origin; audit journal.
 - **R3a — SSH-forwarded attach**
