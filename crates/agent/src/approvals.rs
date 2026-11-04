@@ -210,7 +210,7 @@ pub struct ApprovalDecision {
 #[derive(Serialize)]
 struct ApprovalIdentity<'a> {
 	ticket_id: &'a str,
-	decision: &'a ApprovalDecision,
+	decision:  &'a ApprovalDecision,
 }
 
 impl ApprovalDecision {
@@ -400,7 +400,9 @@ impl ApprovalBook {
 		ticket_id: &str,
 		decision: ApprovalDecision,
 	) -> Result<ApprovalTicket, ApprovalError> {
-		self.decide_inner(session, ticket_id, decision, None).map(|(ticket, _)| ticket)
+		self
+			.decide_inner(session, ticket_id, decision, None)
+			.map(|(ticket, _)| ticket)
 	}
 
 	fn decide_inner(
@@ -456,7 +458,10 @@ impl ApprovalBook {
 				],
 			};
 			let outcome = if let Some(key) = key {
-				session.patch_keyed(txn, key.clone(), &ApprovalIdentity { ticket_id, decision: &decision })?
+				session.patch_keyed(txn, key.clone(), &ApprovalIdentity {
+					ticket_id,
+					decision: &decision,
+				})?
 			} else {
 				AppendOutcome::Appended(session.patch(txn)?)
 			};
@@ -812,14 +817,20 @@ impl ApprovalDesk {
 		if let Some(entry) = session.replay_keyed_patch(&key, "approval.decide", &identity)? {
 			return Ok((crate::ApprovalOutcome::Duplicate { entry }, None));
 		}
-		let (ticket, outcome) = self.book.decide_inner(session, ticket_id, decision.clone(), Some(&key))?;
+		let (ticket, outcome) =
+			self
+				.book
+				.decide_inner(session, ticket_id, decision.clone(), Some(&key))?;
 		match outcome {
 			Some(AppendOutcome::Appended(entry)) => {
 				self.relay(ticket_id, &decision);
-				let seq = u64::try_from(session.entry_count()).expect("journal entry count fits in u64");
+				let seq =
+					u64::try_from(session.entry_count()).expect("journal entry count fits in u64");
 				Ok((crate::ApprovalOutcome::Applied { entry, seq }, Some(ticket)))
 			},
-			Some(AppendOutcome::Replayed(entry)) => Ok((crate::ApprovalOutcome::Duplicate { entry }, None)),
+			Some(AppendOutcome::Replayed(entry)) => {
+				Ok((crate::ApprovalOutcome::Duplicate { entry }, None))
+			},
 			None => Ok((crate::ApprovalOutcome::NotPending, None)),
 		}
 	}
@@ -830,7 +841,6 @@ impl ApprovalDesk {
 			let _ = request.respond(decision.clone());
 		}
 	}
-
 
 	/// Withdraws every journaled prompt whose requesting policy stopped
 	/// waiting (route timeout, cancelled or finished invocation).
@@ -1198,7 +1208,12 @@ mod scope_tests {
 	#[test]
 	fn external_scope_parser_accepts_only_named_scopes() {
 		for name in ["once", "call", "turn", "session", "persist"] {
-			assert_eq!(ApprovalScope::parse_external(name).expect("named scope").as_str(), name);
+			assert_eq!(
+				ApprovalScope::parse_external(name)
+					.expect("named scope")
+					.as_str(),
+				name
+			);
 		}
 		for name in ["", "custom", "SESSION", "persist "] {
 			let error = ApprovalScope::parse_external(name).expect_err("unknown scope is refused");

@@ -714,20 +714,17 @@ async fn print_kernel_event(
 ) -> miette::Result<()> {
 	let value = match event {
 		KernelEvent::ApprovalRequested(ticket) => {
-			let _ = mailbox.send(Up::approve_local(
-				ticket.ticket_id,
-				omp_agent::ApprovalDecision {
-					approved:   false,
-					scope:      omp_agent::ApprovalScope::Once,
-					source:     omp_agent::ApprovalSource::Unavailable,
-					decided_by: None,
-					reason:     Some(Str::new_static(
-						"requires approval but no interactive UI is available; use --approval-mode yolo \
-						 or tools.approval.<tool> allow",
-					)),
-					audited:    false,
-				},
-			));
+			let _ = mailbox.send(Up::approve_local(ticket.ticket_id, omp_agent::ApprovalDecision {
+				approved:   false,
+				scope:      omp_agent::ApprovalScope::Once,
+				source:     omp_agent::ApprovalSource::Unavailable,
+				decided_by: None,
+				reason:     Some(Str::new_static(
+					"requires approval but no interactive UI is available; use --approval-mode yolo or \
+					 tools.approval.<tool> allow",
+				)),
+				audited:    false,
+			}));
 			None
 		},
 		KernelEvent::InferenceRetry { attempt, max_attempts, delay, reason } => {

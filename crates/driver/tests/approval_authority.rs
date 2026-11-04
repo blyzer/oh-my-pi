@@ -1493,17 +1493,14 @@ mod session_network_grants {
 				if let KernelEvent::ApprovalRequested(ticket) = event {
 					let _ =
 						asked.send((ticket.reasons[0].subject.clone(), ticket.reasons[0].scopes.clone()));
-					let _ = mailbox.send(Up::approve_local(
-						ticket.ticket_id,
-						ApprovalDecision {
-							approved:   true,
-							scope:      ApprovalScope::Session,
-							source:     ApprovalSource::User,
-							decided_by: None,
-							reason:     None,
-							audited:    false,
-						},
-					));
+					let _ = mailbox.send(Up::approve_local(ticket.ticket_id, ApprovalDecision {
+						approved:   true,
+						scope:      ApprovalScope::Session,
+						source:     ApprovalSource::User,
+						decided_by: None,
+						reason:     None,
+						audited:    false,
+					}));
 				}
 			}
 		});
@@ -2072,17 +2069,14 @@ mod fetch_host_grants {
 								.map(|reason| reason.subject.clone())
 								.collect(),
 						);
-						let _ = mailbox.send(Up::approve_local(
-							ticket.ticket_id,
-							ApprovalDecision {
-								approved:   true,
-								scope:      ApprovalScope::Session,
-								source:     ApprovalSource::User,
-								decided_by: None,
-								reason:     None,
-								audited:    false,
-							},
-						));
+						let _ = mailbox.send(Up::approve_local(ticket.ticket_id, ApprovalDecision {
+							approved:   true,
+							scope:      ApprovalScope::Session,
+							source:     ApprovalSource::User,
+							decided_by: None,
+							reason:     None,
+							audited:    false,
+						}));
 					}
 				}
 			}

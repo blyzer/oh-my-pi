@@ -3837,7 +3837,8 @@ mod tests {
 		let params = serde_json::json!({"promptId": ticket.ticket_id, "approved": true});
 		let _ =
 			super::approve_response(None, "approve", params.as_object().expect("params"), &mailbox);
-		let omp_agent::Up::Approve { id, decision, .. } = queue.try_recv().expect("approve is queued")
+		let omp_agent::Up::Approve { id, decision, .. } =
+			queue.try_recv().expect("approve is queued")
 		else {
 			panic!("approve queues Up::Approve");
 		};
