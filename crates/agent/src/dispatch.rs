@@ -444,6 +444,66 @@ impl CallControl {
 	/// interrupts routed to the cancellation tree.
 	pub fn handle(&self, session: &mut Session, message: Up) -> Result<Received, SessionError> {
 		match message {
+			Up::Submit { command, author, key, reply } => {
+				let result = (|| {
+					use crate::SubmitCommand;
+					let txn = match &command {
+						SubmitCommand::Steer(text) => steering::steering_txn(session, text.clone(), &[], Some(author.clone()))?,
+						SubmitCommand::Queue(text) => steering::prompt_txn(session, text.clone(), &[], Some(author.clone()))?,
+						SubmitCommand::Pause(active) => crate::pause::pause_txn(session, *active)?,
+						SubmitCommand::Interrupt | SubmitCommand::AbortTools | SubmitCommand::Cancel => {
+							let label = match command {
+								SubmitCommand::Interrupt => "control.interrupt",
+								SubmitCommand::AbortTools => "control.abort_tools",
+								SubmitCommand::Cancel => "control.cancel",
+								_ => unreachable!(),
+							};
+							Txn {
+								cause: session.head().ok_or(SessionError::NoActiveTurn)?,
+								label: Some(Str::new_static(label)),
+								ops: Vec::new(),
+							}
+						},
+					};
+					let outcome = session.patch_keyed(txn, key, &(&command, &author))?;
+					let received = if matches!(outcome, omp_session::AppendOutcome::Appended(_)) {
+						match command {
+							SubmitCommand::Steer(_) => Received::Steering,
+							SubmitCommand::Queue(_) => Received::None,
+							SubmitCommand::Pause(_) => Received::PauseChanged,
+							SubmitCommand::AbortTools => Received::ToolScopedAbort(
+								crate::ToolScopedAbortReason::all(Str::new_static("interrupted by remote controller")),
+							),
+							SubmitCommand::Interrupt => {
+								self.turn.cancel_turn();
+								Received::Cancelled
+							},
+							SubmitCommand::Cancel => {
+								self.session.cancel_session();
+								self.turn.cancel_turn();
+								Received::Cancelled
+							},
+						}
+					} else {
+						Received::None
+					};
+					let seq = if matches!(outcome, omp_session::AppendOutcome::Appended(_)) {
+						u64::try_from(session.entry_count()).unwrap_or(u64::MAX)
+					} else { 0 };
+					Ok::<_, SessionError>((crate::SubmitReceipt { outcome, seq }, received))
+				})();
+				match result {
+					Ok((receipt, received)) => {
+						let _ = reply.send(Ok(receipt));
+						Ok(received)
+					},
+					Err(error) => {
+						let _ = reply.send(Err(error));
+						Ok(Received::None)
+					},
+				}
+			},
+
 			Up::Steer { text, attachments, author } => {
 				steering::queue_steering(session, text, &attachments, author)?;
 				Ok(Received::Steering)

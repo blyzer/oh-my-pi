@@ -79,8 +79,22 @@ pub fn set_paused(session: &mut Session, active: bool) -> Result<PauseTransition
 	if before.active == active {
 		return Ok(PauseTransition { changed: false, state: before });
 	}
-	let now = now_ms();
+	let txn = pause_txn(session, active)?;
+	session.patch(txn)?;
+	Ok(PauseTransition { changed: true, state: pause_state(session.dom()) })
+}
+
+pub(crate) fn pause_txn(session: &Session, active: bool) -> Result<Txn, SessionError> {
+	let before = pause_state(session.dom());
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
+	if before.active == active {
+		return Ok(Txn {
+			cause,
+			label: Some(Str::new_static(if active { "runtime.pause" } else { "runtime.resume" })),
+			ops: Vec::new(),
+		});
+	}
+	let now = now_ms();
 	let mut ops = Vec::with_capacity(3);
 	if let Some((handle, _)) = pause_node(session.dom()) {
 		ops.push(Op::Set {
@@ -123,7 +137,7 @@ pub fn set_paused(session: &mut Session, active: bool) -> Result<PauseTransition
 			node,
 		});
 	}
-	session.patch(Txn {
+	Ok(Txn {
 		cause,
 		label: Some(Str::new_static(if active {
 			"runtime.pause"
@@ -131,8 +145,7 @@ pub fn set_paused(session: &mut Session, active: bool) -> Result<PauseTransition
 			"runtime.resume"
 		})),
 		ops,
-	})?;
-	Ok(PauseTransition { changed: true, state: pause_state(session.dom()) })
+	})
 }
 
 fn pause_node(dom: &Dom) -> Option<(Handle, &omp_dom::Node)> {

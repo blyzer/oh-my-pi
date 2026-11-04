@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use omp_core::Str;
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_journal::data::{Attachment, Compaction, IrcTraffic};
-use omp_session::{Session, SessionError};
+use omp_journal::{data::{Attachment, Compaction, IrcTraffic}, idempotency::IdempotencyKey};
+use omp_session::{AppendOutcome, Session, SessionError};
 
 use crate::SteeringMode;
 
@@ -36,7 +36,10 @@ pub struct ToolScopedAbortReason {
 	pub tool_call_messages:        Arc<[(Str, Str)]>,
 	/// Neutral label for other calls in the same assistant batch.
 	pub default_tool_call_message: Str,
+	/// Whether the command targets every tool in the current turn.
+	pub abort_all: bool,
 }
+
 
 impl ToolScopedAbortReason {
 	/// Creates a reason for one offending call and its unaffected siblings.
@@ -51,6 +54,20 @@ impl ToolScopedAbortReason {
 			message:                   message.clone(),
 			tool_call_messages:        Arc::from([(call_id.into(), message)]),
 			default_tool_call_message: default_tool_call_message.into(),
+			abort_all: false,
+
+		}
+	}
+
+	/// Creates a reason that interrupts every currently running tool.
+	#[must_use]
+	pub fn all(message: impl Into<Str>) -> Self {
+		let message = message.into();
+		Self {
+			message: message.clone(),
+			tool_call_messages: Arc::from([]),
+			default_tool_call_message: message,
+			abort_all: true,
 		}
 	}
 
@@ -67,7 +84,7 @@ impl ToolScopedAbortReason {
 	/// Reports whether this call caused the interruption.
 	#[must_use]
 	pub fn contains(&self, call_id: &str) -> bool {
-		self
+		self.abort_all || self
 			.tool_call_messages
 			.iter()
 			.any(|(id, _)| id.as_str() == call_id)
@@ -105,9 +122,49 @@ impl std::fmt::Debug for SessionMutation {
 	}
 }
 
+/// An authenticated remote command accepted by a running kernel.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmitCommand {
+	/// Queue a steering aside for the current turn.
+	Steer(Str),
+	/// Queue a follow-up for the next turn.
+	Queue(Str),
+	/// Interrupt the current turn.
+	Interrupt,
+	/// Interrupt all tools in the current turn.
+	AbortTools,
+	/// Pause or resume the session.
+	Pause(bool),
+	/// Cancel the session.
+	Cancel,
+}
+
+/// Durable outcome of a remote command handled by the kernel.
+#[derive(Clone, Copy, Debug)]
+pub struct SubmitReceipt {
+	/// Whether the entry was appended or replayed.
+	pub outcome: AppendOutcome,
+	/// One-based journal position for an appended entry, or zero for a replay.
+	pub seq: u64,
+}
+
+
 /// Control sent to a running kernel turn.
 #[derive(Clone, Debug)]
 pub enum Up {
+	/// Applies an authenticated, journal-keyed remote command.
+	Submit {
+		/// Command and its typed input.
+		command: SubmitCommand,
+		/// Transport-authenticated principal.
+		author: Str,
+		/// Client-chosen key committed with the mutation.
+		key: IdempotencyKey,
+		/// Replies only after the mutation has been journaled.
+		reply: flume::Sender<Result<SubmitReceipt, SessionError>>,
+	},
+
 	/// Adds a user steering aside at the next safe point. `attachments` are
 	/// already in the session's blob store and positional against `[Image #N]`
 	/// in `text`.
@@ -218,6 +275,17 @@ pub(crate) fn queue_steering(
 	attachments: &[Attachment],
 	author: Option<Str>,
 ) -> Result<(), SessionError> {
+	let txn = steering_txn(session, text, attachments, author)?;
+	session.patch(txn)?;
+	Ok(())
+}
+
+pub(crate) fn steering_txn(
+	session: &Session,
+	text: Str,
+	attachments: &[Attachment],
+	author: Option<Str>,
+) -> Result<Txn, SessionError> {
 	let steering = steering_queue(session)?;
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
 	let mut node = NodeSpec::new(KnownTag::User)
@@ -230,7 +298,7 @@ pub(crate) fn queue_steering(
 	if let Some(author) = author {
 		node = node.with_prop(PropId::Author, Value::Str(author));
 	}
-	session.patch(Txn {
+	Ok(Txn {
 		cause,
 		label: Some(Str::new_static("steering.queue")),
 		ops: vec![Op::Ins {
@@ -238,8 +306,7 @@ pub(crate) fn queue_steering(
 			after: session.dom().children(steering).last().copied(),
 			node,
 		}],
-	})?;
-	Ok(())
+	})
 }
 
 /// Journals one peer message without making it turn steering.
@@ -273,6 +340,17 @@ pub fn queue_prompt(
 	attachments: &[Attachment],
 	author: Option<Str>,
 ) -> Result<(), SessionError> {
+	let txn = prompt_txn(session, text, attachments, author)?;
+	session.patch(txn)?;
+	Ok(())
+}
+
+pub(crate) fn prompt_txn(
+	session: &Session,
+	text: Str,
+	attachments: &[Attachment],
+	author: Option<Str>,
+) -> Result<Txn, SessionError> {
 	let prompts = omp_session::components::prompts::prompts_handle(session.dom())
 		.ok_or(SessionError::NoActiveTurn)?;
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
@@ -289,7 +367,7 @@ pub fn queue_prompt(
 	if let Some(author) = author {
 		node = node.with_prop(PropId::Author, Value::Str(author));
 	}
-	session.patch(Txn {
+	Ok(Txn {
 		cause,
 		label: Some(Str::new_static("queue.push")),
 		ops: vec![Op::Ins {
@@ -297,8 +375,7 @@ pub fn queue_prompt(
 			after: session.dom().children(prompts).last().copied(),
 			node,
 		}],
-	})?;
-	Ok(())
+	})
 }
 
 /// One follow-up taken from `<queues><prompts>`.
