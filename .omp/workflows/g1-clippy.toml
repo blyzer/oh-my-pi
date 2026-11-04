@@ -1,0 +1,6 @@
+name = "g1-clippy"
+
+[[phase]]
+name = "clippy"
+kind = "code"
+command = ["just", "clippy"]
