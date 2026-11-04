@@ -265,12 +265,32 @@ Phase 4 partly done (`f44c83c249`, `ee8b23083f`):
 - a typed `ElementTag` builder that keeps Tern's tag vocabulary closed;
 - OSC 877 input is decoded in `crates/tui/src/tsp/frame.rs`.
 
+Surface modes, phases 3 and 4 (`crates/tui/src/tsp/doc.rs`, `crates/chat/src/tsp.rs`,
+`crates/chat/src/host.rs`):
+- `screen` and `flow` need no new node kind. A TSP node joins `wire::Kind`, and `Mode::Screen` and
+  `Mode::Flow` were already typed in the wire module, so both are placement decisions over `Mode`. The
+  ledger of 2026-11-01 blocked them on a node shape that none of them needs;
+- a `Surface` is built for a `Mode`. `inline` is the chat session. `screen` never adopts and is
+  discarded when it closes, whatever `keep` says. `flow` is command output that stays in the
+  scrollback: it never listens, so Tern sends it no acks and its frames never wait for credits; it needs
+  the `flow` feature (`present` refuses with `Unsupported` without it) and mounts no composer or
+  status band;
+- a full-screen panel that describes itself natively (`PanelAnchor::Full` with a `tsp_node`, today the
+  settings form) covers the pane with a `screen` surface (`Surface::present_cover`) while the inline
+  session stays live underneath, as the specification's "screen over inline" says; nothing is resent
+  when the cover closes. Pickers and the forms of smaller panels stay in the session `layer`. A view the
+  terminal does not draw, kind by kind, keeps its overlay in cells;
+- the reference applier knows the mode a document opened in: `Document::close(keep)` discards a screen
+  surface whatever `keep` says and keeps the `main` of an inline or flow one. The specification's own
+  frames and its static `ls` table run through it in every mode.
+
 Not started, checked against the code on `omp2`:
 - phase 3: native `editor` editing (`edit`, `undo`, `send` events), the autocomplete overlay at the
   caret, `picker`, `prefs` and `effort` nodes (the model hub and the other overlays still use the
-  cell UI), and `screen` surfaces;
-- phase 4: `flow` surfaces for print mode, `TERN_BLOB_DIR`, and Windows ConPTY input. The amendment
-  of 0034 that the Consequences section asks for is also not written.
+  cell UI), and native descriptions for the full-screen panels that have none;
+- phase 4: a `flow` surface opened from print mode (`crates/app/src/print_mode.rs` has no probe epoch and
+  does not use the chat projection), `TERN_BLOB_DIR` (not a node: no code defines or reads it), and
+  Windows ConPTY input. The amendment of 0034 that the Consequences section asks for is also not written.
 
 ## Not verified
 

@@ -1,4 +1,4 @@
-//! Executable P7 proof for native Tern surfaces (ADR 0041 phase 1).
+//! Executable P7 proof for native Tern surfaces (ADR 0041 phases 1 to 3).
 //!
 //! Every case runs the real `omp chat` on a real PTY whose master side is a
 //! scripted fake Tern: it answers (or withholds) the `hello` query, applies
@@ -31,7 +31,7 @@ use omp_core::Str;
 use omp_tui::tsp::{
 	doc::{Document, Rejected},
 	frame::{self, Incoming},
-	wire::{Close, Frame, Hello, Kind, Open, Reply},
+	wire::{Close, Frame, Hello, Kind, Mode, Open, Reply},
 };
 use serde_json::Value;
 
@@ -42,6 +42,9 @@ const CHECKPOINT: Duration = Duration::from_secs(20);
 const QUIET: Duration = Duration::from_secs(6);
 /// Surface id the chat presenter opens (`omp_chat::tsp::SURFACE_ID`).
 const SURFACE: &str = "omp-chat";
+/// Surface id the presenter opens for a full-screen panel
+/// (`omp_chat::tsp::COVER_ID`).
+const COVER: &str = "omp-screen";
 /// The DA1 answer a terminal that does not speak TSP gives.
 const DA1_REPLY: &[u8] = b"\x1b[?62;4c";
 /// The DA1 request that fences the startup probe.
@@ -81,10 +84,13 @@ struct FakeTern {
 	raw:              Vec<u8>,
 	scanned:          usize,
 	doc:              Document,
+	/// The `screen` surface covering the session, while one is open.
+	screen:           Option<Document>,
 	messages:         Vec<Outgoing>,
 	rejected:         Vec<Rejected>,
 	queries:          usize,
 	acked:            u64,
+	screen_acked:     u64,
 	/// When the `hello` reply goes out.
 	hello:            HelloTiming,
 	/// How many `hello` queries have been answered.
@@ -269,10 +275,12 @@ impl FakeTern {
 			raw: Vec::new(),
 			scanned: 0,
 			doc: Document::new(SURFACE),
+			screen: None,
 			messages: Vec::new(),
 			rejected: Vec::new(),
 			queries: 0,
 			acked: 0,
+			screen_acked: 0,
 			hello: script.hello,
 			hello_replies: 0,
 			da1: script.da1,
@@ -324,14 +332,30 @@ impl FakeTern {
 					self.queries += 1;
 					Outgoing::Other
 				},
-				"o" => Outgoing::Open(serde_json::from_slice(raw.body).expect("open body")),
+				"o" => {
+					let open: Open = serde_json::from_slice(raw.body).expect("open body");
+					if open.mode == Mode::Screen {
+						self.screen = Some(Document::open(&open));
+					}
+					Outgoing::Open(open)
+				},
 				"f" => {
 					let frame: Frame = serde_json::from_slice(raw.body).expect("frame body");
 					if self.first_frame_at.is_none() {
 						self.first_frame_at = Some(Instant::now());
 						self.optimistic_start = self.hello_replies == 0 && !self.sent_da1;
 					}
-					self.rejected.extend(self.doc.apply(&frame));
+					let target = if frame.sf.as_str() == SURFACE {
+						Some(&mut self.doc)
+					} else {
+						self
+							.screen
+							.as_mut()
+							.filter(|screen| screen.surface() == &frame.sf)
+					};
+					let target =
+						target.unwrap_or_else(|| panic!("a frame for {}, which is not open", frame.sf));
+					self.rejected.extend(target.apply(&frame));
 					Outgoing::Frame(frame)
 				},
 				"x" => {
@@ -339,10 +363,11 @@ impl FakeTern {
 					if self.first_close_at.is_none() {
 						self.first_close_at = Some(Instant::now());
 					}
-					if close.keep {
-						self.doc.close();
-					} else {
-						self.doc = Document::new(SURFACE);
+					if close.id.as_str() == SURFACE {
+						self.doc.close(close.keep);
+					} else if let Some(screen) = self.screen.as_mut() {
+						screen.close(close.keep);
+						self.screen = None;
 					}
 					Outgoing::Close(close)
 				},
@@ -381,6 +406,12 @@ impl FakeTern {
 			if highest > self.acked {
 				self.acked = highest;
 				let event = format!(r#"{{"ev":"ack","sf":"{SURFACE}","s":{highest}}}"#);
+				self.write_apc(b"e", event.as_bytes());
+			}
+			let screen = self.highest_screen_frame();
+			if screen > self.screen_acked {
+				self.screen_acked = screen;
+				let event = format!(r#"{{"ev":"ack","sf":"{COVER}","s":{screen}}}"#);
 				self.write_apc(b"e", event.as_bytes());
 			}
 		}
@@ -488,6 +519,18 @@ impl FakeTern {
 		self
 			.frames()
 			.iter()
+			.filter(|frame| frame.sf.as_str() == SURFACE)
+			.map(|frame| frame.s)
+			.max()
+			.unwrap_or_default()
+	}
+
+	/// The highest sequence number seen on the screen surface.
+	fn highest_screen_frame(&self) -> u64 {
+		self
+			.frames()
+			.iter()
+			.filter(|frame| frame.sf.as_str() == COVER)
 			.map(|frame| frame.s)
 			.max()
 			.unwrap_or_default()
@@ -582,10 +625,12 @@ fn tern_hello() -> Hello {
 		v:             1,
 		term:          Str::new_static("tern"),
 		ver:           Some(Str::new_static("1.0-fake")),
-		kinds:         ["col", "row", "card", "section", "md", "text", "rows", "editor", "tool"]
-			.into_iter()
-			.map(Str::new_static)
-			.collect(),
+		kinds:         [
+			"col", "row", "card", "section", "md", "text", "rows", "editor", "tool", "el",
+		]
+		.into_iter()
+		.map(Str::new_static)
+		.collect(),
 		features:      ["settle", "adopt", "dock", "flow"]
 			.into_iter()
 			.map(Str::new_static)
@@ -809,6 +854,66 @@ fn tsp_overlays_suspend_and_resume_the_surface() {
 		.until("surface resumed after the overlay closed", |tern| !tern.doc.contains("model-picker"));
 	let quit = tern.quit();
 	assert!(quit.closes.iter().all(|close| close.keep), "{:?}", quit.closes);
+}
+
+/// A full-screen panel that describes itself natively (the settings form, ADR
+/// 0041 phase 3) covers the pane with a `screen` surface while the inline
+/// session stays live underneath, and the cover closes with the panel.
+#[test]
+fn tsp_a_full_screen_panel_covers_the_pane_with_a_screen_surface() {
+	let sandbox = Sandbox::new();
+	let mut tern = FakeTern::spawn(&sandbox, &Script::tern());
+	tern.until("composer mounted", |tern| tern.doc.contains("composer"));
+
+	// `/settings` opens the settings panel. Its native form fills the pane as a
+	// screen surface instead of floating in the session layer. A completion popup
+	// may take the first Enter, so Enter is repeated until the cover opens.
+	tern.write(b"/settings");
+	tern.until("command typed", |tern| {
+		prop(&tern.doc, "composer", "text")
+			.and_then(|text| text.as_str().map(str::to_owned))
+			.is_some_and(|text| text.trim_end() == "/settings")
+	});
+	for _ in 0..4 {
+		tern.write(b"\r");
+		tern.settle(Duration::from_millis(700));
+		if tern.screen.is_some() {
+			break;
+		}
+	}
+	tern.until("settings form on a screen surface", |tern| {
+		tern
+			.screen
+			.as_ref()
+			.is_some_and(|screen| screen.contains("settings"))
+	});
+	assert!(!tern.doc.suspended(), "the session stays live under the cover");
+	assert!(!tern.doc.contains("settings"), "the form is not in the session layer");
+	let covers: Vec<_> = tern
+		.opens()
+		.into_iter()
+		.filter(|open| open.mode == Mode::Screen)
+		.collect();
+	let [cover] = covers.as_slice() else {
+		panic!("one cover opens: {covers:?}\n{}", tern.report());
+	};
+	assert_eq!(cover.id.as_str(), COVER);
+	assert_eq!(cover.listen, Some(true));
+
+	tern.write(b"\x1b");
+	tern.until("cover closed with the panel", |tern| tern.screen.is_none());
+	let closed: Vec<_> = tern
+		.closes()
+		.into_iter()
+		.filter(|close| close.id.as_str() == COVER)
+		.collect();
+	let [close] = closed.as_slice() else {
+		panic!("one cover closes: {closed:?}\n{}", tern.report());
+	};
+	assert!(!close.keep, "a screen surface is discarded whatever keep says");
+	assert!(!tern.doc.suspended() && tern.doc.contains("composer"), "the session shows again");
+	assert!(tern.rejected.is_empty(), "Tern rejected ops: {:?}\n{}", tern.rejected, tern.report());
+	tern.quit();
 }
 
 /// Re-entering a terminal epoch adopts the kept surface; a `gone` event makes

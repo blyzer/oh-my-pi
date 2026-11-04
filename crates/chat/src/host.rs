@@ -4295,7 +4295,7 @@ impl Host {
 					},
 					None => {
 						self.tsp_surface = Some(match tsp_hello {
-							Some(hello) => Surface::new(hello, self.tsp_adopt),
+							Some(hello) => Surface::new(hello, tsp::wire::Mode::Inline, self.tsp_adopt),
 							None => Surface::optimistic(self.tsp_adopt),
 						});
 					},
@@ -5049,6 +5049,9 @@ impl Host {
 	/// Returns `false` when the caller must fall back to cell rendering: no
 	/// surface, or an overlay is open (the surface is suspended first so the
 	/// existing renderer owns the screen, ADR 0041 decision 6).
+	///
+	/// A full-screen panel that describes itself natively covers the pane with a
+	/// screen surface while the session surface stays live underneath.
 	fn present_tsp(&mut self, renderer: &mut Renderer<TtyOut>) -> Result<bool, HostError> {
 		let overlay_open = self.presenter.overlays.active().is_some();
 		let composer = self.presenter.composer.text_displayed();
@@ -5066,11 +5069,16 @@ impl Host {
 			.overlays
 			.approval()
 			.map(|approval| (approval.id.clone(), approval.reason.clone()));
-		let form = match self.presenter.overlays.active() {
-			Some(Overlay::Panel(panel)) => panel.tsp_node(),
-			Some(Overlay::Models(picker)) => Some(picker.tsp_node()),
-			Some(Overlay::History(picker)) => Some(picker.tsp_node()),
-			_ => None,
+		// A full-screen panel that describes itself natively covers the pane with a
+		// screen surface; pickers and the forms of smaller panels stay in the layer.
+		let (form, cover) = match self.presenter.overlays.active() {
+			Some(Overlay::Panel(panel)) if panel.anchor() == PanelAnchor::Full => {
+				(None, panel.tsp_node())
+			},
+			Some(Overlay::Panel(panel)) => (panel.tsp_node(), None),
+			Some(Overlay::Models(picker)) => (Some(picker.tsp_node()), None),
+			Some(Overlay::History(picker)) => (Some(picker.tsp_node()), None),
+			_ => (None, None),
 		};
 		// The autocomplete dropdown is surfaced as a picker node when no modal
 		// overlay is open; it is sent alongside the composer, not over it.
@@ -5079,10 +5087,12 @@ impl Host {
 		} else {
 			self.presenter.composer.autocomplete_node()
 		};
-		let native_overlay = approval.is_some() || form.is_some();
 		let Some(surface) = self.tsp_surface.as_mut() else {
 			return Ok(false);
 		};
+		// A view the terminal cannot draw leaves its overlay in cells.
+		let cover = cover.filter(|node| surface.draws(node));
+		let native_overlay = approval.is_some() || form.is_some() || cover.is_some();
 		if overlay_open && !native_overlay {
 			surface.suspend(renderer.writer_mut())?;
 			return Ok(false);
@@ -5095,6 +5105,7 @@ impl Host {
 			approval.as_ref().map(|(_, reason)| reason.as_str()),
 		)?;
 		surface.present_form(renderer.writer_mut(), form.or(autocomplete))?;
+		surface.present_cover(renderer.writer_mut(), cover.as_ref())?;
 		Ok(true)
 	}
 

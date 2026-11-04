@@ -5,6 +5,10 @@
 //! index and skipped, and the rest of the frame still applies. `settle` is
 //! recorded as a hint and restricts no later op.
 //!
+//! A document knows the [`Mode`] it was opened in because the mode decides
+//! what `x` leaves behind: with `keep:true` an inline or flow surface stays in
+//! the scrollback, a screen surface never does.
+//!
 //! This is the test oracle for everything that produces frames: a presenter
 //! is correct when the document its frames build here is the one it meant.
 
@@ -14,7 +18,7 @@ use omp_core::{FastHashMap, FastHashSet, Str};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use super::wire::{Frame, Kind, Node, Op, TextMode};
+use super::wire::{Frame, Kind, Mode, Node, Op, Open, TextMode};
 
 /// Why the terminal would reject one op.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -96,10 +100,21 @@ struct Entry {
 	parent:   Option<Str>,
 }
 
-/// A surface document: the root `col` (id = surface id) and an id index.
+/// What the terminal keeps of a surface once it closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Closed {
+	/// The document stays in the scrollback without its live-only regions.
+	Kept,
+	/// Nothing stays: the document is back to its root.
+	Discarded,
+}
+
+/// A surface document: the root `col` (id = surface id) and an id index, for
+/// the [`Mode`] the surface opened in.
 #[derive(Clone, Debug)]
 pub struct Document {
 	surface:   Str,
+	mode:      Mode,
 	nodes:     FastHashMap<Str, Entry>,
 	settled:   FastHashSet<Str>,
 	focus:     Option<Str>,
@@ -107,10 +122,19 @@ pub struct Document {
 }
 
 impl Document {
-	/// An empty surface document: only the root.
+	/// An empty inline surface document: only the root.
 	#[must_use]
 	pub fn new(surface: impl Into<Str>) -> Self {
-		let surface = surface.into();
+		Self::in_mode(surface.into(), Mode::Inline)
+	}
+
+	/// An empty document for the surface an `o` message opens: only the root.
+	#[must_use]
+	pub fn open(open: &Open) -> Self {
+		Self::in_mode(open.id.clone(), open.mode)
+	}
+
+	fn in_mode(surface: Str, mode: Mode) -> Self {
 		let mut nodes = FastHashMap::default();
 		nodes.insert(surface.clone(), Entry {
 			kind:     Kind::Col,
@@ -118,13 +142,19 @@ impl Document {
 			children: Vec::new(),
 			parent:   None,
 		});
-		Self { surface, nodes, settled: FastHashSet::default(), focus: None, suspended: false }
+		Self { surface, mode, nodes, settled: FastHashSet::default(), focus: None, suspended: false }
 	}
 
 	/// The surface id (the root's id).
 	#[must_use]
 	pub const fn surface(&self) -> &Str {
 		&self.surface
+	}
+
+	/// The mode the surface opened in.
+	#[must_use]
+	pub const fn mode(&self) -> Mode {
+		self.mode
 	}
 
 	/// Number of nodes, root included.
@@ -163,9 +193,16 @@ impl Document {
 		self.settled.contains(id)
 	}
 
-	/// `x keep:true`: drops the live-only regions (`dock`, `layer`) and the
-	/// focus; `main` stays.
-	pub fn close(&mut self) {
+	/// `x`: closes the surface and says what the terminal keeps of it.
+	///
+	/// `keep:true` on an inline or flow surface drops the live-only regions
+	/// (`dock`, `layer`) and the focus; `main` stays. A screen surface is
+	/// discarded whatever `keep` says, and `keep:false` removes any surface.
+	pub fn close(&mut self, keep: bool) -> Closed {
+		if !keep || self.mode == Mode::Screen {
+			*self = Self::in_mode(self.surface.clone(), self.mode);
+			return Closed::Discarded;
+		}
 		for region in ["dock", "layer"] {
 			if self
 				.nodes
@@ -177,6 +214,7 @@ impl Document {
 			}
 		}
 		self.focus = None;
+		Closed::Kept
 	}
 
 	/// Applies a frame op by op and returns the rejected ops.
@@ -469,8 +507,8 @@ fn utf16_to_byte(text: &str, units: usize) -> Option<usize> {
 mod tests {
 	use serde_json::json;
 
-	use super::{Document, OpError};
-	use crate::tsp::wire::{Frame, Kind};
+	use super::{Closed, Document, OpError};
+	use crate::tsp::wire::{Frame, Kind, Mode, Open};
 
 	fn frame(value: serde_json::Value) -> Frame {
 		serde_json::from_value(value).expect("frame")
@@ -592,10 +630,127 @@ mod tests {
 			["add","layer","s1",null,{"id":"layer","k":"col"}],
 			["focus","ed"]]})));
 		assert_eq!(doc.focus(), Some("ed"));
-		doc.close();
+		assert_eq!(doc.close(true), Closed::Kept);
 		assert!(doc.contains("main"));
 		assert!(!doc.contains("dock") && !doc.contains("ed") && !doc.contains("layer"));
 		assert_eq!(doc.focus(), None);
 		assert_eq!(doc.snapshot().k, Kind::Col);
+	}
+
+	/// A document for the surface an `o` of `mode` opens.
+	fn opened(id: &str, mode: Mode) -> Document {
+		Document::open(&Open {
+			id: id.into(),
+			mode,
+			title: None,
+			role: None,
+			adopt: None,
+			listen: None,
+		})
+	}
+
+	/// The specification's `o` examples, one per mode.
+	#[test]
+	fn open_messages_decode_in_every_mode() {
+		let open =
+			|value: serde_json::Value| -> Open { serde_json::from_value(value).expect("open") };
+		let inline = open(json!({"id":"s1","mode":"inline","title":"omp","role":"omp.session"}));
+		assert_eq!(Document::open(&inline).mode(), Mode::Inline);
+		let flow = open(json!({"id":"ls","mode":"flow","listen":false}));
+		assert_eq!((flow.mode, flow.listen), (Mode::Flow, Some(false)));
+		// `font` is a field this build does not model; it is ignored.
+		let screen = open(json!({"id":"app","mode":"screen","title":"Deploys","font":"sans"}));
+		assert_eq!(Document::open(&screen).mode(), Mode::Screen);
+		assert!(
+			serde_json::from_value::<Open>(json!({"id":"s1","mode":"tab"})).is_err(),
+			"an unknown mode is an error"
+		);
+		assert_eq!(Document::new("s1").mode(), Mode::Inline);
+	}
+
+	#[test]
+	fn the_same_frames_build_the_same_document_in_every_mode() {
+		let frames = [
+			json!({"sf":"s1","s":1,"ops":[["add","main","s1",null,{"id":"main","k":"col","c":[
+				{"id":"m1","k":"md","p":{"text":"Checking the build"}}]}]]}),
+			json!({"sf":"s1","s":2,"ops":[["text","m1","append",", then the tests."]]}),
+		];
+		let built = [Mode::Inline, Mode::Screen, Mode::Flow].map(|mode| {
+			let mut doc = opened("s1", mode);
+			for value in &frames {
+				let rejected = doc.apply(&frame(value.clone()));
+				assert!(rejected.is_empty(), "{mode:?}: {rejected:?}");
+			}
+			doc.snapshot()
+		});
+		assert_eq!(built[0], built[1]);
+		assert_eq!(built[0], built[2]);
+		assert_eq!(built[0].c[0].c[0].p["text"], "Checking the build, then the tests.");
+	}
+
+	#[test]
+	fn a_screen_surface_is_discarded_on_close_whatever_keep_says() {
+		for keep in [true, false] {
+			let mut doc = opened("app", Mode::Screen);
+			let rejected = doc.apply(&frame(json!({"sf":"app","s":1,"ops":[
+				["add","main","app",null,{"id":"main","k":"col","c":[{"id":"t","k":"text","p":{"text":"Deploys"}}]}],
+				["add","dock","app",null,{"id":"dock","k":"col"}]]})));
+			assert!(rejected.is_empty(), "{rejected:?}");
+			assert_eq!(doc.close(keep), Closed::Discarded, "keep:{keep}");
+			assert!(doc.is_empty() && !doc.contains("main"), "keep:{keep}");
+			assert_eq!(doc.mode(), Mode::Screen);
+		}
+	}
+
+	#[test]
+	fn a_flow_surface_stays_in_the_scrollback_like_command_output() {
+		let mut doc = opened("ls", Mode::Flow);
+		doc.apply(&frame(json!({"sf":"ls","s":1,"ops":[
+			["add","main","ls",null,{"id":"main","k":"col","c":[{"id":"t","k":"text","p":{"text":"Cargo.toml"}}]}],
+			["add","dock","ls",null,{"id":"dock","k":"col","c":[{"id":"ed","k":"editor"}]}],
+			["add","layer","ls",null,{"id":"layer","k":"col"}],
+			["focus","ed"]]})));
+		assert_eq!(doc.close(true), Closed::Kept);
+		assert_eq!(doc.get("t").expect("main stays").p["text"], "Cargo.toml");
+		assert!(!doc.contains("dock") && !doc.contains("ed") && !doc.contains("layer"));
+		assert_eq!(doc.focus(), None);
+	}
+
+	#[test]
+	fn keep_false_removes_an_inline_or_flow_surface() {
+		for mode in [Mode::Inline, Mode::Flow] {
+			let mut doc = opened("s1", mode);
+			doc.apply(&frame(
+				json!({"sf":"s1","s":1,"ops":[["add","main","s1",null,{"id":"main","k":"col"}]]}),
+			));
+			assert_eq!(doc.close(false), Closed::Discarded, "{mode:?}");
+			assert!(doc.is_empty(), "{mode:?}");
+		}
+	}
+
+	/// The specification's static `ls` table: a flow surface that never listens.
+	#[test]
+	fn a_flow_surface_builds_the_specification_table() {
+		let open: Open =
+			serde_json::from_value(json!({"id":"ls","mode":"flow","listen":false})).expect("open");
+		let mut doc = Document::open(&open);
+		let rejected = doc.apply(&frame(
+			json!({"sf":"ls","s":1,"ops":[["add","main","ls",null,{"id":"main","k":"col","c":[
+			{"id":"t","k":"el","p":{"tag":"table"},"c":[
+				{"id":"a","k":"el","p":{"tag":"tr"},"c":[
+					{"id":"a.n","k":"el","p":{"tag":"td","text":"Cargo.toml"}},
+					{"id":"a.s","k":"el","p":{"tag":"td","class":"size","text":"2.1K"}}]},
+				{"id":"b","k":"el","p":{"tag":"tr"},"c":[
+					{"id":"b.n","k":"el","p":{"tag":"td","text":"README.md"}},
+					{"id":"b.s","k":"el","p":{"tag":"td","class":"size","text":"14K"}}]},
+				{"id":"c","k":"el","p":{"tag":"tr"},"c":[
+					{"id":"c.n","k":"el","p":{"tag":"td","text":"build.rs"}},
+					{"id":"c.s","k":"el","p":{"tag":"td","class":"size","text":"312"}}]}]}]}]]}),
+		));
+		assert!(rejected.is_empty(), "{rejected:?}");
+		assert_eq!(doc.len(), 12, "root, main, the table and three rows of a row and two cells");
+		assert_eq!(doc.close(true), Closed::Kept);
+		assert_eq!(doc.get("b.s").expect("cell").p["text"], "14K");
+		assert_eq!(doc.get("a").expect("row").c.len(), 2);
 	}
 }
