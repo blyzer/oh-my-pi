@@ -29,6 +29,7 @@ fn register(
 		autoreply: None,
 		idle_subscribe: None,
 		ask: None,
+		turn_activity: Arc::default(),
 		project_root: Arc::from(std::path::Path::new("/workspace")),
 	});
 }

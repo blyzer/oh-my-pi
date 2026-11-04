@@ -32,6 +32,7 @@ fn registered(sessions: &SessionRegistry, id: &'static str, root: &Path) {
 		autoreply: None,
 		idle_subscribe: None,
 		ask: None,
+		turn_activity: Arc::default(),
 		project_root: Arc::from(root),
 	});
 }

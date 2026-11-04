@@ -157,6 +157,7 @@ impl AppOpenHost {
 			},
 			launch.model.clone(),
 			up,
+			kernel.turn_activity(),
 		)
 		.into_diagnostic()?
 		.with_facts_of(&session)

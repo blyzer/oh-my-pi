@@ -3,7 +3,7 @@
 use std::{
 	fs, io,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, atomic::AtomicBool},
 	time::UNIX_EPOCH,
 };
 
@@ -83,6 +83,13 @@ pub struct KernelHandle {
 	/// through the kernel mailbox. A handle whose owner presents no UI leaves
 	/// it `None`.
 	pub ask:            Option<crate::headless::AskRoute>,
+	/// Whether the kernel driving this session is inside a turn
+	/// ([`omp_agent::Kernel::turn_activity`]).
+	///
+	/// A fast path, not a guarantee: a turn can end between a load and the
+	/// kernel's next mailbox drain, so a caller that sends on `true` still
+	/// bounds its wait for the answer.
+	pub turn_activity:  Arc<AtomicBool>,
 	/// Canonical project root the kernel was composed over.
 	///
 	/// An `Arc<Path>` because the registry clones a handle on every lookup

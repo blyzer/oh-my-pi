@@ -3725,6 +3725,28 @@ impl<C: Inference> Kernel<C> {
 				break;
 			};
 			match message {
+				// The remote form of the three admission controls below, journaled
+				// under its key by the same dispatch every other mailbox drain uses.
+				message @ Up::Submit {
+					command:
+						crate::SubmitCommand::Pause(_)
+						| crate::SubmitCommand::Turn(
+							crate::TurnControl::Interrupt | crate::TurnControl::Cancel,
+						),
+					..
+				} => {
+					let control = CallControl::new(
+						self.mailbox_rx.clone(),
+						turn.clone(),
+						self.cancel.clone(),
+						None,
+						self.approvals.clone(),
+					);
+					if matches!(control.handle(session, message)?, Received::Cancelled) {
+						cancelled = true;
+						break;
+					}
+				},
 				Up::Pause { active } => {
 					crate::set_paused(session, active)?;
 				},

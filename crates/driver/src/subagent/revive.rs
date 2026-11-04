@@ -322,6 +322,7 @@ async fn drive(
 		autoreply,
 		idle_subscribe: None,
 		ask: None,
+		turn_activity: kernel.turn_activity(),
 		project_root: Arc::clone(&composed.project_root),
 	};
 	child.sessions.register(child.id.clone(), live.clone());
@@ -478,6 +479,11 @@ async fn idle(
 				},
 				Ok(Up::Cancel) => return Idle::Cancelled,
 				Ok(Up::Interrupt | Up::AbortTools(_)) => {},
+				// Only a turn journals a remote command, so the caller learns now
+				// that nothing was applied instead of waiting out its bound.
+				Ok(Up::Submit { reply, .. }) => {
+					let _ = reply.send(Err(SessionError::NoActiveTurn));
+				},
 				Ok(
 					other @ (Up::Approval(_)
 					| Up::Approve { .. }

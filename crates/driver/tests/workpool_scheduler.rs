@@ -81,6 +81,7 @@ impl WorkpoolLauncher for Launcher {
 			autoreply:      None,
 			idle_subscribe: None,
 			ask:            None,
+			turn_activity:  Arc::default(),
 			project_root:   Arc::from(std::path::Path::new("/workspace")),
 		});
 		let id = request.id.clone();
@@ -199,6 +200,7 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 		autoreply:      None,
 		idle_subscribe: None,
 		ask:            None,
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(std::path::Path::new("/workspace")),
 	});
 	let authority: Arc<dyn omp_agent::SessionAuthority> = sessions.clone();
