@@ -1,5 +1,3 @@
-[docs/adr/TASKS.md (verbatim, 267 lines total)]
-[docs/adr/TASKS.md (verbatim, 264 lines total)]
 # Active ADR and deferred-work ledger
 
 This file is the active work queue for ADR follow-ups. It is distinct from
