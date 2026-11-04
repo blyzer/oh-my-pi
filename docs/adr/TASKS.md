@@ -66,11 +66,13 @@ error. No council verdict is recorded.
   accepts only `rev == 1`, so a `tool.result@2` is refused as an unknown kind by every reader
   today. Choosing it later would require implementing and verifying revision-2 support first.
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
-- **ADR 0040 success criteria:** with every client measured, the memory criterion (client peak
-  under 5% of the local peak, 130.8 MiB for `omp-envd`) cannot pass on `omp-envd`, and no omp
-  product path can produce the warm run that the wall criterion (≤ 1.5× warm local) compares.
-  Keep the thresholds and record that `omp-envd` cannot meet them, restate or retarget them, or
-  build a warm-state backend first (ADR 0040 open question 7).
+- **ADR 0040 success criteria:** every client measured fails the memory criterion (client peak
+  under 5% of the local peak, 130.8 MiB for `omp-envd`) on this recipe, and no omp product path
+  can produce the warm run that the wall criterion (<= 1.5x warm local) compares. No client has
+  been profiled, so whether one could fit under 130.8 MiB is unknown rather than refuted. Keep the
+  thresholds and record that no measured client meets them, restate or retarget them, profile a
+  client to establish whether the budget is reachable, or build a warm-state backend first
+  (ADR 0040 open question 7).
 - **ADR 0040 production gate:** journal replay, crash handling and result persistence, the items
   of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no product path
   creates one. Build the producer and a real reattach before acceptance, or narrow the gate to

@@ -1222,14 +1222,19 @@ Whether the success criteria can be met:
   action cache under the `buildbuddy` profile. A warm omp run needs a warm-state backend. The
   candidate is the BuildBuddy Run API backend, which no product path composes and whose snapshot
   contract the 2026-10-31 amendment lists as UNVERIFIED.
-- **Client peak memory (< 5% of the local peak).** Unreachable for `omp-envd` with every client
-  measured. Five percent of 2616.6 MiB is 130.8 MiB. The lowest client peak recorded is
-  201.9 MiB, from the `bb` client, and the omp client peaked at 215.4 MiB and 290.0 MiB. A client
-  with a fixed floor F passes only on a recipe whose local peak exceeds 20 × F. That is about
-  3.9 GiB for the `bb` client and 4.2 GiB to 5.7 GiB for the omp client. [INFERENCE] A release
-  `omp` client may peak lower. The audit names the 2026-10-20 omp client as the debug binary and
-  does not record the build of the 2026-10-24 client, so no measurement is known to come from a
-  release client.
+- **Client peak memory (< 5% of the local peak).** Unmet by every client measured, and not shown
+  unreachable. Five percent of 2616.6 MiB is 130.8 MiB. The lowest client peak recorded is
+  201.9 MiB, from the `bb` client, and the omp client peaked at 215.4 MiB and 290.0 MiB. No client
+  has been profiled, so nothing here attributes those peaks to a particular cost, and no lower
+  bound on a client's peak is established. Whether a client can be built under 130.8 MiB is
+  unknown rather than refuted. [INFERENCE] A release `omp` client may peak lower. The audit names
+  the 2026-10-20 omp client as the debug binary and does not record the build of the 2026-10-24
+  client, so no measurement is known to come from a release client.
+- **The memory criterion is a ratio against the measured recipe, so its difficulty moves with the
+  recipe rather than with the client.** A client whose peak does not shrink with the remote
+  workload passes only where the local peak exceeds 20x that peak: about 3.9 GiB for the `bb`
+  client and 4.2 GiB to 5.7 GiB for the omp client. A heavier recipe therefore makes the same
+  unchanged client pass. That property is visible from the definition and needs no profiling.
 - The thresholds are owner adjustable ("Measurement plan"). Whether to keep, restate, or retarget
   them is open question 7 for the owner.
 
@@ -1601,13 +1606,14 @@ None touches a backend.
    or Team? Should BuildBuddy be asked about managed Mac cores (R4b) for the macOS proofs?
 6. **`.gitignore`.** Change `/vendor/` to `/vendor`, so the worktrees' `vendor` symlink stops
    showing as untracked? It is a separate one-line change.
-7. **Success criteria for `omp-envd`.** With every client measured, the memory criterion cannot
-   pass on `omp-envd`, and no omp product path can produce the warm run that the wall criterion
-   compares ("Gap to acceptance"). Choose one. Keep the thresholds and record that `omp-envd`
-   cannot meet them. Restate memory as an absolute client ceiling or as relief (local peak minus
-   client peak), and restate wall time for a cold remote run. Judge the criteria on a recipe with a
-   larger local peak (`just clippy` and `just e2e-build` are unmeasured). Or build a warm-state
-   backend first.
+7. **Success criteria for `omp-envd`.** Every client measured fails the memory criterion on this
+   recipe, and no omp product path can produce the warm run that the wall criterion compares
+   ("Gap to acceptance"). No client has been profiled, so whether one could fit under 130.8 MiB
+   is unknown. Choose one. Keep the thresholds and record that no measured client meets them on
+   `omp-envd`. Restate memory as an absolute client ceiling or as relief (local peak minus client
+   peak), and restate wall time for a cold remote run. Judge the criteria on a recipe with a
+   larger local peak (`just clippy` and `just e2e-build` are unmeasured). Profile a client to
+   establish whether the budget is reachable. Or build a warm-state backend first.
 8. **Scope of the production gate.** Journal replay, crash handling and result persistence, the
    items of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no
    product path creates one. Part L files that producer under "Later", and no caller is specified.
