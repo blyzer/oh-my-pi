@@ -2445,6 +2445,161 @@ mod tests {
 		child.terminate().await;
 	}
 
+	/// The parent session a workpool's forwarded eval-defined tools run under.
+	struct ForwardingParent {
+		cwd: PathBuf,
+	}
+
+	#[async_trait]
+	impl crate::eval::bridge::ParentSessionHost for ForwardingParent {
+		fn eval_session_config(
+			&self,
+		) -> Result<crate::eval::bridge::EvalSessionConfig, BridgeHostError> {
+			Ok(crate::eval::bridge::EvalSessionConfig {
+				cwd:              self.cwd.clone(),
+				local_roots_json: None,
+			})
+		}
+
+		async fn completion(
+			&self,
+			_args: Value,
+			_progress: &dyn BridgeProgressSink,
+		) -> Result<Value, BridgeHostError> {
+			Err(BridgeHostError::message("completion is not used by this test"))
+		}
+
+		async fn agent(
+			&self,
+			_args: Value,
+			_progress: &dyn BridgeProgressSink,
+		) -> Result<Value, BridgeHostError> {
+			Err(BridgeHostError::message("agents are not used by this test"))
+		}
+
+		async fn concurrency(&self, _args: Value) -> Result<Value, BridgeHostError> {
+			Err(BridgeHostError::message("concurrency is not used by this test"))
+		}
+
+		async fn budget(&self, _args: Value) -> Result<Value, BridgeHostError> {
+			Err(BridgeHostError::message("budget is not used by this test"))
+		}
+	}
+
+	/// A workpool worker's call to a forwarded eval-defined tool runs its
+	/// handler in the owner's kernel under the roster of the request that
+	/// named the call, as a cell that request started itself would: the
+	/// nested call the roster allows runs, the one it forbids is refused
+	/// before it acts.
+	#[tokio::test]
+	async fn forwarded_eval_tool_calls_obey_the_calling_requests_roster() {
+		use futures::StreamExt as _;
+		use omp_tool::{
+			Claims, Constraint, Effects, ErasedEv, ErasedOutcome, Ev, IncomingParams, Precedence,
+			Presentation, Registry, Rev, Tool as _, ToolRestrictions, ToolSpec, ToolTerminal,
+		};
+
+		let cwd = env::current_dir().expect("current directory");
+		let interpreter = discover_external_python(&cwd, None).expect("test host provides Python");
+		let reads = Arc::new(AtomicU64::new(0));
+		let writes = Arc::new(AtomicU64::new(0));
+		let mut natives = Registry::new();
+		for (name, ran) in [("read", &reads), ("write", &writes)] {
+			let spec = ToolSpec {
+				name:            Str::new(name),
+				rev:             Rev { family: Str::default(), n: 1 },
+				description:     sf!("forwarded roster probe"),
+				schema:          Bytes::from_static(br#"{"type":"object"}"#),
+				constraint:      Constraint::None,
+				effects:         Effects::empty(),
+				confinement:     omp_tool::Confinement::Host,
+				projection_code: [0; 32],
+			};
+			natives
+				.register(NestedProbe { spec, ran: Arc::clone(ran) }, Presentation::Slot, Claims {
+					precedence: Precedence::CORE,
+					claimant:   sf!("omp/core"),
+					replaces:   None,
+				})
+				.expect("register probe");
+		}
+		let host = Arc::new(SessionBridgeHost::new());
+		host
+			.bind_registry(Arc::new(natives))
+			.expect("bind bridge registry");
+		let _parent = host
+			.bind_sdk_parent(sf!("session"), Arc::new(ForwardingParent { cwd }))
+			.expect("bind parent");
+		let (eval, control) = omp_tools::eval::eval_controlled(ProcessEvalExec::new_inner(
+			PathBuf::from("unused-for-external-python"),
+			interpreter,
+			ExecHost::new(),
+			&host,
+			"1s".parse().expect("interrupt grace"),
+			None,
+		));
+		// The parent's own `eval` cell defines the handler.
+		let (feed, params) = IncomingParams::owned_channel(Str::new_static(r#"["session","agent"]"#));
+		feed
+			.args_committed(Str::new(
+				serde_json::json!({
+					"language": "py",
+					"code": "@tool\ndef leak(path: str):\n    seen = tool.read(path=path)\n    \
+								tool.write(path=path)\n    return seen",
+				})
+				.to_string(),
+			))
+			.expect("eval invocation stays live");
+		let mut defined = Box::pin(eval.call(params));
+		let mut definition = None;
+		while let Some(event) = defined.next().await {
+			if let Ev::Done(ToolTerminal::Done { result, .. }) = event {
+				definition = Some(result);
+			}
+		}
+		definition
+			.expect("the defining cell settles")
+			.expect("the handler is defined");
+		let roster = control
+			.describe_tools("session", &[sf!("leak")], CancellationToken::new())
+			.await
+			.expect("describe the handler");
+		// The worker's registry hosts the handler as a workpool worker's does;
+		// the worker's request allows `read` and the forwarded tool only.
+		let worker = Registry::new();
+		control
+			.host_tools(&worker, &sf!("session"), &roster)
+			.expect("host the forwarded tool");
+		let mut restrictions =
+			ToolRestrictions::default().with_allowlist(Arc::from([sf!("read"), sf!("leak")]), None);
+		restrictions.set_available(Arc::from([sf!("read"), sf!("write"), sf!("leak")]));
+		let (feed, params) = IncomingParams::channel();
+		feed
+			.args_committed(Str::new_static(r#"{"path":"notes.txt"}"#))
+			.expect("forwarded call stays live");
+		let mut forwarded = worker
+			.invoke("leak", params.with_restrictions(Some(Arc::new(restrictions))))
+			.expect("forwarded tool resolves");
+		let mut verdict = None;
+		while let Some(event) = forwarded.next().await {
+			if let ErasedEv::Done(ErasedOutcome::Done { verdict: json, .. }) =
+				event.expect("forwarded call event")
+			{
+				verdict = Some(serde_json::from_slice::<Value>(&json).expect("verdict JSON"));
+			}
+		}
+		assert_eq!(
+			verdict,
+			Some(serde_json::json!({
+				"kind": "faulted",
+				"value": "RuntimeError: nested tool call refused: `write` is not in the `sv_tools` \
+							 allowlist. No action was taken. Available now: read, leak.",
+			}))
+		);
+		assert_eq!(reads.load(Ordering::Acquire), 1, "the allowed nested call ran");
+		assert_eq!(writes.load(Ordering::Acquire), 0, "the refused nested call never ran");
+	}
+
 	/// A writer that consults the calling invocation's write scope, as the
 	/// document host does before every change.
 	struct ScopedWriterProbe {
