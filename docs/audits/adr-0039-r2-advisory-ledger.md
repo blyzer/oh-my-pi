@@ -104,18 +104,24 @@ retry. Each was wrong, and each was caught by an agent that read the code.
 A row closes only when its code and targeted tests have landed and PASSED together.
 Instructing an agent does not close an advisory; a green test does.
 
+> **CORRECTION (2026-11-04).** The revision that introduced this table was merged to
+> `omp2` while every test it cites still lived on an unmerged branch, so for a period
+> this file asserted proof `omp2` did not contain. That is precisely the failure the
+> ledger exists to catch, committed by the ledger. Rows now read **PROVEN ON PR #n**
+> until that PR merges; only then do they become CLOSED ON `omp2`.
+
 | Row | Status | Evidence |
 |-----|--------|----------|
-| 25 | **CLOSED** | `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` (#477) |
-| 26 | **CLOSED** | same test: a waker reads the journal from disk inside `reply.send`, proving the key durable BEFORE the outcome is sent |
-| 27 | **CLOSED** | #477's dated Amendment (2026-11-04): A4 row, owner-grant policy and reason, why `AnswerUi` is its own scope |
-| 28 | **CLOSED** | single-ADR-owner rule held; #477 pasted both siblings' prose verbatim, no conflict |
-| 29 | **CLOSED** | this file, merged as #474 and #475 |
-| 30 | **CLOSED** | premise verified in code: `CallControl` does not degrade steer<->queue; cross-arm key reuse conflicts |
-| 31 | **CLOSED** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a real held kernel turn, then replays after restart (#478) |
-| 32 | **CLOSED** | mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red (#478) |
+| 25 | **PROVEN ON PR #477** | `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` (#477) |
+| 26 | **PROVEN ON PR #477** | same test: a waker reads the journal from disk inside `reply.send`, proving the key durable BEFORE the outcome is sent |
+| 27 | **PROVEN ON PR #477** | #477's dated Amendment (2026-11-04): A4 row, owner-grant policy and reason, why `AnswerUi` is its own scope |
+| 28 | **CLOSED ON omp2** | single-ADR-owner rule held; #477 pasted both siblings' prose verbatim, no conflict |
+| 29 | **CLOSED ON omp2** | this file, merged as #474 and #475 |
+| 30 | **PROVEN ON PR #478** | premise verified in code: `CallControl` does not degrade steer<->queue; cross-arm key reuse conflicts |
+| 31 | **PROVEN ON PR #478** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a real held kernel turn, then replays after restart (#478) |
+| 32 | **PROVEN ON PR #478** | mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red (#478) |
 
-### The A5 gap #473 shipped with is closed
+### The A5 gap #473 shipped with is closed ON PR #478, not yet on omp2
 Steer and queue records now use the same journal-backed key index as `msg.user` and
 approval records (`patch_keyed` over `mutation_keys`). One mechanism, three record kinds,
 as ADR A5 requires. #473 keyed only `MsgUser`; that is no longer true.
