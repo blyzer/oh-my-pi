@@ -71,6 +71,7 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 		&launch.options,
 		launch.model.clone(),
 		kernel.mailbox(),
+		kernel.turn_activity(),
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)

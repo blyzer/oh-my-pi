@@ -444,6 +444,39 @@ impl CallControl {
 	/// interrupts routed to the cancellation tree.
 	pub fn handle(&self, session: &mut Session, message: Up) -> Result<Received, SessionError> {
 		match message {
+			Up::Submit { command, author, key, reply } => {
+				// Best effort and only before dispatch: nobody waits for this answer
+				// any more, so applying the command now would land it unannounced in
+				// whichever turn drains it.
+				if reply.is_disconnected() {
+					return Ok(Received::None);
+				}
+				let journaled = crate::submit::journal(session, &command, &author, key);
+				let received = match (&journaled, command) {
+					(Ok(crate::SubmitReceipt::Applied { .. }), crate::SubmitCommand::Steer(_)) => {
+						Received::Steering
+					},
+					(Ok(crate::SubmitReceipt::Applied { .. }), crate::SubmitCommand::Pause(_)) => {
+						Received::PauseChanged
+					},
+					// Once journaled, a turn control is the local verb, routed by its arm.
+					(Ok(crate::SubmitReceipt::Applied { .. }), crate::SubmitCommand::Turn(control)) => {
+						self.handle(session, match control {
+							crate::TurnControl::Interrupt => Up::Interrupt,
+							crate::TurnControl::AbortTools => {
+								Up::AbortTools(crate::ToolScopedAbortReason::all(Str::new_static(
+									"interrupted by a remote controller",
+								)))
+							},
+							crate::TurnControl::Cancel => Up::Cancel,
+						})?
+					},
+					// A queued follow-up, a replay, or a refusal gives this turn nothing.
+					_ => Received::None,
+				};
+				let _ = reply.send(journaled);
+				Ok(received)
+			},
 			Up::Steer { text, attachments, author } => {
 				steering::queue_steering(session, text, &attachments, author)?;
 				Ok(Received::Steering)
@@ -3984,6 +4017,202 @@ mod approval_tests {
 			Some(Str::new_static("ada"))
 		);
 		assert!(ApprovalBook::new().pending(&session).is_empty());
+	}
+}
+
+/// The Submit receipt carries no disposition, so it describes an outcome only
+/// while the arm alone decides where a command lands. Each test here fails if
+/// `CallControl` routes a steer or a queue anywhere else, or if a replay stops
+/// naming its original. Add a disposition to the receipt before changing them.
+#[cfg(test)]
+mod receipt_without_disposition {
+	use omp_core::Str;
+	use omp_dom::{Event, KnownTag, NodeSpec, Op, PropId, Value};
+	use omp_journal::idempotency::IdempotencyKey;
+	use omp_session::{ComponentRegistry, Session, SessionError};
+
+	use super::{CallControl, Received};
+	use crate::{ApprovalDesk, CancelTree, KernelEvents, SubmitCommand, SubmitReceipt, Up};
+
+	const KEY: &str = "01JSUBMITKEY";
+	const AUTHOR: &str = "authenticated-owner";
+
+	fn control() -> CallControl {
+		let cancel = CancelTree::new();
+		let (_sender, inbox) = flume::unbounded();
+		CallControl::new(
+			inbox,
+			cancel.begin_turn(),
+			cancel,
+			None,
+			ApprovalDesk::new(KernelEvents::default()),
+		)
+	}
+
+	fn submit(
+		control: &CallControl,
+		session: &mut Session,
+		command: SubmitCommand,
+		key: &'static str,
+	) -> (Received, Result<SubmitReceipt, SessionError>) {
+		let (reply, receipt) = flume::bounded(1);
+		let received = control
+			.handle(session, Up::Submit {
+				command,
+				author: Str::new_static(AUTHOR),
+				key: IdempotencyKey::new_static(key),
+				reply,
+			})
+			.expect("a remote command never fails the turn");
+		(
+			received,
+			receipt
+				.recv()
+				.expect("the kernel answers every submit it takes"),
+		)
+	}
+
+	fn session(path: &std::path::Path) -> Session {
+		let mut session = Session::create(path, ComponentRegistry::standard()).expect("session");
+		session.begin_turn().expect("turn");
+		session
+	}
+
+	/// `(steering, prompts)`: how many entries wait in each queue.
+	fn queued(session: &Session) -> (usize, usize) {
+		let count = |selector| session.dom().select(selector).expect("selector").count();
+		(count("queues steering user"), count("queues prompts prompt"))
+	}
+
+	fn steer() -> SubmitCommand {
+		SubmitCommand::Steer(Str::new_static("redirect"))
+	}
+
+	fn queue() -> SubmitCommand {
+		SubmitCommand::Queue(Str::new_static("redirect"))
+	}
+
+	#[test]
+	fn steer_then_queue_under_one_key_is_a_key_conflict() {
+		let directory = tempfile::tempdir().expect("directory");
+		let mut session = session(&directory.path().join("steer-then-queue.oms"));
+		let control = control();
+		let before = session.entry_count() as u64;
+
+		let (received, first) = submit(&control, &mut session, steer(), KEY);
+		assert_eq!(received, Received::Steering);
+		let Ok(SubmitReceipt::Applied { entry, seq }) = first else {
+			panic!("the first steer is journaled: {first:?}");
+		};
+		assert_eq!(seq, before + 1, "the receipt names the steer's own position");
+		assert_eq!(queued(&session), (1, 0), "a steer lands in the steering queue only");
+
+		let (received, retry) = submit(&control, &mut session, queue(), KEY);
+		assert_eq!(received, Received::None);
+		assert!(
+			matches!(
+				&retry,
+				Err(SessionError::KeyConflict { key, existing })
+					if *key == IdempotencyKey::new_static(KEY) && *existing == entry
+			),
+			"a queue reusing a steer's key is refused, not replayed: {retry:?}"
+		);
+		assert_eq!(session.entry_count() as u64, before + 1, "the conflict journals nothing");
+		assert_eq!(queued(&session), (1, 0));
+	}
+
+	#[test]
+	fn queue_then_steer_under_one_key_is_a_key_conflict() {
+		let directory = tempfile::tempdir().expect("directory");
+		let mut session = session(&directory.path().join("queue-then-steer.oms"));
+		let control = control();
+		let before = session.entry_count() as u64;
+
+		let (received, first) = submit(&control, &mut session, queue(), KEY);
+		assert_eq!(received, Received::None);
+		let Ok(SubmitReceipt::Applied { entry, seq }) = first else {
+			panic!("the first queue is journaled: {first:?}");
+		};
+		assert_eq!(seq, before + 1, "the receipt names the follow-up's own position");
+		assert_eq!(queued(&session), (0, 1), "a queue lands in the prompts queue only");
+
+		let (received, retry) = submit(&control, &mut session, steer(), KEY);
+		assert_eq!(received, Received::None);
+		assert!(
+			matches!(
+				&retry,
+				Err(SessionError::KeyConflict { key, existing })
+					if *key == IdempotencyKey::new_static(KEY) && *existing == entry
+			),
+			"a steer reusing a queue's key is refused, not replayed: {retry:?}"
+		);
+		assert_eq!(session.entry_count() as u64, before + 1, "the conflict journals nothing");
+		assert_eq!(queued(&session), (0, 1));
+	}
+
+	#[test]
+	fn same_arm_retry_after_reopen_replays_the_original_entry() {
+		let directory = tempfile::tempdir().expect("directory");
+		let path = directory.path().join("reopen.oms");
+		let mut session = session(&path);
+		let control = control();
+		let before = session.entry_count() as u64;
+		let (_, first) = submit(&control, &mut session, steer(), KEY);
+		let Ok(SubmitReceipt::Applied { entry, seq }) = first else {
+			panic!("the first steer is journaled: {first:?}");
+		};
+		assert_eq!(seq, before + 1);
+		drop(session);
+
+		let mut reopened = Session::open(&path, ComponentRegistry::standard()).expect("reopen");
+		let (received, retry) = submit(&control, &mut reopened, steer(), KEY);
+		assert_eq!(received, Received::None, "a replay gives the turn nothing to deliver");
+		assert_eq!(
+			retry.expect("the retry is answered"),
+			SubmitReceipt::Duplicate { entry },
+			"the reopened journal still names the first submission"
+		);
+		assert_eq!(reopened.entry_count() as u64, before + 1, "the replay journals nothing");
+		assert_eq!(queued(&reopened), (1, 0));
+	}
+
+	/// A replay answers with no position, and the key is never projected into
+	/// the DOM, so the entry is a client's only way back to a submission whose
+	/// first receipt it lost.
+	#[test]
+	fn a_lost_first_receipt_is_recovered_from_the_replayed_entry() {
+		let directory = tempfile::tempdir().expect("directory");
+		let mut session = session(&directory.path().join("lost-receipt.oms"));
+		let (_, events) = session.subscribe();
+		let control = control();
+		drop(submit(&control, &mut session, steer(), KEY));
+		let (_, other) = submit(
+			&control,
+			&mut session,
+			SubmitCommand::Steer(Str::new_static("unrelated")),
+			"01JOTHER",
+		);
+		assert!(matches!(other, Ok(SubmitReceipt::Applied { .. })), "{other:?}");
+
+		let (_, retry) = submit(&control, &mut session, steer(), KEY);
+		let Ok(SubmitReceipt::Duplicate { entry }) = retry else {
+			panic!("the retry replays: {retry:?}");
+		};
+		let inserted = events
+			.try_iter()
+			.find_map(|event| match event {
+				Event::Patch(patch) if patch.cause == entry => Some(patch.ops),
+				_ => None,
+			})
+			.expect("the replayed entry names a patch the client observed");
+		let expected = NodeSpec::new(KnownTag::User)
+			.with_prop(PropId::Status, Value::Str(Str::new_static("queued")))
+			.with_content(Str::new_static("redirect"))
+			.with_prop(PropId::Author, Value::Str(Str::new_static(AUTHOR)));
+		assert!(
+			matches!(inserted.as_slice(), [Op::Ins { node, .. }] if *node == expected),
+			"the entry leads to the client's own steer, not the later one: {inserted:?}"
+		);
 	}
 }
 

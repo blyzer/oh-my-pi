@@ -13,8 +13,8 @@ use omp_journal::{
 	blob::{BlobRef, BlobStore},
 	data::{
 		Attachment, Compaction, FileMentions, Genesis, MsgAssistantEnd, MsgAssistantStart, MsgUser,
-		Patch, SkillPrompt, Stream, StreamOp, ToolCall, ToolResult, ToolUpdate, TurnReceipt,
-		TurnStart,
+		Patch, PatchIdempotency, SkillPrompt, Stream, StreamOp, ToolCall, ToolResult, ToolUpdate,
+		TurnReceipt, TurnStart,
 	},
 	idempotency::{IdempotencyKey, IdempotencyKeyError},
 };
@@ -169,7 +169,7 @@ pub enum SessionError {
 	/// An idempotency key is empty or longer than the durable bound.
 	#[error("idempotency key is invalid")]
 	InvalidIdempotencyKey(#[from] IdempotencyKeyError),
-	/// An idempotency key was reused for a message with different content.
+	/// An idempotency key was reused for a different mutation.
 	#[error("idempotency key {key} already names entry {existing} with different content")]
 	KeyConflict {
 		/// The reused key.
@@ -194,9 +194,9 @@ pub struct Session {
 	pub(crate) call_handles: FastHashMap<EntryId, Handle>,
 	pub(crate) stream_targets: FastHashMap<Sid, Handle>,
 	pub(crate) summaries: FastHashMap<BlobRef, Str>,
-	/// Live-chain index from client key to the user message it names; the fold
-	/// rebuilds it, so the journal stays the only source of truth.
-	pub(crate) user_keys: FastHashMap<IdempotencyKey, EntryId>,
+	/// Live-chain index from client key to its journal entry; folding rebuilds
+	/// it, so the journal stays the only source of truth.
+	pub(crate) mutation_keys: FastHashMap<IdempotencyKey, EntryId>,
 	pub(crate) entry_patch_published: bool,
 	pub(crate) next_sid: Sid,
 	pending_prior: Option<EntryId>,
@@ -369,7 +369,7 @@ impl Session {
 			call_handles: FastHashMap::default(),
 			stream_targets: FastHashMap::default(),
 			summaries: FastHashMap::default(),
-			user_keys: FastHashMap::default(),
+			mutation_keys: FastHashMap::default(),
 			entry_patch_published: false,
 			next_sid: 0,
 			pending_prior: None,
@@ -677,18 +677,19 @@ impl Session {
 		text: &Str,
 		attachments: &[Attachment],
 	) -> Result<Option<EntryId>, SessionError> {
-		let Some(&existing) = self.user_keys.get(key) else {
+		let Some(&existing) = self.mutation_keys.get(key) else {
 			return Ok(None);
 		};
 		let entry = self
 			.entry(existing)
 			.ok_or(SessionError::UnknownEntry { id: existing })?;
-		let stored: MsgUser = serde_json::from_str(entry.data.as_str())?;
-		if stored.text == *text && stored.attachments == attachments {
-			Ok(Some(existing))
-		} else {
-			Err(SessionError::KeyConflict { key: key.clone(), existing })
+		if entry.kind.name.as_str() == omp_journal::kind::MSG_USER {
+			let stored: MsgUser = serde_json::from_str(entry.data.as_str())?;
+			if stored.text == *text && stored.attachments == attachments {
+				return Ok(Some(existing));
+			}
 		}
+		Err(SessionError::KeyConflict { key: key.clone(), existing })
 	}
 
 	fn commit_user(
@@ -1066,13 +1067,81 @@ impl Session {
 
 	/// Journals and applies a caller-built DOM transaction.
 	pub fn patch(&mut self, txn: Txn) -> Result<EntryId, SessionError> {
+		self.commit_patch(txn, None)
+	}
+
+	/// Finds a previously committed keyed patch with the same typed request.
+	/// A key naming another request or journal entry returns a key conflict.
+	pub fn replay_keyed_patch(
+		&self,
+		key: &IdempotencyKey,
+		label: &str,
+		request: &impl Serialize,
+	) -> Result<Option<EntryId>, SessionError> {
+		let request = serde_json::value::to_raw_value(request)?;
+		self.replay_keyed_patch_raw(key, label, &request)
+	}
+
+	fn replay_keyed_patch_raw(
+		&self,
+		key: &IdempotencyKey,
+		label: &str,
+		request: &RawValue,
+	) -> Result<Option<EntryId>, SessionError> {
+		key.validate()?;
+		let Some(&existing) = self.mutation_keys.get(key) else {
+			return Ok(None);
+		};
+		let entry = self
+			.entry(existing)
+			.ok_or(SessionError::UnknownEntry { id: existing })?;
+		if entry.kind.name.as_str() == omp_journal::kind::PATCH
+			&& entry.label.as_deref().unwrap_or_default() == label
+		{
+			let patch: Patch = serde_json::from_str(entry.data.as_str())?;
+			if patch
+				.idempotency
+				.as_ref()
+				.is_some_and(|identity| identity.request.get() == request.get())
+			{
+				return Ok(Some(existing));
+			}
+		}
+		Err(SessionError::KeyConflict { key: key.clone(), existing })
+	}
+
+	/// Journals a patch and its key atomically, or returns the original entry on
+	/// replay. The request must contain the stable typed input, not transient
+	/// DOM handles.
+	pub fn patch_keyed(
+		&mut self,
+		txn: Txn,
+		key: IdempotencyKey,
+		request: &impl Serialize,
+	) -> Result<AppendOutcome, SessionError> {
+		let request = serde_json::value::to_raw_value(request)?;
+		if let Some(existing) =
+			self.replay_keyed_patch_raw(&key, txn.label.as_deref().unwrap_or_default(), &request)?
+		{
+			return Ok(AppendOutcome::Replayed(existing));
+		}
+		self
+			.commit_patch(txn, Some(PatchIdempotency { key, request }))
+			.map(AppendOutcome::Appended)
+	}
+
+	fn commit_patch(
+		&mut self,
+		txn: Txn,
+		idempotency: Option<PatchIdempotency>,
+	) -> Result<EntryId, SessionError> {
 		let data = serde_json::to_string(&txn.ops)?;
 		let decoded = serde_json::from_str(&data)?;
 		self
 			.dom
 			.validate(&Txn { cause: txn.cause, label: txn.label.clone(), ops: decoded })?;
 		let ops = RawValue::from_string(data)?;
-		self.commit(KindName::Patch, Some(txn.cause), txn.label, None, &Patch { ops })
+		self.commit(KindName::Patch, Some(txn.cause), txn.label, None, &Patch { ops, idempotency })
 	}
 
 	/// Records a content-addressed compaction summary, its hidden boundary,
@@ -1168,7 +1237,7 @@ impl Session {
 		self.current_assistant = None;
 		self.call_handles.clear();
 		self.stream_targets.clear();
-		self.user_keys.clear();
+		self.mutation_keys.clear();
 		self.next_sid = 0;
 	}
 

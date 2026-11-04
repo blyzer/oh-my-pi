@@ -3126,6 +3126,7 @@ pub async fn compose_kernel(
 		relay,
 		autoreply,
 		idle_subscribe: None,
+		turn_activity: kernel.turn_activity(),
 		project_root: Arc::from(project_root.as_path()),
 	});
 	if tools_enabled {
@@ -3224,6 +3225,9 @@ pub struct SessionHome {
 	pub live:            Arc<crate::sessions::SessionRegistry>,
 	/// Whether the session's production composition exposes the tool surface.
 	pub tools_enabled:   bool,
+	/// The kernel's turn activity, shared like [`Self::up`] by every session it
+	/// drives and copied onto each handle [`Self::register`] publishes.
+	pub turn_activity:   Arc<std::sync::atomic::AtomicBool>,
 	/// The kernel's upward mailbox, shared by every session it drives.
 	pub up:              flume::Sender<omp_agent::Up>,
 	/// The kernel's discovered rules. When present, each session's rule facts
@@ -3249,6 +3253,7 @@ impl SessionHome {
 		options: &KernelOptions,
 		model: Str,
 		up: flume::Sender<omp_agent::Up>,
+		turn_activity: Arc<std::sync::atomic::AtomicBool>,
 	) -> Result<Self, HeadlessError> {
 		let project_root = fs::canonicalize(project_root)?;
 		let state_dir = omp_env::project_state::directory(data_dir, &project_root)?;
@@ -3270,6 +3275,7 @@ impl SessionHome {
 			live,
 			tools_enabled: !options.no_tools,
 			up,
+			turn_activity,
 			rules: None,
 			workspace_trust: None,
 			idle_subscribe: None,
@@ -3467,6 +3473,7 @@ impl SessionHome {
 				relay,
 				autoreply,
 				idle_subscribe: self.idle_subscribe.clone(),
+				turn_activity: Arc::clone(&self.turn_activity),
 				project_root: Arc::from(self.project_root.as_path()),
 			});
 	}
@@ -4117,6 +4124,7 @@ mod tests {
 			&KernelOptions::default(),
 			sf!(GPT5),
 			up,
+			Arc::default(),
 		)
 		.expect("session home");
 		let session = home.create(None).expect("session");
@@ -5335,6 +5343,7 @@ mod tests {
 			live:            Arc::new(crate::sessions::SessionRegistry::new()),
 			tools_enabled:   false,
 			up:              flume::unbounded().0,
+			turn_activity:   Arc::default(),
 			rules:           None,
 			workspace_trust: None,
 		}
@@ -5656,6 +5665,7 @@ mod tests {
 			relay:          crate::sessions::IrcRelayPolicy::default(),
 			autoreply:      None,
 			idle_subscribe: None,
+			turn_activity:  std::sync::Arc::default(),
 			project_root:   std::sync::Arc::from(scratch.path()),
 		});
 		let home = super::SessionHome {
@@ -5668,6 +5678,7 @@ mod tests {
 			live: std::sync::Arc::clone(&live),
 			tools_enabled: false,
 			up,
+			turn_activity: std::sync::Arc::default(),
 			rules: None,
 			workspace_trust: None,
 		};

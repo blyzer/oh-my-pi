@@ -480,6 +480,7 @@ mod tests {
 			relay: crate::sessions::IrcRelayPolicy::default(),
 			autoreply,
 			idle_subscribe: None,
+			turn_activity: Arc::default(),
 			project_root: Arc::from(std::path::Path::new("/workspace")),
 		}
 	}

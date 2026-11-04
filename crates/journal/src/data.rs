@@ -761,7 +761,18 @@ const fn is_zero(value: &u64) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Patch {
 	/// Serialized array of DOM operations; `omp-dom` owns their Rust type.
-	pub ops: Box<RawValue>,
+	pub ops:         Box<RawValue>,
+	/// Client mutation identity, stored atomically with the patch when present.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub idempotency: Option<PatchIdempotency>,
+}
+/// Identity of a keyed mutation recorded in a patch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PatchIdempotency {
+	/// Client-chosen key.
+	pub key:     IdempotencyKey,
+	/// Serialized typed request used to detect key reuse with different input.
+	pub request: Box<RawValue>,
 }
 
 /// Maximum snapcompact frames one compaction may retain.
@@ -875,6 +886,13 @@ mod tests {
 		assert_eq!(serde_json::from_str::<MsgUser>(&json).unwrap(), payload);
 		let keyless: MsgUser = serde_json::from_str(r#"{"text":"go","author":"Ada"}"#).unwrap();
 		assert!(keyless.key.is_none());
+	}
+
+	#[test]
+	fn patch_preserves_its_idempotency_key_and_request() {
+		let encoded = r#"{"ops":[],"idempotency":{"key":"K","request":{"text":"redirect"}}}"#;
+		let patch: Patch = serde_json::from_str(encoded).expect("keyed patch decodes");
+		assert_eq!(serde_json::to_string(&patch).expect("patch encodes"), encoded);
 	}
 
 	#[test]

@@ -2526,6 +2526,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			live: Arc::clone(&self.home.live),
 			tools_enabled: self.home.tools_enabled,
 			up: self.home.up.clone(),
+			turn_activity: Arc::clone(&self.home.turn_activity),
 			rules: self.home.rules.clone(),
 			// The kernel's decision is about the workspace it was composed
 			// in, never the one the session moves to.
@@ -3923,6 +3924,7 @@ mod tests {
 				live:            Arc::clone(&live),
 				tools_enabled:   true,
 				up:              kernel.mailbox(),
+				turn_activity:   kernel.turn_activity(),
 				rules:           None,
 				workspace_trust: None,
 			};
@@ -4283,6 +4285,7 @@ mod tests {
 			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
 			tools_enabled:   true,
 			up:              kernel.mailbox(),
+			turn_activity:   kernel.turn_activity(),
 			rules:           None,
 			workspace_trust: None,
 		};
@@ -4441,6 +4444,7 @@ mod tests {
 			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
 			tools_enabled:   true,
 			up:              kernel.mailbox(),
+			turn_activity:   kernel.turn_activity(),
 			rules:           None,
 			workspace_trust: None,
 		};
@@ -4824,6 +4828,7 @@ mod tests {
 				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:      None,
 				idle_subscribe: None,
+				turn_activity:  Arc::default(),
 				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		harness
@@ -4964,6 +4969,7 @@ mod tests {
 				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:      None,
 				idle_subscribe: None,
+				turn_activity:  Arc::default(),
 				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		let mailbox = harness.mailbox();

@@ -28,6 +28,7 @@ fn register(
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
 		idle_subscribe: None,
+		turn_activity: Arc::default(),
 		project_root: Arc::from(std::path::Path::new("/workspace")),
 	});
 }

@@ -9,6 +9,9 @@
 //! needs the `control` scope. Resume, fork, and the remaining mutating verbs
 //! are answered with `unimplemented` rather than half-wired: on a versioned
 //! wire that is the correct response for a verb this revision does not grant.
+//!
+//! R2 serves `Submit`, authorized per command arm (ADR 0039 A4) by
+//! [`ControlContext::require_submit`] before the authority is consulted.
 
 use std::sync::Arc;
 
@@ -23,11 +26,10 @@ use crate::inference::RpcStream;
 ///
 /// ADR 0039 section A4 defines the full ladder (`observe`,
 /// `observe_host_local`, `prompt`, `interrupt`, `approve`, `approve_persist`,
-/// `control`, `worker`, `admin`). R1 grants no mutation verb beyond `Open`,
-/// so only the two read scopes and `control` are declared here; the remaining
-/// variants land with the verbs
-/// they authorize. Parsing rejects every string outside this set, so a grant
-/// naming a future scope is refused rather than silently ignored.
+/// `control`, `worker`, `admin`). Only scopes for served or imminent verbs are
+/// declared here; the remaining variants land with the verbs they authorize.
+/// Parsing rejects every string outside this set rather than ignoring a grant
+/// naming a future scope.
 #[derive(
 	Clone,
 	Copy,
@@ -49,6 +51,14 @@ pub enum ControlScope {
 	/// Unredacted snapshots and events: cwd, env facts, advisor subtrees, and
 	/// raw provider metadata.
 	ObserveHostLocal,
+	/// Submit prompts, steering, and queued follow-ups.
+	Prompt,
+	/// Interrupt, abort tools, or pause a turn.
+	Interrupt,
+	/// Decide an approval for at most the current session.
+	Approve,
+	/// Additionally permits persisted approval decisions.
+	ApprovePersist,
 	/// `Open` of a new session, and the mutation verbs that land with it.
 	Control,
 }
@@ -116,6 +126,33 @@ impl ControlContext {
 	pub const fn scopes(&self) -> ScopeSet {
 		self.scopes
 	}
+
+	/// Requires the scope ADR 0039 A4 assigns to this command's arm: `prompt`
+	/// for prompt, steer and queue, `interrupt` for interrupt, abort tools and
+	/// pause, `control` for cancel. It reads the request alone, so it runs
+	/// before any registry lookup and a refusal says nothing about sessions.
+	pub fn require_submit(&self, request: &pb::ControlCommand) -> Result<(), SessionControlError> {
+		use pb::control_command::Command;
+		if !self.scopes.contains(ControlScope::Observe) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::Observe });
+		}
+		let scope = match request
+			.command
+			.as_ref()
+			.ok_or(SessionControlError::MissingCommand)?
+		{
+			Command::Prompt(_) | Command::Steer(_) | Command::Queue(_) => ControlScope::Prompt,
+			Command::Interrupt(_) | Command::AbortTools(_) | Command::Pause(_) => {
+				ControlScope::Interrupt
+			},
+			Command::Cancel(_) => ControlScope::Control,
+		};
+		if self.scopes.contains(scope) {
+			Ok(())
+		} else {
+			Err(SessionControlError::MissingScope { scope })
+		}
+	}
 }
 
 /// A control authority failure, mapped once to a gRPC status at this boundary.
@@ -148,6 +185,35 @@ pub enum SessionControlError {
 	/// A mutating verb arrived with no session selected.
 	#[error("no session is selected")]
 	NoSessionSelected,
+	/// Submit did not contain a command.
+	#[error("no submit command is selected")]
+	MissingCommand,
+	/// The kernel cannot consume commands while no turn is active.
+	#[error("the session is idle")]
+	SessionIdle,
+	/// An idle-only prompt was submitted during an active turn.
+	#[error("the session already has an active turn")]
+	SessionBusy,
+	/// A timed-out mutation may have committed; retry using the same key.
+	#[error("the mutation outcome is unknown; retry with the same idempotency key")]
+	MutationOutcomeUnknown,
+	/// A command carried a stale bridge epoch.
+	#[error("expected session epoch {expected}, current epoch is {actual}")]
+	EpochMismatch {
+		/// The epoch supplied by the client.
+		expected: u64,
+		/// The epoch currently known to the host.
+		actual:   u64,
+	},
+	/// The session refused the mutation: a key reused for another mutation, an
+	/// invalid key, or a failed write.
+	#[error("the session rejected the mutation")]
+	Mutation {
+		/// The typed session failure.
+		#[source]
+		source: omp_session::SessionError,
+	},
+
 	/// The host is shutting down or its session store is not reachable.
 	#[error("the session host is unavailable")]
 	HostUnavailable,
@@ -163,6 +229,10 @@ impl From<SessionControlError> for Status {
 	/// | --- | --- |
 	/// | [`SessionControlError::UnknownSession`] | `not_found` |
 	/// | [`SessionControlError::SessionNotLive`] | `failed_precondition` |
+	/// | [`SessionControlError::SessionIdle`], [`SessionControlError::SessionBusy`], [`SessionControlError::EpochMismatch`] | `failed_precondition` |
+	/// | [`SessionControlError::MissingCommand`] | `invalid_argument` |
+	/// | [`SessionControlError::MutationOutcomeUnknown`] | `deadline_exceeded` |
+	/// | [`SessionControlError::Mutation`] | `already_exists`, `invalid_argument`, or `internal` |
 	/// | [`SessionControlError::OutOfGrant`] | `permission_denied` |
 	/// | [`SessionControlError::MissingScope`] | `permission_denied` |
 	/// | [`SessionControlError::NoSessionSelected`] | `invalid_argument` |
@@ -183,7 +253,20 @@ impl From<SessionControlError> for Status {
 			SessionControlError::OutOfGrant { .. } | SessionControlError::MissingScope { .. } => {
 				Self::permission_denied(message)
 			},
-			SessionControlError::NoSessionSelected => Self::invalid_argument(message),
+			SessionControlError::NoSessionSelected | SessionControlError::MissingCommand => {
+				Self::invalid_argument(message)
+			},
+			SessionControlError::SessionIdle
+			| SessionControlError::SessionBusy
+			| SessionControlError::EpochMismatch { .. } => Self::failed_precondition(message),
+			SessionControlError::MutationOutcomeUnknown => Self::deadline_exceeded(message),
+			SessionControlError::Mutation {
+				source: omp_session::SessionError::KeyConflict { .. },
+			} => Self::already_exists(message),
+			SessionControlError::Mutation {
+				source: omp_session::SessionError::InvalidIdempotencyKey(_),
+			} => Self::invalid_argument(message),
+			SessionControlError::Mutation { .. } => Self::internal(message),
 			SessionControlError::HostUnavailable => Self::unavailable(message),
 			SessionControlError::Backend(_) => Self::internal(message),
 		}
@@ -219,6 +302,12 @@ pub trait SessionControlAuthority: Send + Sync + 'static {
 		context: ControlContext,
 		request: pb::OpenSessionRequest,
 	) -> Result<pb::SessionRef, SessionControlError>;
+	/// Submits a command to a live session after checking its command scope.
+	async fn submit(
+		&self,
+		context: ControlContext,
+		request: pb::ControlCommand,
+	) -> Result<pb::CommandReceipt, SessionControlError>;
 }
 
 /// gRPC projection of [`SessionControlAuthority`].
@@ -317,9 +406,11 @@ impl pb::session_control_server::SessionControl for SessionControlRpc {
 		&self,
 		request: Request<pb::ControlCommand>,
 	) -> Result<Response<pb::CommandReceipt>, Status> {
-		let _context = observer(&request)?;
+		let context = observer(&request)?;
 		require_session(request.get_ref().session_id.as_str())?;
-		Err(read_only("Submit"))
+		context.require_submit(request.get_ref())?;
+		let receipt = self.authority.submit(context, request.into_inner()).await?;
+		Ok(Response::new(receipt))
 	}
 
 	async fn approve(
@@ -454,6 +545,15 @@ mod tests {
 			Err(SessionControlError::UnknownSession {
 				session_id: omp_core::Str::new(request.session_id.as_str()),
 			})
+		}
+
+		async fn submit(
+			&self,
+			context: ControlContext,
+			request: pb::ControlCommand,
+		) -> Result<pb::CommandReceipt, SessionControlError> {
+			self.record(context)?;
+			Ok(pb::CommandReceipt { idempotency_key: request.idempotency_key, ..Default::default() })
 		}
 	}
 
@@ -669,7 +769,15 @@ mod tests {
 		assert_eq!(ControlScope::ObserveHostLocal.to_string(), "observe_host_local");
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
 		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
-		assert!(ControlScope::from_str("prompt").is_err());
+		for name in ["prompt", "interrupt", "approve", "approve_persist"] {
+			assert_eq!(
+				ControlScope::from_str(name)
+					.expect("scope parses")
+					.to_string(),
+				name
+			);
+		}
+		assert!(ControlScope::from_str("admin").is_err());
 
 		let granted = ScopeSet::from_iter([ControlScope::Observe]);
 		assert!(granted.contains(ControlScope::Observe));
@@ -677,6 +785,58 @@ mod tests {
 		assert!(!granted.contains(ControlScope::Control));
 		assert!(ScopeSet::EMPTY.is_empty());
 	}
+	#[test]
+	fn submit_scope_is_selected_per_command_arm() {
+		use pb::control_command::Command;
+		let request = |command| pb::ControlCommand {
+			session_id: "present-or-absent".to_owned(),
+			command: Some(command),
+			..Default::default()
+		};
+		let prompt = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Prompt]),
+		);
+		let interrupt = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Interrupt]),
+		);
+		let steer = || request(Command::Steer(pb::SteerCommand { text: "redirect".to_owned() }));
+		let stop = || request(Command::Interrupt(pb::InterruptCommand {}));
+		assert!(prompt.require_submit(&steer()).is_ok());
+		assert!(matches!(
+			prompt.require_submit(&stop()),
+			Err(SessionControlError::MissingScope { scope: ControlScope::Interrupt })
+		));
+		assert!(interrupt.require_submit(&stop()).is_ok());
+		assert!(matches!(
+			interrupt.require_submit(&steer()),
+			Err(SessionControlError::MissingScope { scope: ControlScope::Prompt })
+		));
+		let cancel = request(Command::Cancel(pb::CancelCommand {}));
+		assert!(matches!(
+			prompt.require_submit(&cancel),
+			Err(SessionControlError::MissingScope { scope: ControlScope::Control })
+		));
+	}
+
+	#[tokio::test]
+	async fn observer_cannot_submit_a_steer() {
+		let rpc = SessionControlRpc::new(FakeAuthority::ok());
+		let request = authenticated(
+			pb::ControlCommand {
+				session_id: "01JSESSION".to_owned(),
+				idempotency_key: "key".to_owned(),
+				command: Some(pb::control_command::Command::Steer(pb::SteerCommand {
+					text: "redirect".to_owned(),
+				})),
+				..pb::ControlCommand::default()
+			},
+			observing("observer"),
+		);
+		assert_eq!(rpc.submit(request).await.unwrap_err().code(), Code::PermissionDenied);
+	}
+
 	#[tokio::test]
 	async fn mutating_verbs_refuse_when_no_session_is_selected() {
 		let rpc = SessionControlRpc::new(FakeAuthority::ok());
@@ -696,6 +856,6 @@ mod tests {
 			},
 			observing("owner"),
 		);
-		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::Unimplemented);
+		assert_eq!(rpc.submit(named).await.unwrap_err().code(), Code::InvalidArgument);
 	}
 }

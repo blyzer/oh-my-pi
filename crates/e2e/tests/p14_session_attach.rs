@@ -202,6 +202,7 @@ fn register<C>(sessions: &SessionRegistry, kernel: &Kernel<C>, root: &Path) -> O
 		relay:          IrcRelayPolicy::default(),
 		autoreply:      None,
 		idle_subscribe: Some(idle_tx),
+		turn_activity:  Arc::default(),
 		project_root:   Arc::from(root),
 	});
 	Owner { requests }
@@ -467,7 +468,8 @@ async fn p14_an_observer_converges_resumes_and_cannot_steer() -> Result<()> {
 				})
 				.await
 				.err(),
-			tonic::Code::Unimplemented,
+			// Served since R2, so a command-less submit is malformed, not unserved.
+			tonic::Code::InvalidArgument,
 		),
 		(
 			"approve",

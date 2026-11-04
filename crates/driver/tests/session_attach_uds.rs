@@ -106,6 +106,7 @@ fn registered(sessions: &SessionRegistry, id: &'static str, root: &Path) -> Fake
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
 		idle_subscribe: None,
+		turn_activity: Arc::default(),
 		project_root: Arc::from(root),
 	});
 	FakeKernel { dom, drain, to, _serve: serve }
@@ -223,13 +224,22 @@ async fn the_owner_socket_serves_a_listing_an_attachment_and_refuses_mutation() 
 		"the replica converged on the host's tree"
 	);
 
+	// The socket grants `prompt`, but no turn is running, so the steer is
+	// refused at once instead of waiting in a mailbox nothing drains.
 	let refused = client
-		.submit(pb::ControlCommand { session_id: "live".to_owned(), ..pb::ControlCommand::default() })
+		.submit(pb::ControlCommand {
+			session_id: "live".to_owned(),
+			idempotency_key: "01JSTEER".to_owned(),
+			command: Some(pb::control_command::Command::Steer(pb::SteerCommand {
+				text: "redirect".to_owned(),
+			})),
+			..pb::ControlCommand::default()
+		})
 		.await
-		.expect_err("this build steers nothing");
+		.expect_err("an idle session takes no steering");
 	assert_eq!(
 		refused.code(),
-		tonic::Code::Unimplemented,
+		tonic::Code::FailedPrecondition,
 		"a mutating verb is refused, not silently accepted"
 	);
 

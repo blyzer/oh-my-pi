@@ -1370,6 +1370,7 @@ pub(crate) async fn run(
 		},
 		model.clone(),
 		up.clone(),
+		kernel.turn_activity(),
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)

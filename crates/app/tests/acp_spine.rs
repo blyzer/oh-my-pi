@@ -202,6 +202,7 @@ fn harness_with(
 		&options,
 		Str::new_static("scripted/test"),
 		kernel.mailbox(),
+		kernel.turn_activity(),
 	)
 	.expect("session home");
 	let session = Session::create(sessions_dir.join("startup.oms"), ComponentRegistry::standard())
@@ -1900,6 +1901,7 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 		live:            Arc::new(SessionRegistry::new()),
 		tools_enabled:   true,
 		up:              kernel.mailbox(),
+		turn_activity:   kernel.turn_activity(),
 		rules:           None,
 		workspace_trust: None,
 	};

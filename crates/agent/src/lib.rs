@@ -25,6 +25,7 @@ pub mod registry;
 mod roster;
 pub mod steering;
 mod stream_coalesce;
+pub mod submit;
 pub mod vars;
 /// Image-input policy (`ai_vision`).
 pub mod vision;
@@ -47,4 +48,5 @@ pub use prompt::*;
 pub use registry::*;
 pub use roster::roster_fingerprint;
 pub use steering::*;
+pub use submit::*;
 pub use vars::*;
