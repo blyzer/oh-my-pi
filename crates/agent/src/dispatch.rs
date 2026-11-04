@@ -3975,13 +3975,13 @@ mod approval_tests {
 
 	use omp_core::Str;
 	use omp_journal::idempotency::IdempotencyKey;
-	use omp_session::{ComponentRegistry, Session};
+	use omp_session::{ComponentRegistry, Session, SessionError};
 
 	use super::{CallControl, Received};
 	use crate::{
 		ApprovalBook, ApprovalDecision, ApprovalDelivery, ApprovalDesk, ApprovalError,
 		ApprovalOutcome, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket, CancelTree,
-		TicketState, Up, events::KernelEvents,
+		SubmitCommand, SubmitReceipt, TicketState, Up, events::KernelEvents,
 	};
 
 	fn spec() -> ApprovalSpec {
@@ -4085,6 +4085,86 @@ mod approval_tests {
 			Received::None
 		);
 		assert_eq!(ApprovalBook::new().pending(&session), vec![ticket]);
+	}
+
+	/// Approve and Submit key into one journal-backed index: a key either verb
+	/// journaled is a conflict for the other, in both orders, and the refused
+	/// mutation journals nothing.
+	#[test]
+	fn approve_and_submit_refuse_each_others_keys() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let mut session =
+			Session::create(directory.path().join("approve.oms"), ComponentRegistry::standard())
+				.expect("session");
+		session.begin_turn().expect("turn");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let decided = desk
+			.file_spec(&mut session, Str::new_static("call-1"), spec())
+			.expect("prompt files");
+		let waiting = desk
+			.file_spec(&mut session, Str::new_static("call-2"), spec())
+			.expect("prompt files");
+		let cancel = CancelTree::new();
+		let (_mailbox, inbox) = flume::unbounded();
+		let control = CallControl::new(inbox, cancel.begin_turn(), cancel, None, desk);
+		let steer = |session: &mut Session, key: &'static str| {
+			let (reply, receipt) = flume::bounded(1);
+			control
+				.handle(session, Up::Submit {
+					command: SubmitCommand::Steer(Str::new_static("redirect")),
+					author: Str::new_static("owner"),
+					key: IdempotencyKey::new_static(key),
+					reply,
+				})
+				.expect("a remote command never fails the turn");
+			receipt
+				.recv()
+				.expect("the kernel answers every submit it takes")
+		};
+
+		let (reply, outcome) = flume::bounded(1);
+		control
+			.handle(&mut session, remote(&decided, reply))
+			.expect("the decision dispatches");
+		let Ok(ApprovalOutcome::Applied { entry: approval, .. }) =
+			outcome.recv().expect("the decision is answered")
+		else {
+			panic!("the remote approval applies");
+		};
+		let entries = session.entry_count();
+		let refused = steer(&mut session, "approve-7");
+		assert!(
+			matches!(&refused, Err(SessionError::KeyConflict { existing, .. }) if *existing == approval),
+			"a steer reusing an approval's key is refused, not applied: {refused:?}"
+		);
+		assert_eq!(session.entry_count(), entries, "the refused steer journals nothing");
+
+		let Ok(SubmitReceipt::Applied { entry: steered, .. }) = steer(&mut session, "steer-1") else {
+			panic!("a fresh key steers");
+		};
+		let entries = session.entry_count();
+		let (reply, outcome) = flume::bounded(1);
+		control
+			.handle(&mut session, Up::Approve {
+				id:       waiting.ticket_id.clone(),
+				decision: external(Some("ada")),
+				delivery: ApprovalDelivery::Remote {
+					key: IdempotencyKey::new_static("steer-1"),
+					reply,
+				},
+			})
+			.expect("a refused decision never fails the turn");
+		let refused = outcome.recv().expect("the decision is answered");
+		assert!(
+			matches!(
+				&refused,
+				Err(ApprovalError::Session(SessionError::KeyConflict { existing, .. }))
+					if *existing == steered
+			),
+			"an approval reusing a steer's key is refused, not applied: {refused:?}"
+		);
+		assert_eq!(session.entry_count(), entries, "the refused decision journals nothing");
+		assert_eq!(ApprovalBook::new().pending(&session), vec![waiting]);
 	}
 
 	/// Keeps the journal as it was on disk the first time it is woken. flume
