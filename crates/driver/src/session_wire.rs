@@ -600,29 +600,40 @@ fn attach_stream(
 }
 
 /// The provisional encoding of [`pb::UiAnswer::answer`]: a JSON object whose
-/// `answers` field holds one [`Selection`] per answered question.
+/// `answers` field holds one [`Selection`] per answered question, or the
+/// string `cancelled` when the caller dismisses the dialog.
 ///
 /// ADR 0039 R2 leaves this encoding to the owner. The named alternatives are a
 /// proto `oneof`, a typed sub-message, or this JSON. Only this type reads the
 /// bytes, so settling the choice changes nothing outside it.
 #[derive(serde::Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
-#[serde(deny_unknown_fields)]
-struct ProvisionalUiAnswer {
-	answers: Vec<Selection>,
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+enum ProvisionalUiAnswer {
+	/// Selections in question order.
+	Answers(Vec<Selection>),
+	/// The caller dismissed the dialog, as the owner's terminal does on Esc.
+	Cancelled,
 }
 
 impl ProvisionalUiAnswer {
 	/// Decodes one answer payload; an empty one is malformed like any other.
-	fn decode(bytes: &[u8]) -> Result<Vec<Selection>, serde_json::Error> {
-		serde_json::from_slice::<Self>(bytes).map(|answer| answer.answers)
+	fn decode(bytes: &[u8]) -> Result<AskReply, serde_json::Error> {
+		serde_json::from_slice::<Self>(bytes).map(|answer| match answer {
+			Self::Answers(selections) => AskReply::Answers(selections),
+			Self::Cancelled => AskReply::Cancelled,
+		})
 	}
 
-	/// Encodes `answers` the way [`Self::decode`] reads them, so no test spells
+	/// Encodes `reply` the way [`Self::decode`] reads it, so no test spells
 	/// the byte shape.
 	#[cfg(test)]
-	fn encode(answers: Vec<Selection>) -> Vec<u8> {
-		serde_json::to_vec(&Self { answers }).expect("selections encode")
+	fn encode(reply: AskReply) -> Vec<u8> {
+		let answer = match reply {
+			AskReply::Answers(selections) => Self::Answers(selections),
+			AskReply::Cancelled => Self::Cancelled,
+		};
+		serde_json::to_vec(&answer).expect("a reply encodes")
 	}
 }
 
@@ -844,7 +855,7 @@ impl SessionControlAuthority for SessionWire {
 			return Err(SessionControlError::InvalidUiRequestId);
 		}
 		let request_id = Str::new(request.request_id.as_str());
-		let selections = ProvisionalUiAnswer::decode(&request.answer).map_err(|source| {
+		let reply = ProvisionalUiAnswer::decode(&request.answer).map_err(|source| {
 			SessionControlError::InvalidUiAnswer { request_id: request_id.clone(), source }
 		})?;
 		let handle = self
@@ -859,7 +870,7 @@ impl SessionControlAuthority for SessionWire {
 			.ok_or_else(|| SessionControlError::NoUiRoute { session_id: handle.id.clone().into() })?;
 		// The route hands the reply to the waiting request and returns: it
 		// neither waits on the kernel nor touches the session.
-		if !route.answer(request_id.as_str(), AskReply::Answers(selections)) {
+		if !route.answer(request_id.as_str(), reply) {
 			return Err(SessionControlError::UiRequestNotWaiting { request_id });
 		}
 		Ok(pb::CommandReceipt {
@@ -2180,14 +2191,18 @@ mod tests {
 		}
 	}
 
-	fn ui_answer(request_id: &str, answers: &[Selection]) -> pb::UiAnswer {
+	fn ui_reply(request_id: &str, reply: AskReply) -> pb::UiAnswer {
 		pb::UiAnswer {
 			session_id: "live".to_owned(),
 			idempotency_key: "answer-1".to_owned(),
 			request_id: request_id.to_owned(),
-			answer: ProvisionalUiAnswer::encode(answers.to_vec()).into(),
+			answer: ProvisionalUiAnswer::encode(reply).into(),
 			..Default::default()
 		}
+	}
+
+	fn ui_answer(request_id: &str, answers: &[Selection]) -> pb::UiAnswer {
+		ui_reply(request_id, AskReply::Answers(answers.to_vec()))
 	}
 
 	fn ui_wire(route: Option<crate::headless::AskRoute>) -> (Arc<SessionWire>, FakeKernel) {
@@ -2474,6 +2489,36 @@ mod tests {
 		server.abort();
 	}
 
+	/// Serves this wire on the production owner socket under `data_dir`, with
+	/// its own interceptor and grant, and returns the host task and a client
+	/// dialed to it.
+	#[cfg(unix)]
+	async fn serve_owner(
+		wire: &Arc<SessionWire>,
+		data_dir: &Path,
+	) -> (
+		tokio::task::JoinHandle<Result<(), SessionWireError>>,
+		pb::session_control_client::SessionControlClient<tonic::transport::Channel>,
+	) {
+		let host = tokio::spawn({
+			let wire = Arc::clone(wire);
+			let data_dir = data_dir.to_path_buf();
+			async move { wire.serve(&data_dir).await }
+		});
+		let socket = socket_path(data_dir);
+		let channel = tokio::time::timeout(UI_BOUND, async {
+			loop {
+				if let Ok(channel) = omp_rpc::uds::connect(&socket).await {
+					break channel;
+				}
+				tokio::time::sleep(Duration::from_millis(25)).await;
+			}
+		})
+		.await
+		.expect("the owner socket binds before the deadline");
+		(host, pb::session_control_client::SessionControlClient::new(channel))
+	}
+
 	/// The production owner socket, with its own interceptor and grant,
 	/// answers a waiting request end to end.
 	#[cfg(unix)]
@@ -2486,23 +2531,7 @@ mod tests {
 		let mut pending = route.present(&question, Some("owner-call"));
 		assert!(futures::poll!(pending.as_mut()).is_pending());
 		let data_dir = tempfile::tempdir().expect("data directory");
-		let host = tokio::spawn({
-			let wire = Arc::clone(&wire);
-			let data_dir = data_dir.path().to_path_buf();
-			async move { wire.serve(&data_dir).await }
-		});
-		let socket = socket_path(data_dir.path());
-		let channel = tokio::time::timeout(UI_BOUND, async {
-			loop {
-				if let Ok(channel) = omp_rpc::uds::connect(&socket).await {
-					break channel;
-				}
-				tokio::time::sleep(Duration::from_millis(25)).await;
-			}
-		})
-		.await
-		.expect("the owner socket binds before the deadline");
-		let mut client = pb::session_control_client::SessionControlClient::new(channel);
+		let (host, mut client) = serve_owner(&wire, data_dir.path()).await;
 		let selection = ui_selection();
 		let receipt = tokio::time::timeout(
 			UI_BOUND,
@@ -2517,6 +2546,50 @@ mod tests {
 			.await
 			.expect("resolved before the deadline");
 		assert_eq!(presentation.expect("presentation resolved").selections, vec![selection]);
+		host.abort();
+	}
+
+	/// A remote caller dismisses a waiting request through the production
+	/// owner socket. The presenter fails with the fault the owner's own Esc
+	/// produces, not the one a host that went away leaves, and the dismissal
+	/// settles the request.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_owner_socket_dismisses_a_waiting_ui_request() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("owner-call"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let data_dir = tempfile::tempdir().expect("data directory");
+		let (host, mut client) = serve_owner(&wire, data_dir.path()).await;
+		let dismissal = ui_reply("owner-call", AskReply::Cancelled);
+		let receipt = tokio::time::timeout(UI_BOUND, client.answer_ui(dismissal.clone()))
+			.await
+			.expect("dismissed before the deadline")
+			.expect("the owner holds answer_ui")
+			.into_inner();
+		assert_eq!(
+			(
+				receipt.idempotency_key.as_str(),
+				receipt.accepted,
+				receipt.seq,
+				receipt.entry_id.as_str()
+			),
+			("answer-1", true, 0, ""),
+			"a dismissal is receipted like an answer"
+		);
+		let fault = tokio::time::timeout(UI_BOUND, pending)
+			.await
+			.expect("resolved before the deadline")
+			.expect_err("a dismissal presents no selections");
+		assert_eq!(fault, omp_tools::ask::Fault::cancelled());
+		let status = tokio::time::timeout(UI_BOUND, client.answer_ui(dismissal))
+			.await
+			.expect("refused before the deadline")
+			.expect_err("a dismissed request no longer waits");
+		assert_eq!(status.code(), tonic::Code::NotFound);
 		host.abort();
 	}
 }
