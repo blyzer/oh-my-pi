@@ -75,7 +75,7 @@ infer-from-intent error the ledger's closing section describes.
 | 31 | I | **PENDING** | `entry_id`: a client that loses its first receipt cannot re-derive its entry (no key in the DOM, no lookup-by-key RPC, `seq = 0` on replay) | **Field ADDED** on a new number, after being refused twice on two different arguments | feat/r2-submit |
 | 32 | A | **PENDING** | Pin the no-degradation invariant with executable tests, not a comment | Cross-arm key reuse in BOTH directions plus same-arm reopen replay, asserted by variant and by value | feat/r2-submit |
 
-## Still open
+## Open: owner decisions and unproven work
 
 1. **Ledger item 2 / #9 / #26** — the approval path must journal its idempotency key
    **durably**, with a test that applies, drops, reopens from the journal, retries the
@@ -90,7 +90,12 @@ infer-from-intent error the ledger's closing section describes.
    disagree about which providers exist. `omp auth login <provider>` exists only in
    `omp2` source (`crates/app/src/auth_cli.rs`).
 
-## Resolved since the first revision
+## Decided since the first revision (DECIDED, not shipped)
+
+None of the following has landed. Each is a decision with its reasoning recorded; the
+code, ADR amendment and tests are pending on the verb branches, and the five PENDING
+rows above are exactly that proof gate. "Merged" in this file means a PR on `omp2`;
+everything else is decided or in flight.
 
 - **`AnswerUi` scope**: its own scope `answer_ui`, owner socket holds it, devices do
   not (R3b). A UI request's content is chosen by the agent at runtime, so the blast
