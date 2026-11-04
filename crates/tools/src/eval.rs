@@ -32,7 +32,8 @@ use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, DocEffects, Effects, Ev,
 	ExecEffects, HostToolExecutor, HostToolInvocation, HostToolResult, HostToolSpec,
 	HostToolUpdateSink, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, ParamError,
-	Part, PromptCaps, Registry, RegistryError, Rev, Tool, ToolSpec, ToolTerminal, Usd,
+	Part, PromptCaps, Registry, RegistryError, Rev, Tool, ToolRestrictions, ToolSpec, ToolTerminal,
+	Usd,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -824,9 +825,16 @@ pub trait EvalExec: Clone + Send + Sync + 'static {
 		self.open_session()
 	}
 
-	/// Freezes the runtime state authorized for one owner/session pair.
-	fn runtime_snapshot(&self, _owner: &str, _session: &Session) -> Result<RuntimeSnapshot, Fault> {
-		Ok(RuntimeSnapshot::default())
+	/// Freezes the runtime state authorized for one owner/session pair, with
+	/// the roster restrictions of the request that started the cell (`None`:
+	/// unrestricted); the cell's nested `tool.<name>()` calls obey them.
+	fn runtime_snapshot(
+		&self,
+		_owner: &str,
+		_session: &Session,
+		restrictions: Option<Arc<ToolRestrictions>>,
+	) -> Result<RuntimeSnapshot, Fault> {
+		Ok(RuntimeSnapshot { restrictions, ..RuntimeSnapshot::default() })
 	}
 
 	/// Starts one cell in an existing session.
@@ -908,6 +916,7 @@ trait EvalDefinedToolHost: Send + Sync {
 		owner: &str,
 		registration: &EvalToolRegistration,
 		args: Value,
+		restrictions: Option<Arc<ToolRestrictions>>,
 		cancellation: CancellationToken,
 	) -> Result<EvalToolResult, EvalToolControlError>;
 }
@@ -930,6 +939,7 @@ impl EvalDefinedToolHost for UnavailableEvalDefinedToolHost {
 		_owner: &str,
 		_registration: &EvalToolRegistration,
 		_args: Value,
+		_restrictions: Option<Arc<ToolRestrictions>>,
 		_cancellation: CancellationToken,
 	) -> Result<EvalToolResult, EvalToolControlError> {
 		Err(EvalToolControlError::Unavailable)
@@ -966,6 +976,7 @@ impl<E: EvalExec> LocalEvalDefinedToolHost<E> {
 		&self,
 		owner: &str,
 		request: Value,
+		restrictions: Option<Arc<ToolRestrictions>>,
 		cancellation: CancellationToken,
 	) -> Result<Value, EvalToolControlError> {
 		let (runtime_owner, owned) = self.owner_session(owner)?;
@@ -980,7 +991,7 @@ impl<E: EvalExec> LocalEvalDefinedToolHost<E> {
 			serde_json::to_string(&request).map_err(|source| EvalToolControlError::Json { source })?;
 		let runtime = self
 			.exec
-			.runtime_snapshot(runtime_owner.as_str(), &session)?;
+			.runtime_snapshot(runtime_owner.as_str(), &session, restrictions)?;
 		let mut run = self
 			.exec
 			.run(&session, RunRequest {
@@ -1023,8 +1034,14 @@ impl<E: EvalExec> EvalDefinedToolHost for LocalEvalDefinedToolHost<E> {
 		names: &[Str],
 		cancellation: CancellationToken,
 	) -> Result<EvalToolRoster, EvalToolControlError> {
+		// A describe runs no handler, so no request roster applies to it.
 		let value = self
-			.request(owner, serde_json::json!({ "op": "describe", "names": names }), cancellation)
+			.request(
+				owner,
+				serde_json::json!({ "op": "describe", "names": names }),
+				None,
+				cancellation,
+			)
 			.await?;
 		if value.get("ok").and_then(Value::as_bool) != Some(true) {
 			return Err(EvalToolControlError::InvalidResponse);
@@ -1051,6 +1068,7 @@ impl<E: EvalExec> EvalDefinedToolHost for LocalEvalDefinedToolHost<E> {
 		owner: &str,
 		registration: &EvalToolRegistration,
 		mut args: Value,
+		restrictions: Option<Arc<ToolRestrictions>>,
 		cancellation: CancellationToken,
 	) -> Result<EvalToolResult, EvalToolControlError> {
 		let current = self.reset_generation.load(Ordering::Acquire);
@@ -1082,6 +1100,7 @@ impl<E: EvalExec> EvalDefinedToolHost for LocalEvalDefinedToolHost<E> {
 					"generation": registration.generation,
 					"args": args,
 				}),
+				restrictions,
 				cancellation,
 			)
 			.await?;
@@ -1203,11 +1222,15 @@ impl EvalSessionControl {
 	///
 	/// Handler failures are returned as [`EvalToolResult::is_error`]; transport,
 	/// cancellation, and generation failures remain typed control errors.
+	/// `restrictions` are the roster restrictions of the request that named
+	/// the call (`None`: unrestricted); the handler's nested `tool.<name>()`
+	/// calls obey them, as a cell the request started itself would.
 	pub async fn invoke_tool(
 		&self,
 		owner: &str,
 		registration: &EvalToolRegistration,
 		args: Value,
+		restrictions: Option<Arc<ToolRestrictions>>,
 		cancellation: CancellationToken,
 	) -> Result<EvalToolResult, EvalToolControlError> {
 		match self.inner.as_ref() {
@@ -1221,7 +1244,7 @@ impl EvalSessionControl {
 					});
 				}
 				tool_host
-					.invoke(owner, registration, args, cancellation)
+					.invoke(owner, registration, args, restrictions, cancellation)
 					.await
 			},
 			EvalSessionControlInner::Remote { .. } => Err(EvalToolControlError::Unavailable),
@@ -1337,6 +1360,7 @@ impl HostToolExecutor for EvalForwardExecutor {
 					owner.as_str(),
 					&registration,
 					Value::Object(invocation.arguments),
+					invocation.restrictions,
 					cancellation,
 				)
 				.await
@@ -1587,8 +1611,9 @@ impl<E: EvalExec> Tool for PyEvalTool<E> {
 					return;
 				},
 			};
-			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session) {
-				Ok(runtime) => RuntimeSnapshot { restrictions: params.restrictions().cloned(), ..runtime },
+			let restrictions = params.restrictions().cloned();
+			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session, restrictions) {
+				Ok(runtime) => runtime,
 				Err(fault) => {
 					yield Ev::Done(ToolTerminal::Done {
 						result: Err(py_eval_resource(fault)),
@@ -1780,8 +1805,9 @@ impl<E: EvalExec> Tool for EvalTool<E> {
 				yield Ev::Done(ToolTerminal::Done { result: Err(fault), useless: false });
 				return;
 			}
-			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session) {
-				Ok(runtime) => RuntimeSnapshot { restrictions: params.restrictions().cloned(), ..runtime },
+			let restrictions = params.restrictions().cloned();
+			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session, restrictions) {
+				Ok(runtime) => runtime,
 				Err(fault) => {
 					yield Ev::Done(ToolTerminal::Done { result: Err(fault), useless: false });
 					return;
@@ -2295,6 +2321,7 @@ mod tests {
 				"owner",
 				&registration,
 				serde_json::json!({ "i": "Scoring", "value": 4 }),
+				None,
 				CancellationToken::new(),
 			)
 			.await
@@ -2311,7 +2338,7 @@ mod tests {
 		stop.cancel();
 		assert!(matches!(
 			control
-				.invoke_tool("owner", &hanging, serde_json::json!({}), stop)
+				.invoke_tool("owner", &hanging, serde_json::json!({}), None, stop)
 				.await,
 			Err(EvalToolControlError::Cancelled)
 		));
@@ -2780,7 +2807,13 @@ mod tests {
 		assert_eq!(disposals.load(Ordering::Acquire), 1);
 		assert!(matches!(
 			control
-				.invoke_tool("owner", &roster.tools[0], serde_json::json!({}), CancellationToken::new(),)
+				.invoke_tool(
+					"owner",
+					&roster.tools[0],
+					serde_json::json!({}),
+					None,
+					CancellationToken::new(),
+				)
 				.await,
 			Err(EvalToolControlError::StaleEpoch { current: 1, received: 0, .. })
 		));

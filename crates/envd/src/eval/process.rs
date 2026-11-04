@@ -187,7 +187,12 @@ impl EvalExec for ProcessEvalExec {
 		future::ready(Ok(self.create_session(owner)))
 	}
 
-	fn runtime_snapshot(&self, owner: &str, session: &Session) -> Result<RuntimeSnapshot, Fault> {
+	fn runtime_snapshot(
+		&self,
+		owner: &str,
+		session: &Session,
+		restrictions: Option<Arc<omp_tool::ToolRestrictions>>,
+	) -> Result<RuntimeSnapshot, Fault> {
 		let owned = self
 			.inner
 			.sessions
@@ -202,7 +207,7 @@ impl EvalExec for ProcessEvalExec {
 				message: sf!("eval session owner does not match the authenticated invocation"),
 			});
 		}
-		self
+		let runtime = self
 			.inner
 			.host
 			.upgrade()
@@ -210,7 +215,8 @@ impl EvalExec for ProcessEvalExec {
 				message: sf!("the eval session bridge was released before the snapshot"),
 			})?
 			.freeze_runtime(owner, &session.id)
-			.map_err(|error| resource_fault("runtime_snapshot", error))
+			.map_err(|error| resource_fault("runtime_snapshot", error))?;
+		Ok(RuntimeSnapshot { restrictions, ..runtime })
 	}
 
 	fn run<'a>(

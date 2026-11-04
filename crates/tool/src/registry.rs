@@ -33,8 +33,8 @@ use crate::{
 	CallOutcome, Confinement, Constraint, DeviceIssue, DevicePath, Effects, ExecutionMode,
 	GrammarSyntax, IncomingParams, JobRef, LiftedCall, Part, Presentation,
 	ProjectionAuthorizationError, ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev,
-	StreamMatchText, Tool, ToolIdentity, ToolPromptExample, ToolSpec, VisibilityReceipt,
-	decode_params,
+	StreamMatchText, Tool, ToolIdentity, ToolPromptExample, ToolRestrictions, ToolSpec,
+	VisibilityReceipt, decode_params,
 };
 
 /// Catalog capabilities needed for deterministic tool lowering.
@@ -145,6 +145,10 @@ pub struct HostToolInvocation {
 	pub name:          Str,
 	/// Fully committed argument object.
 	pub arguments:     Map<String, Value>,
+	/// Roster restrictions of the request that named the call (`None`:
+	/// unrestricted). A host tool that runs nested tool calls applies them to
+	/// each, as the environment applies `InvokeTool.restrictions`.
+	pub restrictions:  Option<Arc<ToolRestrictions>>,
 }
 
 /// Terminal value returned by an attached RPC host tool.
@@ -2937,7 +2941,13 @@ impl Registry {
 		};
 		Ok(host_tool_stream(
 			executor,
-			HostToolInvocation { invocation_id, tool_call_id, name: tool_name, arguments: Map::new() },
+			HostToolInvocation {
+				invocation_id,
+				tool_call_id,
+				name: tool_name,
+				arguments: Map::new(),
+				restrictions: params.restrictions().cloned(),
+			},
 			params,
 		))
 	}
