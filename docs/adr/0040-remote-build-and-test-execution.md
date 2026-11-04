@@ -1235,16 +1235,18 @@ Whether the success criteria can be met:
   workload passes only where the local peak exceeds 20x that peak: about 3.9 GiB for the `bb`
   client and 4.2 GiB to 5.7 GiB for the omp client. A heavier recipe therefore makes the same
   unchanged client pass. That property is visible from the definition and needs no profiling.
-- **Every figure above was measured on a contended machine, so none of them is a clean baseline.**
-  This record notes 13.7 of 15.4 GB of swap in use while it was written, and the same laptop
-  serves omp CI (open question 1). Peak RSS and wall time both move under memory pressure and CPU
-  contention, so the client peaks and the 1.83x wall carry an unquantified load term. The numbers
-  show what these clients did on a loaded host, not what they cost. Before the criteria are judged
-  again, or a client is declared to fail one, the run needs a quiesced host: CI runners stopped,
-  other heavy applications closed, swap pressure near zero, and the load average recorded at the
-  start and end of each repetition alongside the existing metrics. That is an owner action, since
-  it means freeing the machine; ask for it rather than measuring around it. Until then, treat the
-  CPU, wall and memory outcomes as provisional, including the 5.2% CPU failure on rep 1.
+- **No G1 repetition recorded host load, so none of the figures above has a known baseline.**
+  The 2026-10-20 and 2026-10-24 runs (`remote-verification-trial.md:119,170`) record no load
+  average, memory pressure or concurrent work, and the measurement plan does not require it.
+  Peak RSS and wall time both move under memory pressure and CPU contention, and the same laptop
+  serves omp CI (open question 1), so a contended run is possible and would not be visible in the
+  record either way. This is missing information, not evidence of contention: the dated swap note
+  elsewhere in this record is from 2026-10-08 and says nothing about these runs.
+- **Judge the criteria again only on a quiet host.** Stop the CI runners, close other heavy
+  applications, bring swap pressure near zero, and record load average and memory pressure at the
+  start and end of each repetition alongside the existing metrics. Freeing the machine is an owner
+  action: ask for it rather than measuring around it. Until a run meets that bar, treat the CPU,
+  wall and memory outcomes as provisional, including the 5.2% CPU failure on rep 1.
 - The thresholds are owner adjustable ("Measurement plan"). Whether to keep, restate, or retarget
   them is open question 7 for the owner.
 
