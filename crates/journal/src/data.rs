@@ -878,6 +878,14 @@ mod tests {
 	}
 
 	#[test]
+	fn patch_preserves_its_idempotency_key_and_request() {
+		let encoded = r#"{"ops":[],"idempotency":{"key":"K","request":{"text":"redirect"}}}"#;
+		let patch: Patch = serde_json::from_str(encoded).expect("keyed patch decodes");
+		assert_eq!(serde_json::to_string(&patch).expect("patch encodes"), encoded);
+	}
+
+
+	#[test]
 	fn file_mentions_round_trip_order_and_exhaustive_states() {
 		let image = Attachment {
 			blob: BlobRef { hash: Hash32::new([0xcd; 32]), size: 17 },
