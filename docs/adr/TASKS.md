@@ -147,7 +147,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
-- **IN PROGRESS** ADR 0039 mutating verbs. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. A named session still answers `UNIMPLEMENTED`. The verbs do not drive a session yet.
+- **IN PROGRESS** ADR 0039 mutating verbs. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. `Approve` is served for a named session, as the ADR's R2 status records. The other verbs still answer `UNIMPLEMENTED` for a named session and do not drive a session yet.
 - **RESOLVED** ADR 0041 `screen` and `flow` (2026-11-03). Neither needed a node shape: a TSP node joins `wire::Kind`, and `Mode::Screen` and `Mode::Flow` were already typed in the wire module, so both are placement decisions. `Surface` (`crates/chat/src/tsp.rs`) is built for a `Mode`, `crates/chat/src/host.rs` covers the pane with a `screen` surface for a full-screen panel that describes itself natively, and the reference applier (`crates/tui/src/tsp/doc.rs`) closes each mode as the specification says. Nothing opens a `flow` surface yet: print mode (`crates/app/src/print_mode.rs`) has no probe epoch and does not use the chat projection.
 - **BLOCKED** ADR 0041 `TERN_BLOB_DIR`. It is not a node and exists only in prose: no code defines or reads it. It needs a definition against `Query::Blobs` and `Encoder::blob`, or removal from the ADR (audit row 0041-D).
 
