@@ -83,7 +83,26 @@ pub enum ApprovalScope {
 	Custom(Str),
 }
 
+/// An untrusted approval scope is not one of the named scopes.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("unknown approval scope {scope:?}")]
+pub struct UnknownApprovalScope {
+	/// The unrecognized wire value.
+	pub scope: Str,
+}
+
 impl ApprovalScope {
+	/// Parses a named scope from an untrusted request, rejecting custom values.
+	///
+	/// # Errors
+	/// Returns the original value when it is not a named scope.
+	pub fn parse_external(value: &str) -> Result<Self, UnknownApprovalScope> {
+		match Self::from_str(value).expect("approval scope parsing is infallible") {
+			Self::Custom(scope) => Err(UnknownApprovalScope { scope }),
+			scope => Ok(scope),
+		}
+	}
+
 	/// Returns the stable wire spelling.
 	#[must_use]
 	pub fn as_str(&self) -> &str {
