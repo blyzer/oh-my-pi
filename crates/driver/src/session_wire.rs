@@ -864,6 +864,12 @@ impl SessionControlAuthority for SessionWire {
 			.ok_or_else(|| SessionControlError::UnknownSession {
 				session_id: Str::new(request.session_id.as_str()),
 			})?;
+		if let Some(expected) = request.expected_epoch {
+			let actual = self.epoch_of(&handle.id);
+			if expected != actual {
+				return Err(SessionControlError::EpochMismatch { expected, actual });
+			}
+		}
 		let route = handle
 			.ask
 			.as_ref()
@@ -2313,6 +2319,64 @@ mod tests {
 			scope: ControlScope::AnswerUi,
 		}));
 		assert_eq!(route.pending(), [Str::new_static("call-1")], "the request still waits");
+	}
+
+	/// `expected_epoch` guards `AnswerUi` as it guards `Approve` and `Submit`:
+	/// an answer chosen from another bridge start's view never reaches the
+	/// route, and one chosen from the live bridge's view is delivered.
+	#[tokio::test]
+	async fn answer_ui_from_another_bridge_epoch_never_reaches_the_route() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let mut stream = wire
+			.attach(owner(), pb::AttachRequest {
+				session_id: "live".to_owned(),
+				..pb::AttachRequest::default()
+			})
+			.await
+			.expect("attach succeeds");
+		let opening = ready(&mut stream).await;
+		let Some(pb::attach_frame::Frame::Welcome(welcome)) = opening.first() else {
+			panic!("an attachment opens with a welcome, got {opening:?}");
+		};
+		let epoch = welcome.epoch;
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("call-1"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let selection = ui_selection();
+		let answer = ui_answer("call-1", std::slice::from_ref(&selection));
+
+		let stale = pb::UiAnswer { expected_epoch: Some(epoch ^ 1), ..answer.clone() };
+		let refusal = wire
+			.answer_ui(owner(), stale)
+			.await
+			.expect_err("a stale epoch is refused");
+		assert!(
+			matches!(
+				refusal,
+				SessionControlError::EpochMismatch { expected, actual }
+					if expected == epoch ^ 1 && actual == epoch
+			),
+			"got {refusal:?}"
+		);
+		assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::FailedPrecondition);
+		assert_eq!(
+			route.pending(),
+			[Str::new_static("call-1")],
+			"the stale answer delivered nothing"
+		);
+
+		let current = pb::UiAnswer { expected_epoch: Some(epoch), ..answer };
+		let receipt = wire
+			.answer_ui(owner(), current)
+			.await
+			.expect("the live epoch answers");
+		assert!(receipt.accepted);
+		let presentation = tokio::time::timeout(UI_BOUND, pending)
+			.await
+			.expect("resolved before the deadline");
+		assert_eq!(presentation.expect("presentation resolved").selections, vec![selection]);
 	}
 
 	/// One thread holds the session and the kernel's mailbox, which nobody
