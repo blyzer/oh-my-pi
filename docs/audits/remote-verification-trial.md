@@ -199,7 +199,7 @@ behaviour under the BuildBuddy runner) differ from a real host; not diagnosed fu
 
 Against the 2026-10-20 local warm `omp-envd` arm (168.4 s wall, 100.3 s CPU, 2616.6 MiB) — a
 different day and not interleaved, so indicative only: wall 2.6-3.1x (misses the 1.5x
-criterion; both reps pay a cold remote build, cache off), client CPU 3.6-5.2% (passes < 5%),
+criterion; both reps pay a cold remote build, cache off), client CPU 3.6-5.2% (rep 1 fails < 5%; rep 2 passes),
 client peak memory 8.2-11.1% (misses < 5%).
 
 Operational notes: the first push of the image to ghcr failed at the final blob with a
