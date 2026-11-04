@@ -1235,6 +1235,16 @@ Whether the success criteria can be met:
   workload passes only where the local peak exceeds 20x that peak: about 3.9 GiB for the `bb`
   client and 4.2 GiB to 5.7 GiB for the omp client. A heavier recipe therefore makes the same
   unchanged client pass. That property is visible from the definition and needs no profiling.
+- **Every figure above was measured on a contended machine, so none of them is a clean baseline.**
+  This record notes 13.7 of 15.4 GB of swap in use while it was written, and the same laptop
+  serves omp CI (open question 1). Peak RSS and wall time both move under memory pressure and CPU
+  contention, so the client peaks and the 1.83x wall carry an unquantified load term. The numbers
+  show what these clients did on a loaded host, not what they cost. Before the criteria are judged
+  again, or a client is declared to fail one, the run needs a quiesced host: CI runners stopped,
+  other heavy applications closed, swap pressure near zero, and the load average recorded at the
+  start and end of each repetition alongside the existing metrics. That is an owner action, since
+  it means freeing the machine; ask for it rather than measuring around it. Until then, treat the
+  CPU, wall and memory outcomes as provisional, including the 5.2% CPU failure on rep 1.
 - The thresholds are owner adjustable ("Measurement plan"). Whether to keep, restate, or retarget
   them is open question 7 for the owner.
 
