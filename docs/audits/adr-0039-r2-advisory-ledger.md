@@ -120,6 +120,8 @@ Instructing an agent does not close an advisory; a green test does.
 | 30 | **PROVEN ON PR #478** | premise verified in code: `CallControl` does not degrade steer<->queue; cross-arm key reuse conflicts |
 | 31 | **PROVEN ON PR #478** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a real held kernel turn, then replays after restart (#478) |
 | 32 | **PROVEN ON PR #478** | mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red (#478) |
+| 33 | **PROVEN ON PR #476** | Dismissal had no wire form, so a remote operator could answer a dialog but never decline it. `ProvisionalUiAnswer` is one private enum with `deny_unknown_fields`; `"cancelled"` becomes `AskReply::Cancelled`. `the_owner_socket_dismisses_a_waiting_ui_request` runs the production owner socket and asserts the presenter sees `Fault::cancelled()`, not the host-went-away fault |
+| 34 | **PROVEN ON PR #476** | A BUG, not an asymmetry: the proto gives `ControlCommand`, `ApproveRequest` and `UiAnswer` the same stale-view guard, and `AnswerUi` alone did not check it. Since the route keys only by call id and lets a new call reuse a settled one, a client on a stale bridge epoch could answer a request it never saw. Now `FAILED_PRECONDITION` with the request still waiting, pinned by `answer_ui_from_another_bridge_epoch_never_reaches_the_route` |
 
 ### The A5 gap #473 shipped with is closed ON PR #478, not yet on omp2
 Steer and queue records now use the same journal-backed key index as `msg.user` and
@@ -131,11 +133,13 @@ as ADR A5 requires. #473 keyed only `MsgUser`; that is no longer true.
   omp-e2e 68 (1 skipped), omp-journal 58 (3 skipped), omp-proto 33, omp-serve 44, omp-session 71 (1 skipped).
 - **#478**: `just check` exit 0; `0 failed` across journal 58, session 71, proto 33, serve 37,
   agent 352, driver 606, app 462, plus `just e2e-p14`.
-- **#476**: `just check` exit 0; omp-serve 46, omp-driver 607, omp-app 462, omp-e2e 68.
+- **#476**: `just check` exit 0; omp-driver 609, omp-serve 46, omp-app 462, omp-e2e 68 (1 skipped);
+  clippy on omp-driver exits 0 with no warning on a changed line.
 
 ### Still open
 1. **`UiAnswer` encoding** — owner-undecided, shipped provisionally behind one private typed
-   decoder; alternatives named in the ADR.
+   decoder; alternatives named in the ADR. The `Cancelled` arm is part of that provisional
+   encoding, so settling the encoding settles dismissal's wire form too.
 2. **AnswerUi has no idempotency index**, so a retry after success answers `NOT_FOUND` rather
    than a duplicate receipt. A deliberate asymmetry with Submit and Approve: a UI answer
    resolves a one-shot waiter rather than mutating durable state.
