@@ -323,6 +323,7 @@ const OWNER_SCOPES: &[ControlScope] = &[
 	ControlScope::Prompt,
 	ControlScope::Interrupt,
 	ControlScope::Approve,
+	ControlScope::AnswerUi,
 	ControlScope::Control,
 ];
 
@@ -860,6 +861,10 @@ mod tests {
 			ScopeSet::from_iter([
 				ControlScope::Observe,
 				ControlScope::ObserveHostLocal,
+				ControlScope::Prompt,
+				ControlScope::Interrupt,
+				ControlScope::Approve,
+				ControlScope::AnswerUi,
 				ControlScope::Control,
 			]),
 		)
@@ -1033,18 +1038,18 @@ mod tests {
 			(welcome, names)
 		};
 
-		let controlling = ScopeSet::from_iter([ControlScope::Observe, ControlScope::Control]);
+		let controlling = owner().scopes();
 		let observing = ScopeSet::from_iter([ControlScope::Observe]);
 
 		let (opened, controller_names) = welcome_for(controlling, (0, 0)).await;
-		assert_eq!(controller_names, ["control", "observe"], "a fresh attach lists control");
+		assert_eq!(controller_names, ["answer_ui", "approve", "control", "interrupt", "observe", "observe_host_local", "prompt"], "a fresh attach lists the owner grant");
 		let (_, observer_names) = welcome_for(observing, (0, 0)).await;
 		assert_eq!(observer_names, ["observe"], "a fresh attach does not list it");
 
 		kernel.publish("after the detach");
 		let cursor = (opened.epoch, opened.head_seq);
 		let (_, controller_names) = welcome_for(controlling, cursor).await;
-		assert_eq!(controller_names, ["control", "observe"], "a resumed attach lists control");
+		assert_eq!(controller_names, ["answer_ui", "approve", "control", "interrupt", "observe", "observe_host_local", "prompt"], "a resumed attach lists the owner grant");
 		let (_, observer_names) = welcome_for(observing, cursor).await;
 		assert_eq!(observer_names, ["observe"], "a resumed attach does not list it");
 	}
@@ -1741,6 +1746,7 @@ mod tests {
 				(ControlScope::Approve, true),
 				// Persisted policy changes are not granted by default.
 				(ControlScope::ApprovePersist, false),
+				(ControlScope::AnswerUi, true),
 				(ControlScope::Control, true),
 			]),
 			"the owner socket holds exactly the scopes ADR 0039 A4 decided",

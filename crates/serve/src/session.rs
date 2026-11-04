@@ -24,6 +24,7 @@ use crate::inference::RpcStream;
 /// `observe_host_local`, `prompt`, `interrupt`, `approve`, `approve_persist`,
 /// `control`, `worker`, `admin`). Only scopes for served or imminent verbs are
 /// declared here; the remaining variants land with the verbs they authorize.
+/// `answer_ui` is a separate grant for runtime-chosen UI requests.
 /// Parsing rejects every string outside this set rather than ignoring a grant
 /// naming a future scope.
 #[derive(
@@ -55,6 +56,8 @@ pub enum ControlScope {
 	Approve,
 	/// Additionally permits persisted approval decisions.
 	ApprovePersist,
+	/// Answer a pending host UI request.
+	AnswerUi,
 	/// `Open` of a new session, and the mutation verbs that land with it.
 	Control,
 }
@@ -715,7 +718,7 @@ mod tests {
 		assert_eq!(ControlScope::ObserveHostLocal.to_string(), "observe_host_local");
 		assert_eq!(ControlScope::from_str("observe").expect("observe parses"), ControlScope::Observe);
 		assert_eq!(ControlScope::from_str("control").expect("control parses"), ControlScope::Control);
-		for name in ["prompt", "interrupt", "approve", "approve_persist"] {
+		for name in ["prompt", "interrupt", "approve", "approve_persist", "answer_ui"] {
 			assert_eq!(ControlScope::from_str(name).expect("scope parses").to_string(), name);
 		}
 		assert!(ControlScope::from_str("admin").is_err());
