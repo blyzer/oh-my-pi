@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, error::Error as StdError, str};
 
-use omp_core::{CredentialTier, Hash32, RemotePrincipal, Str, sf};
+use omp_core::{CredentialTier, Hash32, Origin, RemotePrincipal, Str, sf};
 use omp_proto::collab::v1::{
 	AbortRequest, AgentCommand, CollabFrame, Hello, PromptRequest, UiRequest, UiRequestEnd,
 	UiResponse, VisibilityClass as WireVisibility, agent_command, collab_frame,
@@ -110,15 +110,12 @@ impl HostAdmission {
 		} else {
 			CredentialTier::ReadOnly
 		};
-		let token_digest = writable.then(|| Hash32::sum(self.write_token.as_bytes()));
+		let origin = Origin::Room {
+			room_id:      self.room_id.clone(),
+			token_digest: writable.then(|| Hash32::sum(self.write_token.as_bytes())),
+		};
 		Ok(AuthenticatedPeer {
-			principal: RemotePrincipal::new(
-				peer_id,
-				display_name,
-				credential_tier,
-				self.room_id.clone(),
-				token_digest,
-			),
+			principal: RemotePrincipal::new(peer_id, display_name, credential_tier, origin),
 		})
 	}
 
@@ -525,7 +522,28 @@ mod tests {
 			.expect("authenticate");
 		assert_eq!(full.principal().display_name(), "guest");
 		assert_eq!(full.principal().credential_tier(), CredentialTier::FullAccess);
-		assert!(full.principal().token_digest().is_some());
+		assert!(matches!(
+			full.principal().origin(),
+			Origin::Room { room_id, token_digest: Some(_) } if room_id.as_str() == "room"
+		));
+	}
+
+	#[test]
+	fn only_writable_room_peers_carry_a_token_digest_in_their_origin() {
+		let authority = admission();
+		let reader = authority
+			.authenticate(2, &Hello {
+				protocol_revision: PROTOCOL_REVISION,
+				display_name:      String::new(),
+				write_token:       None,
+				client_version:    String::new(),
+			})
+			.expect("authenticate");
+		assert_eq!(reader.principal().credential_tier(), CredentialTier::ReadOnly);
+		assert!(matches!(
+			reader.principal().origin(),
+			Origin::Room { room_id, token_digest: None } if room_id.as_str() == "room"
+		));
 	}
 
 	#[test]

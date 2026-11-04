@@ -88,6 +88,9 @@ impl Session {
 			node = node.with_prop(PropId::Author, Value::Str(author));
 		}
 		self.insert_last(entry, turn, node)?;
+		if let Some(key) = payload.key {
+			self.user_keys.entry(key).or_insert(entry.id);
+		}
 		Ok(())
 	}
 

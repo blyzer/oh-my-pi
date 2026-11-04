@@ -1125,7 +1125,7 @@ impl<C: Inference> Kernel<C> {
 			(None, None) => {
 				let mention_paths = parse_file_mentions(&input.text);
 				if let Some(author) = author {
-					session.user_authored(input.text, input.attachments, author)?;
+					session.user_authored(input.text, input.attachments, author, None)?;
 				} else {
 					session.user(input.text, input.attachments)?;
 				}

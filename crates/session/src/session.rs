@@ -16,6 +16,7 @@ use omp_journal::{
 		Patch, SkillPrompt, Stream, StreamOp, ToolCall, ToolResult, ToolUpdate, TurnReceipt,
 		TurnStart,
 	},
+	idempotency::{IdempotencyKey, IdempotencyKeyError},
 };
 use omp_tool::{Abort, CallOutcome, Part as ToolPart};
 use serde::Serialize;
@@ -165,6 +166,17 @@ pub enum SessionError {
 		/// Missing call entry identity.
 		id: EntryId,
 	},
+	/// An idempotency key is empty or longer than the durable bound.
+	#[error("idempotency key is invalid")]
+	InvalidIdempotencyKey(#[from] IdempotencyKeyError),
+	/// An idempotency key was reused for a message with different content.
+	#[error("idempotency key {key} already names entry {existing} with different content")]
+	KeyConflict {
+		/// The reused key.
+		key:      IdempotencyKey,
+		/// The entry the key was first committed on.
+		existing: EntryId,
+	},
 }
 
 /// The mutable controller for one journal-derived session tree.
@@ -182,12 +194,34 @@ pub struct Session {
 	pub(crate) call_handles: FastHashMap<EntryId, Handle>,
 	pub(crate) stream_targets: FastHashMap<Sid, Handle>,
 	pub(crate) summaries: FastHashMap<BlobRef, Str>,
+	/// Live-chain index from client key to the user message it names; the fold
+	/// rebuilds it, so the journal stays the only source of truth.
+	pub(crate) user_keys: FastHashMap<IdempotencyKey, EntryId>,
 	pub(crate) entry_patch_published: bool,
 	pub(crate) next_sid: Sid,
 	pending_prior: Option<EntryId>,
 	/// Content-addressed store every blob this session references resolves
 	/// against: compaction summaries, spilled tool output, attachments.
 	blobs: BlobStore,
+}
+
+/// What an idempotent append did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppendOutcome {
+	/// A new entry was committed.
+	Appended(EntryId),
+	/// The key already named the same message; nothing was committed.
+	Replayed(EntryId),
+}
+
+impl AppendOutcome {
+	/// The entry that carries the message, new or original.
+	#[must_use]
+	pub const fn entry(self) -> EntryId {
+		match self {
+			Self::Appended(id) | Self::Replayed(id) => id,
+		}
+	}
 }
 
 /// User media on its way into the session: what a composer image chip or an
@@ -335,6 +369,7 @@ impl Session {
 			call_handles: FastHashMap::default(),
 			stream_targets: FastHashMap::default(),
 			summaries: FastHashMap::default(),
+			user_keys: FastHashMap::default(),
 			entry_patch_published: false,
 			next_sid: 0,
 			pending_prior: None,
@@ -599,7 +634,7 @@ impl Session {
 		text: impl Into<Str>,
 		attachments: Vec<Attachment>,
 	) -> Result<EntryId, SessionError> {
-		self.commit_user(text.into(), attachments, None)
+		self.commit_user(text.into(), attachments, None, None)
 	}
 
 	/// Appends one host-authenticated remote user message to the active turn.
@@ -608,13 +643,52 @@ impl Session {
 	/// model-facing text and ordered attachments. The entry ULID is the
 	/// authoritative accepted-at timestamp, so attribution never needs a
 	/// follow-up patch and replay cannot separate it from the prompt.
+	///
+	/// A `key` makes the append exactly-once as observed. It is committed in
+	/// that same entry, so a retry carrying the same text and attachments
+	/// returns [`AppendOutcome::Replayed`] with the original entry, also after
+	/// the session is reopened, and appends nothing. The same key with
+	/// different content is [`SessionError::KeyConflict`]. Without a key the
+	/// message always appends.
 	pub fn user_authored(
 		&mut self,
 		text: impl Into<Str>,
 		attachments: Vec<Attachment>,
 		author: impl Into<Str>,
-	) -> Result<EntryId, SessionError> {
-		self.commit_user(text.into(), attachments, Some(author.into()))
+		key: Option<IdempotencyKey>,
+	) -> Result<AppendOutcome, SessionError> {
+		let text = text.into();
+		if let Some(key) = &key {
+			key.validate()?;
+			if let Some(existing) = self.replay_of(key, &text, &attachments)? {
+				return Ok(AppendOutcome::Replayed(existing));
+			}
+		}
+		self
+			.commit_user(text, attachments, Some(author.into()), key)
+			.map(AppendOutcome::Appended)
+	}
+
+	/// The live entry already journaled for `key`, when it carries exactly this
+	/// message; a different message under the same key is a conflict.
+	fn replay_of(
+		&self,
+		key: &IdempotencyKey,
+		text: &Str,
+		attachments: &[Attachment],
+	) -> Result<Option<EntryId>, SessionError> {
+		let Some(&existing) = self.user_keys.get(key) else {
+			return Ok(None);
+		};
+		let entry = self
+			.entry(existing)
+			.ok_or(SessionError::UnknownEntry { id: existing })?;
+		let stored: MsgUser = serde_json::from_str(entry.data.as_str())?;
+		if stored.text == *text && stored.attachments == attachments {
+			Ok(Some(existing))
+		} else {
+			Err(SessionError::KeyConflict { key: key.clone(), existing })
+		}
 	}
 
 	fn commit_user(
@@ -622,9 +696,15 @@ impl Session {
 		text: Str,
 		attachments: Vec<Attachment>,
 		author: Option<Str>,
+		key: Option<IdempotencyKey>,
 	) -> Result<EntryId, SessionError> {
 		let by = self.turn_cause()?;
-		self.commit(KindName::MsgUser, Some(by), None, None, &MsgUser { text, attachments, author })
+		self.commit(KindName::MsgUser, Some(by), None, None, &MsgUser {
+			text,
+			attachments,
+			author,
+			key,
+		})
 	}
 
 	/// Appends a user-invoked skill prompt to the active turn.
@@ -1088,6 +1168,7 @@ impl Session {
 		self.current_assistant = None;
 		self.call_handles.clear();
 		self.stream_targets.clear();
+		self.user_keys.clear();
 		self.next_sid = 0;
 	}
 

@@ -1737,7 +1737,7 @@ mod tests {
 		session.begin_turn().expect("collaboration turn starts");
 		let guest_text = "## Deploy\n\nPlease inspect **both** images.";
 		session
-			.user_authored(guest_text, vec![blob(7, 128), blob(8, 2_048)], "Ada Lovelace")
+			.user_authored(guest_text, vec![blob(7, 128), blob(8, 2_048)], "Ada Lovelace", None)
 			.expect("collaboration user");
 		session.begin_turn().expect("last turn starts");
 		session.user("host after", Vec::new()).expect("last user");
