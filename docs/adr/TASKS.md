@@ -148,7 +148,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
 - **IN PROGRESS** ADR 0040 execution. Routing exists in `crates/exec/src/place.rs:place`. The recorded remote envd run failed three process-lifecycle tests (`docs/audits/remote-verification-trial.md` §G1; `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`). [UNVERIFIED] Current remote result was not rerun.
-- **IN PROGRESS** ADR 0039 R2. Submit is served by `crates/serve/src/session.rs:SessionControlRpc::submit` and `crates/driver/src/session_wire.rs:SessionWire::submit`. Approve and AnswerUi are served by `SessionControlRpc::approve` and `SessionControlRpc::answer_ui` and by `SessionWire::approve` and `SessionWire::answer_ui`, as the ADR's R2 status records. `Submit`, `Approve`, `AnswerUi`, and `Open` (resume or fork) answer `invalid_argument` when no session is selected. `Open` resume and fork still answer `UNIMPLEMENTED` for a named session (`SessionControlRpc::open`) and do not drive a session yet.
+- **DONE** ADR 0039 R2. Submit, Approve, and AnswerUi are served by `crates/serve/src/session.rs:SessionControlRpc::{submit,approve,answer_ui}` and `crates/driver/src/session_wire.rs:SessionWire::{submit,approve,answer_ui}`. New-session Open is served by `SessionControlRpc::open` and `SessionWire::open_session`; resume and fork remain `UNIMPLEMENTED` in `SessionControlRpc::open`. R2 landed on `omp2` in `3410f1e74f` (#478) and `19c807d686` (#477).
 - **IN PROGRESS** ADR 0041 `screen` and `flow`. `crates/chat/src/tsp.rs:Surface::new` supports the modes, but `crates/chat/src/host.rs:Host` constructs an inline surface. [UNVERIFIED] Production screen and flow callers were not established in the checked chat host and `crates/app/src/print_mode.rs`.
 - **[UNVERIFIED]** ADR 0041 `TERN_BLOB_DIR`. The checked `crates/chat/src/tsp.rs:Surface::new` and `crates/app/src/print_mode.rs` did not establish a reader; its repository-wide status was not verified.
 
@@ -204,7 +204,7 @@ Units, in dependency order. Each lands as its own change with its own tests.
    handling from the unused `SessionHost` (PRs #439, #440).
 6. **DONE** `SessionControlRpc` in `crates/serve`: `ListSessions` and `Attach` over a
    `SessionControlAuthority` trait that driver implements, with identity taken from transport
-   extensions. The four mutating verbs answer `UNIMPLEMENTED` until R2 (PR #435).
+   extensions. At the R1 milestone, the four mutating verbs answered `UNIMPLEMENTED` (PR #435); see the R2 entry above for their current status.
 7. **DONE** `omp attach --observe` remains the pipeable owner-socket observer. The retained
    R2 viewer is also implemented in `crates/chat/src/overlays/hub.rs`: `/hub` Enter runs
    `transcript <id>`, `TranscriptViewer` consumes `AgentView` snapshots and ordered patch

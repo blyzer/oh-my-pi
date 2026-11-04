@@ -70,10 +70,7 @@ coordinator), **C** = coordinator self-correction.
 
 ## Still open
 
-1. **Ledger item 2 / #9 / #26** — the approval path must journal its idempotency key
-   **durably**, with a test that applies, drops, reopens from the journal, retries the
-   same key, and asserts `accepted` and `seq` by value. Until that test passes, the
-   indeterminate-retry contract is unproven. An in-memory index passes everything else.
+1. **Ledger item 2 / #9 / #26** — closed by `19c807d686` (#477). The approval-specific test `crates/agent/src/dispatch.rs:a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` covers durable key replay.
 2. **`UiAnswer` encoding** — still owner-undecided. Shipping provisionally behind ONE
    private typed decoder (no `Value` traversal, no `json!`), recorded as provisional,
    alternatives named: a proto `oneof`, a typed sub-message, or the provisional JSON.
@@ -99,7 +96,7 @@ accessor implied reachable liveness; `CommandReceipt` carrying a key implied saf
 retry. Each was wrong, and each was caught by an agent that read the code.
 ---
 
-## Status of rows 25-32 (2026-11-04)
+## Status of rows 25-34 (2026-11-04)
 
 A row closes only when its code and targeted tests have landed and PASSED together.
 Instructing an agent does not close an advisory; a green test does.
@@ -112,21 +109,21 @@ Instructing an agent does not close an advisory; a green test does.
 
 | Row | Status | Evidence |
 |-----|--------|----------|
-| 25 | **PROVEN ON PR #477** | `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` (#477) |
-| 26 | **PROVEN ON PR #477** | same test: a waker reads the journal from disk inside `reply.send`, proving the key durable BEFORE the outcome is sent |
-| 27 | **PROVEN ON PR #477** | #477's dated Amendment (2026-11-04): A4 row, owner-grant policy and reason, why `AnswerUi` is its own scope |
+| 25 | **CLOSED ON omp2** | `a_remote_approval_journals_its_key_before_its_outcome_and_replays_after_reopen` (`crates/agent/src/dispatch.rs`); merge `19c807d686` (#477) |
+| 26 | **CLOSED ON omp2** | The same test reads the journal from disk inside `reply.send`, proving the key durable before the outcome is sent; merge `19c807d686` (#477) |
+| 27 | **CLOSED ON omp2** | The ADR's dated amendment records the A4 row, owner-grant policy, and reason for the separate `AnswerUi` scope; merge `19c807d686` (#477) |
 | 28 | **CLOSED ON omp2** | single-ADR-owner rule held; #477 pasted both siblings' prose verbatim, no conflict |
 | 29 | **CLOSED ON omp2** | this file, merged as #474 and #475 |
-| 30 | **PROVEN ON PR #478** | premise verified in code: `CallControl` does not degrade steer<->queue; cross-arm key reuse conflicts |
-| 31 | **PROVEN ON PR #478** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a real held kernel turn, then replays after restart (#478) |
-| 32 | **PROVEN ON PR #478** | mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red (#478) |
-| 33 | **PROVEN ON PR #476** | Dismissal had no wire form, so a remote operator could answer a dialog but never decline it. `ProvisionalUiAnswer` is one private enum with `deny_unknown_fields`; `"cancelled"` becomes `AskReply::Cancelled`. `the_owner_socket_dismisses_a_waiting_ui_request` runs the production owner socket and asserts the presenter sees `Fault::cancelled()`, not the host-went-away fault |
-| 34 | **PROVEN ON PR #476** | A BUG, not an asymmetry: the proto gives `ControlCommand`, `ApproveRequest` and `UiAnswer` the same stale-view guard, and `AnswerUi` alone did not check it. Since the route keys only by call id and lets a new call reuse a settled one, a client on a stale bridge epoch could answer a request it never saw. Now `FAILED_PRECONDITION` with the request still waiting, pinned by `answer_ui_from_another_bridge_epoch_never_reaches_the_route` |
+| 30 | **CLOSED ON omp2** | `CallControl` does not degrade steer to queue or vice versa; cross-arm key reuse conflicts. Merge `3410f1e74f` (#478) |
+| 31 | **CLOSED ON omp2** | `entry_id` is proto field 4; `session_submit` recovers a lost receipt through a held kernel turn and replays after restart. Merge `3410f1e74f` (#478) |
+| 32 | **CLOSED ON omp2** | Mutation-verified: routing a steer through `prompt_txn` turns 3 tests red; routing a queue through `steering_txn` turns `queue_then_steer` red. Merge `3410f1e74f` (#478) |
+| 33 | **CLOSED ON omp2** | Dismissal had no wire form, so a remote operator could answer a dialog but never decline it. `ProvisionalUiAnswer` is one private enum with `deny_unknown_fields`; `"cancelled"` becomes `AskReply::Cancelled`. `the_owner_socket_dismisses_a_waiting_ui_request` runs the production owner socket and asserts the presenter sees `Fault::cancelled()`, not the host-went-away fault. Merge `76c3097052` (#476), included on omp2 by `19c807d686` (#477) |
+| 34 | **CLOSED ON omp2** | A stale bridge epoch could answer a request it never saw because the route keys by call id and lets a new call reuse a settled one. The guard now returns `FAILED_PRECONDITION` with the request still waiting, pinned by `answer_ui_from_another_bridge_epoch_never_reaches_the_route`. Merge `76c3097052` (#476), included on omp2 by `19c807d686` (#477) |
 
-### The A5 gap #473 shipped with is closed ON PR #478, not yet on omp2
+### The A5 gap #473 shipped with is closed on omp2
 Steer and queue records now use the same journal-backed key index as `msg.user` and
 approval records (`patch_keyed` over `mutation_keys`). One mechanism, three record kinds,
-as ADR A5 requires. #473 keyed only `MsgUser`; that is no longer true.
+as ADR A5 requires. #473 keyed only `MsgUser`; merge `3410f1e74f` (#478) closed the gap.
 
 ### Checks
 - **#477**: `just check` exit 0; `0 failed` across omp-agent 351, omp-app 462, omp-driver 601,
@@ -139,17 +136,16 @@ as ADR A5 requires. #473 keyed only `MsgUser`; that is no longer true.
 ### Still open
 1. **`UiAnswer` encoding** — owner-undecided, shipped provisionally behind one private typed
    decoder; alternatives named in the ADR. The `Cancelled` arm is part of that provisional
-   encoding, so settling the encoding settles dismissal's wire form too.
+   encoding, so settling the encoding settles dismissal's wire form too (`crates/driver/src/session_wire.rs:ProvisionalUiAnswer`).
 2. **AnswerUi has no idempotency index**, so a retry after success answers `NOT_FOUND` rather
    than a duplicate receipt. A deliberate asymmetry with Submit and Approve: a UI answer
-   resolves a one-shot waiter rather than mutating durable state.
-3. **An Approve or Submit sent between turns times out**, because the mailbox drains only
-   inside a turn. Recorded in the ADR as a gap.
+   resolves a one-shot waiter rather than mutating durable state (`crates/driver/src/session_wire.rs:SessionWire::answer_ui`).
+3. **Approve sent between turns times out** because the mailbox drains only inside a turn.
+   Submit refuses an idle session; it can time out if the turn ends after its activity check
+   (`crates/driver/src/session_wire.rs:SessionWire::approve`, `SessionWire::submit`, `submit_command`).
 4. **claude-bridge OAuth** — the installed binary has no `auth` subcommand.
 
 ### Merge order
-#477 (base omp2) first. Then #478 rebased onto it, taking #477's `ControlScope` and
-`OWNER_SCOPES`, dropping its duplicate `MutationOutcomeUnknown`/`EpochMismatch`, and adding
-`turn_activity: Arc::default()` to `fn approving()` in the `session_wire.rs` tests, which
-fails to COMPILE rather than conflict textually. Then #476 rebased onto `omp2`, with its base
-retargeted from `feat/r2-approve`.
+Completed: #476 merged into the approval branch as `76c3097052`. On `omp2`, #478
+landed as `3410f1e74f` first; #477 then merged the approval branch, including #476,
+as `19c807d686`.
