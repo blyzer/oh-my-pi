@@ -11,8 +11,11 @@ use std::sync::Arc;
 
 use omp_core::Str;
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_journal::{data::{Attachment, Compaction, IrcTraffic}, idempotency::IdempotencyKey};
-use omp_session::{AppendOutcome, Session, SessionError};
+use omp_journal::{
+	data::{Attachment, Compaction, IrcTraffic},
+	idempotency::IdempotencyKey,
+};
+use omp_session::{Session, SessionError};
 
 use crate::SteeringMode;
 
@@ -37,9 +40,8 @@ pub struct ToolScopedAbortReason {
 	/// Neutral label for other calls in the same assistant batch.
 	pub default_tool_call_message: Str,
 	/// Whether the command targets every tool in the current turn.
-	pub abort_all: bool,
+	pub abort_all:                 bool,
 }
-
 
 impl ToolScopedAbortReason {
 	/// Creates a reason for one offending call and its unaffected siblings.
@@ -54,8 +56,7 @@ impl ToolScopedAbortReason {
 			message:                   message.clone(),
 			tool_call_messages:        Arc::from([(call_id.into(), message)]),
 			default_tool_call_message: default_tool_call_message.into(),
-			abort_all: false,
-
+			abort_all:                 false,
 		}
 	}
 
@@ -64,10 +65,10 @@ impl ToolScopedAbortReason {
 	pub fn all(message: impl Into<Str>) -> Self {
 		let message = message.into();
 		Self {
-			message: message.clone(),
-			tool_call_messages: Arc::from([]),
+			message:                   message.clone(),
+			tool_call_messages:        Arc::from([]),
 			default_tool_call_message: message,
-			abort_all: true,
+			abort_all:                 true,
 		}
 	}
 
@@ -84,10 +85,11 @@ impl ToolScopedAbortReason {
 	/// Reports whether this call caused the interruption.
 	#[must_use]
 	pub fn contains(&self, call_id: &str) -> bool {
-		self.abort_all || self
-			.tool_call_messages
-			.iter()
-			.any(|(id, _)| id.as_str() == call_id)
+		self.abort_all
+			|| self
+				.tool_call_messages
+				.iter()
+				.any(|(id, _)| id.as_str() == call_id)
 	}
 }
 
@@ -122,49 +124,23 @@ impl std::fmt::Debug for SessionMutation {
 	}
 }
 
-/// An authenticated remote command accepted by a running kernel.
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmitCommand {
-	/// Queue a steering aside for the current turn.
-	Steer(Str),
-	/// Queue a follow-up for the next turn.
-	Queue(Str),
-	/// Interrupt the current turn.
-	Interrupt,
-	/// Interrupt all tools in the current turn.
-	AbortTools,
-	/// Pause or resume the session.
-	Pause(bool),
-	/// Cancel the session.
-	Cancel,
-}
-
-/// Durable outcome of a remote command handled by the kernel.
-#[derive(Clone, Copy, Debug)]
-pub struct SubmitReceipt {
-	/// Whether the entry was appended or replayed.
-	pub outcome: AppendOutcome,
-	/// One-based journal position for an appended entry, or zero for a replay.
-	pub seq: u64,
-}
-
-
 /// Control sent to a running kernel turn.
 #[derive(Clone, Debug)]
 pub enum Up {
-	/// Applies an authenticated, journal-keyed remote command.
+	/// Journals one authenticated remote command under its client key (see
+	/// [`crate::submit`]).
 	Submit {
-		/// Command and its typed input.
-		command: SubmitCommand,
-		/// Transport-authenticated principal.
-		author: Str,
-		/// Client-chosen key committed with the mutation.
-		key: IdempotencyKey,
-		/// Replies only after the mutation has been journaled.
-		reply: flume::Sender<Result<SubmitReceipt, SessionError>>,
+		/// The command and its typed input.
+		command: crate::SubmitCommand,
+		/// Transport-authenticated principal the command is attributed to.
+		author:  Str,
+		/// Client-chosen key journaled atomically with the command.
+		key:     IdempotencyKey,
+		/// Answered once the command is durable, or with the typed refusal. A
+		/// receiver dropped before the kernel takes the message withdraws it;
+		/// one dropped later may still see it commit.
+		reply:   flume::Sender<Result<crate::SubmitReceipt, SessionError>>,
 	},
-
 	/// Adds a user steering aside at the next safe point. `attachments` are
 	/// already in the session's blob store and positional against `[Image #N]`
 	/// in `text`.
