@@ -75,6 +75,14 @@ pub struct KernelHandle {
 	/// owner has no idle loop leaves it `None` and is reachable only through
 	/// the mailbox.
 	pub idle_subscribe: Option<flume::Sender<flume::Sender<DomSubscription>>>,
+	/// Pairs the session's waiting UI requests with answers from outside the
+	/// owner.
+	///
+	/// It is the route the owner's own terminal answers through, so a remote
+	/// answer settles a request exactly as a local one does, without passing
+	/// through the kernel mailbox. A handle whose owner presents no UI leaves
+	/// it `None`.
+	pub ask:            Option<crate::headless::AskRoute>,
 	/// Canonical project root the kernel was composed over.
 	///
 	/// An `Arc<Path>` because the registry clones a handle on every lookup

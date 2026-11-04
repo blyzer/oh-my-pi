@@ -11,7 +11,11 @@
 //! 0700 and the socket 0600, so no other OS user can connect. The reads and
 //! `Open` of a new session are served, the latter only for a context holding
 //! [`ControlScope::Control`], and so are approval decisions, for one holding
-//! [`ControlScope::Approve`]; the owner socket grants both. Device
+//! [`ControlScope::Approve`]; the owner socket grants both. `AnswerUi` is
+//! served for a context holding [`ControlScope::AnswerUi`], which the owner
+//! socket grants too: the answer goes to the session's
+//! [`AskRoute`](crate::headless::AskRoute), the route the owner's own terminal
+//! answers through, and never through the kernel mailbox. Device
 //! authentication and TCP belong to later phases, and the projection answers
 //! the remaining mutating verbs `UNIMPLEMENTED` until then.
 //!
@@ -41,12 +45,14 @@ use omp_serve::{
 		ControlContext, ControlScope, SessionControlAuthority, SessionControlError, SessionControlRpc,
 	},
 };
+use omp_tools::ask::Selection;
 use parking_lot::Mutex;
 use strum::VariantArray as _;
 use tonic::Status;
 
 use crate::{
 	control_visibility::ControlVisibility,
+	headless::AskReply,
 	session_bridge::{BridgeLimits, Closure, Cursor, Delivery, Polled, SessionBridge, Subscriber},
 	sessions::{KernelHandle, SessionId, SessionRegistry},
 };
@@ -593,6 +599,33 @@ fn attach_stream(
 	})
 }
 
+/// The provisional encoding of [`pb::UiAnswer::answer`]: a JSON object whose
+/// `answers` field holds one [`Selection`] per answered question.
+///
+/// ADR 0039 R2 leaves this encoding to the owner. The named alternatives are a
+/// proto `oneof`, a typed sub-message, or this JSON. Only this type reads the
+/// bytes, so settling the choice changes nothing outside it.
+#[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(deny_unknown_fields)]
+struct ProvisionalUiAnswer {
+	answers: Vec<Selection>,
+}
+
+impl ProvisionalUiAnswer {
+	/// Decodes one answer payload; an empty one is malformed like any other.
+	fn decode(bytes: &[u8]) -> Result<Vec<Selection>, serde_json::Error> {
+		serde_json::from_slice::<Self>(bytes).map(|answer| answer.answers)
+	}
+
+	/// Encodes `answers` the way [`Self::decode`] reads them, so no test spells
+	/// the byte shape.
+	#[cfg(test)]
+	fn encode(answers: Vec<Selection>) -> Vec<u8> {
+		serde_json::to_vec(&Self { answers }).expect("selections encode")
+	}
+}
+
 #[tonic::async_trait]
 impl SessionControlAuthority for SessionWire {
 	async fn list(
@@ -796,6 +829,45 @@ impl SessionControlAuthority for SessionWire {
 		}
 		Ok(session_ref(&handle, self.epoch_of(&handle.id)))
 	}
+
+	async fn answer_ui(
+		&self,
+		context: ControlContext,
+		request: pb::UiAnswer,
+	) -> Result<pb::CommandReceipt, SessionControlError> {
+		// Checked here as well as at the projection, for the reason
+		// `open_session` gives: the authority is public.
+		if !context.scopes().contains(ControlScope::AnswerUi) {
+			return Err(SessionControlError::MissingScope { scope: ControlScope::AnswerUi });
+		}
+		if request.request_id.is_empty() {
+			return Err(SessionControlError::InvalidUiRequestId);
+		}
+		let request_id = Str::new(request.request_id.as_str());
+		let selections = ProvisionalUiAnswer::decode(&request.answer).map_err(|source| {
+			SessionControlError::InvalidUiAnswer { request_id: request_id.clone(), source }
+		})?;
+		let handle = self
+			.sessions
+			.lookup(SessionId::from_ref(request.session_id.as_str()))
+			.ok_or_else(|| SessionControlError::UnknownSession {
+				session_id: Str::new(request.session_id.as_str()),
+			})?;
+		let route = handle
+			.ask
+			.as_ref()
+			.ok_or_else(|| SessionControlError::NoUiRoute { session_id: handle.id.clone().into() })?;
+		// The route hands the reply to the waiting request and returns: it
+		// neither waits on the kernel nor touches the session.
+		if !route.answer(request_id.as_str(), AskReply::Answers(selections)) {
+			return Err(SessionControlError::UiRequestNotWaiting { request_id });
+		}
+		Ok(pb::CommandReceipt {
+			idempotency_key: request.idempotency_key,
+			accepted: true,
+			..pb::CommandReceipt::default()
+		})
+	}
 }
 
 #[cfg(test)]
@@ -874,6 +946,7 @@ mod tests {
 			relay: IrcRelayPolicy::default(),
 			autoreply: None,
 			idle_subscribe: None,
+			ask: None,
 			project_root: Arc::from(Path::new(root)),
 		});
 		(FakeKernel { dom, drain, to, _serve: serve }, detached)
@@ -1409,6 +1482,7 @@ mod tests {
 		sessions.register(Str::new("live"), KernelHandle {
 			up: stalled,
 			idle_subscribe: Some(idle_tx),
+			ask: None,
 			..handle
 		});
 		let seam = {
@@ -1830,6 +1904,7 @@ mod tests {
 			relay: IrcRelayPolicy::default(),
 			autoreply: None,
 			idle_subscribe: None,
+			ask: None,
 			project_root: Arc::from(Path::new("/workspace/live")),
 		});
 		mailbox
@@ -2076,5 +2151,373 @@ mod tests {
 				"{truncated} truncated the stream, so the client must learn it faulted",
 			);
 		}
+	}
+
+	/// Bound on every wait in the UI answer tests below.
+	const UI_BOUND: Duration = Duration::from_secs(5);
+
+	fn ui_question() -> omp_tools::ask::Question {
+		omp_tools::ask::Question {
+			id:          Str::new_static("q"),
+			question:    Str::new_static("Pick one"),
+			header:      None,
+			options:     vec![omp_tools::ask::OptionItem {
+				label:       Str::new_static("yes"),
+				description: None,
+				preview:     None,
+			}],
+			multi:       false,
+			recommended: None,
+		}
+	}
+
+	fn ui_selection() -> Selection {
+		Selection {
+			id:           Str::new_static("q"),
+			selected:     vec![Str::new_static("yes")],
+			custom_input: Some(Str::new_static("exact input")),
+			note:         Some(Str::new_static("exact note")),
+			timed_out:    false,
+		}
+	}
+
+	fn ui_answer(request_id: &str, answers: &[Selection]) -> pb::UiAnswer {
+		pb::UiAnswer {
+			session_id: "live".to_owned(),
+			idempotency_key: "answer-1".to_owned(),
+			request_id: request_id.to_owned(),
+			answer: ProvisionalUiAnswer::encode(answers.to_vec()).into(),
+			..Default::default()
+		}
+	}
+
+	fn ui_wire(route: Option<crate::headless::AskRoute>) -> (Arc<SessionWire>, FakeKernel) {
+		let sessions = Arc::new(SessionRegistry::new());
+		let (kernel, _) = registered(&sessions, "live", "/work/omp");
+		let handle = sessions
+			.lookup(SessionId::from_ref("live"))
+			.expect("registered session");
+		sessions.register(Str::new_static("live"), KernelHandle { ask: route, ..handle });
+		(wire(sessions), kernel)
+	}
+
+	#[tokio::test]
+	async fn answer_ui_resolves_exact_values_and_refuses_missing_or_settled_calls() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("call-1"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let selection = ui_selection();
+		let request = ui_answer("call-1", std::slice::from_ref(&selection));
+		let receipt = wire
+			.answer_ui(owner(), request.clone())
+			.await
+			.expect("answer accepted");
+		assert_eq!(
+			(
+				receipt.idempotency_key.as_str(),
+				receipt.accepted,
+				receipt.seq,
+				receipt.entry_id.as_str()
+			),
+			("answer-1", true, 0, ""),
+			"the receipt echoes the key and names no journal entry"
+		);
+		let presentation = tokio::time::timeout(UI_BOUND, pending)
+			.await
+			.expect("resolved before the deadline");
+		assert_eq!(presentation.expect("presentation resolved").selections, vec![selection]);
+		for request in [request, ui_answer("unknown", &[])] {
+			let refusal = wire
+				.answer_ui(owner(), request)
+				.await
+				.expect_err("call not waiting");
+			assert!(matches!(refusal, SessionControlError::UiRequestNotWaiting { .. }));
+			assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::NotFound);
+		}
+	}
+
+	#[tokio::test]
+	async fn answer_ui_rejects_absent_route_unknown_session_and_malformed_requests() {
+		let (wire, _kernel) = ui_wire(None);
+		let refusal = wire
+			.answer_ui(owner(), ui_answer("call-1", &[]))
+			.await
+			.expect_err("no route");
+		assert!(matches!(refusal, SessionControlError::NoUiRoute { .. }));
+		assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::Unimplemented);
+
+		let (wire, _kernel) = ui_wire(Some(crate::headless::AskRoute::new()));
+		let mut elsewhere = ui_answer("call-1", &[]);
+		elsewhere.session_id = "missing".to_owned();
+		let refusal = wire
+			.answer_ui(owner(), elsewhere)
+			.await
+			.expect_err("unknown session");
+		assert!(matches!(refusal, SessionControlError::UnknownSession { .. }));
+		assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::NotFound);
+
+		let refusal = wire
+			.answer_ui(owner(), ui_answer("", &[]))
+			.await
+			.expect_err("empty id");
+		assert!(matches!(refusal, SessionControlError::InvalidUiRequestId));
+		assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::InvalidArgument);
+		for payload in [b"\xff".to_vec(), Vec::new()] {
+			let mut malformed = ui_answer("call-1", &[]);
+			malformed.answer = payload.into();
+			let refusal = wire
+				.answer_ui(owner(), malformed)
+				.await
+				.expect_err("undecodable answer");
+			assert!(matches!(refusal, SessionControlError::InvalidUiAnswer { .. }));
+			assert_eq!(tonic::Status::from(refusal).code(), tonic::Code::InvalidArgument);
+		}
+	}
+
+	/// The projection gates the scope first; the authority checks it again
+	/// because it is public, and refuses before it touches the route.
+	#[tokio::test]
+	async fn the_authority_refuses_a_caller_without_answer_ui_before_the_route() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("call-1"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let prompter = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::Prompt]),
+		);
+		let refusal = wire
+			.answer_ui(prompter, ui_answer("call-1", &[ui_selection()]))
+			.await
+			.expect_err("prompt does not answer UI");
+		assert!(matches!(refusal, SessionControlError::MissingScope {
+			scope: ControlScope::AnswerUi,
+		}));
+		assert_eq!(route.pending(), [Str::new_static("call-1")], "the request still waits");
+	}
+
+	/// One thread holds the session and the kernel's mailbox, which nobody
+	/// drains, across the presenter's await; another thread answers. Every
+	/// wait is bounded, so a path that needed the holder or the mailbox would
+	/// fail at the deadline instead of hanging.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn answer_ui_resolves_while_another_thread_holds_the_session() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let sessions = Arc::new(SessionRegistry::new());
+		let (up, mailbox) = flume::unbounded();
+		sessions.register(Str::new_static("live"), KernelHandle {
+			id: SessionId::new("live"),
+			name: Str::new_static("live"),
+			up,
+			snapshot: Arc::new(RwLock::new(Dom::new().snapshot())),
+			topology: omp_agent::SessionTopology::main(Str::new_static("live")),
+			relay: IrcRelayPolicy::default(),
+			autoreply: None,
+			idle_subscribe: None,
+			ask: Some(route.clone()),
+			project_root: Arc::from(Path::new("/work/omp")),
+		});
+		let wire = wire(sessions);
+		let dir = tempfile::tempdir().expect("session directory");
+		let journal = dir.path().join("held.oms");
+		let (ready_tx, ready_rx) = flume::bounded(1);
+		let (resolved_tx, resolved_rx) = flume::bounded(1);
+		let holder = std::thread::spawn(move || {
+			let mut session =
+				omp_session::Session::create(&journal, omp_session::ComponentRegistry::standard())
+					.expect("session");
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("runtime");
+			runtime.block_on(async {
+				let held = &mut session;
+				let question = [ui_question()];
+				let mut pending = route.present(&question, Some("held-call"));
+				assert!(futures::poll!(pending.as_mut()).is_pending());
+				let entries_before = held.entry_count();
+				ready_tx.send(()).expect("signal registration");
+				let presentation = tokio::time::timeout(UI_BOUND, pending)
+					.await
+					.expect("answered before the deadline")
+					.expect("answer delivered");
+				let appended = held.entry_count() - entries_before;
+				resolved_tx
+					.send((presentation.selections, mailbox.len(), appended))
+					.expect("report the outcome");
+			});
+		});
+		tokio::time::timeout(UI_BOUND, ready_rx.recv_async())
+			.await
+			.expect("session held before the deadline")
+			.expect("registration signal");
+		let expected = ui_selection();
+		let request = ui_answer("held-call", std::slice::from_ref(&expected));
+		let (answered_tx, answered_rx) = flume::bounded(1);
+		let answerer = std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.expect("runtime");
+			let result = runtime.block_on(wire.answer_ui(owner(), request));
+			answered_tx.send(result).expect("report the answer");
+		});
+		let receipt = tokio::time::timeout(UI_BOUND, answered_rx.recv_async())
+			.await
+			.expect("answer completed while the session was held")
+			.expect("answer thread replied")
+			.expect("answer accepted");
+		assert!(receipt.accepted);
+		let (received, queued, appended) = tokio::time::timeout(UI_BOUND, resolved_rx.recv_async())
+			.await
+			.expect("presenter completed before the deadline")
+			.expect("presenter replied");
+		assert_eq!(received, vec![expected]);
+		assert_eq!(queued, 0, "the answer never entered the kernel mailbox");
+		assert_eq!(appended, 0, "answering appended nothing to the held session");
+		answerer.join().expect("answer thread");
+		holder.join().expect("holder thread");
+	}
+
+	/// Serves this wire over a fresh socket under dir whose interceptor
+	/// stamps every request with context, as the owner socket stamps the
+	/// owner's grant, and returns the server task and a client dialed to it.
+	#[cfg(unix)]
+	async fn serve_as(
+		wire: Arc<SessionWire>,
+		context: ControlContext,
+		dir: &Path,
+	) -> (
+		tokio::task::JoinHandle<()>,
+		pb::session_control_client::SessionControlClient<tonic::transport::Channel>,
+	) {
+		let socket = dir.join("control.sock");
+		let authority: Arc<dyn SessionControlAuthority> = wire;
+		let service = tonic::service::interceptor::InterceptedService::new(
+			pb::session_control_server::SessionControlServer::new(SessionControlRpc::new(authority)),
+			move |mut request: tonic::Request<()>| {
+				request.extensions_mut().insert(context.clone());
+				Ok(request)
+			},
+		);
+		let incoming = omp_rpc::uds::listen(&socket)
+			.await
+			.expect("the test socket binds");
+		let server = tokio::spawn(async move {
+			let _ = tonic::transport::Server::builder()
+				.add_service(service)
+				.serve_with_incoming(incoming)
+				.await;
+		});
+		let channel = tokio::time::timeout(UI_BOUND, omp_rpc::uds::connect(&socket))
+			.await
+			.expect("dialed before the deadline")
+			.expect("the test socket answers");
+		(server, pb::session_control_client::SessionControlClient::new(channel))
+	}
+
+	/// The authorization boundary over the real transport: tonic client,
+	/// socket, interceptor, serve projection, this authority, and the route.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn answer_ui_over_the_wire_requires_its_own_scope() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("call-1"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let selection = ui_selection();
+		let answer = ui_answer("call-1", std::slice::from_ref(&selection));
+		for (holder, scopes) in [
+			("prompt", [ControlScope::Observe, ControlScope::Prompt].as_slice()),
+			("control", [ControlScope::Observe, ControlScope::Control].as_slice()),
+			("observer", [ControlScope::Observe].as_slice()),
+		] {
+			let dir = tempfile::tempdir().expect("socket directory");
+			let context = ControlContext::new("device", scopes.iter().copied().collect());
+			let (server, mut client) = serve_as(Arc::clone(&wire), context, dir.path()).await;
+			let status = tokio::time::timeout(UI_BOUND, client.answer_ui(answer.clone()))
+				.await
+				.expect("answered before the deadline")
+				.expect_err("answer_ui is a grant of its own");
+			assert_eq!(status.code(), tonic::Code::PermissionDenied, "{holder}");
+			assert_eq!(status.message(), "the caller does not hold the answer_ui scope", "{holder}");
+			assert_eq!(
+				route.pending(),
+				[Str::new_static("call-1")],
+				"a {holder} holder delivered nothing"
+			);
+			server.abort();
+		}
+		let dir = tempfile::tempdir().expect("socket directory");
+		let holder = ControlContext::new(
+			"device",
+			ScopeSet::from_iter([ControlScope::Observe, ControlScope::AnswerUi]),
+		);
+		let (server, mut client) = serve_as(Arc::clone(&wire), holder, dir.path()).await;
+		let receipt = tokio::time::timeout(UI_BOUND, client.answer_ui(answer))
+			.await
+			.expect("answered before the deadline")
+			.expect("an answer_ui holder answers")
+			.into_inner();
+		assert_eq!((receipt.idempotency_key.as_str(), receipt.accepted), ("answer-1", true));
+		let presentation = tokio::time::timeout(UI_BOUND, pending)
+			.await
+			.expect("resolved before the deadline");
+		assert_eq!(presentation.expect("presentation resolved").selections, vec![selection]);
+		server.abort();
+	}
+
+	/// The production owner socket, with its own interceptor and grant,
+	/// answers a waiting request end to end.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_owner_socket_answers_a_waiting_ui_request() {
+		use omp_tools::ask::AskPresenter as _;
+		let route = crate::headless::AskRoute::new();
+		let (wire, _kernel) = ui_wire(Some(route.clone()));
+		let question = [ui_question()];
+		let mut pending = route.present(&question, Some("owner-call"));
+		assert!(futures::poll!(pending.as_mut()).is_pending());
+		let data_dir = tempfile::tempdir().expect("data directory");
+		let host = tokio::spawn({
+			let wire = Arc::clone(&wire);
+			let data_dir = data_dir.path().to_path_buf();
+			async move { wire.serve(&data_dir).await }
+		});
+		let socket = socket_path(data_dir.path());
+		let channel = tokio::time::timeout(UI_BOUND, async {
+			loop {
+				if let Ok(channel) = omp_rpc::uds::connect(&socket).await {
+					break channel;
+				}
+				tokio::time::sleep(Duration::from_millis(25)).await;
+			}
+		})
+		.await
+		.expect("the owner socket binds before the deadline");
+		let mut client = pb::session_control_client::SessionControlClient::new(channel);
+		let selection = ui_selection();
+		let receipt = tokio::time::timeout(
+			UI_BOUND,
+			client.answer_ui(ui_answer("owner-call", std::slice::from_ref(&selection))),
+		)
+		.await
+		.expect("answered before the deadline")
+		.expect("the owner holds answer_ui")
+		.into_inner();
+		assert!(receipt.accepted);
+		let presentation = tokio::time::timeout(UI_BOUND, pending)
+			.await
+			.expect("resolved before the deadline");
+		assert_eq!(presentation.expect("presentation resolved").selections, vec![selection]);
+		host.abort();
 	}
 }

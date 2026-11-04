@@ -106,6 +106,7 @@ fn registered(sessions: &SessionRegistry, id: &'static str, root: &Path) -> Fake
 		relay: IrcRelayPolicy::default(),
 		autoreply: None,
 		idle_subscribe: None,
+		ask: None,
 		project_root: Arc::from(root),
 	});
 	FakeKernel { dom, drain, to, _serve: serve }

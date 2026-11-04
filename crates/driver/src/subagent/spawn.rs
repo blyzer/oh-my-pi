@@ -1989,6 +1989,7 @@ mod tests {
 				relay:          crate::sessions::IrcRelayPolicy::default(),
 				autoreply:      None,
 				idle_subscribe: None,
+				ask:            None,
 				project_root:   Arc::from(temp.path()),
 			});
 		};

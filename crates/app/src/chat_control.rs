@@ -680,7 +680,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 		// it drains its mailbox only inside one. The session is held here
 		// while idle, so the idle loop answers from it.
 		let (idle_tx, idle_subscribe) = flume::unbounded();
-		let home = home.with_idle_subscribe(idle_tx);
+		// A remote UI answer settles the same waiting request this controller
+		// answers locally, so the live handles carry its route.
+		let home = home.with_idle_subscribe(idle_tx).with_ask(ask.clone());
 		let controller = Self {
 			kernel,
 			lifecycle,
@@ -2519,6 +2521,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let home = SessionHome {
 			sessions_dir,
 			idle_subscribe: None,
+			ask: self.home.ask.clone(),
 			project_root: target.clone(),
 			model: self.home.model.clone(),
 			prompt: self.home.prompt.clone(),
@@ -3916,6 +3919,7 @@ mod tests {
 			let home = SessionHome {
 				sessions_dir:    dir.path().join("sessions"),
 				idle_subscribe:  None,
+				ask:             None,
 				project_root:    dir.path().to_path_buf(),
 				model:           Str::new_static("test/model"),
 				prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4276,6 +4280,7 @@ mod tests {
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
 			idle_subscribe:  None,
+			ask:             None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4434,6 +4439,7 @@ mod tests {
 		let home = SessionHome {
 			sessions_dir:    dir.path().join("sessions"),
 			idle_subscribe:  None,
+			ask:             None,
 			project_root:    dir.path().to_path_buf(),
 			model:           Str::new_static("test/model"),
 			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
@@ -4824,6 +4830,7 @@ mod tests {
 				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:      None,
 				idle_subscribe: None,
+				ask:            None,
 				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		harness
@@ -4964,6 +4971,7 @@ mod tests {
 				relay:          omp_driver::sessions::IrcRelayPolicy::default(),
 				autoreply:      None,
 				idle_subscribe: None,
+				ask:            None,
 				project_root:   Arc::from(std::path::Path::new("/workspace")),
 			});
 		let mailbox = harness.mailbox();
