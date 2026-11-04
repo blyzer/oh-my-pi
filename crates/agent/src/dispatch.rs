@@ -4108,9 +4108,10 @@ mod approval_tests {
 		let Poll::Ready(Ok(first)) = outcome.as_mut().poll(&mut context) else {
 			panic!("the outcome is sent before dispatch returns");
 		};
+		// The journal holds its genesis, the filed prompt, then the decision.
 		assert_eq!(first.expect("the decision applies"), ApprovalOutcome::Applied {
 			entry: decided,
-			seq:   4,
+			seq:   3,
 		});
 		let journaled = probe
 			.journal
