@@ -7,6 +7,7 @@ pub mod cpp;
 pub mod dotnet;
 pub mod generic;
 pub mod go;
+pub mod jvm;
 pub mod rust_tools;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
@@ -20,6 +21,13 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 		},
 		program if cpp::is_gtest_binary_name(program) => cpp::supports(program, subcommand),
 		"dotnet" => dotnet::supports(program, subcommand),
+		// JVM build tools: phase is decided inside jvm::filter (never by
+		// ctx.subcommand, which mis-reports `mvn clean install` as `clean`), so
+		// supports() claims every subcommand. Defensive `.cmd`/`.bat` arms cover
+		// the case where normalize_program is bypassed.
+		"mvn" | "mvnw" | "mvnw.cmd" | "gradle" | "gradlew" | "gradlew.bat" => {
+			jvm::supports(program, subcommand)
+		},
 		"rustfmt" => rust_tools::supports(program, subcommand),
 		_ => false,
 	}
@@ -32,6 +40,9 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		"go" | "golangci-lint" => go::filter(ctx, input, exit_code),
 		"dotnet" => dotnet::filter(ctx, input, exit_code),
+		"mvn" | "mvnw" | "mvnw.cmd" | "gradle" | "gradlew" | "gradlew.bat" => {
+			jvm::filter(ctx, input, exit_code)
+		},
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::filter(ctx, input, exit_code)
 		},
