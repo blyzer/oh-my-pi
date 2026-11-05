@@ -407,9 +407,12 @@ numbers therefore support no relief or CPU figure. They show only the mechanics 
 The client spawned envd PID 77433. `lsof` matched two client sockets to it in 380 of 383 samples,
 and no other peer appeared. At the sample with the highest tree RSS, envd held 131.3 MiB of
 240.6 MiB. envd used 13.1 s of CPU against 4.8 s for the client tree. After the run it was an orphan
-(PPID 1) with no children. ADW spawns envd with no idle timeout
-(`crates/driver/src/adw/production.rs:178`), so later runs attach to it, and a tree-only
-measurement of them misses all of envd's work. The remote action exited 0.
+(PPID 1) with no children. ADW passes no `--idle-timeout` (`crates/driver/src/adw/production.rs:178`),
+so envd keeps its default of 900 s without a connected app (`crates/app/src/cli.rs:1689-1690`). Its
+log shows it stopping at 21:19:43Z, 15 minutes after the run. A run that starts within those 15
+minutes attaches to it, and a tree-only measurement of that run misses all of envd's work. In an
+interleaved session, attachment therefore depends on how long the local repetition and guards
+between two remote repetitions take. The remote action exited 0.
 
 **Setup.** The session ran the driver at `10cd9845e4`, with `target/debug/omp` built in the
 measurement worktree by `just build`. Remote settings lived in a separate `OMP_CONFIG_DIR`, so
