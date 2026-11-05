@@ -42,13 +42,9 @@ RTK-derived components of this crate that upstream's NOTICE does not name
   RTK's `go_cmd`, and the test
   `looks_like_go_error_recognizes_non_location_error_shapes`, whose inputs are
   RTK's `go_cmd` inline test inputs.
-- `src/defs/*.toml`: each definition whose header reads `Ported from
-  https://github.com/rtk-ai/rtk/blob/master/src/filters/<name>.toml` adapts
-  that RTK file: ansible-playbook, biome, brew-install, composer-install, df,
-  du, fail2ban-client, gcc, hadolint, jq, make, markdownlint, mix-compile,
-  mix-format, oxlint, pio-run, quarto-render, shellcheck, stat,
-  systemctl-status, terraform-plan, tofu-fmt, tofu-init, tofu-plan,
-  tofu-validate, trunk-build, uv-sync, and yamllint.
+- `src/defs/*.toml`: no definition in this tree ports an RTK filter yet.
+  Upstream ports 28 definitions from RTK's `src/filters/*.toml`; the change
+  that brings any of them here adds its entry to this list.
 
 Upstream's minimizer also adapts filters, tests, and fixtures from snip, cites
 snip by bare path only, and carries no snip notice. The snip notice follows
