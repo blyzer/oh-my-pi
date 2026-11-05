@@ -1,0 +1,1438 @@
+host: 11 cpus, 16 GB; jobs=4; cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0; rustc 1.99.0-nightly (1a98b1e13 2026-08-07)
+GS	load	omp	all	1	5.68 5.12 4.81
+GS	cold-ast	omp	all	1	468.316	1354.599	179.228	5317
+GS	timings	omp	all	1	1430	468.1	1520.1	168	115.3	105.8	225.0	239.4	3.4
+GS	unit	omp	all	omp-ai	2.0.0	lib	123.61	91.66
+GS	unit	omp	all	omp-envd	2.0.0	lib	332.53	76.75
+GS	unit	omp	all	omp-proto	2.0.0	lib	68.68	45.10
+GS	unit	omp	all	omp-tools	2.0.0	lib	299.26	40.69
+GS	unit	omp	all	omp-driver	2.0.0	lib	396.66	35.84
+GS	unit	omp	all	omp-app	2.0.0	lib	428.18	32.97
+GS	unit	omp	all	jj-lib	0.44.0	lib	278.33	31.35
+GS	unit	omp	all	omp-shell-builtins	2.0.0	lib	273.45	18.22
+GS	unit	omp	all	omp-catalog	2.0.0	lib	105.89	18.10
+GS	unit	omp	all	omp-tui	2.0.0	lib	326.75	16.37
+GS	unit	omp	all	tree-sitter-ocaml	0.24.2	build-script (run)	173.68	16.01
+GS	unit	omp	all	x11rb-protocol	0.13.2	lib	230.13	15.22
+GS	unit	omp	all	omp-chat	2.0.0	lib	340.89	14.31
+GS	unit	omp	all	anydoc	0.1.9	lib	281.54	12.93
+GS	unit	omp	all	omp-shell	2.0.0	lib	251.63	12.86
+GS	unit	omp	all	zstd-sys	2.1.2+zstd.1.5.7	build-script (run)	51.11	11.52
+GS	unit	omp	all	html-to-markdown-rs	3.18.4	lib	273.73	9.93
+GS	unit	omp	all	zbus	5.19.0	lib	196.89	9.43
+GS	unit	omp	all	webrtc	0.17.2	lib	104.09	9.39
+GS	unit	omp	all	omp-py	2.0.0	lib	287.16	9.09
+GS	unit	omp	all	tree-sitter-julia	0.23.1	build-script (run)	194.92	8.80
+GS	unit	omp	all	omp-agent	2.0.0	lib	255.17	8.58
+GS	unit	omp	all	russh	0.63.3	lib	311.13	8.52
+GS	unit	omp	all	pdf-inspector	1.25.2	lib	264.19	8.29
+GS	unit	omp	all	read-fonts	0.39.2	lib	216.58	8.17
+GS	unit	omp	all	lopdf	0.45.0	lib	232.41	8.07
+GS	unit	omp	all	omp-ext	2.0.0	lib	318.76	7.91
+GS	unit	omp	all	omp-serve	2.0.0	lib	333.07	7.81
+GS	unit	omp	all	wayland-protocols	0.32.13	lib	218.85	7.65
+GS	unit	omp	all	anstyle	1.0.14	lib	116.12	7.31
+GS	unit	omp	all	omp-edit	2.0.0	lib	273.52	7.31
+GS	unit	omp	all	colorchoice	1.0.5	lib	115.99	7.30
+GS	unit	omp	all	is_terminal_polyfill	1.70.2	lib	115.98	7.29
+GS	unit	omp	all	fearless_simd	1.1.0	lib	213.19	7.24
+GS	unit	omp	all	pcre2-sys	0.2.10	build-script (run)	204.86	7.20
+GS	unit	omp	all	omp-vcs	2.0.0	lib	300.84	7.12
+GS	unit	omp	all	libsqlite3-sys	0.38.2	build-script (run)	69.61	7.07
+GS	unit	omp	all	omp-app	2.0.0	omp "bin"	461.15	6.97
+GS	unit	omp	all	tree-sitter-fortran	0.6.0	build-script (run)	176.33	6.87
+GS	unit	omp	all	tokio	1.54.0	lib	17.71	6.42
+GS	unit	omp	all	moxcms	0.8.1	lib	147.11	6.32
+GS	unit	omp	all	ashpd	0.11.1	lib	304.96	5.60
+GS	unit	omp	all	tree-sitter-verilog	1.0.3	build-script (run)	183.21	5.53
+GS	unit	omp	all	omp-ar	2.0.0	lib	124.18	5.46
+GS	unit	omp	all	omp-tool	2.0.0	lib	197.06	5.40
+GS	unit	omp	all	protobuf	3.7.2	lib	323.65	5.25
+GS	unit	omp	all	tree-sitter-tlaplus	1.5.0	build-script (run)	179.52	4.89
+GS	unit	omp	all	rustls	0.23.46	lib	37.72	4.83
+GS	unit	omp	all	audiopus_sys	0.2.2	build-script (run)	89.08	4.83
+GS	unit	omp	all	atspi-common	0.14.0	lib	241.52	4.83
+GS	unit	omp	all	pic-scale	0.7.12	lib	267.53	4.78
+GS	unit	omp	all	webrtc-ice	0.17.2	lib	96.29	4.70
+GS	unit	omp	all	tree-sitter-swift	0.7.4	build-script (run)	163.48	4.69
+GS	unit	omp	all	tree-sitter-kotlin-sg	0.4.1	build-script (run)	185.17	4.69
+GS	unit	omp	all	syn	3.0.9	lib	106.85	4.57
+GS	unit	omp	all	dtls	0.17.2	lib	95.28	4.44
+GS	unit	omp	all	reqwest	0.13.5	lib	130.66	4.44
+GS	unit	omp	all	syn	2.0.119	lib	3.31	4.42
+GS	unit	omp	all	hayro-interpret	0.7.0	lib	263.75	4.42
+GS	unit	omp	all	ring	0.17.14	build-script (run)	26.92	4.35
+GS	unit	omp	all	opentelemetry_sdk	0.32.1	lib	137.02	4.35
+GS	unit	omp	all	vello_cpu	0.0.8	lib	260.78	4.34
+GS	unit	omp	all	p521	0.14.0	lib	296.08	4.30
+GS	unit	omp	all	rustix	0.38.44	lib	274.08	4.24
+GS	unit	omp	all	syn	3.0.9	lib	3.23	4.16
+GS	unit	omp	all	image	0.25.10	lib	206.68	4.16
+GS	unit	omp	all	jiff	0.2.38	lib	141.65	4.09
+GS	unit	omp	all	pyo3-macros-backend	0.29.3	lib	227.48	4.07
+GS	unit	omp	all	bon-macros	3.10.2	lib	218.24	4.04
+GS	unit	omp	all	tree-sitter-scala	0.26.3	build-script (run)	190.90	4.02
+GS	unit	omp	all	skrifa	0.42.1	lib	242.02	3.99
+GS	unit	omp	all	zerocopy	0.8.63	lib	25.48	3.95
+GS	unit	omp	all	omp-py	2.0.0	build-script (run)	255.28	3.94
+GS	unit	omp	all	omp-webview	2.0.0	lib	312.95	3.91
+GS	unit	omp	all	zlib-rs	0.6.8	lib	228.96	3.88
+GS	unit	omp	all	regex-automata	0.4.18	lib	38.71	3.84
+GS	unit	omp	all	rustix	1.1.5	lib	17.48	3.82
+GS	unit	omp	all	tree-sitter-c-sharp	0.23.5	build-script (run)	165.10	3.81
+GS	unit	omp	all	tree-sitter-ruby	0.23.1	build-script (run)	175.48	3.81
+GS	unit	omp	all	prost-reflect	0.16.5	lib	48.89	3.76
+GS	unit	omp	all	h2	0.4.20	lib	39.88	3.75
+GS	unit	omp	all	pyo3	0.29.3	lib	257.04	3.74
+GS	unit	omp	all	zlib-rs	0.6.8	lib	14.37	3.73
+GS	unit	omp	all	regex-automata	0.4.18	lib	11.44	3.66
+GS	unit	omp	all	jiff	0.2.38	lib	20.47	3.66
+GS	unit	omp	all	fearless_simd	0.4.1	lib	149.80	3.53
+GS	unit	omp	all	omp-core	2.0.0	lib	32.14	3.50
+GS	unit	omp	all	omp-sandbox	2.0.0	lib	315.27	3.49
+GS	unit	omp	all	windows-sys	0.61.2	lib	326.70	3.47
+GS	unit	omp	all	nix	0.31.3	lib	124.67	3.44
+GS	unit	omp	all	omp-desktop	2.0.0	lib	311.84	3.43
+GS	unit	omp	all	interceptor	0.17.2	lib	100.25	3.41
+GS	unit	omp	all	tonic	0.14.6	lib	60.76	3.40
+GS	unit	omp	all	omp-ast	2.0.0	lib	239.41	3.39
+GS	unit	omp	all	hayro-syntax	0.7.2	lib	234.95	3.38
+GS	unit	omp	all	pxfm	0.1.30	lib	132.90	3.30
+GS	unit	omp	all	crypto-bigint	0.7.5	lib	72.02	3.28
+GS	unit	omp	all	axum	0.8.9	lib	57.50	3.25
+GS	unit	omp	all	rkyv	0.8.18	lib	85.17	3.21
+GS	unit	omp	all	brotli	8.0.4	lib	79.15	3.20
+GS	unit	omp	all	tree-sitter-haskell	0.23.1	build-script (run)	171.19	3.18
+GS	unit	omp	all	tree-sitter-objc	3.0.2	build-script (run)	193.12	3.18
+GS	unit	omp	all	rend	0.5.4	lib	77.51	3.15
+GS	unit	omp	all	omp-observability	2.0.0	lib	202.46	3.15
+GS	unit	omp	all	clap_builder	4.6.7	lib	153.34	3.14
+GS	unit	omp	all	rustybuzz	0.20.1	lib	231.98	3.12
+GS	unit	omp	all	ttf-parser	0.25.1	lib	86.57	3.06
+GS	unit	omp	all	omp-core	2.0.0	lib	152.67	3.02
+GS	unit	omp	all	tree-sitter-sequel	0.3.11	build-script (run)	170.40	3.02
+GS	unit	omp	all	tree-sitter-powershell	0.26.4	build-script (run)	170.18	2.95
+GS	unit	omp	all	omp-exec-reapi	2.0.0	lib	330.17	2.89
+GS	unit	omp	all	tree-sitter-typescript	0.23.2	build-script (run)	191.72	2.84
+GS	unit	omp	all	object	0.37.3	lib	65.99	2.82
+GS	unit	omp	all	nix	0.26.4	lib	45.89	2.81
+GS	unit	omp	all	webrtc-sctp	0.17.2	lib	91.72	2.74
+GS	unit	omp	all	kdl	6.7.1	lib	101.22	2.74
+GS	unit	omp	all	zvariant	5.15.1	lib	129.63	2.72
+GS	unit	omp	all	gix	0.85.0	lib	259.22	2.72
+GS	unit	omp	all	omp-memory	2.0.0	lib	297.25	2.69
+GS	unit	omp	all	p384	0.14.0	lib	295.56	2.67
+GS	unit	omp	all	serde_derive	1.0.229	lib	7.40	2.66
+GS	unit	omp	all	futures-util	0.3.34	lib	23.18	2.62
+GS	unit	omp	all	omp-session	2.0.0	lib	246.66	2.62
+GS	unit	omp	all	nom	8.0.0	lib	138.73	2.60
+GS	unit	omp	all	omp-rpc	2.0.0	lib	329.92	2.60
+GS	unit	omp	all	zbus_macros	5.19.0	lib	157.18	2.58
+GS	unit	omp	all	darling_core	0.24.1	lib	141.51	2.57
+GS	unit	omp	all	rayon	1.12.0	lib	96.94	2.55
+GS	unit	omp	all	omp-oauth	2.0.0	lib	113.47	2.52
+GS	unit	omp	all	ssh-key	0.7.0-rc.11	lib	300.38	2.52
+GS	unit	omp	all	usvg	0.45.1	lib	251.13	2.51
+GS	unit	omp	all	regex-syntax	0.8.11	lib	9.70	2.41
+GS	unit	omp	all	regex-syntax	0.8.11	lib	32.00	2.33
+GS	unit	omp	all	omp-env	2.0.0	lib	268.17	2.32
+GS	unit	omp	all	omp-proto	2.0.0	build-script (run)	65.50	2.31
+GS	unit	omp	all	tree-sitter-odin	1.3.0	build-script (run)	165.27	2.31
+GS	unit	omp	all	turn	0.17.2	lib	88.98	2.30
+GS	unit	omp	all	tree-sitter-bash	0.25.1	build-script (run)	194.56	2.30
+GS	unit	omp	all	ring	0.17.14	lib	31.28	2.27
+GS	unit	omp	all	zvariant	5.15.1	lib	104.42	2.25
+GS	unit	omp	all	omp-journal	2.0.0	lib	136.67	2.25
+GS	unit	omp	all	tree-sitter-cpp	0.23.4	build-script (run)	174.08	2.25
+GS	unit	omp	all	time	0.3.55	lib	57.06	2.22
+GS	unit	omp	all	tracing-subscriber	0.3.23	lib	144.58	2.22
+GS	unit	omp	all	russh-sftp	2.4.0	lib	317.43	2.14
+GS	unit	omp	all	x509-parser	0.16.0	lib	76.82	2.10
+GS	unit	omp	all	syntect	5.3.0	lib	321.56	2.09
+GS	unit	omp	all	omp-tools	2.0.0	build-script (run)	291.90	2.07
+GS	unit	omp	all	serde_core	1.0.229	lib	12.12	2.05
+GS	unit	omp	all	tiny-skia	0.11.4	lib	255.01	2.03
+GS	unit	omp	all	webrtc-util	0.17.2	lib	48.10	2.02
+GS	unit	omp	all	ascii-dag	0.9.1	lib	321.19	2.02
+GS	unit	omp	all	gimli	0.32.3	lib	65.39	2.00
+GS	unit	omp	all	x11rb	0.13.2	lib	242.80	2.00
+GS	unit	omp	all	calamine	0.36.1	lib	251.14	1.97
+GS	unit	omp	all	gix-config	0.58.0	lib	226.59	1.95
+GS	unit	omp	all	mermaid-text	0.57.0	lib	323.20	1.95
+GS	unit	omp	all	vello_common	0.0.8	lib	245.90	1.91
+GS	unit	omp	all	serde_core	1.0.229	lib	2.80	1.87
+GS	unit	omp	all	reis	0.5.0	lib	302.95	1.87
+GS	unit	omp	all	tree-sitter-php	0.24.2	build-script (run)	189.86	1.86
+GS	unit	omp	all	hayro-jpeg2000	0.3.5	lib	225.35	1.84
+GS	unit	omp	all	hyper	1.12.0	lib	42.89	1.83
+GS	unit	omp	all	omp-con	2.0.0	lib	99.72	1.82
+GS	unit	omp	all	similar	3.2.0	lib	249.83	1.80
+GS	unit	omp	all	gix-odb	0.82.0	lib	245.27	1.79
+GS	unit	omp	all	toml_edit	0.25.17+spec-1.1.0	lib	270.84	1.79
+GS	unit	omp	all	winnow	0.7.15	lib	82.78	1.77
+GS	unit	omp	all	gix-ref	0.65.0	lib	131.69	1.76
+GS	unit	omp	all	gix-pack	0.72.0	lib	216.35	1.74
+GS	unit	omp	all	pest_meta	2.9.4	lib	224.94	1.73
+GS	unit	omp	all	tree-sitter-elixir	0.3.5	build-script (run)	169.47	1.72
+GS	unit	omp	all	hayro-jbig2	0.3.1	lib	220.43	1.72
+GS	unit	omp	all	atspi-proxies	0.14.0	lib	262.32	1.71
+GS	unit	omp	all	gix-index	0.53.0	lib	129.67	1.68
+GS	unit	omp	all	wayland-client	0.31.15	lib	207.39	1.67
+GS	unit	omp	all	aho-corasick	1.1.5	lib	9.03	1.65
+GS	unit	omp	all	hyper-util	0.1.21	lib	44.24	1.65
+GS	unit	omp	all	tree-sitter-md	0.5.3	build-script (run)	191.48	1.64
+GS	unit	omp	all	xutf	1.6.0	lib	53.33	1.63
+GS	unit	omp	all	arboard	3.7.0	lib	294.47	1.61
+GS	unit	omp	all	strum_macros	0.28.0	lib	26.16	1.59
+GS	unit	omp	all	clap_derive	4.6.7	lib	159.64	1.59
+GS	unit	omp	all	itertools	0.15.0	lib	271.78	1.59
+GS	unit	omp	all	itertools	0.14.0	lib	249.35	1.55
+GS	unit	omp	all	libc	0.2.191	lib	2.76	1.54
+GS	unit	omp	all	petgraph	0.8.3	lib	214.52	1.54
+GS	unit	omp	all	asn1-rs	0.6.2	lib	63.43	1.53
+GS	unit	omp	all	rkyv_derive	0.8.18	lib	81.96	1.53
+GS	unit	omp	all	icu_locale_core	2.3.0	lib	15.55	1.49
+GS	unit	omp	all	serde_yaml	0.9.34+deprecated	lib	311.43	1.49
+GS	unit	omp	all	der	0.8.2	lib	70.89	1.47
+GS	unit	omp	all	png	0.18.1	lib	91.27	1.47
+GS	unit	omp	all	chrono	0.4.45	lib	68.52	1.44
+GS	unit	omp	all	icu_properties	2.3.0	lib	123.86	1.44
+GS	unit	omp	all	rustix	1.1.5	lib	45.64	1.43
+GS	unit	omp	all	toml	1.1.8+spec-1.1.0	lib	79.00	1.43
+GS	unit	omp	all	ignore	0.4.33	lib	158.21	1.43
+GS	unit	omp	all	encoding_rs	0.8.42	lib	56.23	1.42
+GS	unit	omp	all	logos-codegen	0.16.1	lib	44.02	1.41
+GS	unit	omp	all	rusqlite	0.40.2	lib	85.16	1.41
+GS	unit	omp	all	axum-core	0.5.6	lib	54.16	1.40
+GS	unit	omp	all	num-bigint	0.4.8	lib	63.99	1.40
+GS	unit	omp	all	kurbo	0.11.3	lib	227.22	1.40
+GS	unit	omp	all	wayland-protocols-wlr	0.3.12	lib	240.62	1.40
+GS	unit	omp	all	bigdecimal	0.4.11	lib	265.95	1.40
+GS	unit	omp	all	serde_json	1.0.154	lib	23.73	1.38
+GS	unit	omp	all	opentelemetry-proto	0.32.0	lib	143.20	1.38
+GS	unit	omp	all	petgraph	0.8.3	lib	47.28	1.37
+GS	unit	omp	all	omp-ai	2.0.0	build-script (run)	104.52	1.37
+GS	unit	omp	all	omp-collab	2.0.0	lib	340.09	1.37
+GS	unit	omp	all	aho-corasick	1.1.5	lib	37.46	1.35
+GS	unit	omp	all	omp-kb	2.0.0	lib	341.46	1.35
+GS	unit	omp	all	cc	1.2.67	lib	4.57	1.34
+GS	unit	omp	all	zerocopy-derive	0.8.63	lib	24.14	1.34
+GS	unit	omp	all	curve25519-dalek	5.0.0	lib	265.24	1.33
+GS	unit	omp	all	num-bigint	0.5.1	lib	308.34	1.33
+GS	unit	omp	all	curve25519-dalek	4.1.3	lib	76.96	1.32
+GS	unit	omp	all	pest	2.9.4	lib	163.36	1.31
+GS	unit	omp	all	typed-path	0.12.3	lib	230.56	1.31
+GS	unit	omp	all	opentelemetry	0.32.0	lib	114.70	1.30
+GS	unit	omp	all	linux-raw-sys	0.12.1	lib	16.23	1.29
+GS	unit	omp	all	im	15.1.0	lib	75.53	1.29
+GS	unit	omp	all	omp-dom	2.0.0	lib	145.62	1.29
+GS	unit	omp	all	miette	7.6.0	lib	84.07	1.28
+GS	unit	omp	all	wayland-backend	0.3.17	lib	151.38	1.27
+GS	unit	omp	all	pest	2.9.4	lib	253.60	1.27
+GS	unit	omp	all	atspi-connection	0.14.0	lib	293.97	1.27
+GS	unit	omp	all	wl-clipboard-rs	0.9.4	lib	253.64	1.26
+GS	unit	omp	all	jiff-core	0.1.1	lib	19.23	1.25
+GS	unit	omp	all	zip	8.6.0	lib	233.71	1.24
+GS	unit	omp	all	gix-merge	0.18.0	lib	246.35	1.23
+GS	unit	omp	all	logos-codegen	0.15.1	lib	38.23	1.21
+GS	unit	omp	all	protox-parse	0.9.0	lib	48.74	1.21
+GS	unit	omp	all	prost-types	0.14.4	lib	113.48	1.21
+GS	unit	omp	all	crypto-primes	0.7.2	lib	270.05	1.20
+GS	unit	omp	all	gix-object	0.62.0	lib	50.07	1.19
+GS	unit	omp	all	nom	7.1.3	lib	56.30	1.19
+GS	unit	omp	all	image-webp	0.2.4	lib	141.58	1.19
+GS	unit	omp	all	tree-sitter-python	0.25.0	build-script (run)	188.73	1.19
+GS	unit	omp	all	wayland-scanner	0.31.11	lib	153.43	1.18
+GS	unit	omp	all	tokio-util	0.7.20	lib	29.66	1.17
+GS	unit	omp	all	schemars	1.2.3	lib	30.77	1.17
+GS	unit	omp	all	winnow	1.0.4	lib	37.54	1.16
+GS	unit	omp	all	icu_locale_core	2.3.0	lib	84.00	1.16
+GS	unit	omp	all	jiff-core	0.1.1	lib	140.49	1.16
+GS	unit	omp	all	tree-sitter-dart	0.2.0	build-script (run)	190.21	1.16
+GS	unit	omp	all	libm	0.2.16	lib	12.38	1.15
+GS	unit	omp	all	kurbo	0.13.1	lib	154.90	1.15
+GS	unit	omp	all	tree-sitter-rust	0.24.2	build-script (run)	168.05	1.15
+GS	unit	omp	all	pulldown-cmark	0.13.4	lib	45.81	1.14
+GS	unit	omp	all	gix-diff	0.65.0	lib	203.72	1.14
+GS	unit	omp	all	blake3	1.8.7	lib	236.20	1.14
+GS	unit	omp	all	png	0.17.16	lib	248.12	1.14
+GS	unit	omp	all	schemars	1.2.3	lib	144.48	1.12
+GS	unit	omp	all	prost-build	0.14.4	lib	48.69	1.11
+GS	unit	omp	all	crypto-bigint	0.5.5	lib	62.00	1.11
+GS	unit	omp	all	stun	0.17.2	lib	75.55	1.11
+GS	unit	omp	all	quick-xml	0.41.0	lib	248.31	1.11
+GS	unit	omp	all	icu_properties	2.3.0	lib	20.17	1.09
+GS	unit	omp	all	prost-derive	0.14.4	lib	34.33	1.09
+GS	unit	omp	all	der	0.7.10	lib	51.29	1.09
+GS	unit	omp	all	rcgen	0.13.2	lib	87.83	1.09
+GS	unit	omp	all	omp-audio	2.0.0	lib	114.69	1.09
+GS	unit	omp	all	jaq-core	2.2.1	lib	213.43	1.09
+GS	unit	omp	all	tungstenite	0.28.0	lib	74.45	1.07
+GS	unit	omp	all	omp-cache	2.0.0	lib	319.72	1.07
+GS	unit	omp	all	winnow	1.0.4	lib	52.64	1.06
+GS	unit	omp	all	omp-exec-local	2.0.0	lib	395.68	1.06
+GS	unit	omp	all	schemars_derive	1.2.3	lib	28.47	1.05
+GS	unit	omp	all	fancy-regex	0.17.0	lib	247.81	1.05
+GS	unit	omp	all	resvg	0.45.1	lib	283.65	1.05
+GS	unit	omp	all	itertools	0.14.0	lib	32.79	1.04
+GS	unit	omp	all	deranged	0.5.9	lib	56.02	1.04
+GS	unit	omp	all	zbus_xml	5.2.1	lib	210.63	1.04
+GS	unit	omp	all	tree-sitter	0.25.10	build-script (run)	95.27	1.02
+GS	unit	omp	all	scip	0.10.0	lib	328.90	1.02
+GS	unit	omp	all	backtrace	0.3.76	lib	68.60	1.01
+GS	unit	omp	all	omp-walker	2.0.0	lib	205.71	1.01
+GS	unit	omp	all	p256	0.14.0	lib	296.25	1.01
+GS	unit	omp	all	brotli-decompressor	5.0.3	lib	60.90	0.99
+GS	unit	omp	all	rtp	0.17.2	lib	71.03	0.99
+GS	unit	omp	all	gix-filter	0.32.0	lib	147.64	0.98
+GS	unit	omp	all	serde_json	1.0.154	lib	34.30	0.97
+GS	unit	omp	all	zvariant_utils	4.2.0	lib	125.62	0.97
+GS	unit	omp	all	rsa	0.10.0-rc.18	lib	284.70	0.97
+GS	unit	omp	all	rustls-webpki	0.103.15	lib	37.06	0.96
+GS	unit	omp	all	zune-jpeg	0.5.15	lib	129.64	0.96
+GS	unit	omp	all	sha2	0.11.1	lib	26.29	0.95
+GS	unit	omp	all	http	1.5.0	lib	34.55	0.95
+GS	unit	omp	all	quick-xml	0.41.0	lib	149.23	0.95
+GS	unit	omp	all	regex-lite	0.1.9	lib	229.40	0.95
+GS	unit	omp	all	zerovec	0.11.8	lib	13.17	0.94
+GS	unit	omp	all	zvariant_utils	4.2.0	lib	64.21	0.94
+GS	unit	omp	all	tracing-attributes	0.1.31	lib	14.11	0.93
+GS	unit	omp	all	miette-derive	7.6.0	lib	40.79	0.93
+GS	unit	omp	all	tower	0.5.3	lib	46.75	0.93
+GS	unit	omp	all	prost-types	0.14.4	lib	42.85	0.92
+GS	unit	omp	all	time-macros	0.2.32	lib	53.71	0.92
+GS	unit	omp	all	omp-secrets	2.0.0	lib	113.78	0.92
+GS	unit	omp	all	zerovec-derive	0.11.6	lib	11.32	0.91
+GS	unit	omp	all	peg-macros	0.8.6	lib	213.92	0.91
+GS	unit	omp	all	fancy-regex	0.16.2	lib	319.65	0.91
+GS	unit	omp	all	cap-primitives	4.0.3	lib	94.40	0.90
+GS	unit	omp	all	linux-raw-sys	0.4.15	lib	273.19	0.90
+GS	unit	omp	all	ml-kem	0.3.3	lib	299.95	0.89
+GS	unit	omp	all	webrtc-mdns	0.17.2	lib	85.48	0.88
+GS	unit	omp	all	rtcp	0.17.2	lib	81.06	0.87
+GS	unit	omp	all	zbus_xml	5.2.1	lib	157.31	0.87
+GS	unit	omp	all	tree-sitter-xml	0.7.0	build-script (run)	174.61	0.87
+GS	unit	omp	all	omp-snapcompact	2.0.0	lib	217.32	0.87
+GS	unit	omp	all	bytemuck_derive	1.12.1	lib	52.39	0.86
+GS	unit	omp	all	webrtc-srtp	0.17.2	lib	86.97	0.86
+GS	unit	omp	all	jaq-json	1.1.3	lib	252.52	0.86
+GS	unit	omp	all	zerofrom-derive	0.1.8	lib	9.10	0.85
+GS	unit	omp	all	omp-scribe	2.0.0	lib	209.78	0.85
+GS	unit	omp	all	parse_datetime	0.14.0	lib	269.20	0.85
+GS	unit	omp	all	thiserror-impl	2.0.21	lib	7.41	0.84
+GS	unit	omp	all	notify	8.2.0	lib	254.44	0.84
+GS	unit	omp	all	layout-rs	0.1.3	lib	325.91	0.84
+GS	unit	omp	all	libc	0.2.191	lib	2.49	0.83
+GS	unit	omp	all	futures-lite	2.6.1	lib	112.63	0.83
+GS	unit	omp	all	grep-printer	0.3.1	lib	265.12	0.83
+GS	unit	omp	all	gix-attributes	0.33.2	lib	96.12	0.82
+GS	unit	omp	all	toml_edit	0.25.17+spec-1.1.0	lib	60.29	0.80
+GS	unit	omp	all	ast-grep-core	0.39.9	lib	226.50	0.80
+GS	unit	omp	all	xkeysym	0.2.1	lib	311.05	0.80
+GS	unit	omp	all	typenum	1.20.1	lib	5.52	0.79
+GS	unit	omp	all	crypto-common	0.2.2	lib	8.92	0.79
+GS	unit	omp	all	astral-tl	0.8.0	lib	272.62	0.79
+GS	unit	omp	all	hayro	0.7.1	lib	286.38	0.78
+GS	unit	omp	all	url	2.5.8	lib	146.34	0.77
+GS	unit	omp	all	opentelemetry-otlp	0.32.0	lib	156.40	0.77
+GS	unit	omp	all	gix-refspec	0.43.0	lib	225.13	0.77
+GS	unit	omp	all	num-traits	0.2.19	lib	18.26	0.76
+GS	unit	omp	all	heapless	0.9.3	lib	30.83	0.76
+GS	unit	omp	all	thiserror-impl	1.0.69	lib	35.89	0.76
+GS	unit	omp	all	owo-colors	4.4.0	lib	83.04	0.76
+GS	unit	omp	all	sdp	0.17.2	lib	99.49	0.76
+GS	unit	omp	all	tree-sitter	0.25.10	lib	135.29	0.76
+GS	unit	omp	all	async-process	2.5.0	lib	156.18	0.76
+GS	unit	omp	all	tree-sitter-erlang	0.16.0	build-script (run)	163.43	0.76
+GS	unit	omp	all	tree-sitter-javascript	0.25.0	build-script (run)	184.41	0.76
+GS	unit	omp	all	cfb	0.14.0	lib	253.11	0.76
+GS	unit	omp	all	tree-sitter-r	1.3.0	build-script (run)	169.43	0.75
+GS	unit	omp	all	web_atoms	0.3.0	lib	222.29	0.75
+GS	unit	omp	all	url	2.5.8	lib	21.64	0.74
+GS	unit	omp	all	pin-project-internal	1.1.13	lib	55.31	0.74
+GS	unit	omp	all	gix-revision	0.47.0	lib	158.18	0.74
+GS	unit	omp	all	omp-macros	2.0.0	lib	222.15	0.74
+GS	unit	omp	all	indicatif	0.18.6	lib	251.79	0.74
+GS	unit	omp	all	html5ever	0.40.1	lib	264.50	0.74
+GS	unit	omp	all	hybrid-array	0.4.15	lib	8.18	0.73
+GS	unit	omp	all	rand	0.10.3	lib	27.25	0.73
+GS	unit	omp	all	blake3	1.8.7	build-script	212.31	0.73
+GS	unit	omp	all	pyo3-ffi	0.29.3	lib	247.06	0.73
+GS	unit	omp	all	unsafe-libyaml	0.2.11	lib	310.70	0.73
+GS	unit	omp	all	icu_segmenter	2.3.0	lib	69.40	0.72
+GS	unit	omp	all	tree-sitter-yaml	0.7.2	build-script (run)	168.18	0.72
+GS	unit	omp	all	prettyplease	0.3.0	lib	209.05	0.72
+GS	unit	omp	all	serde_derive_internals	0.30.0	lib	27.75	0.71
+GS	unit	omp	all	miniz_oxide	0.9.1	lib	31.07	0.71
+GS	unit	omp	all	zbus_names	4.3.5	lib	136.06	0.71
+GS	unit	omp	all	ssh-cipher	0.3.0	lib	285.67	0.71
+GS	unit	omp	all	rayon-core	1.13.0	lib	89.63	0.70
+GS	unit	omp	all	zune-jpeg	0.4.21	lib	251.09	0.69
+GS	unit	omp	all	pyo3-build-config	0.29.3	lib	123.99	0.68
+GS	unit	omp	all	zopfli	0.8.4	lib	214.83	0.68
+GS	unit	omp	all	libc	0.2.191	build-script	1.81	0.66
+GS	unit	omp	all	der-parser	9.0.0	lib	70.23	0.66
+GS	unit	omp	all	heapless	0.9.3	lib	146.97	0.66
+GS	unit	omp	all	hashbrown	0.16.1	lib	159.99	0.66
+GS	unit	omp	all	tree-sitter-c	0.24.2	build-script (run)	173.42	0.66
+GS	unit	omp	all	console	0.16.6	lib	248.87	0.66
+GS	unit	omp	all	yoke-derive	0.8.4	lib	9.95	0.65
+GS	unit	omp	all	async-trait	0.1.92	lib	28.85	0.65
+GS	unit	omp	all	prettyplease	0.2.37	lib	46.09	0.65
+GS	unit	omp	all	gix-dir	0.27.0	lib	218.20	0.65
+GS	unit	omp	all	tree_magic_mini	3.2.2	lib	246.01	0.65
+GS	unit	omp	all	proc-macro2	1.0.107	build-script	1.81	0.64
+GS	unit	omp	all	quote	1.0.47	build-script	1.81	0.64
+GS	unit	omp	all	globset	0.4.20	lib	52.36	0.64
+GS	unit	omp	all	yasna	0.5.2	lib	80.43	0.64
+GS	unit	omp	all	fontdb	0.23.0	lib	240.88	0.64
+GS	unit	omp	all	enum_dispatch	0.3.13	lib	309.67	0.64
+GS	unit	omp	all	hashbrown	0.17.1	lib	8.30	0.63
+GS	unit	omp	all	bytes	1.12.1	lib	10.61	0.63
+GS	unit	omp	all	bstr	1.13.1	lib	15.04	0.63
+GS	unit	omp	all	rand	0.9.5	lib	35.97	0.63
+GS	unit	omp	all	async-io	2.6.0	lib	135.48	0.63
+GS	unit	omp	all	gif	0.14.2	lib	156.94	0.63
+GS	unit	omp	all	indexmap	2.14.2	lib	13.52	0.62
+GS	unit	omp	all	hashbrown	0.14.5	lib	36.25	0.62
+GS	unit	omp	all	pest_generator	2.9.4	lib	240.01	0.62
+GS	unit	omp	all	smol_bitmap	0.3.2	lib	31.59	0.61
+GS	unit	omp	all	prodash	31.0.1	lib	35.64	0.61
+GS	unit	omp	all	proc-macro2	1.0.107	lib	84.54	0.61
+GS	unit	omp	all	p384	0.13.1	lib	90.83	0.61
+GS	unit	omp	all	gix-traverse	0.59.0	lib	127.76	0.61
+GS	unit	omp	all	omp-exec	2.0.0	lib	216.30	0.61
+GS	unit	omp	all	svgtypes	0.15.3	lib	238.38	0.61
+GS	unit	omp	all	delegate	0.13.5	lib	310.16	0.61
+GS	unit	omp	all	zerotrie	0.2.5	lib	15.67	0.60
+GS	unit	omp	all	tonic-build	0.14.6	lib	51.69	0.60
+GS	unit	omp	all	omp-ai	2.0.0	build-script	102.53	0.60
+GS	unit	omp	all	rand	0.10.3	lib	146.90	0.60
+GS	unit	omp	all	gif	0.13.3	lib	267.71	0.60
+GS	unit	omp	all	toml_parser	1.1.5+spec-1.1.0	lib	61.31	0.59
+GS	unit	omp	all	memchr	2.8.3	lib	4.83	0.58
+GS	unit	omp	all	miniz_oxide	0.8.9	lib	40.01	0.58
+GS	unit	omp	all	gix-pathspec	0.18.1	lib	136.58	0.58
+GS	unit	omp	all	data-encoding	2.11.1	lib	139.35	0.58
+GS	unit	omp	all	tiny-skia-path	0.11.4	lib	215.73	0.58
+GS	unit	omp	all	gix-submodule	0.32.0	lib	238.43	0.58
+GS	unit	omp	all	data-encoding	2.11.1	lib	25.92	0.57
+GS	unit	omp	all	gix-imara-diff	0.2.5	lib	159.66	0.57
+GS	unit	omp	all	csv	1.4.0	lib	253.87	0.57
+GS	unit	omp	all	yaml-rust	0.4.5	lib	316.86	0.57
+GS	unit	omp	all	idna	1.1.0	lib	21.43	0.56
+GS	unit	omp	all	portable-atomic	1.15.0	lib	43.98	0.56
+GS	unit	omp	all	linkme-impl	0.3.37	lib	78.28	0.56
+GS	unit	omp	all	hashbrown	0.15.5	lib	127.20	0.56
+GS	unit	omp	all	unicode-bidi	0.3.18	lib	150.65	0.56
+GS	unit	omp	all	tree-sitter-zig	1.1.2	build-script (run)	190.30	0.56
+GS	unit	omp	all	fontdue	0.9.5	lib	211.19	0.56
+GS	unit	omp	all	hayro-cmap	0.1.0	lib	235.64	0.56
+GS	unit	omp	all	icu_provider	2.3.1	lib	16.74	0.55
+GS	unit	omp	all	bitmaps	2.1.0	lib	67.81	0.55
+GS	unit	omp	all	tree-sitter-nix	0.3.0	build-script (run)	173.13	0.55
+GS	unit	omp	all	color	0.3.3	lib	211.75	0.55
+GS	unit	omp	all	roxmltree	0.20.0	lib	212.64	0.55
+GS	unit	omp	all	fontconfig-parser	0.5.8	lib	215.52	0.55
+GS	unit	omp	all	argon2	0.6.0	lib	280.99	0.55
+GS	unit	omp	all	pep440_rs	0.7.3	lib	298.71	0.55
+GS	unit	omp	all	proc-macro2	1.0.107	lib	2.52	0.54
+GS	unit	omp	all	phf_macros	0.13.1	lib	223.26	0.54
+GS	unit	omp	all	maybe-async	0.2.11	lib	228.52	0.54
+GS	unit	omp	all	weezl	0.2.1	lib	231.87	0.54
+GS	unit	omp	all	pyo3-macros	0.29.3	lib	233.17	0.54
+GS	unit	omp	all	jaq-std	2.1.2	lib	235.10	0.54
+GS	unit	omp	all	futures-macro	0.3.34	lib	22.65	0.53
+GS	unit	omp	all	typenum	1.20.1	lib	44.72	0.53
+GS	unit	omp	all	serde	1.0.229	lib	10.05	0.52
+GS	unit	omp	all	hashbrown	0.15.5	lib	45.29	0.52
+GS	unit	omp	all	toml_parser	1.1.5+spec-1.1.0	lib	58.07	0.52
+GS	unit	omp	all	gix-commitgraph	0.37.1	lib	70.51	0.52
+GS	unit	omp	all	omp-adw	2.0.0	lib	212.12	0.52
+GS	unit	omp	all	pcre2	0.2.11	lib	245.35	0.52
+GS	unit	omp	all	html-escape	0.3.0	lib	273.21	0.52
+GS	unit	omp	all	vcpkg	0.2.15	lib	65.22	0.51
+GS	unit	omp	all	heapless	0.7.17	lib	86.37	0.51
+GS	unit	omp	all	miniz_oxide	0.9.1	lib	213.41	0.51
+GS	unit	omp	all	hashbrown	0.17.1	lib	18.24	0.50
+GS	unit	omp	all	crossbeam-channel	0.5.17	lib	35.71	0.50
+GS	unit	omp	all	async-lock	3.4.2	lib	147.91	0.50
+GS	unit	omp	all	gix-date	0.15.6	lib	48.02	0.49
+GS	unit	omp	all	grep-cli	0.1.12	lib	266.76	0.49
+GS	unit	omp	all	pkcs5	0.8.1	lib	111.62	0.48
+GS	unit	omp	all	lscolors	0.21.0	lib	268.31	0.48
+GS	unit	omp	all	tracing-core	0.1.36	lib	15.08	0.47
+GS	unit	omp	all	mio	1.2.4	lib	15.76	0.47
+GS	unit	omp	all	tempfile	3.27.0	lib	36.60	0.47
+GS	unit	omp	all	miette	7.6.0	lib	45.62	0.47
+GS	unit	omp	all	idna	1.1.0	lib	136.20	0.47
+GS	unit	omp	all	tree-sitter-css	0.25.0	build-script (run)	167.58	0.47
+GS	unit	omp	all	tree-sitter-starlark	1.3.0	build-script (run)	189.84	0.47
+GS	unit	omp	all	simplecss	0.2.2	lib	249.53	0.47
+GS	unit	omp	all	synstructure	0.14.0	lib	8.63	0.46
+GS	unit	omp	all	rustls-pki-types	1.15.1	lib	33.95	0.46
+GS	unit	omp	all	bytes	1.12.1	lib	36.60	0.46
+GS	unit	omp	all	synstructure	0.13.2	lib	59.57	0.46
+GS	unit	omp	all	aes	0.8.4	lib	66.66	0.46
+GS	unit	omp	all	zbus_names	4.3.5	lib	126.58	0.46
+GS	unit	omp	all	euclid	0.22.14	lib	212.23	0.46
+GS	unit	omp	all	blake2	0.10.6	lib	228.06	0.46
+GS	unit	omp	all	grep-regex	0.1.14	lib	267.26	0.46
+GS	unit	omp	all	indexmap	2.14.2	lib	18.74	0.45
+GS	unit	omp	all	ipnet	2.12.2	lib	24.87	0.45
+GS	unit	omp	all	gix-path	0.12.6	lib	30.62	0.45
+GS	unit	omp	all	bytecheck_derive	0.8.3	lib	67.71	0.45
+GS	unit	omp	all	textwrap	0.16.4	lib	76.95	0.45
+GS	unit	omp	all	webrtc-data	0.17.2	lib	95.42	0.45
+GS	unit	omp	all	tree-sitter-java	0.23.5	build-script (run)	164.19	0.45
+GS	unit	omp	all	blake3	1.8.7	build-script (run)	215.27	0.45
+GS	unit	omp	all	unicode-ident	1.0.27	lib	1.81	0.44
+GS	unit	omp	all	tokio-stream	0.1.19	lib	50.27	0.44
+GS	unit	omp	all	socket2	0.5.10	lib	82.15	0.44
+GS	unit	omp	all	gix-config-value	0.18.1	lib	128.61	0.44
+GS	unit	omp	all	tree-sitter-cmake	0.7.5	build-script (run)	196.30	0.44
+GS	unit	omp	all	displaydoc	0.2.7	lib	10.91	0.43
+GS	unit	omp	all	icu_collections	2.3.0	lib	17.62	0.43
+GS	unit	omp	all	protox	0.9.1	lib	51.25	0.43
+GS	unit	omp	all	icu_normalizer	2.3.0	lib	123.75	0.43
+GS	unit	omp	all	sharded-slab	0.1.7	lib	137.43	0.43
+GS	unit	omp	all	tree-sitter-solidity	1.2.13	build-script (run)	164.84	0.43
+GS	unit	omp	all	stringprep	0.1.5	lib	225.89	0.43
+GS	unit	omp	all	grep-searcher	0.1.17	lib	239.02	0.43
+GS	unit	omp	all	clap_complete	4.6.11	lib	343.13	0.43
+GS	unit	omp	all	memchr	2.8.3	lib	17.29	0.42
+GS	unit	omp	all	icu_normalizer	2.3.0	lib	19.75	0.42
+GS	unit	omp	all	dashmap	6.2.1	lib	36.86	0.42
+GS	unit	omp	all	weezl	0.1.12	lib	134.48	0.42
+GS	unit	omp	all	gix-status	0.32.0	lib	244.85	0.42
+GS	unit	omp	all	imagesize	0.13.0	lib	250.00	0.42
+GS	unit	omp	all	pkg-config	0.3.34	lib	25.32	0.41
+GS	unit	omp	all	gix-url	0.36.2	lib	159.12	0.41
+GS	unit	omp	all	ecdsa	0.17.0	lib	216.91	0.41
+GS	unit	omp	all	inotify	0.11.5	lib	240.48	0.41
+GS	unit	omp	all	pkcs1	0.8.0-rc.4	lib	268.79	0.41
+GS	unit	omp	all	generic-array	1.4.5	lib	309.68	0.41
+GS	unit	omp	all	flate2	1.1.10	lib	32.20	0.40
+GS	unit	omp	all	gix-utils	0.3.6	lib	33.55	0.40
+GS	unit	omp	all	asn1-rs-derive	0.5.1	lib	60.38	0.40
+GS	unit	omp	all	omp-proto	2.0.0	build-script	64.16	0.40
+GS	unit	omp	all	gix-glob	0.26.1	lib	67.18	0.40
+GS	unit	omp	all	icu_collections	2.3.0	lib	94.46	0.40
+GS	unit	omp	all	smol_bitmap	0.3.2	lib	144.08	0.40
+GS	unit	omp	all	opentelemetry-http	0.32.0	lib	147.51	0.40
+GS	unit	omp	all	env_filter	2.0.0	lib	227.30	0.40
+GS	unit	omp	all	env_logger	0.11.11	lib	239.01	0.40
+GS	unit	omp	all	protobuf-support	3.7.2	lib	320.78	0.40
+GS	unit	omp	all	tokio-macros	2.7.2	lib	16.35	0.39
+GS	unit	omp	all	human_format	1.2.1	lib	35.50	0.39
+GS	unit	omp	all	curve25519-dalek-derive	0.1.1	lib	59.54	0.39
+GS	unit	omp	all	zerovec	0.11.8	lib	63.82	0.39
+GS	unit	omp	all	elliptic-curve	0.14.1	lib	155.69	0.39
+GS	unit	omp	all	phf_macros	0.14.0	lib	157.82	0.39
+GS	unit	omp	all	generic-array	0.14.7	lib	8.19	0.38
+GS	unit	omp	all	crossbeam-utils	0.8.23	lib	12.61	0.38
+GS	unit	omp	all	base64	0.23.1	lib	41.88	0.38
+GS	unit	omp	all	prost	0.14.4	lib	42.46	0.38
+GS	unit	omp	all	fdeflate	0.3.7	lib	64.95	0.38
+GS	unit	omp	all	rustls-native-certs	0.8.5	lib	104.04	0.38
+GS	unit	omp	all	tower-http	0.6.11	lib	128.11	0.38
+GS	unit	omp	all	gix-protocol	0.63.0	lib	237.57	0.38
+GS	unit	omp	all	bincode	1.3.3	lib	320.92	0.38
+GS	unit	omp	all	tonic-health	0.14.6	lib	325.52	0.38
+GS	unit	omp	all	omp-sdk	2.0.0	lib	342.81	0.38
+GS	unit	omp	all	socket2	0.6.5	lib	17.12	0.37
+GS	unit	omp	all	serde	1.0.229	lib	21.99	0.37
+GS	unit	omp	all	generic-array	0.14.7	lib	45.25	0.37
+GS	unit	omp	all	aes	0.9.3	lib	58.70	0.37
+GS	unit	omp	all	async-recursion	1.2.0	lib	128.78	0.37
+GS	unit	omp	all	primeorder	0.14.0	lib	222.90	0.37
+GS	unit	omp	all	landlock	0.4.7	lib	307.96	0.37
+GS	unit	omp	all	omp-exec-reapi	2.0.0	build-script (run)	325.16	0.37
+GS	unit	omp	all	parking_lot	0.12.5	lib	10.86	0.36
+GS	unit	omp	all	writeable	0.6.4	lib	14.23	0.36
+GS	unit	omp	all	sha2-asm	0.6.4	build-script (run)	22.53	0.36
+GS	unit	omp	all	tinyvec	1.13.3	lib	25.28	0.36
+GS	unit	omp	all	ref-cast-impl	1.0.27	lib	25.80	0.36
+GS	unit	omp	all	unicode-normalization	0.1.26	lib	28.44	0.36
+GS	unit	omp	all	heapless	0.8.0	lib	39.00	0.36
+GS	unit	omp	all	regex	1.13.1	lib	39.36	0.36
+GS	unit	omp	all	uuid	1.28.0	lib	50.75	0.36
+GS	unit	omp	all	poly1305	0.8.0	lib	80.66	0.36
+GS	unit	omp	all	font-types	0.11.3	lib	211.76	0.36
+GS	unit	omp	all	omp-exec-reapi	2.0.0	build-script	320.56	0.36
+GS	unit	omp	all	rand_chacha	0.9.0	lib	35.63	0.35
+GS	unit	omp	all	enumflags2_derive	0.7.12	lib	55.33	0.35
+GS	unit	omp	all	postcard	1.1.3	lib	94.93	0.35
+GS	unit	omp	all	tracing-core	0.1.36	lib	137.86	0.35
+GS	unit	omp	all	gix-discover	0.53.0	lib	210.84	0.35
+GS	unit	omp	all	poly1305	0.9.1	lib	270.49	0.35
+GS	unit	omp	all	ring	0.17.14	build-script	26.49	0.34
+GS	unit	omp	all	gix-features	0.48.1	lib	36.21	0.34
+GS	unit	omp	all	proc-macro-crate	3.5.0	lib	63.47	0.34
+GS	unit	omp	all	gix-tempfile	23.0.2	lib	63.48	0.34
+GS	unit	omp	all	p256	0.13.2	lib	90.49	0.34
+GS	unit	omp	all	target-lexicon	0.13.5	build-script	94.38	0.34
+GS	unit	omp	all	strsim	0.11.1	lib	133.87	0.34
+GS	unit	omp	all	gix-worktree	0.54.0	lib	136.11	0.34
+GS	unit	omp	all	web_atoms	0.3.0	build-script	156.05	0.34
+GS	unit	omp	all	async-executor	1.14.0	lib	156.83	0.34
+GS	unit	omp	all	web_atoms	0.3.0	build-script (run)	206.91	0.34
+GS	unit	omp	all	termcolor	1.4.1	lib	228.82	0.34
+GS	unit	omp	all	walkdir	2.5.0	lib	25.97	0.33
+GS	unit	omp	all	rustversion	1.0.23	lib	29.84	0.33
+GS	unit	omp	all	ppv-lite86	0.2.21	lib	30.25	0.33
+GS	unit	omp	all	tonic-prost-build	0.14.6	lib	54.64	0.33
+GS	unit	omp	all	rustc-demangle	0.1.28	lib	68.16	0.33
+GS	unit	omp	all	ecdsa	0.16.9	lib	68.81	0.33
+GS	unit	omp	all	async-stream-impl	0.3.6	lib	103.56	0.33
+GS	unit	omp	all	nu-ansi-term	0.50.3	lib	123.27	0.33
+GS	unit	omp	all	string_cache_codegen	0.11.2	lib	148.49	0.33
+GS	unit	omp	all	zbus-lockstep-macros	0.5.2	lib	223.03	0.33
+GS	unit	omp	all	omp-py	2.0.0	build-script	247.58	0.33
+GS	unit	omp	all	nix	0.24.3	lib	249.28	0.33
+GS	unit	omp	all	prost	0.14.4	lib	49.94	0.32
+GS	unit	omp	all	addr2line	0.25.1	lib	67.39	0.32
+GS	unit	omp	all	munge_macro	0.4.7	lib	72.80	0.32
+GS	unit	omp	all	tree-sitter-dockerfile-updated	0.2.0	build-script (run)	169.89	0.32
+GS	unit	omp	all	flate2	1.1.10	lib	232.85	0.32
+GS	unit	omp	all	command-fds	0.3.3	lib	247.80	0.32
+GS	unit	omp	all	ssh-encoding	0.3.0	lib	247.92	0.32
+GS	unit	omp	all	zeroize_derive	1.5.0	lib	7.74	0.31
+GS	unit	omp	all	zmij	1.0.23	lib	23.02	0.31
+GS	unit	omp	all	gix-hash	0.25.1	lib	43.93	0.31
+GS	unit	omp	all	linux-raw-sys	0.12.1	lib	44.73	0.31
+GS	unit	omp	all	regex	1.13.1	lib	47.78	0.31
+GS	unit	omp	all	rustix-linux-procfs	0.1.1	lib	93.71	0.31
+GS	unit	omp	all	webrtc-media	0.17.2	lib	101.54	0.31
+GS	unit	omp	all	gix-command	0.9.2	lib	123.43	0.31
+GS	unit	omp	all	anstream	1.0.0	lib	123.55	0.31
+GS	unit	omp	all	pkcs8	0.11.0	lib	125.30	0.31
+GS	unit	omp	all	wayland-sys	0.31.11	lib	146.01	0.31
+GS	unit	omp	all	hayro-postscript	0.1.0	lib	229.59	0.31
+GS	unit	omp	all	rangemap	1.8.0	lib	231.67	0.31
+GS	unit	omp	all	autocfg	1.5.1	lib	6.56	0.30
+GS	unit	omp	all	pem	3.0.6	lib	81.21	0.30
+GS	unit	omp	all	polling	3.11.0	lib	132.59	0.30
+GS	unit	omp	all	polycool	0.4.0	lib	148.87	0.30
+GS	unit	omp	all	tree-sitter-clojure	0.1.0	build-script (run)	169.20	0.30
+GS	unit	omp	all	peniko	0.6.1	lib	216.05	0.30
+GS	unit	omp	all	gix-worktree-state	0.32.0	lib	238.08	0.30
+GS	unit	omp	all	notify-types	2.1.0	lib	249.42	0.30
+GS	unit	omp	all	blake2	0.11.0	lib	272.32	0.30
+GS	unit	omp	all	seccompiler	0.5.0	lib	310.56	0.30
+GS	unit	omp	all	bytesize	2.7.0	lib	35.28	0.29
+GS	unit	omp	all	pem-rfc7468	0.7.0	lib	50.41	0.29
+GS	unit	omp	all	pem-rfc7468	1.0.0	lib	59.28	0.29
+GS	unit	omp	all	elliptic-curve	0.13.8	lib	63.13	0.29
+GS	unit	omp	all	fallible-iterator	0.3.0	lib	83.60	0.29
+GS	unit	omp	all	zerotrie	0.2.5	lib	92.88	0.29
+GS	unit	omp	all	smallvec	2.0.0-beta.3	lib	149.27	0.29
+GS	unit	omp	all	blocking	1.7.0	lib	154.61	0.29
+GS	unit	omp	all	tree-sitter-html	0.23.2	build-script (run)	189.92	0.29
+GS	unit	omp	all	slotmap	1.1.1	lib	223.41	0.29
+GS	unit	omp	all	data-url	0.3.2	lib	250.51	0.29
+GS	unit	omp	all	jj-lib-proc-macros	0.44.0	lib	272.58	0.29
+GS	unit	omp	all	allocator-api2	0.2.21	lib	7.56	0.28
+GS	unit	omp	all	gix-fs	0.21.2	lib	59.07	0.28
+GS	unit	omp	all	icu_locale_fallback	2.3.0	lib	65.92	0.28
+GS	unit	omp	all	cmake	0.1.58	lib	73.21	0.28
+GS	unit	omp	all	tree-sitter-make	1.1.1	build-script (run)	169.15	0.28
+GS	unit	omp	all	rand_chacha	0.10.0	lib	271.50	0.28
+GS	unit	omp	all	sha2	0.10.9	lib	29.52	0.27
+GS	unit	omp	all	sha1-checked	0.10.0	lib	43.34	0.27
+GS	unit	omp	all	bytemuck	1.25.2	lib	53.89	0.27
+GS	unit	omp	all	matchit	0.8.4	lib	55.68	0.27
+GS	unit	omp	all	crossbeam-epoch	0.9.21	lib	66.39	0.27
+GS	unit	omp	all	oid-registry	0.7.1	lib	69.96	0.27
+GS	unit	omp	all	target-lexicon	0.13.5	lib	112.36	0.27
+GS	unit	omp	all	parking_lot	0.12.5	lib	145.74	0.27
+GS	unit	omp	all	serde_repr	0.1.21	lib	160.23	0.27
+GS	unit	omp	all	gix-transport	0.57.2	lib	225.08	0.27
+GS	unit	omp	all	tendril	0.5.1	lib	226.32	0.27
+GS	unit	omp	all	gix-shallow	0.12.1	lib	226.95	0.27
+GS	unit	omp	all	interim	0.2.1	lib	254.90	0.27
+GS	unit	omp	all	codesnake	0.2.1	lib	272.92	0.27
+GS	unit	omp	all	jobserver	0.1.35	lib	4.31	0.26
+GS	unit	omp	all	chacha20	0.10.2	lib	24.38	0.26
+GS	unit	omp	all	base64ct	1.8.3	lib	28.11	0.26
+GS	unit	omp	all	httparse	1.10.1	lib	37.46	0.26
+GS	unit	omp	all	pulldown-cmark-to-cmark	22.0.3	lib	47.68	0.26
+GS	unit	omp	all	unicode-width	0.2.2	lib	53.63	0.26
+GS	unit	omp	all	toml_datetime	1.1.2+spec-1.1.0	lib	62.53	0.26
+GS	unit	omp	all	gix-revwalk	0.33.0	lib	76.69	0.26
+GS	unit	omp	all	omp-catalog	2.0.0	build-script	93.18	0.26
+GS	unit	omp	all	zune-core	0.5.3	lib	129.41	0.26
+GS	unit	omp	all	tree-sitter-toml-ng	0.7.0	build-script (run)	168.91	0.26
+GS	unit	omp	all	markup5ever	0.40.0	lib	239.74	0.26
+GS	unit	omp	all	serde_bytes	0.11.19	lib	310.31	0.26
+GS	unit	omp	all	libc	0.2.191	build-script	2.48	0.25
+GS	unit	omp	all	gix-error	0.2.5	lib	37.06	0.25
+GS	unit	omp	all	base64	0.22.1	lib	39.44	0.25
+GS	unit	omp	all	tempfile	3.27.0	lib	47.45	0.25
+GS	unit	omp	all	pkcs8	0.10.2	lib	57.82	0.25
+GS	unit	omp	all	rand_xoshiro	0.6.0	lib	72.55	0.25
+GS	unit	omp	all	scrypt	0.12.0	lib	94.97	0.25
+GS	unit	omp	all	icu_provider	2.3.1	lib	95.87	0.25
+GS	unit	omp	all	cap-std	4.0.3	lib	112.12	0.25
+GS	unit	omp	all	gix-ignore	0.21.1	lib	131.44	0.25
+GS	unit	omp	all	streaming-iterator	0.1.9	lib	133.49	0.25
+GS	unit	omp	all	tree-sitter-go	0.25.0	build-script (run)	168.90	0.25
+GS	unit	omp	all	fixedbitset	0.5.7	lib	213.04	0.25
+GS	unit	omp	all	unicode-script	0.5.8	lib	229.34	0.25
+GS	unit	omp	all	rgb	0.8.53	lib	271.25	0.25
+GS	unit	omp	all	etcetera	0.11.0	lib	272.63	0.25
+GS	unit	omp	all	portable-atomic	1.15.0	build-script	42.61	0.24
+GS	unit	omp	all	flume	0.11.1	lib	47.21	0.24
+GS	unit	omp	all	hex	0.4.3	lib	53.39	0.24
+GS	unit	omp	all	num-integer	0.1.47	lib	55.09	0.24
+GS	unit	omp	all	zstd	0.13.3	lib	63.19	0.24
+GS	unit	omp	all	tokio-tungstenite	0.28.0	lib	88.38	0.24
+GS	unit	omp	all	phf_shared	0.14.0	lib	102.05	0.24
+GS	unit	omp	all	gix-packetline	0.21.5	lib	128.37	0.24
+GS	unit	omp	all	byteorder-lite	0.1.0	lib	139.93	0.24
+GS	unit	omp	all	sec1	0.8.1	lib	142.94	0.24
+GS	unit	omp	all	tree-sitter-astro-next	0.1.1	build-script (run)	169.17	0.24
+GS	unit	omp	all	tree-sitter-svelte-next	0.1.1	build-script (run)	169.50	0.24
+GS	unit	omp	all	include_dir_macros	0.7.4	lib	228.73	0.24
+GS	unit	omp	all	peg-runtime	0.8.6	lib	229.10	0.24
+GS	unit	omp	all	hifijson	0.2.3	lib	250.42	0.24
+GS	unit	omp	all	sha3	0.12.0	lib	295.32	0.24
+GS	unit	omp	all	zerocopy	0.8.63	build-script	24.13	0.23
+GS	unit	omp	all	simd-adler32	0.3.10	lib	24.64	0.23
+GS	unit	omp	all	zmij	1.0.23	lib	33.83	0.23
+GS	unit	omp	all	sha2	0.10.9	lib	51.06	0.23
+GS	unit	omp	all	quote	1.0.47	lib	100.99	0.23
+GS	unit	omp	all	gix-sec	0.14.2	lib	129.05	0.23
+GS	unit	omp	all	ordered-stream	0.2.0	lib	159.76	0.23
+GS	unit	omp	all	tree-sitter-just	0.2.0	build-script (run)	164.64	0.23
+GS	unit	omp	all	tree-sitter-hcl	1.1.0	build-script (run)	164.87	0.23
+GS	unit	omp	all	tree-sitter-vue-next	0.1.0	build-script (run)	174.37	0.23
+GS	unit	omp	all	tree-sitter-lua	0.5.0	build-script (run)	179.29	0.23
+GS	unit	omp	all	guillotiere	0.7.0	lib	216.07	0.23
+GS	unit	omp	all	phf_shared	0.13.1	lib	226.72	0.23
+GS	unit	omp	all	omp-tui	2.0.0	build-script	321.31	0.23
+GS	unit	omp	all	bytes-utils	0.1.4	lib	31.78	0.22
+GS	unit	omp	all	nanorand	0.7.0	lib	46.99	0.22
+GS	unit	omp	all	fixedbitset	0.5.7	lib	47.07	0.22
+GS	unit	omp	all	mime	0.3.17	lib	53.03	0.22
+GS	unit	omp	all	iana-time-zone	0.1.65	lib	67.89	0.22
+GS	unit	omp	all	libsqlite3-sys	0.38.2	lib	76.68	0.22
+GS	unit	omp	all	nix	0.31.3	build-script	94.75	0.22
+GS	unit	omp	all	darling_macro	0.24.1	lib	156.56	0.22
+GS	unit	omp	all	ucd-trie	0.1.7	lib	249.91	0.22
+GS	unit	omp	all	sha3	0.10.9	lib	253.38	0.22
+GS	unit	omp	all	ed25519-dalek	3.0.0	lib	291.68	0.22
+GS	unit	omp	all	cipher	0.5.2	lib	19.02	0.21
+GS	unit	omp	all	rustc_version	0.4.1	lib	23.52	0.21
+GS	unit	omp	all	sha1	0.10.7	lib	25.76	0.21
+GS	unit	omp	all	gix-validate	0.11.4	lib	30.41	0.21
+GS	unit	omp	all	http-body-util	0.1.5	lib	43.13	0.21
+GS	unit	omp	all	logos-derive	0.16.1	lib	45.43	0.21
+GS	unit	omp	all	sec1	0.7.3	lib	60.17	0.21
+GS	unit	omp	all	primeorder	0.13.6	lib	70.30	0.21
+GS	unit	omp	all	hashlink	0.12.2	lib	81.93	0.21
+GS	unit	omp	all	unicode-width	0.1.14	lib	82.83	0.21
+GS	unit	omp	all	opus	0.3.1	lib	111.41	0.21
+GS	unit	omp	all	strsim	0.11.1	lib	141.37	0.21
+GS	unit	omp	all	clap_lex	1.1.1	lib	150.18	0.21
+GS	unit	omp	all	phf_shared	0.13.1	lib	158.91	0.21
+GS	unit	omp	all	csv-core	0.1.13	lib	249.62	0.21
+GS	unit	omp	all	ctutils	0.4.3	lib	7.00	0.20
+GS	unit	omp	all	smallvec	2.0.0-beta.3	lib	31.94	0.20
+GS	unit	omp	all	futures-executor	0.3.34	lib	40.60	0.20
+GS	unit	omp	all	minimal-lexical	0.2.1	lib	55.72	0.20
+GS	unit	omp	all	ptr_meta_derive	0.3.2	lib	62.25	0.20
+GS	unit	omp	all	hyper-rustls	0.27.10	lib	64.66	0.20
+GS	unit	omp	all	zvariant_derive	5.15.1	lib	65.47	0.20
+GS	unit	omp	all	writeable	0.6.4	lib	83.80	0.20
+GS	unit	omp	all	event-listener	5.4.2	lib	101.85	0.20
+GS	unit	omp	all	chacha20	0.10.2	lib	135.11	0.20
+GS	unit	omp	all	unicode-properties	0.1.4	lib	139.09	0.20
+GS	unit	omp	all	phf_shared	0.14.0	lib	148.67	0.20
+GS	unit	omp	all	bytes-utils	0.1.4	lib	148.90	0.20
+GS	unit	omp	all	clru	0.6.3	lib	196.86	0.20
+GS	unit	omp	all	sha1	0.11.0	lib	298.23	0.20
+GS	unit	omp	all	raw-window-handle	0.6.2	lib	310.77	0.20
+GS	unit	omp	all	bitflags	2.13.2	lib	7.22	0.19
+GS	unit	omp	all	rand_core	0.6.4	lib	7.84	0.19
+GS	unit	omp	all	parking_lot_core	0.9.12	lib	10.72	0.19
+GS	unit	omp	all	fastrand	2.5.0	lib	19.19	0.19
+GS	unit	omp	all	semver	1.0.28	lib	23.33	0.19
+GS	unit	omp	all	anyhow	1.0.104	lib	32.60	0.19
+GS	unit	omp	all	gix-actor	0.41.2	lib	48.70	0.19
+GS	unit	omp	all	arc-swap	1.9.3	lib	54.97	0.19
+GS	unit	omp	all	asn1-rs-impl	0.2.0	lib	62.05	0.19
+GS	unit	omp	all	oid-registry	0.7.1	build-script	65.18	0.19
+GS	unit	omp	all	icu_segmenter_data	2.3.0	lib	66.20	0.19
+GS	unit	omp	all	sized-chunks	0.6.5	lib	68.38	0.19
+GS	unit	omp	all	cap-primitives	4.0.3	build-script	82.58	0.19
+GS	unit	omp	all	smol_str	0.2.2	lib	103.37	0.19
+GS	unit	omp	all	bit-vec	0.8.0	lib	103.96	0.19
+GS	unit	omp	all	libloading	0.8.9	lib	115.93	0.19
+GS	unit	omp	all	string_cache	0.11.0	lib	163.29	0.19
+GS	unit	omp	all	tree-sitter-diff	0.1.0	build-script (run)	170.21	0.19
+GS	unit	omp	all	bumpalo	3.20.3	lib	212.93	0.19
+GS	unit	omp	all	atoi_simd	0.18.1	lib	237.38	0.19
+GS	unit	omp	all	zune-core	0.4.12	lib	250.90	0.19
+GS	unit	omp	all	ahash	0.8.12	lib	261.95	0.19
+GS	unit	omp	all	grep-pcre2	0.1.10	lib	262.13	0.19
+GS	unit	omp	all	omp-tools	2.0.0	build-script	266.57	0.19
+GS	unit	omp	all	ed25519	3.0.0	lib	267.35	0.19
+GS	unit	omp	all	quote	1.0.47	lib	3.05	0.18
+GS	unit	omp	all	version_check	0.9.5	lib	6.32	0.18
+GS	unit	omp	all	lock_api	0.4.14	lib	6.51	0.18
+GS	unit	omp	all	thiserror	2.0.21	build-script	7.09	0.18
+GS	unit	omp	all	const-oid	0.9.6	lib	11.24	0.18
+GS	unit	omp	all	signal-hook-registry	1.4.8	lib	14.72	0.18
+GS	unit	omp	all	tinystr	0.8.4	lib	14.91	0.18
+GS	unit	omp	all	rustversion	1.0.23	build-script	29.62	0.18
+GS	unit	omp	all	getrandom	0.3.4	lib	30.23	0.18
+GS	unit	omp	all	tokio-rustls	0.26.6	lib	42.95	0.18
+GS	unit	omp	all	rustix	1.1.5	build-script	43.74	0.18
+GS	unit	omp	all	zstd-sys	2.1.2+zstd.1.5.7	build-script	50.70	0.18
+GS	unit	omp	all	gix-lock	23.0.1	lib	65.73	0.18
+GS	unit	omp	all	polyval	0.7.3	lib	70.12	0.18
+GS	unit	omp	all	litemap	0.8.3	lib	82.64	0.18
+GS	unit	omp	all	ccm	0.5.0	lib	91.44	0.18
+GS	unit	omp	all	filetime	0.2.29	lib	129.35	0.18
+GS	unit	omp	all	const-random-macro	0.1.16	lib	216.31	0.18
+GS	unit	omp	all	stacker	0.1.25	lib	239.56	0.18
+GS	unit	omp	all	rustix	0.38.44	build-script	250.81	0.18
+GS	unit	omp	all	xmlwriter	0.1.0	lib	250.93	0.18
+GS	unit	omp	all	bytecount	0.6.9	lib	272.88	0.18
+GS	unit	omp	all	shlex	2.0.1	lib	2.29	0.17
+GS	unit	omp	all	libm	0.2.16	build-script	12.15	0.17
+GS	unit	omp	all	crc32fast	1.5.2	lib	13.00	0.17
+GS	unit	omp	all	ref-cast	1.0.27	build-script	25.11	0.17
+GS	unit	omp	all	getrandom	0.3.4	build-script	29.82	0.17
+GS	unit	omp	all	simdutf8	0.1.5	lib	36.69	0.17
+GS	unit	omp	all	faster-hex	0.10.1	lib	39.84	0.17
+GS	unit	omp	all	httpdate	1.0.3	lib	42.25	0.17
+GS	unit	omp	all	spin	0.9.9	lib	43.63	0.17
+GS	unit	omp	all	toml_writer	1.1.3+spec-1.1.0	lib	62.86	0.17
+GS	unit	omp	all	polyval	0.6.2	lib	63.83	0.17
+GS	unit	omp	all	bytecheck	0.8.3	lib	68.51	0.17
+GS	unit	omp	all	tinystr	0.8.4	lib	78.98	0.17
+GS	unit	omp	all	tree-sitter	0.25.10	build-script	93.54	0.17
+GS	unit	omp	all	async-task	4.7.1	lib	134.90	0.17
+GS	unit	omp	all	lock_api	0.4.14	lib	135.30	0.17
+GS	unit	omp	all	pyo3-ffi	0.29.3	build-script	136.77	0.17
+GS	unit	omp	all	tracing	0.1.44	lib	142.77	0.17
+GS	unit	omp	all	async-signal	0.2.14	lib	146.80	0.17
+GS	unit	omp	all	piper	0.2.5	lib	149.10	0.17
+GS	unit	omp	all	tree-sitter-proto	0.4.0	build-script (run)	164.67	0.17
+GS	unit	omp	all	md-5	0.11.0	lib	227.70	0.17
+GS	unit	omp	all	keccak	0.1.6	lib	250.13	0.17
+GS	unit	omp	all	pico-args	0.5.0	lib	250.34	0.17
+GS	unit	omp	all	fast-float2	0.2.4	lib	250.76	0.17
+GS	unit	omp	all	find-msvc-tools	0.1.15	lib	2.47	0.16
+GS	unit	omp	all	serde_core	1.0.229	build-script	2.63	0.16
+GS	unit	omp	all	getrandom	0.4.3	lib	6.17	0.16
+GS	unit	omp	all	getrandom	0.2.17	lib	6.69	0.16
+GS	unit	omp	all	smallvec	1.16.3	lib	10.57	0.16
+GS	unit	omp	all	serde_core	1.0.229	build-script	11.74	0.16
+GS	unit	omp	all	rustix	1.1.5	build-script	15.32	0.16
+GS	unit	omp	all	tracing	0.1.44	lib	18.09	0.16
+GS	unit	omp	all	either	1.19.0	lib	29.43	0.16
+GS	unit	omp	all	httparse	1.10.1	build-script	37.08	0.16
+GS	unit	omp	all	logos-derive	0.15.1	lib	39.72	0.16
+GS	unit	omp	all	unicode-width	0.1.14	lib	45.04	0.16
+GS	unit	omp	all	gix-chunk	0.7.3	lib	61.89	0.16
+GS	unit	omp	all	libsqlite3-sys	0.38.2	build-script	65.73	0.16
+GS	unit	omp	all	spki	0.8.1	lib	90.33	0.16
+GS	unit	omp	all	rustls-platform-verifier	0.7.1	lib	127.04	0.16
+GS	unit	omp	all	gix-bitmap	0.3.3	lib	128.49	0.16
+GS	unit	omp	all	thread_local	1.1.10	lib	138.93	0.16
+GS	unit	omp	all	tree-sitter-ini	1.4.0	build-script (run)	169.74	0.16
+GS	unit	omp	all	peg-runtime	0.8.6	lib	213.19	0.16
+GS	unit	omp	all	hayro-ccitt	0.3.0	lib	229.90	0.16
+GS	unit	omp	all	ryu	1.0.23	lib	230.34	0.16
+GS	unit	omp	all	pest_derive	2.9.4	lib	264.04	0.16
+GS	unit	omp	all	bcrypt-pbkdf	0.11.0	lib	280.83	0.16
+GS	unit	omp	all	md5	0.8.1	lib	310.97	0.16
+GS	unit	omp	all	cmov	0.5.4	lib	6.85	0.15
+GS	unit	omp	all	log	0.4.34	lib	6.86	0.15
+GS	unit	omp	all	foldhash	0.2.0	lib	8.03	0.15
+GS	unit	omp	all	zeroize	1.9.1	lib	8.04	0.15
+GS	unit	omp	all	yoke	0.8.3	lib	11.99	0.15
+GS	unit	omp	all	litemap	0.8.3	lib	15.17	0.15
+GS	unit	omp	all	futures-channel	0.3.34	lib	22.50	0.15
+GS	unit	omp	all	either	1.19.0	lib	25.65	0.15
+GS	unit	omp	all	thiserror	1.0.69	build-script	35.42	0.15
+GS	unit	omp	all	memmap2	0.9.11	lib	41.73	0.15
+GS	unit	omp	all	unicase	2.10.0	lib	44.58	0.15
+GS	unit	omp	all	cipher	0.4.4	lib	50.26	0.15
+GS	unit	omp	all	crc	3.4.0	lib	63.14	0.15
+GS	unit	omp	all	gix-quote	0.7.2	lib	64.86	0.15
+GS	unit	omp	all	chacha20	0.9.1	lib	81.02	0.15
+GS	unit	omp	all	fs-set-times	0.20.3	lib	88.69	0.15
+GS	unit	omp	all	smallvec	1.16.3	lib	94.21	0.15
+GS	unit	omp	all	concurrent-queue	2.5.0	lib	103.23	0.15
+GS	unit	omp	all	unicase	2.10.0	lib	103.89	0.15
+GS	unit	omp	all	openssl-probe	0.2.1	lib	103.93	0.15
+GS	unit	omp	all	parking_lot_core	0.9.12	lib	137.28	0.15
+GS	unit	omp	all	tracing-log	0.2.0	lib	138.42	0.15
+GS	unit	omp	all	async-broadcast	0.7.2	lib	157.67	0.15
+GS	unit	omp	all	grep-matcher	0.1.9	lib	163.08	0.15
+GS	unit	omp	all	tree-sitter-elisp	1.7.2	build-script (run)	189.69	0.15
+GS	unit	omp	all	hayro-ccitt	0.4.0	lib	212.78	0.15
+GS	unit	omp	all	zbus-lockstep	0.5.2	lib	218.09	0.15
+GS	unit	omp	all	curve25519-dalek	5.0.0	build-script	227.33	0.15
+GS	unit	omp	all	bigdecimal	0.4.11	build-script	228.54	0.15
+GS	unit	omp	all	omp-http	2.0.0	lib	319.57	0.15
+GS	unit	omp	all	once_cell	1.21.4	lib	6.42	0.14
+GS	unit	omp	all	byteorder	1.5.0	lib	11.43	0.14
+GS	unit	omp	all	digest	0.10.7	lib	11.56	0.14
+GS	unit	omp	all	percent-encoding	2.3.2	lib	12.24	0.14
+GS	unit	omp	all	crossbeam-utils	0.8.23	build-script	12.33	0.14
+GS	unit	omp	all	heck	0.5.0	lib	22.36	0.14
+GS	unit	omp	all	anyhow	1.0.104	build-script	30.57	0.14
+GS	unit	omp	all	itoa	1.0.18	lib	34.06	0.14
+GS	unit	omp	all	rand_core	0.9.5	lib	34.41	0.14
+GS	unit	omp	all	once_cell	1.21.4	lib	35.57	0.14
+GS	unit	omp	all	heapless	0.8.0	build-script	37.28	0.14
+GS	unit	omp	all	digest	0.10.7	lib	50.12	0.14
+GS	unit	omp	all	arrayvec	0.7.8	lib	50.88	0.14
+GS	unit	omp	all	time-core	0.1.9	lib	53.25	0.14
+GS	unit	omp	all	spki	0.7.3	lib	54.95	0.14
+GS	unit	omp	all	time-core	0.1.9	lib	55.98	0.14
+GS	unit	omp	all	powerfmt	0.2.1	lib	56.12	0.14
+GS	unit	omp	all	toml_datetime	1.1.2+spec-1.1.0	lib	60.15	0.14
+GS	unit	omp	all	rusticata-macros	4.1.0	lib	61.09	0.14
+GS	unit	omp	all	zstd-safe	7.3.0	lib	62.72	0.14
+GS	unit	omp	all	linkme-impl	0.3.37	build-script	68.10	0.14
+GS	unit	omp	all	io-lifetimes	3.0.1	build-script	68.36	0.14
+GS	unit	omp	all	audiopus_sys	0.2.2	build-script	75.30	0.14
+GS	unit	omp	all	foldhash	0.1.5	lib	82.35	0.14
+GS	unit	omp	all	supports-hyperlinks	3.2.0	lib	82.50	0.14
+GS	unit	omp	all	kstring	2.0.5	lib	92.74	0.14
+GS	unit	omp	all	cap-std	4.0.3	build-script	94.03	0.14
+GS	unit	omp	all	maybe-owned	0.3.4	lib	94.23	0.14
+GS	unit	omp	all	anstyle-parse	1.0.0	lib	104.26	0.14
+GS	unit	omp	all	omp-vocab	2.0.0	lib	132.35	0.14
+GS	unit	omp	all	byteorder	1.5.0	lib	134.22	0.14
+GS	unit	omp	all	group	0.14.0	lib	136.45	0.14
+GS	unit	omp	all	base16ct	1.0.0	lib	140.35	0.14
+GS	unit	omp	all	zeroize	1.9.1	lib	149.56	0.14
+GS	unit	omp	all	primefield	0.14.0	lib	157.17	0.14
+GS	unit	omp	all	pcre2-sys	0.2.10	build-script	159.53	0.14
+GS	unit	omp	all	tree-sitter-vue-next	0.1.0	build-script	161.73	0.14
+GS	unit	omp	all	tree-sitter-c	0.24.2	build-script	161.86	0.14
+GS	unit	omp	all	tree-sitter-powershell	0.26.4	build-script	162.11	0.14
+GS	unit	omp	all	ucd-trie	0.1.7	lib	163.13	0.14
+GS	unit	omp	all	tiny-keccak	2.0.2	lib	206.73	0.14
+GS	unit	omp	all	crc32fast	1.5.2	lib	224.98	0.14
+GS	unit	omp	all	encoding_rs_io	0.1.8	lib	227.19	0.14
+GS	unit	omp	all	urlencoding	2.1.3	lib	229.26	0.14
+GS	unit	omp	all	module-lattice	0.2.3	lib	298.43	0.14
+GS	unit	omp	all	omp-app	2.0.0	build-script	339.95	0.14
+GS	unit	omp	all	serde	1.0.229	build-script	4.67	0.13
+GS	unit	omp	all	const-oid	0.10.2	lib	19.38	0.13
+GS	unit	omp	all	heapless	0.9.3	build-script	27.98	0.13
+GS	unit	omp	all	fastrand	2.5.0	lib	30.11	0.13
+GS	unit	omp	all	bitflags	2.13.2	lib	42.78	0.13
+GS	unit	omp	all	tonic-prost	0.14.6	lib	63.29	0.13
+GS	unit	omp	all	io-lifetimes	2.0.4	build-script	68.24	0.13
+GS	unit	omp	all	io-extras	0.19.0	build-script	73.81	0.13
+GS	unit	omp	all	siphasher	1.0.4	lib	74.11	0.13
+GS	unit	omp	all	supports-color	3.0.2	lib	74.32	0.13
+GS	unit	omp	all	hash32	0.2.1	lib	81.83	0.13
+GS	unit	omp	all	cap-primitives	4.0.3	build-script (run)	85.35	0.13
+GS	unit	omp	all	cobs	0.3.0	lib	94.01	0.13
+GS	unit	omp	all	enumflags2	0.7.12	lib	102.40	0.13
+GS	unit	omp	all	psm	0.1.24	build-script	103.66	0.13
+GS	unit	omp	all	shell-words	1.1.1	lib	123.30	0.13
+GS	unit	omp	all	zcheapstr	1.1.0	lib	128.65	0.13
+GS	unit	omp	all	color_quant	1.1.0	lib	133.74	0.13
+GS	unit	omp	all	tree-sitter-cmake	0.7.5	build-script	160.65	0.13
+GS	unit	omp	all	tree-sitter-md	0.5.3	build-script	160.95	0.13
+GS	unit	omp	all	tree-sitter-zig	1.1.2	build-script	161.11	0.13
+GS	unit	omp	all	tree-sitter-php	0.24.2	build-script	161.24	0.13
+GS	unit	omp	all	tree-sitter-python	0.25.0	build-script	161.37	0.13
+GS	unit	omp	all	tree-sitter-verilog	1.0.3	build-script	161.50	0.13
+GS	unit	omp	all	tree-sitter-lua	0.5.0	build-script	161.60	0.13
+GS	unit	omp	all	tree-sitter-cpp	0.23.4	build-script	161.78	0.13
+GS	unit	omp	all	tree-sitter-ocaml	0.24.2	build-script	161.87	0.13
+GS	unit	omp	all	tree-sitter-nix	0.3.0	build-script	161.91	0.13
+GS	unit	omp	all	tree-sitter-dockerfile-updated	0.2.0	build-script	162.12	0.13
+GS	unit	omp	all	tree-sitter-ini	1.4.0	build-script	162.15	0.13
+GS	unit	omp	all	tree-sitter-elixir	0.3.5	build-script	162.25	0.13
+GS	unit	omp	all	tree-sitter-svelte-next	0.1.1	build-script	162.25	0.13
+GS	unit	omp	all	tree-sitter-r	1.3.0	build-script	162.28	0.13
+GS	unit	omp	all	tree-sitter-toml-ng	0.7.0	build-script	162.50	0.13
+GS	unit	omp	all	tree-sitter-css	0.25.0	build-script	162.64	0.13
+GS	unit	omp	all	tree-sitter-c-sharp	0.23.5	build-script	162.74	0.13
+GS	unit	omp	all	tree-sitter-just	0.2.0	build-script	162.89	0.13
+GS	unit	omp	all	omp-vocab	2.0.0	lib	207.25	0.13
+GS	unit	omp	all	io-close	0.3.7	lib	228.69	0.13
+GS	unit	omp	all	include_dir	0.7.4	lib	237.96	0.13
+GS	unit	omp	all	argmax	0.3.1	lib	254.88	0.13
+GS	unit	omp	all	russh-cryptovec	0.62.0	lib	304.82	0.13
+GS	unit	omp	all	linked-hash-map	0.5.6	lib	310.57	0.13
+GS	unit	omp	all	protobuf	3.7.2	build-script	310.85	0.13
+GS	unit	omp	all	itoa	1.0.18	lib	10.73	0.12
+GS	unit	omp	all	crc32fast	1.5.2	build-script	12.47	0.12
+GS	unit	omp	all	zmij	1.0.23	build-script	14.17	0.12
+GS	unit	omp	all	potential_utf	0.1.6	lib	15.57	0.12
+GS	unit	omp	all	form_urlencoded	1.2.2	lib	21.48	0.12
+GS	unit	omp	all	sha2-asm	0.6.4	build-script	22.41	0.12
+GS	unit	omp	all	futures-task	0.3.34	lib	22.89	0.12
+GS	unit	omp	all	same-file	1.0.6	lib	25.80	0.12
+GS	unit	omp	all	base16ct	0.2.0	lib	60.01	0.12
+GS	unit	omp	all	siphasher	1.0.4	lib	60.02	0.12
+GS	unit	omp	all	curve25519-dalek	4.1.3	build-script	67.58	0.12
+GS	unit	omp	all	ctr	0.10.1	lib	81.58	0.12
+GS	unit	omp	all	omp-catalog	2.0.0	build-script (run)	95.30	0.12
+GS	unit	omp	all	enumflags2	0.7.12	lib	102.28	0.12
+GS	unit	omp	all	anstyle-query	1.1.5	lib	123.43	0.12
+GS	unit	omp	all	stacker	0.1.25	build-script	129.28	0.12
+GS	unit	omp	all	percent-encoding	2.3.2	lib	134.36	0.12
+GS	unit	omp	all	async-channel	2.5.0	lib	137.16	0.12
+GS	unit	omp	all	crunchy	0.2.4	build-script	140.17	0.12
+GS	unit	omp	all	tree-sitter-regex	0.25.0	build-script	160.60	0.12
+GS	unit	omp	all	tree-sitter-bash	0.25.1	build-script	160.78	0.12
+GS	unit	omp	all	tree-sitter-objc	3.0.2	build-script	160.83	0.12
+GS	unit	omp	all	tree-sitter-scala	0.26.3	build-script	161.08	0.12
+GS	unit	omp	all	tree-sitter-dart	0.2.0	build-script	161.20	0.12
+GS	unit	omp	all	tree-sitter-starlark	1.3.0	build-script	161.31	0.12
+GS	unit	omp	all	tree-sitter-elisp	1.7.2	build-script	161.36	0.12
+GS	unit	omp	all	tree-sitter-kotlin-sg	0.4.1	build-script	161.43	0.12
+GS	unit	omp	all	tree-sitter-javascript	0.25.0	build-script	161.47	0.12
+GS	unit	omp	all	tree-sitter-fortran	0.6.0	build-script	161.62	0.12
+GS	unit	omp	all	tree-sitter-ruby	0.23.1	build-script	161.66	0.12
+GS	unit	omp	all	tree-sitter-xml	0.7.0	build-script	161.74	0.12
+GS	unit	omp	all	tree-sitter-haskell	0.23.1	build-script	161.99	0.12
+GS	unit	omp	all	tree-sitter-sequel	0.3.11	build-script	162.00	0.12
+GS	unit	omp	all	tree-sitter-clojure	0.1.0	build-script	162.39	0.12
+GS	unit	omp	all	tree-sitter-astro-next	0.1.1	build-script	162.41	0.12
+GS	unit	omp	all	tree-sitter-rust	0.24.2	build-script	162.62	0.12
+GS	unit	omp	all	tree-sitter-odin	1.3.0	build-script	162.74	0.12
+GS	unit	omp	all	tree-sitter-hcl	1.1.0	build-script	162.77	0.12
+GS	unit	omp	all	tree-sitter-swift	0.7.4	build-script	162.98	0.12
+GS	unit	omp	all	crc32fast	1.5.2	build-script	163.10	0.12
+GS	unit	omp	all	inotify-sys	0.1.8	build-script	163.27	0.12
+GS	unit	omp	all	zbus-lockstep	0.5.2	lib	206.42	0.12
+GS	unit	omp	all	os_pipe	1.2.3	lib	249.72	0.12
+GS	unit	omp	all	subtle	2.6.1	lib	5.41	0.11
+GS	unit	omp	all	getrandom	0.4.3	build-script	5.99	0.11
+GS	unit	omp	all	futures-core	0.3.34	lib	11.22	0.11
+GS	unit	omp	all	icu_properties_data	2.3.0	lib	19.60	0.11
+GS	unit	omp	all	digest	0.11.3	lib	21.32	0.11
+GS	unit	omp	all	slab	0.4.12	lib	21.37	0.11
+GS	unit	omp	all	foldhash	0.2.0	lib	34.20	0.11
+GS	unit	omp	all	getrandom	0.4.3	build-script	37.34	0.11
+GS	unit	omp	all	getrandom	0.4.3	lib	38.89	0.11
+GS	unit	omp	all	tower-layer	0.3.3	lib	43.77	0.11
+GS	unit	omp	all	yoke	0.8.3	lib	57.71	0.11
+GS	unit	omp	all	hyper-timeout	0.5.2	lib	58.58	0.11
+GS	unit	omp	all	group	0.13.0	lib	60.79	0.11
+GS	unit	omp	all	crossbeam-epoch	0.9.21	build-script	62.94	0.11
+GS	unit	omp	all	nonempty	0.12.0	lib	63.03	0.11
+GS	unit	omp	all	object	0.37.3	build-script	63.05	0.11
+GS	unit	omp	all	parking	2.2.1	lib	65.33	0.11
+GS	unit	omp	all	crossbeam-deque	0.8.8	build-script	65.37	0.11
+GS	unit	omp	all	aes-gcm	0.10.3	lib	69.17	0.11
+GS	unit	omp	all	crossbeam-deque	0.8.8	lib	69.28	0.11
+GS	unit	omp	all	heapless	0.7.17	build-script	72.37	0.11
+GS	unit	omp	all	unicode-bom	2.0.3	lib	73.49	0.11
+GS	unit	omp	all	utf-8	0.7.6	lib	73.61	0.11
+GS	unit	omp	all	backtrace-ext	0.2.1	lib	77.40	0.11
+GS	unit	omp	all	bit-set	0.8.0	lib	104.15	0.11
+GS	unit	omp	all	phf_generator	0.14.0	lib	106.67	0.11
+GS	unit	omp	all	icu_properties_data	2.3.0	lib	115.78	0.11
+GS	unit	omp	all	prettyplease	0.3.0	build-script	151.26	0.11
+GS	unit	omp	all	tree-sitter-julia	0.23.1	build-script	160.72	0.11
+GS	unit	omp	all	tree-sitter-typescript	0.23.2	build-script	160.89	0.11
+GS	unit	omp	all	tree-sitter-graphql	0.1.0	build-script	161.00	0.11
+GS	unit	omp	all	tree-sitter-html	0.23.2	build-script	161.24	0.11
+GS	unit	omp	all	tree-sitter-tlaplus	1.5.0	build-script	161.55	0.11
+GS	unit	omp	all	tree-sitter-diff	0.1.0	build-script	162.03	0.11
+GS	unit	omp	all	tree-sitter-json	0.24.8	build-script	162.39	0.11
+GS	unit	omp	all	tree-sitter-make	1.1.1	build-script	162.51	0.11
+GS	unit	omp	all	tree-sitter-go	0.25.0	build-script	162.53	0.11
+GS	unit	omp	all	tree-sitter-yaml	0.7.2	build-script	162.63	0.11
+GS	unit	omp	all	tree-sitter-solidity	1.2.13	build-script	162.86	0.11
+GS	unit	omp	all	tree-sitter-proto	0.4.0	build-script	162.87	0.11
+GS	unit	omp	all	tree-sitter-java	0.23.5	build-script	162.97	0.11
+GS	unit	omp	all	tree-sitter-erlang	0.16.0	build-script	163.02	0.11
+GS	unit	omp	all	tree-sitter-graphql	0.1.0	build-script (run)	191.37	0.11
+GS	unit	omp	all	wnaf	0.14.1	lib	206.56	0.11
+GS	unit	omp	all	getrandom	0.2.17	lib	212.12	0.11
+GS	unit	omp	all	simd-adler32	0.3.10	lib	213.30	0.11
+GS	unit	omp	all	gethostname	1.1.0	lib	227.87	0.11
+GS	unit	omp	all	ahash	0.8.12	build-script	228.62	0.11
+GS	unit	omp	all	constant_time_eq	0.4.2	lib	229.15	0.11
+GS	unit	omp	all	phf	0.13.1	lib	239.45	0.11
+GS	unit	omp	all	xxhash-rust	0.8.19	lib	273.41	0.11
+GS	unit	omp	all	block-buffer	0.12.1	lib	8.93	0.10
+GS	unit	omp	all	block-buffer	0.10.4	lib	11.35	0.10
+GS	unit	omp	all	utf8_iter	1.0.4	lib	17.52	0.10
+GS	unit	omp	all	want	0.3.2	lib	39.74	0.10
+GS	unit	omp	all	multimap	0.10.1	lib	48.59	0.10
+GS	unit	omp	all	core_detect	1.0.0	lib	55.91	0.10
+GS	unit	omp	all	terminal_size	0.4.4	lib	59.36	0.10
+GS	unit	omp	all	aead	0.5.2	lib	61.90	0.10
+GS	unit	omp	all	icu_segmenter_data	2.3.0	build-script	62.85	0.10
+GS	unit	omp	all	ctr	0.9.2	lib	64.56	0.10
+GS	unit	omp	all	hmac	0.13.0	lib	65.01	0.10
+GS	unit	omp	all	rancor	0.1.3	lib	65.89	0.10
+GS	unit	omp	all	im	15.1.0	build-script	67.79	0.10
+GS	unit	omp	all	fallible-streaming-iterator	0.1.9	lib	83.49	0.10
+GS	unit	omp	all	supports-unicode	3.0.0	lib	83.97	0.10
+GS	unit	omp	all	aes-gcm	0.11.1	lib	86.88	0.10
+GS	unit	omp	all	io-extras	0.19.0	lib	88.84	0.10
+GS	unit	omp	all	cbc	0.1.2	lib	93.44	0.10
+GS	unit	omp	all	utf8_iter	1.0.4	lib	94.14	0.10
+GS	unit	omp	all	zcheapstr	1.1.0	lib	103.13	0.10
+GS	unit	omp	all	async-io	2.6.0	build-script	129.15	0.10
+GS	unit	omp	all	ff	0.14.0	lib	129.25	0.10
+GS	unit	omp	all	endi	1.1.1	lib	129.53	0.10
+GS	unit	omp	all	wayland-sys	0.31.11	build-script	132.49	0.10
+GS	unit	omp	all	wayland-backend	0.3.17	build-script	138.63	0.10
+GS	unit	omp	all	stacker	0.1.25	lib	156.08	0.10
+GS	unit	omp	all	pyo3	0.29.3	build-script	157.56	0.10
+GS	unit	omp	all	tree-sitter-regex	0.25.0	build-script (run)	196.74	0.10
+GS	unit	omp	all	phf_generator	0.13.1	lib	205.61	0.10
+GS	unit	omp	all	phf	0.14.0	lib	206.32	0.10
+GS	unit	omp	all	blowfish	0.10.0	lib	272.48	0.10
+GS	unit	omp	all	pollster	1.0.1	lib	273.06	0.10
+GS	unit	omp	all	parking_lot_core	0.9.12	build-script	6.33	0.09
+GS	unit	omp	all	generic-array	0.14.7	build-script	7.37	0.09
+GS	unit	omp	all	errno	0.3.14	lib	14.63	0.09
+GS	unit	omp	all	inout	0.2.5	lib	16.27	0.09
+GS	unit	omp	all	futures-io	0.3.34	lib	19.51	0.09
+GS	unit	omp	all	adler2	2.0.1	lib	26.84	0.09
+GS	unit	omp	all	http-body	1.1.0	lib	36.96	0.09
+GS	unit	omp	all	rand_core	0.10.1	lib	37.31	0.09
+GS	unit	omp	all	log	0.4.34	lib	42.68	0.09
+GS	unit	omp	all	pulldown-cmark	0.13.4	build-script	43.80	0.09
+GS	unit	omp	all	foldhash	0.1.5	lib	45.20	0.09
+GS	unit	omp	all	inout	0.1.4	lib	48.65	0.09
+GS	unit	omp	all	num-conv	0.2.2	lib	55.57	0.09
+GS	unit	omp	all	zstd-safe	7.3.0	build-script	56.05	0.09
+GS	unit	omp	all	multiversion_no_op	1.0.0	lib	56.14	0.09
+GS	unit	omp	all	signature	2.2.0	lib	67.70	0.09
+GS	unit	omp	all	is_ci	1.2.0	lib	73.72	0.09
+GS	unit	omp	all	linkme	0.3.37	build-script	74.02	0.09
+GS	unit	omp	all	potential_utf	0.1.6	lib	91.62	0.09
+GS	unit	omp	all	salsa20	0.11.0	lib	93.91	0.09
+GS	unit	omp	all	endi	1.1.1	lib	103.79	0.09
+GS	unit	omp	all	form_urlencoded	1.2.2	lib	135.11	0.09
+GS	unit	omp	all	tiny-keccak	2.0.2	build-script	150.39	0.09
+GS	unit	omp	all	futures-core	0.3.34	lib	150.48	0.09
+GS	unit	omp	all	opentelemetry-appender-tracing	0.32.0	lib	156.47	0.09
+GS	unit	omp	all	slotmap	1.1.1	build-script	160.50	0.09
+GS	unit	omp	all	strict-num	0.1.1	lib	163.27	0.09
+GS	unit	omp	all	rfc6979	0.6.0	lib	211.67	0.09
+GS	unit	omp	all	pcre2-sys	0.2.10	lib	216.49	0.09
+GS	unit	omp	all	logos	0.15.1	lib	249.26	0.09
+GS	unit	omp	all	unit-prefix	0.5.2	lib	250.67	0.09
+GS	unit	omp	all	rand_core	0.10.1	lib	5.91	0.08
+GS	unit	omp	all	tree-sitter-language	0.1.9	build-script	7.01	0.08
+GS	unit	omp	all	zerofrom	0.1.8	lib	11.92	0.08
+GS	unit	omp	all	icu_properties_data	2.3.0	build-script	14.15	0.08
+GS	unit	omp	all	icu_normalizer_data	2.3.0	build-script	14.29	0.08
+GS	unit	omp	all	serde_json	1.0.154	build-script	15.10	0.08
+GS	unit	omp	all	block-padding	0.4.2	lib	15.68	0.08
+GS	unit	omp	all	num-traits	0.2.19	build-script	17.04	0.08
+GS	unit	omp	all	hash32	0.3.1	lib	18.12	0.08
+GS	unit	omp	all	dyn-clone	1.0.20	lib	29.54	0.08
+GS	unit	omp	all	rustls	0.23.46	build-script	36.87	0.08
+GS	unit	omp	all	logos-codegen	0.15.1	build-script	37.25	0.08
+GS	unit	omp	all	faster-hex	0.10.1	build-script (run)	38.81	0.08
+GS	unit	omp	all	memoffset	0.7.1	build-script	42.60	0.08
+GS	unit	omp	all	generic-array	0.14.7	build-script	43.66	0.08
+GS	unit	omp	all	prettyplease	0.2.37	build-script	43.88	0.08
+GS	unit	omp	all	logos	0.16.1	lib	47.71	0.08
+GS	unit	omp	all	logos	0.15.1	lib	47.94	0.08
+GS	unit	omp	all	hmac	0.12.1	lib	49.98	0.08
+GS	unit	omp	all	encoding_rs	0.8.42	build-script	52.28	0.08
+GS	unit	omp	all	num-conv	0.2.2	lib	53.24	0.08
+GS	unit	omp	all	zerofrom	0.1.8	lib	55.16	0.08
+GS	unit	omp	all	ff	0.13.1	lib	59.46	0.08
+GS	unit	omp	all	icu_locale_fallback_data	2.3.0	build-script	59.93	0.08
+GS	unit	omp	all	hkdf	0.12.4	lib	61.23	0.08
+GS	unit	omp	all	serde_spanned	1.1.2	lib	62.45	0.08
+GS	unit	omp	all	zstd-sys	2.1.2+zstd.1.5.7	lib	62.63	0.08
+GS	unit	omp	all	substring	1.4.5	build-script	73.13	0.08
+GS	unit	omp	all	aead	0.6.1	lib	81.69	0.08
+GS	unit	omp	all	unicode-ident	1.0.27	lib	83.89	0.08
+GS	unit	omp	all	async-stream	0.3.6	lib	104.39	0.08
+GS	unit	omp	all	idna_adapter	1.2.2	lib	131.35	0.08
+GS	unit	omp	all	hash32	0.3.1	lib	135.21	0.08
+GS	unit	omp	all	dlib	0.5.3	lib	136.94	0.08
+GS	unit	omp	all	signature	3.0.0	lib	138.26	0.08
+GS	unit	omp	all	tracing-serde	0.2.0	lib	138.34	0.08
+GS	unit	omp	all	omp-py-link	2.0.0	lib	141.37	0.08
+GS	unit	omp	all	phf_codegen	0.14.0	lib	148.41	0.08
+GS	unit	omp	all	hkdf	0.13.0	lib	148.82	0.08
+GS	unit	omp	all	wayland-client	0.31.15	build-script	150.57	0.08
+GS	unit	omp	all	float-cmp	0.9.0	lib	163.21	0.08
+GS	unit	omp	all	typed-arena	2.0.2	lib	213.35	0.08
+GS	unit	omp	all	ecb	0.2.1	lib	227.98	0.08
+GS	unit	omp	all	bigdecimal	0.4.11	build-script (run)	238.36	0.08
+GS	unit	omp	all	keccak	0.2.2	lib	249.83	0.08
+GS	unit	omp	all	sponge-cursor	0.1.0	lib	250.99	0.08
+GS	unit	omp	all	self_cell	1.3.0	lib	273.37	0.08
+GS	unit	omp	all	shake	0.1.0	lib	295.25	0.08
+GS	unit	omp	all	unscanny	0.1.0	lib	298.62	0.08
+GS	unit	omp	all	proc-macro2	1.0.107	build-script (run)	2.45	0.07
+GS	unit	omp	all	num-traits	0.2.19	build-script (run)	18.05	0.07
+GS	unit	omp	all	idna_adapter	1.2.2	lib	21.30	0.07
+GS	unit	omp	all	heapless	0.9.3	build-script (run)	28.36	0.07
+GS	unit	omp	all	atomic-waker	1.1.2	lib	29.59	0.07
+GS	unit	omp	all	faster-hex	0.10.1	build-script	37.47	0.07
+GS	unit	omp	all	beef	0.5.2	lib	38.07	0.07
+GS	unit	omp	all	webpki-roots	1.0.9	lib	42.55	0.07
+GS	unit	omp	all	block-padding	0.3.3	lib	48.51	0.07
+GS	unit	omp	all	gix-hashtable	0.15.2	lib	49.92	0.07
+GS	unit	omp	all	universal-hash	0.5.1	lib	55.24	0.07
+GS	unit	omp	all	cbc	0.2.1	lib	65.11	0.07
+GS	unit	omp	all	md-5	0.10.6	lib	72.48	0.07
+GS	unit	omp	all	rayon-core	1.13.0	build-script	73.94	0.07
+GS	unit	omp	all	io-lifetimes	3.0.1	lib	78.85	0.07
+GS	unit	omp	all	pbkdf2	0.13.0	lib	78.92	0.07
+GS	unit	omp	all	io-lifetimes	2.0.4	lib	78.92	0.07
+GS	unit	omp	all	waitgroup	0.1.2	lib	81.50	0.07
+GS	unit	omp	all	chacha20poly1305	0.10.1	lib	88.62	0.07
+GS	unit	omp	all	x25519-dalek	2.0.1	lib	88.94	0.07
+GS	unit	omp	all	substring	1.4.5	lib	89.01	0.07
+GS	unit	omp	all	cap-std	4.0.3	build-script (run)	94.86	0.07
+GS	unit	omp	all	event-listener-strategy	0.5.4	lib	106.78	0.07
+GS	unit	omp	all	dyn-clone	1.0.20	lib	139.28	0.07
+GS	unit	omp	all	ident_case	1.0.1	lib	140.29	0.07
+GS	unit	omp	all	tree-sitter-json	0.24.8	build-script (run)	169.41	0.07
+GS	unit	omp	all	adler2	2.0.1	lib	213.12	0.07
+GS	unit	omp	all	tree-sitter-ocaml	0.24.2	lib	224.14	0.07
+GS	unit	omp	all	tree-sitter-verilog	1.0.3	lib	224.17	0.07
+GS	unit	omp	all	tree-sitter-swift	0.7.4	lib	224.82	0.07
+GS	unit	omp	all	codepage	0.1.3	lib	248.24	0.07
+GS	unit	omp	all	russh-util	0.52.0	lib	310.09	0.07
+GS	unit	omp	all	thiserror	2.0.21	build-script (run)	7.27	0.06
+GS	unit	omp	all	crypto-common	0.1.7	lib	8.57	0.06
+GS	unit	omp	all	rustix	1.1.5	build-script (run)	15.49	0.06
+GS	unit	omp	all	futures-sink	0.3.34	lib	21.26	0.06
+GS	unit	omp	all	untrusted	0.9.0	lib	29.78	0.06
+GS	unit	omp	all	strum	0.28.0	lib	30.00	0.06
+GS	unit	omp	all	gix-trace	0.1.21	lib	30.18	0.06
+GS	unit	omp	all	anyhow	1.0.104	build-script (run)	30.71	0.06
+GS	unit	omp	all	rustix	1.1.5	build-script (run)	43.92	0.06
+GS	unit	omp	all	block-buffer	0.10.4	lib	49.80	0.06
+GS	unit	omp	all	crypto-common	0.1.7	lib	49.86	0.06
+GS	unit	omp	all	alloc-no-stdlib	2.0.4	lib	55.66	0.06
+GS	unit	omp	all	alloc-stdlib	0.2.4	lib	57.65	0.06
+GS	unit	omp	all	crc-catalog	2.5.0	lib	62.79	0.06
+GS	unit	omp	all	ptr_meta	0.3.2	lib	63.42	0.06
+GS	unit	omp	all	universal-hash	0.6.1	lib	65.15	0.06
+GS	unit	omp	all	ghash	0.5.1	lib	65.67	0.06
+GS	unit	omp	all	rfc6979	0.4.0	lib	67.12	0.06
+GS	unit	omp	all	munge	0.4.7	lib	75.49	0.06
+GS	unit	omp	all	ghash	0.6.0	lib	76.90	0.06
+GS	unit	omp	all	core_maths	0.1.1	lib	81.77	0.06
+GS	unit	omp	all	linkme	0.3.37	lib	88.92	0.06
+GS	unit	omp	all	audiopus_sys	0.2.2	lib	95.23	0.06
+GS	unit	omp	all	matchers	0.2.0	lib	138.57	0.06
+GS	unit	omp	all	strum	0.28.0	lib	149.18	0.06
+GS	unit	omp	all	uluru	3.1.0	lib	212.06	0.06
+GS	unit	omp	all	linebender_resource_handle	0.1.1	lib	212.69	0.06
+GS	unit	omp	all	tree-sitter-scala	0.26.3	lib	223.85	0.06
+GS	unit	omp	all	tree-sitter-typescript	0.23.2	lib	223.86	0.06
+GS	unit	omp	all	tree-sitter-php	0.24.2	lib	223.92	0.06
+GS	unit	omp	all	tree-sitter-dart	0.2.0	lib	223.98	0.06
+GS	unit	omp	all	tree-sitter-fortran	0.6.0	lib	224.26	0.06
+GS	unit	omp	all	inotify-sys	0.1.8	lib	225.02	0.06
+GS	unit	omp	all	rustc-hash	2.1.3	lib	230.06	0.06
+GS	unit	omp	all	unicode-ccc	0.4.0	lib	230.50	0.06
+GS	unit	omp	all	unicode-bidi-mirroring	0.4.0	lib	231.60	0.06
+GS	unit	omp	all	unicode-vo	0.1.0	lib	251.06	0.06
+GS	unit	omp	all	hex-literal	1.1.0	lib	310.99	0.06
+GS	unit	omp	all	cfg-if	1.0.5	lib	2.24	0.05
+GS	unit	omp	all	scopeguard	1.2.0	lib	6.12	0.05
+GS	unit	omp	all	thiserror	2.0.21	lib	8.25	0.05
+GS	unit	omp	all	sha2-asm	0.6.4	lib	28.80	0.05
+GS	unit	omp	all	ref-cast	1.0.27	lib	30.06	0.05
+GS	unit	omp	all	thiserror	1.0.69	build-script (run)	35.58	0.05
+GS	unit	omp	all	fnv	1.0.7	lib	36.56	0.05
+GS	unit	omp	all	lazy_static	1.5.1	lib	38.02	0.05
+GS	unit	omp	all	try-lock	0.2.5	lib	39.69	0.05
+GS	unit	omp	all	sync_wrapper	1.0.2	lib	43.61	0.05
+GS	unit	omp	all	io-extras	0.19.0	build-script (run)	74.27	0.05
+GS	unit	omp	all	substring	1.4.5	build-script (run)	75.44	0.05
+GS	unit	omp	all	utf8parse	0.2.2	lib	103.88	0.05
+GS	unit	omp	all	psm	0.1.24	build-script (run)	104.47	0.05
+GS	unit	omp	all	async-io	2.6.0	build-script (run)	130.62	0.05
+GS	unit	omp	all	cpufeatures	0.3.1	lib	135.07	0.05
+GS	unit	omp	all	quick-error	2.0.1	lib	141.46	0.05
+GS	unit	omp	all	psm	0.1.24	lib	148.62	0.05
+GS	unit	omp	all	new_debug_unreachable	1.0.6	lib	149.69	0.05
+GS	unit	omp	all	downcast-rs	1.2.1	lib	149.75	0.05
+GS	unit	omp	all	scoped-tls	1.0.1	lib	151.21	0.05
+GS	unit	omp	all	slotmap	1.1.1	build-script (run)	196.84	0.05
+GS	unit	omp	all	tree-sitter-bash	0.25.1	lib	223.71	0.05
+GS	unit	omp	all	tree-sitter-cmake	0.7.5	lib	223.80	0.05
+GS	unit	omp	all	tree-sitter-objc	3.0.2	lib	223.81	0.05
+GS	unit	omp	all	tree-sitter-md	0.5.3	lib	223.90	0.05
+GS	unit	omp	all	tree-sitter-graphql	0.1.0	lib	223.96	0.05
+GS	unit	omp	all	tree-sitter-python	0.25.0	lib	224.08	0.05
+GS	unit	omp	all	tree-sitter-kotlin-sg	0.4.1	lib	224.09	0.05
+GS	unit	omp	all	tree-sitter-javascript	0.25.0	lib	224.21	0.05
+GS	unit	omp	all	tree-sitter-tlaplus	1.5.0	lib	224.23	0.05
+GS	unit	omp	all	tree-sitter-ruby	0.23.1	lib	224.32	0.05
+GS	unit	omp	all	tree-sitter-haskell	0.23.1	lib	224.41	0.05
+GS	unit	omp	all	tree-sitter-c	0.24.2	lib	224.42	0.05
+GS	unit	omp	all	tree-sitter-nix	0.3.0	lib	224.46	0.05
+GS	unit	omp	all	tree-sitter-sequel	0.3.11	lib	224.47	0.05
+GS	unit	omp	all	tree-sitter-powershell	0.26.4	lib	224.51	0.05
+GS	unit	omp	all	tree-sitter-dockerfile-updated	0.2.0	lib	224.56	0.05
+GS	unit	omp	all	tree-sitter-svelte-next	0.1.1	lib	224.64	0.05
+GS	unit	omp	all	tree-sitter-c-sharp	0.23.5	lib	224.79	0.05
+GS	unit	omp	all	tree-sitter-yaml	0.7.2	lib	224.80	0.05
+GS	unit	omp	all	tree-sitter-odin	1.3.0	lib	224.85	0.05
+GS	unit	omp	all	tree-sitter-hcl	1.1.0	lib	224.88	0.05
+GS	unit	omp	all	tree-sitter-solidity	1.2.13	lib	224.88	0.05
+GS	unit	omp	all	tree-sitter-java	0.23.5	lib	224.93	0.05
+GS	unit	omp	all	tree-sitter-erlang	0.16.0	lib	224.97	0.05
+GS	unit	omp	all	psm	0.1.24	lib	226.67	0.05
+GS	unit	omp	all	bon	3.10.2	lib	244.80	0.05
+GS	unit	omp	all	dunce	1.0.5	lib	272.87	0.05
+GS	unit	omp	all	maplit	1.0.2	lib	273.16	0.05
+GS	unit	omp	all	kem	0.3.0	lib	298.57	0.05
+GS	unit	omp	all	atspi	0.30.0	lib	302.90	0.05
+GS	unit	omp	all	pin-project-lite	0.2.17	lib	7.52	0.04
+GS	unit	omp	all	cpufeatures	0.3.1	lib	10.69	0.04
+GS	unit	omp	all	equivalent	1.0.3	lib	18.20	0.04
+GS	unit	omp	all	icu_normalizer_data	2.3.0	lib	19.71	0.04
+GS	unit	omp	all	tree-sitter-language	0.1.9	lib	21.60	0.04
+GS	unit	omp	all	cfg-if	1.0.5	lib	22.37	0.04
+GS	unit	omp	all	fnv	1.0.7	lib	29.50	0.04
+GS	unit	omp	all	thiserror	1.0.69	lib	36.65	0.04
+GS	unit	omp	all	tower-service	0.3.3	lib	37.40	0.04
+GS	unit	omp	all	lazy_static	1.5.1	lib	38.14	0.04
+GS	unit	omp	all	bitflags	1.3.2	lib	38.19	0.04
+GS	unit	omp	all	cpubits	0.1.1	lib	42.43	0.04
+GS	unit	omp	all	thiserror	2.0.21	lib	42.55	0.04
+GS	unit	omp	all	memoffset	0.7.1	build-script (run)	42.91	0.04
+GS	unit	omp	all	memoffset	0.7.1	lib	43.98	0.04
+GS	unit	omp	all	futures	0.3.34	lib	46.95	0.04
+GS	unit	omp	all	sha2-asm	0.6.4	lib	50.70	0.04
+GS	unit	omp	all	cpufeatures	0.2.17	lib	51.03	0.04
+GS	unit	omp	all	opaque-debug	0.3.1	lib	55.95	0.04
+GS	unit	omp	all	pin-project	1.1.13	lib	56.26	0.04
+GS	unit	omp	all	static_assertions	1.1.0	lib	60.13	0.04
+GS	unit	omp	all	icu_locale_fallback_data	2.3.0	lib	63.43	0.04
+GS	unit	omp	all	cfg_aliases	0.2.2	lib	94.17	0.04
+GS	unit	omp	all	ambient-authority	0.0.2	lib	94.36	0.04
+GS	unit	omp	all	icu_normalizer_data	2.3.0	lib	115.89	0.04
+GS	unit	omp	all	scopeguard	1.2.0	lib	133.45	0.04
+GS	unit	omp	all	ref-cast	1.0.27	lib	138.22	0.04
+GS	unit	omp	all	pin-project-lite	0.2.17	lib	141.33	0.04
+GS	unit	omp	all	crunchy	0.2.4	lib	156.79	0.04
+GS	unit	omp	all	precomputed-hash	0.1.1	lib	163.23	0.04
+GS	unit	omp	all	darling	0.24.1	lib	206.87	0.04
+GS	unit	omp	all	tree-sitter-julia	0.23.1	lib	223.37	0.04
+GS	unit	omp	all	tree-sitter-regex	0.25.0	lib	223.75	0.04
+GS	unit	omp	all	tree-sitter-zig	1.1.2	lib	224.00	0.04
+GS	unit	omp	all	tree-sitter-starlark	1.3.0	lib	224.03	0.04
+GS	unit	omp	all	tree-sitter-html	0.23.2	lib	224.05	0.04
+GS	unit	omp	all	tree-sitter-elisp	1.7.2	lib	224.13	0.04
+GS	unit	omp	all	tree-sitter-lua	0.5.0	lib	224.28	0.04
+GS	unit	omp	all	tree-sitter-cpp	0.23.4	lib	224.33	0.04
+GS	unit	omp	all	tree-sitter-vue-next	0.1.0	lib	224.37	0.04
+GS	unit	omp	all	tree-sitter-xml	0.7.0	lib	224.37	0.04
+GS	unit	omp	all	tree-sitter-elixir	0.3.5	lib	224.52	0.04
+GS	unit	omp	all	tree-sitter-diff	0.1.0	lib	224.56	0.04
+GS	unit	omp	all	tree-sitter-r	1.3.0	lib	224.60	0.04
+GS	unit	omp	all	tree-sitter-ini	1.4.0	lib	224.61	0.04
+GS	unit	omp	all	tree-sitter-clojure	0.1.0	lib	224.65	0.04
+GS	unit	omp	all	tree-sitter-json	0.24.8	lib	224.69	0.04
+GS	unit	omp	all	tree-sitter-make	1.1.1	lib	224.70	0.04
+GS	unit	omp	all	tree-sitter-astro-next	0.1.1	lib	224.73	0.04
+GS	unit	omp	all	tree-sitter-rust	0.24.2	lib	224.74	0.04
+GS	unit	omp	all	tree-sitter-toml-ng	0.7.0	lib	224.76	0.04
+GS	unit	omp	all	tree-sitter-go	0.25.0	lib	224.77	0.04
+GS	unit	omp	all	tree-sitter-css	0.25.0	lib	224.83	0.04
+GS	unit	omp	all	tree-sitter-just	0.2.0	lib	224.90	0.04
+GS	unit	omp	all	tree-sitter-proto	0.4.0	lib	224.92	0.04
+GS	unit	omp	all	debug_unsafe	0.1.4	lib	229.06	0.04
+GS	unit	omp	all	as-raw-xcb-connection	1.0.1	lib	231.56	0.04
+GS	unit	omp	all	peg	0.8.6	lib	237.34	0.04
+GS	unit	omp	all	const-random	0.1.18	lib	245.86	0.04
+GS	unit	omp	all	web-time	1.1.0	lib	250.30	0.04
+GS	unit	omp	all	rustix	0.38.44	build-script (run)	251.10	0.04
+GS	unit	omp	all	quote	1.0.47	build-script (run)	2.45	0.03
+GS	unit	omp	all	libc	0.2.191	build-script (run)	2.73	0.03
+GS	unit	omp	all	serde	1.0.229	build-script (run)	4.81	0.03
+GS	unit	omp	all	stable_deref_trait	1.2.1	lib	7.33	0.03
+GS	unit	omp	all	equivalent	1.0.3	lib	7.48	0.03
+GS	unit	omp	all	cpufeatures	0.2.17	lib	11.71	0.03
+GS	unit	omp	all	zerocopy	0.8.63	build-script (run)	24.36	0.03
+GS	unit	omp	all	heapless	0.8.0	build-script (run)	37.42	0.03
+GS	unit	omp	all	portable-atomic	1.15.0	build-script (run)	42.86	0.03
+GS	unit	omp	all	pin-utils	0.1.1	lib	44.55	0.03
+GS	unit	omp	all	stable_deref_trait	1.2.1	lib	53.00	0.03
+GS	unit	omp	all	object	0.37.3	build-script (run)	63.17	0.03
+GS	unit	omp	all	im	15.1.0	build-script (run)	68.57	0.03
+GS	unit	omp	all	curve25519-dalek	4.1.3	build-script (run)	69.14	0.03
+GS	unit	omp	all	heapless	0.7.17	build-script (run)	76.66	0.03
+GS	unit	omp	all	webpki-roots	0.26.11	lib	81.17	0.03
+GS	unit	omp	all	target-lexicon	0.13.5	build-script (run)	94.72	0.03
+GS	unit	omp	all	clap	4.6.7	lib	190.87	0.03
+GS	unit	omp	all	arrayref	0.3.9	lib	212.75	0.03
+GS	unit	omp	all	ahash	0.8.12	build-script (run)	238.33	0.03
+GS	unit	omp	all	curve25519-dalek	5.0.0	build-script (run)	238.99	0.03
+GS	unit	omp	all	windows-link	0.2.1	lib	326.67	0.03
+GS	unit	omp	all	libc	0.2.191	build-script (run)	2.47	0.02
+GS	unit	omp	all	serde_core	1.0.229	build-script (run)	2.78	0.02
+GS	unit	omp	all	getrandom	0.4.3	build-script (run)	6.10	0.02
+GS	unit	omp	all	generic-array	0.14.7	build-script (run)	7.46	0.02
+GS	unit	omp	all	serde_core	1.0.229	build-script (run)	11.89	0.02
+GS	unit	omp	all	crc32fast	1.5.2	build-script (run)	12.59	0.02
+GS	unit	omp	all	zmij	1.0.23	build-script (run)	14.60	0.02
+GS	unit	omp	all	ref-cast	1.0.27	build-script (run)	25.73	0.02
+GS	unit	omp	all	rustversion	1.0.23	build-script (run)	29.80	0.02
+GS	unit	omp	all	httparse	1.10.1	build-script (run)	37.23	0.02
+GS	unit	omp	all	logos-codegen	0.15.1	build-script (run)	37.44	0.02
+GS	unit	omp	all	getrandom	0.4.3	build-script (run)	37.45	0.02
+GS	unit	omp	all	generic-array	0.14.7	build-script (run)	43.90	0.02
+GS	unit	omp	all	oid-registry	0.7.1	build-script (run)	65.45	0.02
+GS	unit	omp	all	linkme-impl	0.3.37	build-script (run)	68.49	0.02
+GS	unit	omp	all	linkme	0.3.37	build-script (run)	74.24	0.02
+GS	unit	omp	all	nix	0.31.3	build-script (run)	112.10	0.02
+GS	unit	omp	all	stacker	0.1.25	build-script (run)	130.60	0.02
+GS	unit	omp	all	crunchy	0.2.4	build-script (run)	143.18	0.02
+GS	unit	omp	all	wayland-backend	0.3.17	build-script (run)	145.60	0.02
+GS	unit	omp	all	pyo3-ffi	0.29.3	build-script (run)	146.32	0.02
+GS	unit	omp	all	crc32fast	1.5.2	build-script (run)	163.40	0.02
+GS	unit	omp	all	pyo3	0.29.3	build-script (run)	206.54	0.02
+GS	unit	omp	all	protobuf	3.7.2	build-script (run)	312.93	0.02
+GS	unit	omp	all	omp-tui	2.0.0	build-script (run)	321.54	0.02
+GS	unit	omp	all	parking_lot_core	0.9.12	build-script (run)	6.50	0.01
+GS	unit	omp	all	tree-sitter-language	0.1.9	build-script (run)	7.20	0.01
+GS	unit	omp	all	libm	0.2.16	build-script (run)	12.31	0.01
+GS	unit	omp	all	crossbeam-utils	0.8.23	build-script (run)	12.46	0.01
+GS	unit	omp	all	icu_normalizer_data	2.3.0	build-script (run)	14.59	0.01
+GS	unit	omp	all	icu_properties_data	2.3.0	build-script (run)	14.62	0.01
+GS	unit	omp	all	serde_json	1.0.154	build-script (run)	15.56	0.01
+GS	unit	omp	all	getrandom	0.3.4	build-script (run)	29.99	0.01
+GS	unit	omp	all	rustls	0.23.46	build-script (run)	36.95	0.01
+GS	unit	omp	all	pulldown-cmark	0.13.4	build-script (run)	43.89	0.01
+GS	unit	omp	all	prettyplease	0.2.37	build-script (run)	43.97	0.01
+GS	unit	omp	all	encoding_rs	0.8.42	build-script (run)	54.62	0.01
+GS	unit	omp	all	icu_locale_fallback_data	2.3.0	build-script (run)	60.78	0.01
+GS	unit	omp	all	zstd-safe	7.3.0	build-script (run)	62.71	0.01
+GS	unit	omp	all	crossbeam-epoch	0.9.21	build-script (run)	63.11	0.01
+GS	unit	omp	all	icu_segmenter_data	2.3.0	build-script (run)	63.12	0.01
+GS	unit	omp	all	crossbeam-deque	0.8.8	build-script (run)	65.49	0.01
+GS	unit	omp	all	io-lifetimes	2.0.4	build-script (run)	68.37	0.01
+GS	unit	omp	all	io-lifetimes	3.0.1	build-script (run)	68.50	0.01
+GS	unit	omp	all	rayon-core	1.13.0	build-script (run)	74.26	0.01
+GS	unit	omp	all	wayland-sys	0.31.11	build-script (run)	136.05	0.01
+GS	unit	omp	all	prettyplease	0.3.0	build-script (run)	151.37	0.01
+GS	unit	omp	all	wayland-client	0.31.15	build-script (run)	152.66	0.01
+GS	unit	omp	all	tiny-keccak	2.0.2	build-script (run)	153.32	0.01
+GS	unit	omp	all	inotify-sys	0.1.8	build-script (run)	163.39	0.01
+GS	unit	omp	all	omp-app	2.0.0	build-script (run)	340.88	0.01
+GS	size-omp-dev	all	962006824	325394850	157528256	18462400	57	0
+GS	relink-omp	all	1	5.163	5.177
+GS	relink-omp	all	2	5.311	5.325
+GS	relink-omp	all	3	5.363	5.377

@@ -1,0 +1,6 @@
+#   Failed test 'fails an assertion'
+#   at outcomes.t line 6.
+#          got: '2'
+#     expected: '3'
+#   Failed test at outcomes.t line 15.
+# Looks like you failed 2 tests of 5.
