@@ -1,9 +1,7 @@
 //! Cargo build/test output filters.
 
-use std::{
-	collections::BTreeMap,
-	fmt::{NumBuffer, Write as _},
-};
+use core::fmt::NumBuffer;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use xutf::ToAnsiStripped as _;
 

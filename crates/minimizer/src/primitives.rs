@@ -1,6 +1,7 @@
 //! Reusable text transforms shared by minimizer filters.
 
-use std::{collections::BTreeMap, fmt::NumBuffer};
+use core::fmt::NumBuffer;
+use std::collections::BTreeMap;
 
 /// Named line budgets for head/tail caps, by the kind of output capped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
