@@ -1,4 +1,4 @@
-//! JUnit XML report normalization: one diagnostic per `<failure>` or `<error>`.
+//! `JUnit` XML normalization: one diagnostic per `<failure>` or `<error>`.
 //!
 //! Each dialect rule is pinned by a recorded report under `fixtures/junit`.
 //! nextest and jest-junit write every failed test as `<failure>` (panics,
@@ -23,7 +23,7 @@ use super::{Diagnostic, ParserInput, Severity, relative_path};
 /// `line` attribute is the zero-based `location[1]`.
 const PYTEST_REPORT: &str = "pytest tests";
 
-/// Why a JUnit report could not be read.
+/// Why a `JUnit` report could not be read.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum JunitError {
 	#[error("no <testsuites> or <testsuite> element")]
@@ -44,7 +44,7 @@ pub(super) enum JunitError {
 	},
 }
 
-/// Reads the JUnit XML report on stdout; stderr is the runner's console.
+/// Reads the `JUnit` XML report on stdout; stderr is the runner's console.
 ///
 /// `Ok` holds one diagnostic per `<failure>` or `<error>` in document order
 /// and is empty when no test failed. Unreadable input is an `Err` naming
