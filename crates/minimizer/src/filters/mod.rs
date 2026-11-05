@@ -6,6 +6,7 @@ pub mod cargo;
 pub mod generic;
 pub mod gh;
 pub mod git;
+pub mod glab;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
@@ -13,6 +14,7 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"git" | "yadm" => git::supports(subcommand),
 		"gh" => gh::supports(subcommand),
+		"glab" => glab::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
 		_ => false,
 	}
@@ -24,6 +26,7 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 	match ctx.program {
 		"git" | "yadm" => git::filter(ctx, input, exit_code),
 		"gh" => gh::filter(ctx, input, exit_code),
+		"glab" => glab::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
