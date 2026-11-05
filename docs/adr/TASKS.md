@@ -64,11 +64,16 @@ error. No council verdict is recorded.
   accepts only `rev == 1`, so a `tool.result@2` is refused as an unknown kind by every reader
   today. Choosing it later would require implementing and verifying revision-2 support first.
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
-- **ADR 0040 success criteria: DECIDED 2026-11-04.** Memory is relief, warm local peak minus
-  client peak, not the superseded client-to-local ratio. The owner must set a threshold and decision
-  rule; the harness must account for the serving envd by role, with bounds when shared. The §G1
-  data cannot establish a relief verdict. Warm wall time remains unjudgeable until a warm-state
-  product backend exists, coupled to the producer and reattach acceptance gate.
+- **ADR 0040 success criteria: DECIDED 2026-11-04.** Memory relief is warm local peak minus
+  client peak. The minimum is an absolute MiB quantity, not a fraction of local peak: a heavier
+  recipe could make the same unchanged client pass a fractional threshold. Set a separate minimum
+  for each recipe because `omp-envd`, `omp-core`, and `clippy` have substantially different local
+  peaks. When envd is shared, apply the criterion to the lower relief bound, least favourable to
+  passing. After the first valid quiet-host run, the owner must set the numeric threshold per recipe
+  and the repetition rule (all repetitions, median, or worst case). The §G1 data cannot establish a
+  relief verdict. The harness must account for the serving envd by role, with bounds when shared.
+  Warm wall time remains unjudgeable until a warm-state product backend exists, coupled to the
+  producer and reattach acceptance gate.
 - **ADR 0040 production gate: DECIDED 2026-11-04.** Build a product execution-job producer and a
   real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
   and result persistence require that producer. ADR 0047 is the proposed agent-build companion;

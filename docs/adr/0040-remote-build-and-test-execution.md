@@ -1517,8 +1517,14 @@ What is measured:
     excludes its unallocatable RSS and the upper includes all of it. Subtract these bounds in
     reverse order from the local peak to report a relief interval, not a point estimate.
     Report each repetition and its cache and attachment state; do not average incompatible arms.
-    The owner must set the minimum acceptable relief and the repetition/interval decision rule.
-    Until then there is no pass/fail memory criterion. The current `measure-recipe.py` reports
+    The decision rule uses an absolute minimum in MiB, not a fraction of the local peak. A fractional
+    threshold would again let a heavier recipe make the same unchanged client pass. Set a separate
+    threshold for each recipe: `omp-envd`, `omp-core`, and `clippy` have substantially different
+    local peaks. Apply the threshold to the lower relief bound, the end least favourable to passing,
+    so a shared envd cannot flatter the result. After the first valid quiet-host run, the owner must
+    set the numeric threshold for each recipe and the repetition rule (all repetitions, median, or
+    worst case). The existing §G1 figures cannot support a relief verdict. Until then there is no
+    pass/fail memory criterion. The current `measure-recipe.py` reports
     tree RSS only and cannot calculate the role-inclusive bound; the harness must capture it
     before this measure is computable. Prior §G1 client figures may omit envd.
   - Warm remote wall time remains within 1.5× warm local wall time. It is unjudgeable for the
@@ -1637,11 +1643,13 @@ None touches a backend.
 6. **`.gitignore`.** Change `/vendor/` to `/vendor`, so the worktrees' `vendor` symlink stops
    showing as untracked? It is a separate one-line change.
 7. **Success criteria for `omp-envd`: DECIDED 2026-11-04.** Adopt relief, local peak minus
-   client peak. It answers what offloading gives back, unlike the former client-to-local ratio
-   whose outcome changes with recipe size even if the client does not. The owner still must set
-   a relief threshold and decision rule; role-inclusive envd accounting is also missing from the
-   harness. Warm wall time remains unjudgeable until a warm-state backend exists. See Measurement
-   plan and Gap to acceptance.
+   client peak. The threshold is absolute, not a fraction of local peak, and is set per recipe.
+   Apply it to the lower relief bound when envd is shared. A fractional threshold would let a
+   heavier recipe make the same unchanged client pass. After the first valid quiet-host run, the
+   owner must set the numeric threshold for each recipe and the repetition rule (all repetitions,
+   median, or worst case). The §G1 figures cannot support a relief verdict. Role-inclusive envd
+   accounting is also missing from the harness. Warm wall time remains unjudgeable until a
+   warm-state backend exists. See Measurement plan and Gap to acceptance.
 8. **Scope of the production gate: DECIDED 2026-11-04.** Build the execution-job producer and a
    real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
    and result persistence need a product-created journaled job, not library-only tests of unused

@@ -81,9 +81,13 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
 CI invocation dispatched and 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af`
 (PR #339). Two `omp-envd` repetitions through the omp REAPI backend were recorded on 2026-10-24;
 both compiled and ran the suite but failed the same three tests ([audit §G1](../audits/remote-verification-trial.md#g1-through-the-omp-reapi-backend-omp-envd-2026-10-24)).
-Open: `BuildExecutionPort` is explicitly deferred. ADR 0040 now measures memory relief, not the
-superseded client-memory ratio; its threshold and role-inclusive measurement remain open. Warm
-wall-time acceptance requires a warm-state product backend.
+The proposed `BuildExecutionPort` is rejected, not pending work. Decision item 2 rejects its
+proposed form; Context explains that it conflates build system, execution environment, provider,
+cache, CI orchestrator, and artifact store, contrary to ADR 0040 R3, ADR 0003, and ADR 0010.
+Instead, `omp-exec` holds `ExecutionRequest`, `ExecutionBackend`, `place()`, and `BuildReport`,
+with the four separate backends named above. ADR 0040 now measures memory relief, not the
+superseded client-memory ratio; its numeric thresholds, repetition rule, and role-inclusive
+measurement remain open. Warm wall-time acceptance requires a warm-state product backend.
 
 ## References
 
