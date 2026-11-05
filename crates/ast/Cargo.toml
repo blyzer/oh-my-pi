@@ -154,3 +154,11 @@ zstd.workspace = true
 [[example]]
 name = "grammar_probe"
 required-features = ["grammars-all", "wasm"]
+
+[[example]]
+name = "wasm_runtime_size"
+required-features = ["wasm"]
+
+[[example]]
+name = "native_runtime_size"
+required-features = ["grammars-hot"]

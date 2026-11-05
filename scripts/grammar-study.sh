@@ -165,4 +165,24 @@ check() {
 	rm -rf "$root/check"
 }
 
+compressed() {
+	emit bytes "$1" "$(stat -c %s "$2")" "$(gzip -9 -c "$2" | wc -c)" "$(zstd -19 -T0 -q -c "$2" | wc -c)"
+}
+
+# Release binary sizes, raw and compressed: omp-kb per grammar set, and the wasmtime runtime as a
+# loader links it (wasm_runtime_size) against the same program without wasm calls.
+bytes() {
+	local dir=$root/bytes v
+	for v in all hot none; do
+		CARGO_TARGET_DIR=$dir cargo build -p omp-kb --bin omp-kb --release "${common[@]}" ${feats[$v]} >"$root/last.log" 2>&1 || { tail -40 "$root/last.log"; return 1; }
+		cp "$dir/release/omp-kb" "$root/omp-kb-$v"
+		compressed "omp-kb-$v" "$root/omp-kb-$v"
+	done
+	CARGO_TARGET_DIR=$dir cargo build -p omp-ast --release --example wasm_runtime_size --example native_runtime_size \
+		"${common[@]}" --no-default-features --features grammars-hot,wasm >"$root/last.log" 2>&1 || { tail -40 "$root/last.log"; return 1; }
+	compressed wasm_runtime_size "$dir/release/examples/wasm_runtime_size"
+	compressed native_runtime_size "$dir/release/examples/native_runtime_size"
+	rm -rf "$dir"
+}
+
 "$phase"
