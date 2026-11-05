@@ -1,0 +1,6 @@
+name = "g1-core"
+
+[[phase]]
+name = "test-core"
+kind = "code"
+command = ["just", "test-pkg", "omp-core"]
