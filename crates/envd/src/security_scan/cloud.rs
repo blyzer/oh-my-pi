@@ -565,12 +565,12 @@ fn cloud_scan(
 				continue;
 			};
 			locations.push(Location {
-				path: Str::new(path),
-				start_line,
-				end_line: line.get("end_line_number").and_then(Value::as_u64),
+				path:         Str::new(path),
+				start_line:   Some(start_line),
+				end_line:     line.get("end_line_number").and_then(Value::as_u64),
 				start_column: None,
-				end_column: None,
-				role: Some(Str::new_static("primary")),
+				end_column:   None,
+				role:         Some(Str::new_static("primary")),
 			});
 		}
 		if locations.is_empty() {
@@ -585,7 +585,7 @@ fn cloud_scan(
 				};
 				locations.push(Location {
 					path:         Str::new(path),
-					start_line:   1,
+					start_line:   None,
 					end_line:     None,
 					start_column: None,
 					end_column:   None,
