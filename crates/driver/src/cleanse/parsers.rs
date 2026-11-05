@@ -115,6 +115,8 @@ pub struct ParserInput<'a> {
 pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 	let mut diagnostics = match kind {
 		ParserKind::Rust | ParserKind::RustTest => cargo::parse(kind, input),
+		ParserKind::Stylelint => structured(input, stylelint::parse(input)),
+		ParserKind::Terraform => structured(input, terraform::parse(input)),
 		ParserKind::JUnit => structured(input, junit::parse(input)),
 		_ => generic(kind, input),
 	};
@@ -248,9 +250,17 @@ fn parse_json_value(
 			}
 			// ESLint names the file once, on the parent of its `messages`.
 			let file = string_at(object, FILE_KEYS).or(file);
-			for key in
-				["diagnostics", "messages", "errors", "issues", "files", "results", "runs", "Issues"]
-			{
+			for key in [
+				"diagnostics",
+				"messages",
+				"errors",
+				"issues",
+				"files",
+				"results",
+				"runs",
+				"Issues",
+				"generalDiagnostics",
+			] {
 				if let Some(value) = object.get(key) {
 					parse_json_value(kind, value, file, input, output);
 				}

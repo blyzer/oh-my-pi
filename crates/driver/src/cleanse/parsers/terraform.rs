@@ -5,6 +5,77 @@
 //! `detail` paragraph. Its `range` is optional: a missing provider names no
 //! file. Lines and columns are one-based and `end` is exclusive.
 
+use std::borrow::Cow;
+
+use omp_core::{Str, sf};
+
+use super::{Diagnostic, ParserInput, Severity, relative_path};
+
+/// Why a `terraform validate -json` report could not be read.
+#[derive(Debug, thiserror::Error)]
+#[error("malformed `terraform validate -json` report")]
+pub(super) struct TerraformError(#[from] serde_json::Error);
+
+#[derive(serde::Deserialize)]
+struct Report<'a> {
+	#[serde(borrow)]
+	diagnostics: Vec<Entry<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct Entry<'a> {
+	severity: Severity,
+	#[serde(borrow)]
+	summary:  Cow<'a, str>,
+	#[serde(borrow, default)]
+	detail:   Cow<'a, str>,
+	#[serde(borrow)]
+	range:    Option<Range<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct Range<'a> {
+	#[serde(borrow)]
+	filename: Cow<'a, str>,
+	start:    Position,
+	end:      Position,
+}
+
+#[derive(serde::Deserialize)]
+struct Position {
+	line:   u32,
+	column: u32,
+}
+
+/// Reads the report on stdout.
+pub(super) fn parse(input: &ParserInput<'_>) -> Result<Vec<Diagnostic>, TerraformError> {
+	let report: Report<'_> = serde_json::from_str(input.stdout)?;
+	let checker = Str::from(input.checker);
+	Ok(report
+		.diagnostics
+		.into_iter()
+		.map(|entry| {
+			let range = entry.range.as_ref();
+			Diagnostic {
+				checker:    checker.clone(),
+				file:       range.and_then(|range| relative_path(&range.filename, input)),
+				line:       range.map(|range| range.start.line),
+				column:     range.map(|range| range.start.column),
+				end_line:   range.map(|range| range.end.line),
+				end_column: range.map(|range| range.end.column),
+				code:       None,
+				severity:   entry.severity,
+				message:    if entry.detail.is_empty() {
+					Str::from(entry.summary)
+				} else {
+					sf!("{}\n{}", entry.summary, entry.detail)
+				},
+				suggestion: None,
+			}
+		})
+		.collect())
+}
+
 #[cfg(test)]
 mod tests {
 	use std::path::Path;
