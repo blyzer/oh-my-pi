@@ -64,18 +64,15 @@ error. No council verdict is recorded.
   accepts only `rev == 1`, so a `tool.result@2` is refused as an unknown kind by every reader
   today. Choosing it later would require implementing and verifying revision-2 support first.
   `just proto-breaking` exits 0 on `omp2` at `e93fc4b962`.
-- **ADR 0040 success criteria:** every client measured fails the memory criterion (client peak
-  under 5% of the local peak, 130.8 MiB for `omp-envd`) on this recipe, and no omp product path
-  can produce the warm run that the wall criterion (<= 1.5x warm local) compares. No client has
-  been profiled, so whether one could fit under 130.8 MiB is unknown rather than refuted. Keep the
-  thresholds and record that no measured client meets them, restate or retarget them, profile a
-  client to establish whether the budget is reachable, or build a warm-state backend first
-  (ADR 0040 open question 7).
-- **ADR 0040 production gate:** journal replay, crash handling and result persistence, the items
-  of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no product path
-  creates one. Build the producer and a real reattach before acceptance, or narrow the gate to
-  the ADW path (ADR 0040 open question 8). ADR 0040 "Gap to acceptance" lists what each piece
-  takes and buys.
+- **ADR 0040 success criteria: DECIDED 2026-11-04.** Memory is relief, warm local peak minus
+  client peak, not the superseded client-to-local ratio. The owner must set a threshold and decision
+  rule; the harness must account for the serving envd by role, with bounds when shared. The §G1
+  data cannot establish a relief verdict. Warm wall time remains unjudgeable until a warm-state
+  product backend exists, coupled to the producer and reattach acceptance gate.
+- **ADR 0040 production gate: DECIDED 2026-11-04.** Build a product execution-job producer and a
+  real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
+  and result persistence require that producer. ADR 0047 is the proposed agent-build companion;
+  ADR 0040 "Gap to acceptance" describes the work.
 
 ## Snapshot JSON byte preservation
 
@@ -160,7 +157,7 @@ Deltas verified 2026-11-01 against `omp2` at `04576bc158`:
 
 Deltas started 2026-11-01 from `omp2` at `04576bc158`:
 
-- **BLOCKED** ADR 0040 execution, re-verified 2026-11-04 at `1578b1204c`. Slice 1 is composed. `crates/driver/src/adw/production.rs:ProductionAdwHost::run_command` places eligible ADW code phases without `crates/exec/src/place.rs:place`, and `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote` runs them over `ReapiBackend`. The 2026-10-31 production gate is unmet. Nothing produces a `JobKind::Execution` job (`crates/session/src/components/jobs.rs:insert_execution` and `accept_execution` have no caller), and `crates/agent/src/jobs.rs:reattach_execution` is a stub. The wall-time and client-memory criteria fail on every measured `omp-envd` arm (`docs/audits/remote-verification-trial.md` §G1). Acceptance waits on the two ADR 0040 owner decisions in the decision matrix above. The remote envd failures (three process-lifecycle tests, including `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`) stay open and undiagnosed.
+- **BLOCKED** ADR 0040 execution, re-verified 2026-11-04 at `1578b1204c`. Slice 1 is composed. `crates/driver/src/adw/production.rs:ProductionAdwHost::run_command` places eligible ADW code phases without `crates/exec/src/place.rs:place`, and `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote` runs them over `ReapiBackend`. The production gate is unmet: no product path produces a `JobKind::Execution` job and `crates/agent/src/jobs.rs:reattach_execution` is a stub. The owner decided to require both before acceptance. Memory relief lacks a threshold and role-inclusive measurements; warm wall time needs a warm-state backend. The remote envd failures (three process-lifecycle tests, including `crates/envd/src/lib.rs:spawn_kills_a_daemon_that_never_becomes_ready`) stay open and undiagnosed.
 - **DONE** ADR 0039 R2. Submit, Approve, and AnswerUi are served by `crates/serve/src/session.rs:SessionControlRpc::{submit,approve,answer_ui}` and `crates/driver/src/session_wire.rs:SessionWire::{submit,approve,answer_ui}`. New-session Open is served by `SessionControlRpc::open` and `SessionWire::open_session`; resume and fork remain `UNIMPLEMENTED` in `SessionControlRpc::open`. R2 landed on `omp2` in `3410f1e74f` (#478) and `19c807d686` (#477).
 - **PARTIAL** ADR 0041 phase 3. Implemented: the `screen` cover for a full-screen panel (`crates/chat/src/host.rs:Host::present_tsp` through `crates/chat/src/tsp.rs:Surface::present_cover`, #472) and native composer `edit` and `undo` (`crates/tui/src/tsp/edit.rs:resolve`, `crates/tui/src/editcore.rs:EditBuffer::apply_native_edit`, P7 `tsp_native_edits_round_trip_through_utf16_offsets`). Open: `send`, data-first pickers and the picker half of the exit criterion, the autocomplete overlay at the caret, `prefs` and `effort`.
 - **OPEN** ADR 0041 phase 4, which is optional and decided per item by the owner. No production code opens a `flow` surface (`crates/chat/src/host.rs:Host` builds inline surfaces, and `crates/app/src/print_mode.rs` has no TSP code), nothing calls `crates/chat/src/tsp.rs:Surface::set_stylesheet`, and nothing in `crates/` reads `TERN_BLOB_DIR`.
