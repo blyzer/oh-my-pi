@@ -281,9 +281,10 @@ subgrammar() {
 				for entry in "${archives[@]}"; do
 					crate=${entry%%:*}
 					libname=${entry#*:}
-					lib=$(find "$dir" -path "*/build/$crate-*/out/lib$libname.a" | head -1)
+					lib=$(find "$dir" -name "lib$libname.a" -path "*$crate*" | head -1)
 					if [ -z "$lib" ]; then
-						echo "error: no lib$libname.a under $dir" >&2
+						echo "error: no lib$libname.a under $dir; archives there:" >&2
+						find "$dir" -name "*.a" | head -20 >&2
 						return 1
 					fi
 					emit objects "$phase" "$arm" "$r" "$crate" "$(ar t "$lib" | wc -l)" "$(stat -c %s "$lib")"
