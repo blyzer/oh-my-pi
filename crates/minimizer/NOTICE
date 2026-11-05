@@ -42,9 +42,18 @@ RTK-derived components of this crate that upstream's NOTICE does not name
   RTK's `go_cmd`, and the test
   `looks_like_go_error_recognizes_non_location_error_shapes`, whose inputs are
   RTK's `go_cmd` inline test inputs.
-- `src/defs/*.toml`: each definition whose header reads `Ported from
+- `src/defs/*.toml`: the definitions ported or adapted from RTK's
+  `src/filters/*.toml`. A definition whose header reads `Ported from
   https://github.com/rtk-ai/rtk/blob/master/src/filters/<name>.toml` adapts
-  that RTK file.
+  that RTK file. A definition without that header is RTK-derived as well when
+  it shares its filter name with an RTK filter and shares regexes or test
+  names with the text RTK had committed for that filter before upstream added
+  the definition. Upstream added these in commit
+  151934e9a15e89ee862fe2386cf45726396fe391 on 2026-04-24, and each meets that
+  test: `iptables.toml`, `jj.toml`, `liquibase.toml`, `mise.toml`,
+  `ollama.toml`, `ping.toml`, `pre-commit.toml`, `rsync.toml`,
+  `shopify-theme.toml`, `skopeo.toml`, `ssh.toml`, `swift-build.toml`,
+  `task.toml`, `turbo.toml`, `ty.toml`, `xcodebuild.toml`, and `yadm.toml`.
 
 Upstream's minimizer also adapts filters, tests, and fixtures from snip, cites
 snip by bare path only, and carries no snip notice. The snip notice follows
