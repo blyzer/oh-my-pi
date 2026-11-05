@@ -234,7 +234,8 @@ const FAMILIES: &[Family] = &[
 		extensions: &["go"],
 		markers:    &["go.mod"],
 		binaries:   &["golangci-lint"],
-		args:       &["run", "--out-format=json"],
+		// golangci-lint v2 replaced v1's `--out-format=json` with `--output.json.path`.
+		args:       &["run", "--output.json.path=stdout"],
 		parser:     ParserKind::Golangci,
 		effect:     CheckerEffect::ReadOnly,
 		test:       false,

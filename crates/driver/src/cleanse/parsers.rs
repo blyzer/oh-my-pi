@@ -244,7 +244,9 @@ fn parse_json_value(
 			}
 			// ESLint names the file once, on the parent of its `messages`.
 			let file = string_at(object, FILE_KEYS).or(file);
-			for key in ["diagnostics", "messages", "errors", "issues", "files", "results", "runs"] {
+			for key in
+				["diagnostics", "messages", "errors", "issues", "files", "results", "runs", "Issues"]
+			{
 				if let Some(value) = object.get(key) {
 					parse_json_value(kind, value, file, input, output);
 				}
@@ -267,12 +269,17 @@ fn object_diagnostic(
 	inherited_file: Option<&str>,
 	input: &ParserInput<'_>,
 ) -> Option<Diagnostic> {
-	let message = string_at(object, &["message", "description", "reason", "text", "title"])?;
+	let message = string_at(object, &["message", "description", "reason", "text", "title", "Text"])?;
 	let file = string_at(object, FILE_KEYS)
 		.or_else(|| {
 			object
 				.get("location")
 				.and_then(|location| string_value(location, &["file", "path"]))
+		})
+		.or_else(|| {
+			object
+				.get("Pos")
+				.and_then(|pos| string_value(pos, &["Filename"]))
 		})
 		.or_else(|| {
 			first_span(object).and_then(|span| string_at(span, &["file_name", "file", "path"]))
@@ -281,31 +288,48 @@ fn object_diagnostic(
 		.and_then(|path| relative_path(path, input));
 	let line = number_at(object, &["line", "lineNumber", "startLine"])
 		.or_else(|| position_number(object, "range", "start", "line"))
+		.or_else(|| position_number(object, "location", "start", "line"))
 		.or_else(|| field_number(object, "location", "row"))
+		.or_else(|| field_number(object, "Pos", "Line"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["line_start", "line"])))
-		.map(adjust_zero_based(kind));
+		.and_then(one_based(kind, Axis::Line));
 	let column = number_at(object, &["column", "columnNumber", "startColumn"])
 		.or_else(|| position_number(object, "range", "start", "character"))
+		.or_else(|| position_number(object, "range", "start", "col"))
+		.or_else(|| position_number(object, "location", "start", "column"))
 		.or_else(|| field_number(object, "location", "column"))
+		.or_else(|| field_number(object, "Pos", "Column"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["column_start", "column"])))
-		.map(adjust_zero_based(kind));
+		.and_then(one_based(kind, Axis::Column));
 	let end_line = number_at(object, &["endLine"])
 		.or_else(|| position_number(object, "range", "end", "line"))
+		.or_else(|| position_number(object, "location", "end", "line"))
 		.or_else(|| field_number(object, "end_location", "row"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["line_end"])))
-		.map(adjust_zero_based(kind));
+		.and_then(one_based(kind, Axis::Line));
 	let end_column = number_at(object, &["endColumn"])
 		.or_else(|| position_number(object, "range", "end", "character"))
+		.or_else(|| position_number(object, "range", "end", "col"))
+		.or_else(|| position_number(object, "location", "end", "column"))
 		.or_else(|| field_number(object, "end_location", "column"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["column_end"])))
-		.map(adjust_zero_based(kind));
-	let code = string_at(object, &["code", "ruleId", "rule", "symbol", "name"])
-		.or_else(|| {
-			object
-				.get("code")
-				.and_then(|value| string_value(value, &["code", "value"]))
-		})
-		.map(Str::from);
+		.and_then(one_based(kind, Axis::Column));
+	let code =
+		string_at(object, &["code", "ruleId", "rule", "symbol", "name", "category", "FromLinter"])
+			.or_else(|| {
+				object
+					.get("code")
+					.and_then(|value| string_value(value, &["code", "value"]))
+			})
+			.map(Str::from)
+			.or_else(|| {
+				// ShellCheck numbers its codes; `SC` is the prefix its own reports use.
+				let code = object
+					.get("code")?
+					.as_u64()
+					.filter(|_| kind == ParserKind::Shellcheck)?;
+				Some(sf!("SC{code}"))
+			});
 	let severity = object
 		.get("severity")
 		.or_else(|| object.get("level"))
@@ -395,12 +419,27 @@ fn field_number(
 	object.get(outer)?.get(field).and_then(number_value)
 }
 
-fn adjust_zero_based(kind: ParserKind) -> impl Fn(u32) -> u32 {
+#[derive(Clone, Copy)]
+enum Axis {
+	Line,
+	Column,
+}
+
+/// Converts a checker coordinate to 1-based. Each 0-based axis below was
+/// observed in the checker's real JSON; every other checker numbers both axes
+/// from 1, where 0 is no position.
+fn one_based(kind: ParserKind, axis: Axis) -> impl Fn(u32) -> Option<u32> {
+	let zero_based = match axis {
+		Axis::Line => matches!(kind, ParserKind::Pyright),
+		Axis::Column => {
+			matches!(kind, ParserKind::Pyright | ParserKind::DenoLint | ParserKind::Pylint)
+		},
+	};
 	move |value| {
-		if matches!(kind, ParserKind::Pyright | ParserKind::DenoLint | ParserKind::Biome) {
-			value.saturating_add(1)
+		if zero_based {
+			Some(value.saturating_add(1))
 		} else {
-			value
+			(value != 0).then_some(value)
 		}
 	}
 }
@@ -655,6 +694,149 @@ mod tests {
 			parse(ParserKind::Eslint, &input(unlocated.as_str())),
 			without_file.collect::<Vec<_>>()
 		);
+	}
+
+	fn input<'a>(checker: &'a str, root: &'a Path, stdout: &'a str) -> ParserInput<'a> {
+		ParserInput { checker, checker_root: root, project_root: root, stdout, stderr: "" }
+	}
+
+	fn with_severity(severity: Severity, diagnostic: Diagnostic) -> Diagnostic {
+		Diagnostic { severity, ..diagnostic }
+	}
+
+	fn file_level(checker: &str, file: &str, code: &str, message: &str) -> Diagnostic {
+		Diagnostic {
+			line: None,
+			column: None,
+			end_line: None,
+			end_column: None,
+			..located(checker, file, [0; 4], code, message)
+		}
+	}
+
+	#[test]
+	fn biome_json_reads_location_start_end_and_category() {
+		let root = Path::new("/private/tmp/offsets-repro/js");
+		let report = include_str!("../../../../fixtures/biome/check-reporter-json.json");
+		let formatter = "Formatter would have printed the following content:";
+		assert_eq!(parse(ParserKind::Biome, &input("biome", root, report)), vec![
+			file_level("biome", "bad.js", "format", formatter),
+			with_severity(
+				Severity::Warning,
+				located(
+					"biome",
+					"bad.js",
+					[1, 1, 1, 4],
+					"lint/style/useConst",
+					"This let declares a variable that is only assigned once."
+				)
+			),
+			with_severity(
+				Severity::Warning,
+				located(
+					"biome",
+					"bad.js",
+					[1, 5, 1, 11],
+					"lint/correctness/noUnusedVariables",
+					"This variable unused is unused."
+				)
+			),
+			located(
+				"biome",
+				"bad.js",
+				[2, 5, 2, 9],
+				"lint/correctness/noConstantCondition",
+				"This condition always evaluates to the same value."
+			),
+			located(
+				"biome",
+				"bad.js",
+				[3, 5, 3, 14],
+				"lint/suspicious/noDebugger",
+				"This is an unexpected use of the debugger statement."
+			),
+			file_level("biome", "package.json", "format", formatter),
+		]);
+	}
+
+	#[test]
+	fn deno_lint_json_keeps_one_based_line_and_shifts_col() {
+		let root = Path::new("/private/tmp/offsets-repro/deno");
+		let report = include_str!("../../../../fixtures/deno/lint-json.json");
+		assert_eq!(parse(ParserKind::DenoLint, &input("deno-lint", root, report)), vec![
+			located("deno-lint", "bad.ts", [1, 7, 1, 13], "no-unused-vars", "`unused` is never used"),
+			located("deno-lint", "bad.ts", [2, 10, 2, 11], "no-unused-vars", "`f` is never used"),
+			located(
+				"deno-lint",
+				"bad.ts",
+				[3, 5, 3, 14],
+				"no-debugger",
+				"`debugger` statement is not allowed"
+			),
+		]);
+	}
+
+	#[test]
+	fn pylint_json_shifts_zero_based_columns() {
+		let root = Path::new("/private/tmp/offsets-repro/py");
+		let report = include_str!("../../../../fixtures/pylint/output-format-json.json");
+		let warning = |span, code, message| {
+			with_severity(Severity::Warning, located("pylint", "bad.py", span, code, message))
+		};
+		assert_eq!(parse(ParserKind::Pylint, &input("pylint", root, report)), vec![
+			Diagnostic {
+				end_line: None,
+				end_column: None,
+				..warning([1, 1, 0, 0], "missing-module-docstring", "Missing module docstring")
+			},
+			warning([1, 1, 1, 10], "unused-import", "Unused import os"),
+			warning(
+				[4, 1, 4, 6],
+				"missing-function-docstring",
+				"Missing function or method docstring"
+			),
+			warning([5, 5, 5, 6], "unused-variable", "Unused variable 'x'"),
+			located(
+				"pylint",
+				"bad.py",
+				[6, 12, 6, 26],
+				"undefined-variable",
+				"Undefined variable 'undefined_name'"
+			),
+		]);
+	}
+
+	#[test]
+	fn shellcheck_json_names_numeric_code() {
+		let root = Path::new("/private/tmp/offsets-repro/sh");
+		let report = include_str!("../../../../fixtures/shellcheck/format-json.json");
+		assert_eq!(parse(ParserKind::Shellcheck, &input("shellcheck", root, report)), vec![
+			with_severity(
+				Severity::Info,
+				located(
+					"shellcheck",
+					"bad.sh",
+					[3, 8, 3, 10],
+					"SC2086",
+					"Double quote to prevent globbing and word splitting."
+				)
+			),
+		]);
+	}
+
+	#[test]
+	fn golangci_v2_json_reads_issues_pos() {
+		let root = Path::new("/private/tmp/offsets-repro/go");
+		let stdout = include_str!("../../../../fixtures/golangci/run-output-json-stdout.txt");
+		let point = |line, column, code, message| Diagnostic {
+			end_line: None,
+			end_column: None,
+			..located("golangci-lint", "main.go", [line, column, 0, 0], code, message)
+		};
+		assert_eq!(parse(ParserKind::Golangci, &input("golangci-lint", root, stdout)), vec![
+			point(6, 11, "errcheck", "Error return value of `os.Remove` is not checked"),
+			point(9, 6, "unused", "func unused is unused"),
+		]);
 	}
 
 	#[test]
