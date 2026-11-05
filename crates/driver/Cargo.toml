@@ -69,6 +69,7 @@ omp-tools.workspace = true
 omp-vcs.workspace = true
 omp-walker.workspace = true
 parking_lot.workspace = true
+quick-xml.workspace = true
 rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
