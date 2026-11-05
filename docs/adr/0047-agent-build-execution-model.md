@@ -28,6 +28,10 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
      - typed `Outcome` that separates command failure from infrastructure failure;
      - `BuildSystemAdapter`, a pure `place()`, and a normalized `BuildReport`.
    - Hosting reuses `JobBoard`/`JobSettlement`, `BlobStore`/`artifact://`, `CancelTree` and envd `ExecHost`.
+   - **Companion to [ADR 0040](0040-remote-build-and-test-execution.md):** this proposed ADR covers
+     agent-facing builds and job-board hosting, including a remote execution job owner in stage 2.
+     ADR 0040 requires a product execution-job producer and real reattach before acceptance. This
+     record does not specify the producer caller or authorize implementation before owner review.
 2. **`BuildExecutionPort` is deferred.** It is rejected in its proposed form. Bazel is a Local-placed adapter that never wraps its actions. GitHub Actions is a CI capability, not a working-tree executor. BuildBuddy remains two backends (Run API, generic REAPI) per the ADR 0040 amendment.
 3. **envd does not become a build orchestrator.** It keeps its process, filesystem, blob and sandbox authorities, and later gains only a git-semantics `CaptureInputs`. Placement, adapters and vendor clients live outside envd.
 4. **First slice: Local backend plus `CargoJust`** for one ADW code phase (`just test-pkg omp-envd`), returning a `BuildReport` from cargo JSON and nextest JUnit. This closes F11 for ADW. Remote backends wait for Gates 2–3. This ordering applies to agent builds generally. It does not amend ADR 0040's ordering for OMP²'s own builds; the owner must reconcile the two.
@@ -69,7 +73,17 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
 
 ## Status in omp
 
-**Partially implemented.** Re-verified against `omp2` at `9e0c073d04`. The `omp-exec` crate (`crates/exec/`), `CargoJust` adapter, `place()` router, `BuildReport`, `BuildStatus`, and all four backends (`omp-exec-reapi`, `omp-exec-buildbuddy`, `omp-exec-local`, `omp-exec-ssh`) exist. `omp.exec.*` telemetry spans and `omp.exec.worker.*` tracing events from `ExecutedActionMetadata` are wired (PRs #350, #351, #352, #353). Gate 2 proven 2026-10-19: remote CI invocation dispatched and 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af` (PR #339). Two `omp-envd` repetitions through the omp REAPI backend were recorded on 2026-10-24; both compiled and ran the suite but failed the same three tests ([audit §G1 through the omp REAPI backend, `omp-envd`, 2026-10-24](../audits/remote-verification-trial.md#g1-through-the-omp-reapi-backend-omp-envd-2026-10-24)). Open: `BuildExecutionPort` is explicitly deferred by this ADR; the wall-time and client peak-memory success criteria both fail on the available `omp-envd` `bb remote` measurement (`docs/audits/remote-verification-trial.md` §G1).
+**Partially implemented.** This status was re-verified against `omp2` at `9e0c073d04`. The
+`omp-exec` crate (`crates/exec/`), `CargoJust` adapter, `place()` router, `BuildReport`,
+`BuildStatus`, and all four backends (`omp-exec-reapi`, `omp-exec-buildbuddy`, `omp-exec-local`,
+`omp-exec-ssh`) exist. `omp.exec.*` telemetry spans and `omp.exec.worker.*` tracing events from
+`ExecutedActionMetadata` are wired (PRs #350, #351, #352, #353). Gate 2 proven 2026-10-19: remote
+CI invocation dispatched and 54/54 tests passed, invocation `03d524aa-71d2-40ed-b92f-f1da843c63af`
+(PR #339). Two `omp-envd` repetitions through the omp REAPI backend were recorded on 2026-10-24;
+both compiled and ran the suite but failed the same three tests ([audit §G1](../audits/remote-verification-trial.md#g1-through-the-omp-reapi-backend-omp-envd-2026-10-24)).
+Open: `BuildExecutionPort` is explicitly deferred. ADR 0040 now measures memory relief, not the
+superseded client-memory ratio; its threshold and role-inclusive measurement remain open. Warm
+wall-time acceptance requires a warm-state product backend.
 
 ## References
 

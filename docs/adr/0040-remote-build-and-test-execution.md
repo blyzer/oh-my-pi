@@ -1082,8 +1082,8 @@ top of it in PR 1d.
 **Status: Partially implemented.** Re-verified 2026-11-04 against `omp2` at `1578b1204c` by reading
 code, tests and `docs/audits/remote-verification-trial.md`. No build, test, remote run or
 measurement was repeated for this re-verification. The record stays `proposed`. The production
-gate of the 2026-10-31 amendment is unmet. The wall-time and client-memory success criteria in
-"Measurement plan" fail on every measured `omp-envd` arm.
+gate of the 2026-10-31 amendment is unmet. Memory relief lacks a threshold and role-inclusive
+measurements. Warm wall time is unjudgeable for the product until a warm-state backend exists.
 
 Composed into a product path (Part L Slice 1 and the Slice 2 local path):
 
@@ -1158,12 +1158,12 @@ The 2026-10-31 production gate is unmet:
   persistence. The 2026-10-31 change (`01f8151003`) edited `crates/agent/tests/jobs.rs` and
   `crates/agent/tests/turn.rs` only to add `execution: None`.
 
-The wall-time and client-memory criteria fail on both arms. Client CPU passes on the `bb remote`
-arm and fails on rep 1 of the omp REAPI backend arm. The local arm is warm
+The historical §G1 rows below were judged against the superseded client-memory ratio, not the
+new relief measure. Their client figures may undercount as described below. The local arm is warm
 `just test-pkg omp-envd` on 2026-10-20: 168.4 s wall, 100.3 s CPU, and a 2616.6 MiB process-tree
 peak.
 
-| Remote arm | Wall (≤ 1.5× local) | Client CPU (< 5%) | Client peak memory (< 5%) |
+| Remote arm | Wall (historical ≤ 1.5× local) | Client CPU (< 5%) | Client peak memory (historical < 5%) |
 |---|---|---|---|
 | `bb remote`, 2026-10-20, 3 reps | 1.83× mean; rep 3 alone 1.25× | 1.5% | 7.7% (201.9 MiB) |
 | omp REAPI backend, 2026-10-24, reps 1 and 2, cold, cache off | 3.1×, 2.6× | 5.2%, 3.6% | 11.1%, 8.2% (290.0, 215.4 MiB) |
@@ -1199,13 +1199,16 @@ in-tree and including envd rather than folding the two together.
 
 ### Gap to acceptance (2026-11-04)
 
-None of the items below was built on 2026-11-04. Items 1 and 2 are substantial. Items 3 and 4
-are small, but they only matter once item 1 exists, and none of the four changes what the success
-criteria measure. Whether acceptance needs them is open question 8 for the owner.
+The owner decided on 2026-11-04 that acceptance requires the producer and real reattach, without
+narrowing the gate to ADW. The remaining lifecycle and test requirements also apply. Items 1 and 2
+are substantial; items 3 and 4 depend on the producer.
 
 1. **A `JobKind::Execution` producer.** A product caller mints an `ExecutionSpec`, appends
    `insert_execution` to its session, and hands the run to `JobBoard::attach_execution_run`. Part L
    files agent-initiated remote runs as jobs (ADR 0010) under "Later", and no caller is specified.
+   Companion [ADR 0047](0047-agent-build-execution-model.md) covers agent builds over `omp-exec`,
+   reuses the job board and anticipates a remote execution job owner in stage 2. It is proposed,
+   not an implemented producer design, and does not specify this caller.
    The ADW path cannot be that caller as it stands, because it owns no session journal and no job
    board. Part A.1 already routes ADW results to "a CLI report for ADW today". The producer also
    needs the backend composition in `run_remote` moved where a kernel can build a `ReapiBackend`
@@ -1233,8 +1236,8 @@ criteria measure. Whether acceptance needs them is open question 8 for the owner
 
 Whether the success criteria can be met:
 
-- **Client CPU (< 5%).** Reachable. The `bb` client used 1.5%. The omp client used 5.2% on rep 1
-  and 3.6% on rep 2, so it failed once.
+- **Client CPU (< 5%).** The recorded tree-only `bb` client ratio was 1.5%; the omp client ratios
+  were 5.2% and 3.6%. These figures may omit envd, so they do not establish a client-cost verdict.
 - **Warm wall time (≤ 1.5× warm local, so 252.6 s for `omp-envd`).** Not shown to be
   unreachable, but no omp product path can reach it. One `bb remote` rep met it (210.9 s, 1.25×)
   and the three-rep mean (308.7 s) did not, and the reps do not record whether a runner was cold.
@@ -1245,21 +1248,11 @@ Whether the success criteria can be met:
   action cache under the `buildbuddy` profile. A warm omp run needs a warm-state backend. The
   candidate is the BuildBuddy Run API backend, which no product path composes and whose snapshot
   contract the 2026-10-31 amendment lists as UNVERIFIED.
-- **Client peak memory (< 5% of the local peak).** Unmet by every client measured, and not shown
-  unreachable. Five percent of 2616.6 MiB is 130.8 MiB. The lowest client peak recorded is
-  201.9 MiB, from the `bb` client, and the omp client peaked at 215.4 MiB and 290.0 MiB. No client
-  has been profiled, so nothing here attributes those peaks to a particular cost, and no lower
-  bound on a client's peak is established. Whether a client can be built under 130.8 MiB is
-  unknown rather than refuted. [INFERENCE] A release `omp` client may peak lower. The audit names
-  the 2026-10-20 omp client as the debug binary and does not record the build of the 2026-10-24
-  client, so no measurement is known to come from a release client.
-- **The memory criterion is a ratio against the measured recipe, so its difficulty moves with the
-  recipe rather than with the client.** A client whose peak does not shrink with the remote
-  workload passes only where the local peak exceeds 20x that peak: about 3.9 GiB for the `bb`
-  client and 4.2 GiB to 5.7 GiB for the omp client. A heavier recipe therefore makes the same
-  unchanged client pass. That property is visible from the definition and needs no profiling.
-- The thresholds are owner adjustable ("Measurement plan"). Whether to keep, restate, or retarget
-  them is open question 7 for the owner.
+- **Client peak memory: relief, decided 2026-11-04.** The former requirement that client peak be
+  under 5% of local peak is superseded. The §G1 ratios above are historical comparisons only.
+  That ratio let a heavier recipe make the same unchanged client pass. Relief instead answers what
+  offloading gives back. Its owner-set threshold and measurement boundary remain unresolved; see
+  the Measurement plan. The existing §G1 figures cannot establish a relief verdict.
 
 ### BuildBuddy coverage of REAPI
 
@@ -1513,12 +1506,26 @@ What is measured:
 - **Per remote run:** local capture, FindMissing, upload bytes and time, queue, input fetch,
   execution, output upload, download (from `ExecutedActionMetadata`), local CPU and memory of the
   client sampled as above, and the BuildBuddy cache transfer of the run (snapshots included).
-- **Success criterion for Slice 0/1:**
-  - the client's local CPU time and its peak memory are each under 5% of the local recipe's;
-  - warm remote wall time is within 1.5× of warm local wall time;
-  - cumulative cache transfer stays inside the Slice 0 stop condition.
-  Local wall time is not a criterion, because the client waits for the remote run. The thresholds
-  are owner adjustable.
+- **Success criteria for Slice 0/1:**
+  - Client CPU time remains under 5% of the local recipe CPU time, with the serving envd included
+    by role rather than ancestry. The existing tree-only CPU figures may undercount.
+  - Memory uses **relief**, decided 2026-11-04: for each recipe, subtract the client peak from the
+    warm local baseline peak, in MiB. Each peak is the maximum over once-per-second samples of
+    simultaneous summed RSS, not a sum of independently observed peaks. The client sample includes
+    the command tree plus its serving envd by role even when already running outside that tree;
+    count any process only once. For a shared envd, report bounds: the lower client-cost bound
+    excludes its unallocatable RSS and the upper includes all of it. Subtract these bounds in
+    reverse order from the local peak to report a relief interval, not a point estimate.
+    Report each repetition and its cache and attachment state; do not average incompatible arms.
+    The owner must set the minimum acceptable relief and the repetition/interval decision rule.
+    Until then there is no pass/fail memory criterion. The current `measure-recipe.py` reports
+    tree RSS only and cannot calculate the role-inclusive bound; the harness must capture it
+    before this measure is computable. Prior §G1 client figures may omit envd.
+  - Warm remote wall time remains within 1.5× warm local wall time. It is unjudgeable for the
+    omp product path until a warm-state backend exists. This work is coupled to question 8: the
+    required producer and reattach must be built before acceptance, not replaced by an ADW-only gate.
+  - Cumulative cache transfer stays inside the Slice 0 stop condition.
+  Local wall time alone is not a criterion, because the client waits for the remote run.
 - **Result record:** `docs/audits/remote-verification-trial.md`.
 
 ### Relationship to P14, P15, P16 and other ADRs
@@ -1629,21 +1636,17 @@ None touches a backend.
    or Team? Should BuildBuddy be asked about managed Mac cores (R4b) for the macOS proofs?
 6. **`.gitignore`.** Change `/vendor/` to `/vendor`, so the worktrees' `vendor` symlink stops
    showing as untracked? It is a separate one-line change.
-7. **Success criteria for `omp-envd`.** Every client measured fails the memory criterion on this
-   recipe, and no omp product path can produce the warm run that the wall criterion compares
-   ("Gap to acceptance"). No client has been profiled, so whether one could fit under 130.8 MiB
-   is unknown. Choose one. Keep the thresholds and record that no measured client meets them on
-   `omp-envd`. Restate memory as an absolute client ceiling or as relief (local peak minus client
-   peak), and restate wall time for a cold remote run. Judge the criteria on a recipe with a
-   larger local peak (`just clippy` and `just e2e-build` are unmeasured). Profile a client to
-   establish whether the budget is reachable. Or build a warm-state backend first.
-8. **Scope of the production gate.** Journal replay, crash handling and result persistence, the
-   items of the 2026-10-31 gate, exist only for a journaled `JobKind::Execution` job, and no
-   product path creates one. Part L files that producer under "Later", and no caller is specified.
-   Library tests alone would meet the gate's wording while testing functions that no product path
-   calls. Either build the producer and a real reattach before this record can be accepted, or
-   narrow the gate to the ADW path. That path journals nothing and enforces the accepted-action
-   rule in-process through `crates/exec/src/error.rs:fallback_eligible`.
+7. **Success criteria for `omp-envd`: DECIDED 2026-11-04.** Adopt relief, local peak minus
+   client peak. It answers what offloading gives back, unlike the former client-to-local ratio
+   whose outcome changes with recipe size even if the client does not. The owner still must set
+   a relief threshold and decision rule; role-inclusive envd accounting is also missing from the
+   harness. Warm wall time remains unjudgeable until a warm-state backend exists. See Measurement
+   plan and Gap to acceptance.
+8. **Scope of the production gate: DECIDED 2026-11-04.** Build the execution-job producer and a
+   real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
+   and result persistence need a product-created journaled job, not library-only tests of unused
+   paths. [ADR 0047](0047-agent-build-execution-model.md) is the companion for agent builds; its
+   proposed job-board integration does not yet specify the producer caller.
 
 ### Review record (2026-10-08)
 
