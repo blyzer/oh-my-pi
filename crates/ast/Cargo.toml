@@ -12,7 +12,7 @@ description = "Tree-sitter-backed source analysis, structural search, and AST-aw
 workspace = true
 
 [features]
-default = ["grammars-all"]
+default = []
 grammars-hot = [
 	"dep:tree-sitter-bash",
 	"dep:tree-sitter-c",
