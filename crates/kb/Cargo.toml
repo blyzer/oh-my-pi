@@ -11,11 +11,17 @@ description = "Revision-aware derived code knowledge base from SCIP producers an
 [lints]
 workspace = true
 
+[features]
+default = ["grammars-all"]
+grammars-all = ["omp-ast/grammars-all"]
+grammars-hot = ["omp-ast/grammars-hot"]
+wasm = ["omp-ast/wasm"]
+
 [dependencies]
 thiserror.workspace = true
 ast-grep-core.workspace = true
 clap.workspace = true
-omp-ast.workspace = true
+omp-ast = { path = "../ast", default-features = false }
 omp-core.workspace = true
 protobuf.workspace = true
 scip.workspace = true

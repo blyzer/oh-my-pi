@@ -144,6 +144,11 @@ remote-seed:
 remote-probe:
     printf 'buildbuddy remote probe ok\\n'
 
+# Research harness for docs/research/grammar-bundling.md (branch research/grammar-bundling-harness, never merged).
+[group('remote')]
+grammar-study phase reps="5":
+    scripts/grammar-study.sh {{ phase }} {{ reps }}
+
 # Run the Linux-valid Cargo verification set in one remote runner so the
 # runner-home Cargo target and Python cache are reused between phases. Protobuf
 # checks remain in the GitHub gate because they need the repository's `buf`.
