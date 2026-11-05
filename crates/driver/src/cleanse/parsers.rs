@@ -2,6 +2,8 @@
 
 mod cargo;
 mod junit;
+mod stylelint;
+mod terraform;
 
 use std::{fmt::Write as _, path::Path, sync::LazyLock};
 
@@ -822,6 +824,40 @@ mod tests {
 		assert_eq!(parse(ParserKind::Golangci, &input("golangci-lint", root, stdout)), vec![
 			point(6, 11, "errcheck", "Error return value of `os.Remove` is not checked"),
 			point(9, 6, "unused", "func unused is unused"),
+		]);
+	}
+
+	#[test]
+	fn pyright_json_reads_general_diagnostics() {
+		let root = Path::new("/private/tmp/empty-result-repro/py");
+		let report = include_str!("../../../../fixtures/pyright/outputjson.json");
+		// Pyright indents a message's continuation lines with no-break spaces.
+		let return_type = "Type \"str\" is not assignable to return type \
+		                   \"int\"\n\u{a0}\u{a0}\"str\" is not assignable to \"int\"";
+		let revealed = "Type of \"greet\" is \"(name: str) -> int\"";
+		assert_eq!(parse(ParserKind::Pyright, &input("pyright", root, report)), vec![
+			located("pyright", "bad.py", [2, 12, 2, 16], "reportReturnType", return_type),
+			with_severity(Severity::Info, Diagnostic {
+				code: None,
+				..located("pyright", "bad.py", [5, 13, 5, 18], "", revealed)
+			}),
+			with_severity(
+				Severity::Warning,
+				located(
+					"pyright",
+					"bad.py",
+					[6, 1, 6, 7],
+					"reportUnusedExpression",
+					"Expression value is unused"
+				),
+			),
+			located(
+				"pyright",
+				"bad.py",
+				[7, 7, 7, 21],
+				"reportUndefinedVariable",
+				"\"undefined_name\" is not defined"
+			),
 		]);
 	}
 

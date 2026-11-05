@@ -1,0 +1,22 @@
+Pyright --outputjson fixtures. Each *.json is the verbatim stdout of one run, never hand-edited.
+The recording scratch directory was /private/tmp/empty-result-repro (neutral: no user name, no owner hostname).
+
+outputjson.json
+  command: npx -y pyright@1.1.414 --outputjson   (cwd /private/tmp/empty-result-repro/py; the args the cleanse pyright checker passes)
+  versions: pyright 1.1.414 (npm), node v26.11.1
+  exit 1; report on stdout, stderr empty
+  pyproject.toml:
+    [project]
+    name = "repro"
+    version = "0"
+  bad.py:
+    def greet(name: str) -> int:
+        return name
+
+
+    reveal_type(greet)
+    [1, 2]
+    print(undefined_name)
+  clean.py:
+    def add(left: int, right: int) -> int:
+        return left + right

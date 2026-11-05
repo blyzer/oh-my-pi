@@ -1,0 +1,104 @@
+{
+  "format_version": "1.0",
+  "valid": false,
+  "error_count": 2,
+  "warning_count": 1,
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "summary": "Redundant ignore_changes element",
+      "detail": "Adding an attribute name to ignore_changes tells Terraform to ignore future changes to the argument in configuration after the object has been created, retaining the value originally configured.\n\nThe attribute id is decided by the provider alone and therefore there can be no configured value to compare with. Including this attribute in ignore_changes has no effect. Remove the attribute from ignore_changes to quiet this warning.",
+      "range": {
+        "filename": "main.tf",
+        "start": {
+          "line": 5,
+          "column": 10,
+          "byte": 46
+        },
+        "end": {
+          "line": 5,
+          "column": 26,
+          "byte": 62
+        }
+      },
+      "snippet": {
+        "context": "resource \"terraform_data\" \"x\"",
+        "code": "resource \"terraform_data\" \"x\" {",
+        "start_line": 5,
+        "highlight_start_offset": 9,
+        "highlight_end_offset": 25,
+        "values": []
+      }
+    },
+    {
+      "severity": "error",
+      "summary": "Reference to undeclared input variable",
+      "detail": "An input variable with the name \"missing\" has not been declared. This variable can be declared with a variable \"missing\" {} block.",
+      "range": {
+        "filename": "main.tf",
+        "start": {
+          "line": 14,
+          "column": 11,
+          "byte": 166
+        },
+        "end": {
+          "line": 14,
+          "column": 22,
+          "byte": 177
+        }
+      },
+      "snippet": {
+        "context": "output \"greeting\"",
+        "code": "  value = var.missing",
+        "start_line": 14,
+        "highlight_start_offset": 10,
+        "highlight_end_offset": 21,
+        "values": []
+      }
+    },
+    {
+      "severity": "error",
+      "summary": "Too many function arguments",
+      "detail": "Function \"upper\" expects only 1 argument(s).",
+      "range": {
+        "filename": "main.tf",
+        "start": {
+          "line": 18,
+          "column": 27,
+          "byte": 224
+        },
+        "end": {
+          "line": 18,
+          "column": 28,
+          "byte": 225
+        }
+      },
+      "snippet": {
+        "context": "output \"shout\"",
+        "code": "  value = upper(var.name, 1)",
+        "start_line": 18,
+        "highlight_start_offset": 26,
+        "highlight_end_offset": 27,
+        "values": [
+          {
+            "traversal": "var.name",
+            "statement": "is a string"
+          }
+        ],
+        "function_call": {
+          "called_as": "upper",
+          "signature": {
+            "name": "upper",
+            "params": [
+              {
+                "name": "str",
+                "type": "string"
+              }
+            ],
+            "return_type": "string"
+          }
+        }
+      }
+    }
+  ]
+}
