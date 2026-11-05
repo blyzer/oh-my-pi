@@ -7,6 +7,7 @@ pub mod generic;
 pub mod git;
 pub mod lint;
 pub mod pkg;
+pub mod system;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
@@ -22,6 +23,8 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 			pkg::supports(subcommand)
 		},
 		"uv" => pkg::supports(subcommand),
+		"env" | "log" | "deps" | "summary" | "err" | "test" | "diff" | "format" | "pipe" | "ps"
+		| "ping" | "ssh" | "sops" => system::supports(program),
 		_ => false,
 	}
 }
@@ -77,6 +80,8 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"pip" | "pip3" | "bundle" | "brew" | "composer" | "uv" | "poetry" => {
 			pkg::filter(ctx, input, exit_code)
 		},
+		"env" | "log" | "deps" | "summary" | "err" | "test" | "diff" | "format" | "pipe" | "ps"
+		| "ping" | "ssh" | "sops" => system::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
 }
