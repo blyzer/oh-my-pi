@@ -367,6 +367,10 @@ fn program_label(program: &str) -> &'static str {
 		"yadm" => "yadm",
 		"gt" => "gt",
 		"gh" => "gh",
+		"aws" => "aws",
+		"curl" => "curl",
+		"wget" => "wget",
+		"psql" => "psql",
 		"cargo" => "cargo",
 		_ => "builtin",
 	}

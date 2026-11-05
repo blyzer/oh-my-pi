@@ -3,6 +3,7 @@
 use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
+pub mod cloud;
 pub mod generic;
 pub mod gh;
 pub mod git;
@@ -15,6 +16,7 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"git" | "yadm" => git::supports(subcommand),
 		"gt" => gt::supports(program, subcommand),
+		"aws" | "curl" | "wget" | "psql" => cloud::supports(program, subcommand),
 		"gh" => gh::supports(subcommand),
 		"glab" => glab::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
@@ -28,6 +30,7 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 	match ctx.program {
 		"git" | "yadm" => git::filter(ctx, input, exit_code),
 		"gt" => gt::filter(ctx, input, exit_code),
+		"aws" | "curl" | "wget" | "psql" => cloud::filter(ctx, input, exit_code),
 		"gh" => gh::filter(ctx, input, exit_code),
 		"glab" => glab::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
