@@ -325,7 +325,8 @@ separate. For remote repetitions the sampler matches Unix socket peers from `lso
 serving envd PID, records its socket evidence and per-second RSS and cumulative CPU, and records
 whether it was pre-existing or spawned when observable. It checks for other visible peers. A shared
 owner cannot be apportioned: the in-tree value and the value including the whole owner are conditional
-lower and upper bounds, not a point estimate. Samples can miss peaks, inaccessible peers and CPU
+lower and upper bounds, not a point estimate. The upper bound never falls below the tree peak, so it
+also covers samples taken before a spawned owner starts. Samples can miss peaks, inaccessible peers and CPU
 changes between probes. If identity or ownership is unresolved, it records that instead of adding an
 unrelated process. Repetitions with different attachment or sharing states are not averaged together.
 The driver withholds client-ratio verdicts while this boundary remains unresolved.
@@ -345,4 +346,126 @@ not client content, and their possible measurement overhead remains unquantified
 For an integration check without recipes, run the same command with `--dry-run` and a new output
 path. It executes `/usr/bin/true` instead of the fetch and recipes and marks the session, guards,
 metrics and repetitions as synthetic in the file. A synthetic guard is never accepted for a real run.
+
+### Quiet-host G1 attempt, 2026-11-05: blocked by host load
+
+**Outcome.** No repetition ran, so this attempt gives no relief figure for any recipe and there is
+nothing to discard. The driver ran 43 guards from 21:14:59Z to 21:43:21Z. All 43 refused and none
+passed. The coordinator stopped the session at 21:43Z, and the file ends with `aborted: terminated
+by signal`. Refusing 43 of 43 is the guard working, not a harness failure. The earlier §G1 figures
+cannot support a verdict partly because nothing could refuse them.
+
+**The harness measures the client peak by role.** This was checked by reading the code and on real
+processes. It holds whether or not a run takes place.
+
+- It finds envd by command line, not by ancestry. `envd_roots` (`scripts/quiet-host.py:158`)
+  matches ` envd --root <project> --state-dir `, the order `spawn_project_daemon_with` passes
+  (`crates/envd/src/lib.rs:2258-2264`). That root is canonicalized (`crates/envd/src/lib.rs:493`).
+- It proves which envd serves this client through Unix socket peers. `serving_envd`
+  (`scripts/quiet-host.py:163`) pairs each socket in the command tree with the envd socket that
+  `lsof -U` reports as its peer. This finds a pre-existing orphan outside the tree. Without one
+  unique owner the result is `unresolved` and no bound is reported.
+- Content is the command tree plus that envd, with each process counted once
+  (`attribute_processes`, `scripts/quiet-host.py:241`, a set union). Each sample sums
+  simultaneous RSS, and the peak is the maximum over the 1 Hz samples.
+- A shared envd gives bounds, not a split. Any other process connected to the owner's sockets marks
+  it `shared`. The lower client bound excludes envd RSS and the upper bound includes all of it
+  (`rss_bounds`, `scripts/measure-adr0040.py:322`).
+- CPU follows the same boundary. A pre-existing envd adds its CPU delta over the run. A spawned envd
+  adds its whole CPU, which `/usr/bin/time` never counts because the orphan is never reaped
+  (`envd_accounting`, `scripts/quiet-host.py:290`).
+
+This attempt fixed two harness defects, each with a regression test:
+
+- The driver ended the session at the first refused guard. A heavy local recipe keeps the one-minute
+  load above 1.0 for minutes, so the guard after a local repetition would always refuse, and no
+  session could finish. A refused guard is now recorded and retried every 30 seconds for up to an
+  hour. In this attempt the driver retried for 28 minutes. The old driver would have stopped after
+  the first guard.
+- The upper RSS bound covered only samples in which the serving envd existed. For an envd the
+  client spawns, a tree peak before the spawn was dropped, and that error flatters relief. The upper
+  bound now never falls below the tree peak.
+
+Limits that remain:
+
+- envd child processes count only when envd is inside the command tree. Capture does not need
+  them here. This repository is not a reftable repository, so `capture_inputs` lists and diffs
+  files in-process through gix (`crates/vcs/src/git/read.rs:661-685`,
+  `crates/vcs/src/git/diff.rs:41-47`). The envd in the pre-flight run had no children.
+- The lower bound still covers only samples in which envd existed. For a spawned envd it can be too
+  low, never too high.
+- `no_other_peer_observed` does not prove that no other process uses envd, because `lsof` runs once
+  a second. The pessimistic relief end uses the upper bound, so a missed peer cannot flatter it.
+- Summed RSS counts a shared page once per process that maps it. The client and envd map the same
+  executable, and parallel `rustc` processes share libraries. The ADR defines each peak as summed
+  RSS. This note only says what that definition counts.
+
+**Pre-flight repetition, not a measurement.** At 20:58-21:04Z, before the session, one remote
+`omp-core` repetition (`g1-core`) ran through the driver's `run_one`. The untimed local warm-up
+was compiling at the same time. Load reached 112.8, and 3.5 million swapouts were recorded. Its
+numbers therefore support no relief or CPU figure. They show only the mechanics on real processes.
+The client spawned envd PID 77433. `lsof` matched two client sockets to it in 380 of 383 samples,
+and no other peer appeared. At the sample with the highest tree RSS, envd held 131.3 MiB of
+240.6 MiB. envd used 13.1 s of CPU against 4.8 s for the client tree. After the run it was an orphan
+(PPID 1) with no children. ADW spawns envd with no idle timeout
+(`crates/driver/src/adw/production.rs:178`), so later runs attach to it, and a tree-only
+measurement of them misses all of envd's work. The remote action exited 0.
+
+**Setup.** The session ran the driver at `10cd9845e4`, with `target/debug/omp` built in the
+measurement worktree by `just build`. Remote settings lived in a separate `OMP_CONFIG_DIR`, so
+the owner's `~/.o2/config.cfg` was not changed:
+
+```
+sv_exec_remote_endpoint "grpcs://remote.buildbuddy.io"
+sv_exec_remote_profile buildbuddy
+sv_exec_remote_cache off
+sv_exec_remote_image "docker://ghcr.io/blyzer/omp-reapi@sha256:772594c52a49c67ba4545f8ce8a1de30a592300afd97e08a28975dc143ca0cc0"
+sv_exec_remote_credential env:BUILDBUDDY_API_KEY
+```
+
+`omp trust` granted the worktree. One untimed run of each local recipe (20:56-21:09Z) warmed the
+target, so that every local repetition measures the warm baseline that the relief rule names.
+`just test-pkg omp-envd` ran 1262 tests: 1262 passed and 2 were skipped. `just test-pkg
+omp-core` passed 655 tests. `just clippy` exited 0.
+
+**Guard record.**
+
+| Item | Observed |
+|---|---|
+| Window | 21:14:59Z to 21:43:21Z |
+| Guards | 43 run, 43 refused, 0 passed |
+| One-minute load, 86 guard snapshots | minimum 5.03, median 12.0, maximum 106.98; limit 1.0 |
+| Paging within the 10 s guard window | 32 of 43 guards (pageouts in 26, swapouts in 23); limit 0 |
+| Swap in use | 16.5 to 22.8 GiB (16,848 to 23,315 MiB), on a 16 GiB machine |
+| Runner services in every guard | `blyzer-oh-my-pi` and both `vostroRD` services idle at both snapshots; no `Runner.Worker`, no unattributed worker |
+| External monitor, every 15 s | 125 polls, 21:13:34Z to 21:44:35Z. `gh api` runner busy flags were false for all three runners, `pgrep` found no `Runner.Worker`, and `gh run list` showed no in-progress or queued run in `blyzer/oh-my-pi` |
+
+**Cause.** CI was not the cause, because no runner was busy in any guard or poll. The cause was
+interactive use plus memory pressure. Several agent sessions were running on the Mac. At about
+21:37Z Claude.app started, with Safari WebContent, Siri `embeddedspeech` and `heard` active, and
+the load reached 107.
+
+**Precondition for a valid run.** Schedule the run for a time when all of these hold for the whole
+session:
+
+- No interactive use of the Mac.
+- No agent sessions and no other local builds, tests or indexers.
+- No CI on any of the three runner services. Hold merges to `omp2`, and pushes or PR updates that
+  touch a `.github/ci-paths.txt` path. Docs-only changes outside `docs/py/**` do not start the
+  Mac job. The scheduled `p8-baseline` (`macos-15`) and `codeql` (`ubuntu-24.04`) workflows use
+  hosted runners, and `package-macos` is manual.
+- Memory pressure cleared, because the guard needs zero pageouts and swapouts over 10 s and a
+  one-minute load of 1.0 or less. [INFERENCE] With 16.5-22.8 GiB already in swap, that probably
+  needs memory-heavy apps closed or a restart first.
+
+Repeat the setup above in a fresh worktree before the window opens, because building and warming
+load the host. [INFERENCE] From earlier per-repetition wall times, the 18 repetitions and their
+settle waits take about 2-3 hours.
+
+**Not measured.** Relief remains unmeasured for all three recipes, and this record proposes no
+threshold. Some quantities cannot be measured on this path whatever the host does. Warm remote wall
+time cannot be judged, because the product path has no warm-state backend to compare against. The
+`buildbuddy` REAPI profile requests no runner recycling and keeps the action cache off, so every
+remote repetition is cold. FindMissing time has no span. The remote runner's actual freshness and
+the probe overhead remain unverified.
 
