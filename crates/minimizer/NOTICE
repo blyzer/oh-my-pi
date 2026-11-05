@@ -16,6 +16,49 @@ owner; this notice does not claim ownership of that material.
 That minimizer adapts an algorithm from RTK. Upstream's NOTICE follows
 verbatim; the paths it names are relative to upstream's `crates/pi-shell`.
 
+Upstream's NOTICE names one adapted RTK component, but upstream ports more RTK
+code than that, and the RTK copyright and MIT terms below cover it as well.
+RTK-derived components of this crate that upstream's NOTICE does not name
+(paths relative to this crate; upstream pins no RTK commit for them):
+
+- `src/filters/ruby.rs`: `strip_rspec_noise`, adapted from RTK's
+  `src/cmds/ruby/rspec_cmd.rs::strip_noise`; `MAX_RENDERED_FAILURES`, RTK's
+  `MAX_RSPEC_FAILURES` limit; and the RuboCop autocorrect summary compaction
+  in `filter_rubocop`, adapted from RTK's `src/cmds/ruby/rubocop_cmd.rs`.
+- `src/filters/lint.rs`: the basedpyright `strip_lines_matching` patterns and
+  one inline test, re-derived from RTK's `src/filters/basedpyright.toml`; and
+  the ESLint stylish "Top rules" summary, an RTK idea re-derived from ESLint's
+  default text output.
+- `src/filters/jvm.rs`: the Maven filters (phase detection, Surefire block
+  collapse, compile, package, and quiet-mode filters) and their tests, ported
+  from RTK's `src/cmds/jvm/mvn_cmd.rs`; the Gradle filters (`detect_task`,
+  `filter_build_line`, `filter_test`, `filter_connected`, `filter_lint`,
+  `filter_dependencies`) and their tests, ported from RTK's
+  `src/cmds/jvm/gradlew_cmd.rs`; and the Spring Boot keep-list, re-derived
+  from RTK's `src/filters/spring-boot.toml`. The JVM test fixtures that name
+  `RtkInducedFailTest` or `com.example.rtk` appear to be RTK recordings;
+  upstream does not state their source.
+- `src/filters/go.rs`: the `go test` success aggregation, re-derived from
+  RTK's `go_cmd`, and the test
+  `looks_like_go_error_recognizes_non_location_error_shapes`, whose inputs are
+  RTK's `go_cmd` inline test inputs.
+- `src/defs/*.toml`: the definitions ported or adapted from RTK's
+  `src/filters/*.toml`. A definition whose header reads `Ported from
+  https://github.com/rtk-ai/rtk/blob/master/src/filters/<name>.toml` adapts
+  that RTK file. A definition without that header is RTK-derived as well when
+  it shares its filter name with an RTK filter and shares regexes or test
+  names with the text RTK had committed for that filter before upstream added
+  the definition. Upstream added these in commit
+  151934e9a15e89ee862fe2386cf45726396fe391 on 2026-04-24, and each meets that
+  test: `iptables.toml`, `jj.toml`, `liquibase.toml`, `mise.toml`,
+  `ollama.toml`, `ping.toml`, `pre-commit.toml`, `rsync.toml`,
+  `shopify-theme.toml`, `skopeo.toml`, `ssh.toml`, `swift-build.toml`,
+  `task.toml`, `turbo.toml`, `ty.toml`, `xcodebuild.toml`, and `yadm.toml`.
+
+Upstream's minimizer also adapts filters, tests, and fixtures from snip, cites
+snip by bare path only, and carries no snip notice. The snip notice follows
+upstream's NOTICE at the end of this file.
+
 -------------------------------------------------------------------------------
 
 This file documents third-party attribution for the shell-output minimizer in
@@ -35,6 +78,71 @@ lines (RTK's defensive default) so xdist `[gwN]` prefixes and custom reporters
 never cause data loss.
 
 MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+This crate also adapts declarative filters, inline tests, and fixtures from
+snip (https://github.com/edouard-claude/snip), used under the MIT License.
+snip's LICENSE, reproduced verbatim below, was read at snip commit
+2e5b8490cb9f6eb643d758c13cd8abad4eae7d78.
+
+  Copyright (c) 2026 snip contributors
+
+Derived components (paths relative to this crate; snip paths relative to the
+snip repository):
+
+- `src/defs/npx.toml`: ported from `filters/npx.yaml`, inline tests included.
+- `src/filters/node_tests.rs`: the console-echo and `Ran all test suites`
+  strips (`is_noise_line`), from the `remove_lines` of `filters/jest.yaml`;
+  and the tests `jest_all_passing_collapses_to_summary` and
+  `jest_failures_drop_ran_banner_and_keep_rich_context`, ported from that
+  file's inline tests.
+- `src/filters/lint.rs`: the tests
+  `tsc_eslint_biome_oxlint_are_program_claimed`,
+  `tsc_pretty_strips_code_frames_and_groups_by_file`,
+  `tsc_classic_groups_by_file`, and `tsc_empty_input_condenses_to_clean`,
+  ported from the inline tests and fixtures of `filters/tsc.yaml`; and
+  `eslint_stylish_groups_rows_under_headers_with_top_rules`,
+  `eslint_stylish_single_file_keeps_summary`, and
+  `eslint_clean_run_condenses_to_clean`, ported from those of
+  `filters/eslint.yaml`.
+- `src/filters/ruby.rs`: the rake keep-lines predicate (`is_rake_keep_line`),
+  re-derived from `filters/rake.yaml`; and the tests
+  `rspec_exit_zero_collapses_doc_tree_to_summary` and
+  `rspec_failure_doc_run_keeps_failed_examples_and_summary`, whose inputs come
+  from `tests/fixtures/rspec_raw.txt`.
+- `src/filters/jvm.rs`: the tests `gradle_snip_build_success`,
+  `gradle_snip_build_failure_with_exception`, and
+  `gradle_snip_download_and_start_noise_removed`, whose inputs and expectations
+  are copied from the tests of `filters/gradlew-bat.yaml`.
+
+Comments in `src/filters/pkg.rs` (`strip_package_noise`, `is_noise_line`,
+`is_js_install_summary`), `src/filters/lint.rs` (`is_lint_noise`),
+`src/filters/ruby.rs` (the rspec success collapse), `src/filters/jvm.rs`
+(`keep_gradle_build_line`), and `src/filters/go.rs` (`is_golangci_noise`) cite
+snip's behaviour on the same tool output; that code copies no snip text.
+
+MIT License
+
+Copyright (c) 2026 snip contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -2,16 +2,55 @@
 
 mod cargo;
 mod junit;
+mod sarif;
+mod stylelint;
+mod tap;
+mod terraform;
 
-use std::{fmt::Write as _, path::Path, sync::LazyLock};
+use std::{error::Error as _, fmt::Write as _, path::Path, sync::LazyLock};
 
 use omp_core::{Str, sf};
 use regex::Regex;
 
-use super::types::{Diagnostic, Severity};
+pub use self::{
+	junit::JunitError, sarif::SarifError, stylelint::StylelintError, tap::TapError,
+	terraform::TerraformError,
+};
+use super::types::{CheckLogs, Diagnostic, Severity};
 
-/// Code of the diagnostic an unreadable structured report degrades to.
+/// Code of the diagnostic unreadable checker output degrades to.
 const UNPARSEABLE: &str = "unparseable";
+
+/// Why a checker's output is not a readable instance of its declared format.
+///
+/// Each reason stays typed through the parse seam; [`unparseable`] renders it
+/// once, into the diagnostic a repair worker reads.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+	/// cargo stopped before it finished a build: stdout holds no
+	/// `build-finished` record, and no output line names a diagnostic.
+	#[error("cargo wrote no `build-finished` record and no diagnostic")]
+	CargoUnfinished,
+	/// A checker that reports JSON wrote no JSON value and no diagnostic line;
+	/// the source is why the whole output is not JSON.
+	#[error("output holds no JSON report")]
+	NoJson(#[source] serde_json::Error),
+	/// The `JUnit` XML report could not be read.
+	#[error(transparent)]
+	Junit(#[from] JunitError),
+	/// The SARIF log could not be read.
+	#[error(transparent)]
+	Sarif(#[from] SarifError),
+	/// The TAP stream could not be read.
+	#[error(transparent)]
+	Tap(#[from] TapError),
+	/// The Stylelint report could not be read.
+	#[error(transparent)]
+	Stylelint(#[from] StylelintError),
+	/// The `terraform validate -json` report could not be read.
+	#[error(transparent)]
+	Terraform(#[from] TerraformError),
+}
 
 static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(r"^(?P<file>.*?):(?P<line>\d+)(?::(?P<column>\d+))?(?::|\s+-\s+|\s+)(?P<message>.+)$")
@@ -89,8 +128,12 @@ pub enum ParserKind {
 	Terraform,
 	/// TFLint JSON.
 	Tflint,
-	/// Actionlint text.
+	/// Actionlint JSON (`-format '{{json .}}'`).
 	Actionlint,
+	/// SARIF 2.1.0 log on stdout.
+	Sarif,
+	/// TAP stream on stdout: TAP 14, TAP 13, or version-less TAP 12.
+	Tap,
 	/// Generic file/line/column text or JSON.
 	Generic,
 }
@@ -110,11 +153,50 @@ pub struct ParserInput<'a> {
 }
 
 /// Parses one invocation into deduplicated project-relative diagnostics.
-pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
+///
+/// `Ok` holds every diagnostic the output reports, and is empty exactly when
+/// the output is a report that names no problem. `Err` is output that is not
+/// a readable instance of the declared format, so it never reads as a clean
+/// run. A text format has no unreadable state: each line names a problem or
+/// does not, and the process exit status says what an empty result means.
+pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Result<Vec<Diagnostic>, ParseError> {
 	let mut diagnostics = match kind {
-		ParserKind::Rust | ParserKind::RustTest => cargo::parse(kind, input),
-		ParserKind::JUnit => structured(input, junit::parse(input)),
-		_ => generic(kind, input),
+		ParserKind::Rust | ParserKind::RustTest => cargo::parse(kind, input)?,
+		ParserKind::JUnit => junit::parse(input)?,
+		ParserKind::Sarif => sarif::parse(input)?,
+		ParserKind::Tap => tap::parse(input)?,
+		ParserKind::Stylelint => stylelint::parse(input)?,
+		ParserKind::Terraform => terraform::parse(input)?,
+		ParserKind::GoTest
+		| ParserKind::Golangci
+		| ParserKind::Ruff
+		| ParserKind::Pyright
+		| ParserKind::Pylint
+		| ParserKind::Eslint
+		| ParserKind::Biome
+		| ParserKind::DenoLint
+		| ParserKind::Rubocop
+		| ParserKind::Phpstan
+		| ParserKind::Psalm
+		| ParserKind::Swiftlint
+		| ParserKind::Credo
+		| ParserKind::Shellcheck
+		| ParserKind::Hlint
+		| ParserKind::Tflint
+		| ParserKind::Actionlint => match walk(kind, input) {
+			(diagnostics, Some(error)) if diagnostics.is_empty() => {
+				return Err(ParseError::NoJson(error));
+			},
+			(diagnostics, _) => diagnostics,
+		},
+		ParserKind::Go
+		| ParserKind::Staticcheck
+		| ParserKind::Mypy
+		| ParserKind::Flake8
+		| ParserKind::Ty
+		| ParserKind::Oxlint
+		| ParserKind::Dart
+		| ParserKind::Generic => walk(kind, input).0,
 	};
 	diagnostics.sort_by(|left, right| {
 		left
@@ -131,10 +213,12 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 			&& left.code == right.code
 			&& left.message == right.message
 	});
-	diagnostics
+	Ok(diagnostics)
 }
 
-fn generic(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
+/// Reads every JSON value and every diagnostic text line of the combined
+/// output, and returns why the output is not JSON when it holds no JSON value.
+fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<serde_json::Error>) {
 	let combined = if input.stderr.is_empty() {
 		input.stdout.to_owned()
 	} else if input.stdout.is_empty() {
@@ -143,24 +227,27 @@ fn generic(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 		format!("{}\n{}", input.stdout, input.stderr)
 	};
 	let mut diagnostics = Vec::new();
-	for value in json_values(&combined) {
-		parse_json_value(kind, &value, None, input, &mut diagnostics);
-	}
+	let not_json = match json_values(&combined) {
+		Ok(values) => {
+			for value in &values {
+				parse_json_value(kind, value, None, input, &mut diagnostics);
+			}
+			None
+		},
+		Err(error) => Some(error),
+	};
 	parse_text(kind, &combined, input, &mut diagnostics);
-	diagnostics
+	(diagnostics, not_json)
 }
 
-/// Flattens a structured parser's outcome. An unreadable report becomes one
-/// project-wide `unparseable` diagnostic carrying the reason and an output
-/// excerpt, never an empty result that would read as a clean run.
-fn structured<E: std::error::Error>(
-	input: &ParserInput<'_>,
-	outcome: Result<Vec<Diagnostic>, E>,
-) -> Vec<Diagnostic> {
-	let error = match outcome {
-		Ok(diagnostics) => return diagnostics,
-		Err(error) => error,
-	};
+/// The one project-wide diagnostic unreadable output degrades to: the reason,
+/// rendered once with its causes, then where the complete output is retained.
+/// The diagnostic never carries the output itself, so none of it is cut.
+pub(super) fn unparseable(
+	checker: Str,
+	error: &ParseError,
+	logs: Option<&CheckLogs>,
+) -> Diagnostic {
 	let mut message = String::new();
 	let _ = write!(message, "{error}");
 	let mut source = error.source();
@@ -173,44 +260,31 @@ fn structured<E: std::error::Error>(
 		}
 		source = cause.source();
 	}
-	let output = if input.stdout.trim().is_empty() {
-		input.stderr
-	} else {
-		input.stdout
-	};
-	let output = excerpt(output).trim();
-	if !output.is_empty() {
-		message.push_str(": ");
-		message.push_str(output);
+	if let Some(logs) = logs {
+		logs.cite(&mut message);
 	}
-	vec![Diagnostic {
-		checker:    Str::from(input.checker),
-		file:       None,
-		line:       None,
-		column:     None,
-		end_line:   None,
+	Diagnostic {
+		checker,
+		file: None,
+		line: None,
+		column: None,
+		end_line: None,
 		end_column: None,
-		code:       Some(sf!(UNPARSEABLE)),
-		severity:   Severity::Error,
-		message:    Str::from(message),
+		code: Some(sf!(UNPARSEABLE)),
+		severity: Severity::Error,
+		message: Str::from(message),
 		suggestion: None,
-	}]
-}
-
-/// First 12,000 characters of `output`: the raw output one diagnostic carries.
-pub(super) fn excerpt(output: &str) -> &str {
-	output
-		.char_indices()
-		.nth(12_000)
-		.map_or(output, |(cut, _)| &output[..cut])
-}
-
-fn json_values(text: &str) -> Vec<serde_json::Value> {
-	let mut values = Vec::new();
-	if let Ok(value) = serde_json::from_str(text.trim()) {
-		values.push(value);
-		return values;
 	}
+}
+
+/// Every JSON value in `text`: the whole text as one document, else each line
+/// that holds one. `Err` is why the whole text is not JSON, when no line is.
+fn json_values(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+	let error = match serde_json::from_str(text.trim()) {
+		Ok(value) => return Ok(vec![value]),
+		Err(error) => error,
+	};
+	let mut values = Vec::new();
 	for line in text.lines() {
 		let line = line.trim();
 		if (line.starts_with('{') || line.starts_with('['))
@@ -219,7 +293,11 @@ fn json_values(text: &str) -> Vec<serde_json::Value> {
 			values.push(value);
 		}
 	}
-	values
+	if values.is_empty() {
+		Err(error)
+	} else {
+		Ok(values)
+	}
 }
 
 fn parse_json_value(
@@ -246,9 +324,17 @@ fn parse_json_value(
 			}
 			// ESLint names the file once, on the parent of its `messages`.
 			let file = string_at(object, FILE_KEYS).or(file);
-			for key in
-				["diagnostics", "messages", "errors", "issues", "files", "results", "runs", "Issues"]
-			{
+			for key in [
+				"diagnostics",
+				"messages",
+				"errors",
+				"issues",
+				"files",
+				"results",
+				"runs",
+				"Issues",
+				"generalDiagnostics",
+			] {
 				if let Some(value) = object.get(key) {
 					parse_json_value(kind, value, file, input, output);
 				}
@@ -625,6 +711,10 @@ mod tests {
 		}
 	}
 
+	fn read(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
+		parse(kind, input).expect("readable report")
+	}
+
 	#[test]
 	fn ruff_json_keeps_location_rows() {
 		let root = Path::new("/private/tmp/walker-repro/py");
@@ -635,7 +725,7 @@ mod tests {
 			stdout:       include_str!("../../../../fixtures/ruff/check.json"),
 			stderr:       "",
 		};
-		assert_eq!(parse(ParserKind::Ruff, &input), vec![
+		assert_eq!(read(ParserKind::Ruff, &input), vec![
 			located("ruff", "bad.py", [1, 8, 1, 10], "F401", "`os` imported but unused"),
 			located(
 				"ruff",
@@ -670,14 +760,14 @@ mod tests {
 			located("eslint", "bad.js", [3, 1, 3, 8], "no-undef", "'console' is not defined."),
 			located("eslint", "bad.js", [3, 13, 3, 20], "no-undef", "'missing' is not defined."),
 		];
-		assert_eq!(parse(ParserKind::Eslint, &input(report)), expected);
+		assert_eq!(read(ParserKind::Eslint, &input(report)), expected);
 		let unlocated =
 			report.replacen(r#""filePath":"/private/tmp/walker-repro/js/bad.js","#, "", 1);
 		let without_file = expected
 			.into_iter()
 			.map(|diagnostic| Diagnostic { file: None, ..diagnostic });
 		assert_eq!(
-			parse(ParserKind::Eslint, &input(unlocated.as_str())),
+			read(ParserKind::Eslint, &input(unlocated.as_str())),
 			without_file.collect::<Vec<_>>()
 		);
 	}
@@ -705,7 +795,7 @@ mod tests {
 		let root = Path::new("/private/tmp/offsets-repro/js");
 		let report = include_str!("../../../../fixtures/biome/check-reporter-json.json");
 		let formatter = "Formatter would have printed the following content:";
-		assert_eq!(parse(ParserKind::Biome, &input("biome", root, report)), vec![
+		assert_eq!(read(ParserKind::Biome, &input("biome", root, report)), vec![
 			file_level("biome", "bad.js", "format", formatter),
 			with_severity(
 				Severity::Warning,
@@ -749,7 +839,7 @@ mod tests {
 	fn deno_lint_json_keeps_one_based_line_and_shifts_col() {
 		let root = Path::new("/private/tmp/offsets-repro/deno");
 		let report = include_str!("../../../../fixtures/deno/lint-json.json");
-		assert_eq!(parse(ParserKind::DenoLint, &input("deno-lint", root, report)), vec![
+		assert_eq!(read(ParserKind::DenoLint, &input("deno-lint", root, report)), vec![
 			located("deno-lint", "bad.ts", [1, 7, 1, 13], "no-unused-vars", "`unused` is never used"),
 			located("deno-lint", "bad.ts", [2, 10, 2, 11], "no-unused-vars", "`f` is never used"),
 			located(
@@ -769,7 +859,7 @@ mod tests {
 		let warning = |span, code, message| {
 			with_severity(Severity::Warning, located("pylint", "bad.py", span, code, message))
 		};
-		assert_eq!(parse(ParserKind::Pylint, &input("pylint", root, report)), vec![
+		assert_eq!(read(ParserKind::Pylint, &input("pylint", root, report)), vec![
 			Diagnostic {
 				end_line: None,
 				end_column: None,
@@ -796,7 +886,7 @@ mod tests {
 	fn shellcheck_json_names_numeric_code() {
 		let root = Path::new("/private/tmp/offsets-repro/sh");
 		let report = include_str!("../../../../fixtures/shellcheck/format-json.json");
-		assert_eq!(parse(ParserKind::Shellcheck, &input("shellcheck", root, report)), vec![
+		assert_eq!(read(ParserKind::Shellcheck, &input("shellcheck", root, report)), vec![
 			with_severity(
 				Severity::Info,
 				located(
@@ -819,9 +909,43 @@ mod tests {
 			end_column: None,
 			..located("golangci-lint", "main.go", [line, column, 0, 0], code, message)
 		};
-		assert_eq!(parse(ParserKind::Golangci, &input("golangci-lint", root, stdout)), vec![
+		assert_eq!(read(ParserKind::Golangci, &input("golangci-lint", root, stdout)), vec![
 			point(6, 11, "errcheck", "Error return value of `os.Remove` is not checked"),
 			point(9, 6, "unused", "func unused is unused"),
+		]);
+	}
+
+	#[test]
+	fn pyright_json_reads_general_diagnostics() {
+		let root = Path::new("/private/tmp/empty-result-repro/py");
+		let report = include_str!("../../../../fixtures/pyright/outputjson.json");
+		// Pyright indents a message's continuation lines with no-break spaces.
+		let return_type = "Type \"str\" is not assignable to return type \
+		                   \"int\"\n\u{a0}\u{a0}\"str\" is not assignable to \"int\"";
+		let revealed = "Type of \"greet\" is \"(name: str) -> int\"";
+		assert_eq!(read(ParserKind::Pyright, &input("pyright", root, report)), vec![
+			located("pyright", "bad.py", [2, 12, 2, 16], "reportReturnType", return_type),
+			with_severity(Severity::Info, Diagnostic {
+				code: None,
+				..located("pyright", "bad.py", [5, 13, 5, 18], "", revealed)
+			}),
+			with_severity(
+				Severity::Warning,
+				located(
+					"pyright",
+					"bad.py",
+					[6, 1, 6, 7],
+					"reportUnusedExpression",
+					"Expression value is unused"
+				),
+			),
+			located(
+				"pyright",
+				"bad.py",
+				[7, 7, 7, 21],
+				"reportUndefinedVariable",
+				"\"undefined_name\" is not defined"
+			),
 		]);
 	}
 
@@ -836,28 +960,174 @@ mod tests {
 			stdout,
 			stderr: "runner console",
 		};
-		assert_eq!(parse(ParserKind::JUnit, &input(report)).len(), 2);
+		assert_eq!(read(ParserKind::JUnit, &input(report)).len(), 2);
 		let cut = report
 			.find("<testcase name=\"passes\"")
 			.expect("passes testcase");
-		let truncated = parse(ParserKind::JUnit, &input(&report[..cut]));
-		assert_eq!(truncated.len(), 1);
-		assert_eq!(truncated[0].file, None);
-		assert_eq!(truncated[0].code.as_deref(), Some(UNPARSEABLE));
+		let error = parse(ParserKind::JUnit, &input(&report[..cut])).expect_err("cut report");
+		assert!(matches!(error, ParseError::Junit(JunitError::Truncated { open: 2 })));
+		let truncated = unparseable(sf!("nextest"), &error, None);
+		assert_eq!(truncated.file, None);
+		assert_eq!(truncated.code.as_deref(), Some(UNPARSEABLE));
+		assert_eq!(truncated.message.as_str(), "report ends with 2 element(s) unclosed");
+		let inside_tag =
+			parse(ParserKind::JUnit, &input(&report[..cut + 9])).expect_err("cut inside a tag");
 		assert_eq!(
-			truncated[0].message.lines().next(),
-			Some("report ends with 2 element(s) unclosed: <?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-		);
-		let inside_tag = parse(ParserKind::JUnit, &input(&report[..cut + 9]));
-		assert_eq!(
-			inside_tag[0].message.lines().next(),
-			Some(
-				format!(
-					"malformed XML at byte {cut}: syntax error: tag not closed: `>` not found before \
-					 end of input: <?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-				)
-				.as_str()
+			unparseable(sf!("nextest"), &inside_tag, None)
+				.message
+				.as_str(),
+			format!(
+				"malformed XML at byte {cut}: syntax error: tag not closed: `>` not found before end \
+				 of input"
 			)
 		);
+	}
+
+	/// The shared walk reads nothing from text that names no problem, as it does
+	/// for a clean run, so for a text format the exit status decides. SARIF and
+	/// TAP keep the distinction at the seam: rejected output is an `Err` naming
+	/// why, which degrades to one file-less diagnostic.
+	#[test]
+	fn sarif_and_tap_never_read_rejected_output_as_clean() {
+		let root = Path::new("/repo");
+		let input = |stdout, stderr| ParserInput {
+			checker: "checker",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr,
+		};
+		let rows = |kind, input: &ParserInput<'_>| {
+			let error = parse(kind, input).expect_err("rejected output");
+			let diagnostic = unparseable(sf!("checker"), &error, None);
+			vec![(diagnostic.file, diagnostic.code, diagnostic.message.as_str().to_owned())]
+		};
+		let rejected =
+			|message: &str| vec![(None::<Str>, Some(sf!(UNPARSEABLE)), message.to_owned())];
+		let garbage = input("checker crashed before writing its log", "");
+		assert!(read(ParserKind::Generic, &garbage).is_empty());
+		assert_eq!(
+			rows(ParserKind::Sarif, &garbage),
+			rejected("stdout is not a SARIF 2.1.0 log: expected value at line 1 column 1")
+		);
+		assert_eq!(
+			rows(ParserKind::Tap, &garbage),
+			rejected("stdout holds no TAP stream (no version line, plan, test point or Bail out!)")
+		);
+		assert_eq!(
+			rows(ParserKind::Sarif, &input("", "error: unknown flag --sarif")),
+			rejected("stdout is empty; expected a SARIF 2.1.0 log")
+		);
+		let clean_sarif =
+			r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint"}},"results":[]}]}"#;
+		assert!(read(ParserKind::Sarif, &input(clean_sarif, "")).is_empty());
+		assert!(
+			read(ParserKind::Tap, &input("TAP version 14\n1..1\nok 1 - passes\n", "")).is_empty()
+		);
+	}
+
+	/// Recorded runs under `fixtures` at the seam. A clean run parses to an
+	/// empty `Ok` and a report to its failures; the same output cut short, as a
+	/// checker killed mid-write leaves it, is an `Err` naming why. Output that
+	/// could not be read never looks like a run with zero failures.
+	#[test]
+	fn could_not_parse_is_distinguishable_from_zero_failures_at_the_seam() {
+		let root = Path::new("/private/tmp/cleanse-seam");
+		let run = |kind, stdout, stderr| {
+			parse(kind, &ParserInput {
+				checker: "checker",
+				checker_root: root,
+				project_root: root,
+				stdout,
+				stderr,
+			})
+		};
+		let half = |output: &'static str| {
+			let middle = output.len() / 2;
+			&output[..(0..=middle)
+				.rev()
+				.find(|&cut| output.is_char_boundary(cut))
+				.unwrap_or(0)]
+		};
+		let cut = |kind, stdout, stderr| {
+			run(kind, half(stdout), half(stderr)).expect_err("output cut short")
+		};
+
+		for (kind, stdout, stderr) in [
+			(
+				ParserKind::Rust,
+				include_str!("../../../../fixtures/cargo/check-clean.stdout"),
+				include_str!("../../../../fixtures/cargo/check-clean.stderr"),
+			),
+			(
+				ParserKind::Rust,
+				include_str!("../../../../fixtures/cargo/clippy-clean.stdout"),
+				include_str!("../../../../fixtures/cargo/clippy-clean.stderr"),
+			),
+			(
+				ParserKind::RustTest,
+				include_str!("../../../../fixtures/cargo/test-clean.stdout"),
+				include_str!("../../../../fixtures/cargo/test-clean.stderr"),
+			),
+		] {
+			assert!(
+				run(kind, stdout, stderr)
+					.expect("clean cargo run")
+					.is_empty(),
+				"{kind:?}"
+			);
+			assert!(matches!(cut(kind, stdout, stderr), ParseError::CargoUnfinished));
+		}
+		let stylelint = include_str!("../../../../fixtures/stylelint/format-json-clean.json");
+		assert!(
+			run(ParserKind::Stylelint, "", stylelint)
+				.expect("clean run")
+				.is_empty()
+		);
+		assert!(matches!(cut(ParserKind::Stylelint, "", stylelint), ParseError::Stylelint(_)));
+		let terraform = include_str!("../../../../fixtures/terraform/validate-json-clean.json");
+		assert!(
+			run(ParserKind::Terraform, terraform, "")
+				.expect("clean run")
+				.is_empty()
+		);
+		assert!(matches!(cut(ParserKind::Terraform, terraform, ""), ParseError::Terraform(_)));
+
+		for (kind, report) in [
+			(ParserKind::Ruff, include_str!("../../../../fixtures/ruff/check.json")),
+			(ParserKind::Eslint, include_str!("../../../../fixtures/eslint/format-json.json")),
+			(ParserKind::Pyright, include_str!("../../../../fixtures/pyright/outputjson.json")),
+			(ParserKind::Biome, include_str!("../../../../fixtures/biome/check-reporter-json.json")),
+			(ParserKind::DenoLint, include_str!("../../../../fixtures/deno/lint-json.json")),
+			(ParserKind::Pylint, include_str!("../../../../fixtures/pylint/output-format-json.json")),
+			(ParserKind::Shellcheck, include_str!("../../../../fixtures/shellcheck/format-json.json")),
+			(
+				ParserKind::Golangci,
+				include_str!("../../../../fixtures/golangci/run-output-json-stdout.txt"),
+			),
+		] {
+			assert!(!run(kind, report, "").expect("recorded report").is_empty(), "{kind:?}");
+			assert!(matches!(cut(kind, report, ""), ParseError::NoJson(_)), "{kind:?}");
+		}
+		let junit = include_str!("../../../../fixtures/junit/nextest.xml");
+		assert!(
+			!run(ParserKind::JUnit, junit, "")
+				.expect("recorded report")
+				.is_empty()
+		);
+		assert!(matches!(cut(ParserKind::JUnit, junit, ""), ParseError::Junit(_)));
+		let sarif = include_str!("../../../../fixtures/sarif/ruff.sarif");
+		assert!(
+			!run(ParserKind::Sarif, sarif, "")
+				.expect("recorded log")
+				.is_empty()
+		);
+		assert!(matches!(cut(ParserKind::Sarif, sarif, ""), ParseError::Sarif(_)));
+		// Test::More's diagnostics alone, without the TAP stream they annotate.
+		let perl = include_str!("../../../../fixtures/tap/perl.stderr");
+		assert!(matches!(
+			run(ParserKind::Tap, perl, "").expect_err("no TAP stream"),
+			ParseError::Tap(TapError::NoStream)
+		));
 	}
 }
