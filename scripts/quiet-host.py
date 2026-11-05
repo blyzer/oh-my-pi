@@ -656,6 +656,9 @@ def run_recipe(
             else None
         )
         upper = owner.get("max_combined_rss_kib") if owner else None
+        if upper is not None and peak[0] is not None:
+            # A spawned envd is absent from the samples taken before it starts.
+            upper = max(upper, peak[0])
         lower = owner.get("max_tree_without_envd_rss_kib") if owner else None
         end = {
             "type": "end",
