@@ -41,10 +41,11 @@ const TAIL_BYTES: usize = 20 * 1024;
 const PROJECTION_LINES: usize = 500;
 /// `BYTES_PER_TOKEN` (crates/agent/src/context.rs).
 const BYTES_PER_TOKEN: usize = 4;
-/// Failure lines: compiler and lint errors, test failures, panics and format
-/// diffs.
-const FAILURE: &str = r"(?:^|\s)error(?:\[[A-Z]\d{4}\])?:|\bFAIL(?:ED)?\b|panicked at|^Diff in ";
-const FAILURE_KEY_BYTES: usize = 80;
+/// Failures: compiler and lint errors, nextest failures of every kind,
+/// libtest failures, panics and format diffs. An error is keyed by the
+/// location line under it, since one message can repeat at many locations.
+const FAILURE: &str = r"^error(?:\[[A-Z]\d{4}\])?: |^\s*(?:FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|SIGILL|LEAK|LEAK-FAIL|ABORT) +\[|\.\.\. FAILED$|^test result: FAILED|panicked at |^Diff in ";
+const FAILURE_KEY_BYTES: usize = 120;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, Ord, PartialEq, PartialOrd)]
 enum Band {
@@ -311,12 +312,17 @@ fn prefix(text: &str, maximum: usize) -> &str {
 }
 
 fn failure_keys<'t>(failure: &Regex, text: &'t str) -> BTreeSet<&'t str> {
-	text
-		.lines()
-		.filter_map(|line| {
-			failure
-				.find(line)
-				.map(|found| prefix(line[found.start()..].trim(), FAILURE_KEY_BYTES))
+	let lines = text.lines().collect::<Vec<_>>();
+	lines
+		.iter()
+		.enumerate()
+		.filter(|(_, line)| failure.is_match(line))
+		.map(|(index, line)| {
+			lines
+				.get(index + 1)
+				.map(|next| next.trim())
+				.filter(|next| next.starts_with("--> "))
+				.unwrap_or_else(|| prefix(line.trim(), FAILURE_KEY_BYTES))
 		})
 		.collect()
 }
