@@ -185,4 +185,113 @@ bytes() {
 	rm -rf "$dir"
 }
 
+
+# Cold omp-ast builds with the four multi-grammar crates as shipped ("stock") and patched to compile
+# only the parser omp-ast references ("trimmed"). Each patch is a thin crate generated outside the
+# workspace; its build script compiles from the registry sources. Cargo.lock is restored after every
+# build, and the archive member counts prove which parsers each arm compiled.
+registry_dir() {
+	find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name "$1" | head -1
+}
+
+# make_wrapper CRATE VERSION LIBNAME SOURCE_DIR INCLUDE_DIR SYMBOL CONST [FLAG]
+make_wrapper() {
+	local crate=$1 version=$2 libname=$3 src=$4 inc=$5 symbol=$6 const=$7 flag=${8:-} dir reg flagline=""
+	reg=$(registry_dir "$crate-$version")
+	if [ -z "$reg" ]; then
+		echo "error: $crate-$version is not in the Cargo registry" >&2
+		return 1
+	fi
+	if [ -n "$flag" ]; then flagline="c.flag_if_supported(\"$flag\");"; fi
+	dir=$root/patched/$crate
+	mkdir -p "$dir"
+	cat >"$dir/Cargo.toml" <<EOF
+[package]
+name = "$crate"
+version = "$version"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.2"
+EOF
+	cat >"$dir/build.rs" <<EOF
+fn main() {
+    let root = std::path::Path::new("$reg");
+    let mut c = cc::Build::new();
+    c.std("c11").include(root.join("$inc"));
+    $flagline
+    c.file(root.join("$src/parser.c")).file(root.join("$src/scanner.c"));
+    c.compile("$libname");
+}
+EOF
+	cat >"$dir/lib.rs" <<EOF
+use tree_sitter_language::LanguageFn;
+
+extern "C" {
+    fn $symbol() -> *const ();
+}
+
+pub const $const: LanguageFn = unsafe { LanguageFn::from_raw($symbol) };
+EOF
+	patches+=(--config "patch.crates-io.$crate.path=\"$dir\"")
+	archives+=("$crate:$libname")
+}
+
+subgrammar() {
+	local spec profile j n r arm dir t lock=$root/Cargo.lock.stock entry crate libname lib phase
+	local -a flags arms
+	patches=()
+	archives=()
+	make_wrapper tree-sitter-ocaml 0.24.2 tree-sitter-ocaml grammars/ocaml/src grammars/ocaml/src tree_sitter_ocaml LANGUAGE_OCAML
+	make_wrapper tree-sitter-php 0.24.2 tree-sitter-php php_only/src php/src tree_sitter_php_only LANGUAGE_PHP_ONLY
+	make_wrapper tree-sitter-md 0.5.3 tree-sitter-markdown tree-sitter-markdown/src tree-sitter-markdown/src tree_sitter_markdown LANGUAGE
+	make_wrapper tree-sitter-xml 0.7.0 tree-sitter-xml xml/src xml/src tree_sitter_xml LANGUAGE_XML -Wno-unused-value
+	cp Cargo.lock "$lock"
+	for spec in dev:4:5 dev:11:5 release:4:3; do
+		IFS=: read -r profile j n <<<"$spec"
+		phase=sub-$profile-j$j
+		flags=(-j "$j" --offline --config 'resolver.feature-unification="selected"' --no-default-features --features grammars-all --timings)
+		if [ "$profile" = release ]; then flags+=(--release); fi
+		for ((r = 1; r <= n; r++)); do
+			arms=(stock trimmed)
+			if ((r % 2 == 0)); then arms=(trimmed stock); fi
+			for arm in "${arms[@]}"; do
+				dir=$root/s-$arm
+				rm -rf "$dir"
+				emit load "$phase" "$arm" "$r" "$(cut -d' ' -f1-3 /proc/loadavg)"
+				if [ "$arm" = stock ]; then
+					t=$(timed env CARGO_TARGET_DIR="$dir" cargo build -p omp-ast --locked "${flags[@]}")
+				else
+					t=$(timed env CARGO_TARGET_DIR="$dir" cargo build -p omp-ast "${patches[@]}" "${flags[@]}")
+				fi
+				cp "$lock" Cargo.lock
+				if grep -q 'was not used in the crate graph' "$root/last.log"; then
+					echo "error: a [patch] entry was not used" >&2
+					return 1
+				fi
+				emit cold-ast "$phase" "$arm" "$r" $t "$(du -sm "$dir" | cut -f1)"
+				timings "$dir/cargo-timings/cargo-timing.html" "$phase" "$arm" "$r"
+				for entry in "${archives[@]}"; do
+					crate=${entry%%:*}
+					libname=${entry#*:}
+					lib=$(find "$dir" -path "*/build/$crate-*/out/lib$libname.a" | head -1)
+					if [ -z "$lib" ]; then
+						echo "error: no lib$libname.a under $dir" >&2
+						return 1
+					fi
+					emit objects "$phase" "$arm" "$r" "$crate" "$(ar t "$lib" | wc -l)" "$(stat -c %s "$lib")"
+				done
+				rm -rf "$dir"
+			done
+		done
+	done
+}
+
 "$phase"
