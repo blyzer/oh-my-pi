@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="1" errors="0" uuid="77583940-59c7-41af-827c-144f4b1cfe81" timestamp="2026-11-05T01:21:18.595-04:00" time="0.049">
+    <testsuite name="junit_abort" tests="1" skipped="0" errors="0" failures="1">
+        <testcase name="aborts" classname="junit_abort" timestamp="2026-11-05T01:21:18.596-04:00" time="0.038">
+            <failure message="process aborted with signal 6 (SIGABRT)" type="test abort">process aborted with signal 6 (SIGABRT)</failure>
+            <system-out>
+running 1 test
+</system-out>
+            <system-err></system-err>
+        </testcase>
+    </testsuite>
+</testsuites>
