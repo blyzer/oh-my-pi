@@ -450,23 +450,33 @@ fn first(dir: &Path, samples: &Path, name: &str, rep: &str, native_first: bool) 
 	let total_ms = ms(all.elapsed());
 	let (native_ms, native_tree) = native.unwrap_or_else(|| first_native(language, &source));
 	let (w, n) = (wasm_tree.root_node(), native_tree.root_node());
-	println!(
-		"GS\tfirst\t{language}\t{rep}\t{}\t{}\t{}\t{engine_ms:.3}\t{read_ms:.3}\t{store_ms:.3}\\
-		 t{compile_ms:.3}\t{parser_store_ms:.3}\t{set_language_ms:.3}\t{parse_ms:.3}\t{total_ms:.3}\\
-		 t{native_ms:.3}\t{}\t{}\t{}\t{}\t{}",
-		if native_first {
-			"native-first"
-		} else {
-			"wasm-first"
-		},
-		bytes.len(),
-		source.len(),
-		w.descendant_count(),
-		n.descendant_count(),
-		w.has_error(),
-		n.has_error(),
-		w.to_sexp() == n.to_sexp()
-	);
+	let order = if native_first {
+		"native-first"
+	} else {
+		"wasm-first"
+	};
+	let fields = [
+		language.to_owned(),
+		rep.to_owned(),
+		order.to_owned(),
+		bytes.len().to_string(),
+		source.len().to_string(),
+		format!("{engine_ms:.3}"),
+		format!("{read_ms:.3}"),
+		format!("{store_ms:.3}"),
+		format!("{compile_ms:.3}"),
+		format!("{parser_store_ms:.3}"),
+		format!("{set_language_ms:.3}"),
+		format!("{parse_ms:.3}"),
+		format!("{total_ms:.3}"),
+		format!("{native_ms:.3}"),
+		w.descendant_count().to_string(),
+		n.descendant_count().to_string(),
+		w.has_error().to_string(),
+		n.has_error().to_string(),
+		(w.to_sexp() == n.to_sexp()).to_string(),
+	];
+	println!("GS\tfirst\t{}", fields.join("\t"));
 }
 
 fn quantile(sorted: &[f64], q: f64) -> f64 {
@@ -516,21 +526,25 @@ fn steady(dir: &Path, samples: &Path, name: &str, iters: usize) {
 	}
 	let rss_native_end = rss_kb();
 	let (n_med, w_med) = (quantile(&native_us, 0.5), quantile(&wasm_us, 0.5));
-	println!(
-		"GS\tsteady\t{language}\t{}\t{}\t{nodes}\t{equal}\t{n_med:.1}\t{:.1}\t{:.1}\t{w_med:.1}\t{:.\
-		 1}\t{:.1}\t{:.3}\t{}\t{}\t{}\t{}",
-		source.len(),
-		native_us.len(),
-		quantile(&native_us, 0.1),
-		quantile(&native_us, 0.9),
-		quantile(&wasm_us, 0.1),
-		quantile(&wasm_us, 0.9),
-		w_med / n_med,
-		rss_wasm_start,
-		rss_wasm_end,
-		rss_native_start,
-		rss_native_end
-	);
+	let fields = [
+		language.to_owned(),
+		source.len().to_string(),
+		native_us.len().to_string(),
+		nodes.to_string(),
+		equal.to_string(),
+		format!("{n_med:.1}"),
+		format!("{:.1}", quantile(&native_us, 0.1)),
+		format!("{:.1}", quantile(&native_us, 0.9)),
+		format!("{w_med:.1}"),
+		format!("{:.1}", quantile(&wasm_us, 0.1)),
+		format!("{:.1}", quantile(&wasm_us, 0.9)),
+		format!("{:.3}", w_med / n_med),
+		rss_wasm_start.to_string(),
+		rss_wasm_end.to_string(),
+		rss_native_start.to_string(),
+		rss_native_end.to_string(),
+	];
+	println!("GS\tsteady\t{}", fields.join("\t"));
 }
 
 fn main() {
