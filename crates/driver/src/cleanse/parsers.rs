@@ -41,7 +41,7 @@ pub enum ParserKind {
 	Go,
 	/// `go test -json`.
 	GoTest,
-	/// JUnit XML report on stdout.
+	/// `JUnit` XML report on stdout.
 	#[serde(rename = "junit")]
 	JUnit,
 	/// staticcheck Unix output.
