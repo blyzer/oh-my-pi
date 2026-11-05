@@ -174,12 +174,22 @@ fn config_list(value: Str) -> Vec<String> {
 		.collect()
 }
 
-fn cache_policy(ctx: &Ctx) -> omp_exec::CachePolicy {
-	match SV_EXEC_REMOTE_CACHE.get(ctx).as_str() {
+/// The operator's REAPI profile and action-cache policy, each read from `ctx`
+/// exactly once. The policy is validated against the profile it is returned
+/// with, so a cfg write during the run cannot swap in an unvalidated value.
+fn remote_profile(ctx: &Ctx) -> Result<(Profile, omp_exec::CachePolicy), RemoteError> {
+	let profile = match SV_EXEC_REMOTE_PROFILE.get(ctx).as_str() {
+		"buildbuddy" => Profile::buildbuddy(),
+		"reapi" => Profile::reapi(),
+		_ => return Err(RemoteError::MissingConfiguration),
+	};
+	let cache = match SV_EXEC_REMOTE_CACHE.get(ctx).as_str() {
 		"read" => omp_exec::CachePolicy::Read,
 		"read-write" => omp_exec::CachePolicy::ReadWrite,
 		_ => omp_exec::CachePolicy::Off,
-	}
+	};
+	validate_cache_policy(cache, profile.name.as_str())?;
+	Ok((profile, cache))
 }
 
 /// Returns `Err` when `policy` is non-off and `profile` uses runner recycling
@@ -473,16 +483,8 @@ impl ProductionAdwHost {
 				symlinks: capture.excluded_symlinks,
 			},
 		});
-		let buildbuddy = SV_EXEC_REMOTE_PROFILE.get(ctx).as_str() == "buildbuddy";
-		let profile = if buildbuddy {
-			Profile::buildbuddy()
-		} else if SV_EXEC_REMOTE_PROFILE.get(ctx).as_str() == "reapi" {
-			Profile::reapi()
-		} else {
-			return Err(RemoteError::MissingConfiguration.into());
-		};
-		validate_cache_policy(cache_policy(ctx), SV_EXEC_REMOTE_PROFILE.get(ctx).as_str())
-			.map_err(ProductionError::from)?;
+		let (profile, cache) = remote_profile(ctx)?;
+		let buildbuddy = profile.name.as_str() == "buildbuddy";
 		let credential = Credential::new(credential);
 		let buildbuddy_canceller = if buildbuddy {
 			Some(
@@ -503,7 +505,7 @@ impl ProductionAdwHost {
 			credential: Some(credential),
 			platform: Platform::LINUX_X86_64,
 			enforced: REMOTE_POSTURE,
-			cache: cache_policy(ctx),
+			cache,
 			platform_properties: BTreeMap::new(),
 			toolchains: BTreeMap::from([(
 				CargoJust::toolchain(&pins).to_string().into(),
@@ -669,5 +671,40 @@ mod tests {
 		validate_cache_policy(omp_exec::CachePolicy::Off, "buildbuddy").unwrap();
 		validate_cache_policy(omp_exec::CachePolicy::Read, "reapi").unwrap();
 		validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "reapi").unwrap();
+	}
+
+	#[test]
+	fn remote_profile_returns_the_cache_policy_it_validated() {
+		let ctx = Ctx::new();
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("reapi"))
+			.unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("read-write"))
+			.unwrap();
+		assert_eq!(
+			remote_profile(&ctx).unwrap(),
+			(Profile::reapi(), omp_exec::CachePolicy::ReadWrite)
+		);
+
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("buildbuddy"))
+			.unwrap();
+		let err = remote_profile(&ctx).unwrap_err();
+		assert!(matches!(err, RemoteError::CachePolicyConflict), "got {err:?}");
+
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("off"))
+			.unwrap();
+		assert_eq!(
+			remote_profile(&ctx).unwrap(),
+			(Profile::buildbuddy(), omp_exec::CachePolicy::Off)
+		);
+
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("other"))
+			.unwrap();
+		let err = remote_profile(&ctx).unwrap_err();
+		assert!(matches!(err, RemoteError::MissingConfiguration), "got {err:?}");
 	}
 }
