@@ -365,6 +365,7 @@ mod tests {
 			[
 				normalize(ParserKind::Rust, "cargo-check", "manifest", run!("check-manifest")),
 				normalize(ParserKind::RustTest, "cargo-test", "doctest", run!("test-doctest")),
+				normalize(ParserKind::Rust, "cargo-check-short", "short", run!("check-short")),
 			],
 			[
 				vec![error(
@@ -375,6 +376,17 @@ mod tests {
 					"invalid type: integer `1`, expected SemVer version",
 				)],
 				vec![error("cargo-test", "src/lib.rs", [2, 14], Some("E0308"), "mismatched types")],
+				vec![Diagnostic {
+					severity: Severity::Warning,
+					..error(
+						"cargo-check-short",
+						"src/lib.rs",
+						[2, 6],
+						None,
+						"unused variable: `unused`: help: if this is intentional, prefix it with an \
+						 underscore: `_unused`",
+					)
+				}],
 			]
 		);
 	}
