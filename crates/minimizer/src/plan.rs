@@ -255,24 +255,34 @@ fn pipeline_spans(tokens: &[Token]) -> Vec<(usize, usize)> {
 
 /// Whether shell word text expands without running anything: no command
 /// substitution or arithmetic expansion at any depth. Text the word parser
-/// rejects (bash 5.3 `${ …;}` among it) is unsafe.
+/// rejects is unsafe.
 fn text_is_safe(text: &str) -> bool {
-	word::parse(text, &ParserOptions::default()).is_ok_and(|pieces| pieces_are_safe(&pieces))
+	word::parse(text, &ParserOptions::default()).is_ok_and(|pieces| pieces_are_safe(text, &pieces))
 }
 
 fn word_is_safe(word: &ast::Word) -> bool {
 	text_is_safe(&word.value)
 }
 
-fn pieces_are_safe(pieces: &[WordPieceWithSource]) -> bool {
+/// `text` is the word the pieces were parsed from; piece indices are byte
+/// offsets into it.
+fn pieces_are_safe(text: &str, pieces: &[WordPieceWithSource]) -> bool {
 	pieces.iter().all(|piece| match &piece.piece {
-		WordPiece::Text(_)
-		| WordPiece::SingleQuotedText(_)
+		// A `$` the parser kept literal before `{` is a `${…}` it could not
+		// parse: a bad substitution, or bash 5.3's `${ …;}` command
+		// substitution. Either way it stays with the whole command.
+		WordPiece::Text(literal) => {
+			!(literal.ends_with('$')
+				&& text
+					.get(piece.end_index..)
+					.is_some_and(|rest| rest.starts_with('{')))
+		},
+		WordPiece::SingleQuotedText(_)
 		| WordPiece::AnsiCQuotedText(_)
 		| WordPiece::EscapeSequence(_)
 		| WordPiece::TildeExpansion(_) => true,
 		WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
-			pieces_are_safe(inner)
+			pieces_are_safe(text, inner)
 		},
 		WordPiece::ParameterExpansion(expr) => param_is_safe(expr),
 		// Command substitutions (`$(…)`, backticks) run commands of their
