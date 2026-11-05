@@ -364,12 +364,16 @@ fn ensure_success_visible(output: MinimizerOutput<'_>, exit_code: i32) -> Minimi
 fn program_label(program: &str) -> &'static str {
 	match program {
 		"cargo" => "cargo",
+		"go" => "go",
 		"cmake" => "cmake",
 		"ctest" => "ctest",
 		"ninja" => "ninja",
 		"gtest" => "gtest",
 		"gtest-parallel" => "gtest",
 		program if filters::cpp::is_gtest_binary_name(program) => "gtest",
+		"golangci-lint" => "golangci-lint",
+		"dotnet" => "dotnet",
+		"rustfmt" => "rustfmt",
 		_ => "builtin",
 	}
 }

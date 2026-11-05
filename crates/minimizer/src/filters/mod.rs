@@ -4,17 +4,23 @@ use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
 pub mod cpp;
+pub mod dotnet;
 pub mod generic;
+pub mod go;
+pub mod rust_tools;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"cargo" => cargo::supports(subcommand),
+		"go" | "golangci-lint" => go::supports(program, subcommand),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::supports(program, subcommand)
 		},
 		program if cpp::is_gtest_binary_name(program) => cpp::supports(program, subcommand),
+		"dotnet" => dotnet::supports(program, subcommand),
+		"rustfmt" => rust_tools::supports(program, subcommand),
 		_ => false,
 	}
 }
@@ -24,10 +30,13 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"go" | "golangci-lint" => go::filter(ctx, input, exit_code),
+		"dotnet" => dotnet::filter(ctx, input, exit_code),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::filter(ctx, input, exit_code)
 		},
 		program if cpp::is_gtest_binary_name(program) => cpp::filter(ctx, input, exit_code),
+		"rustfmt" => rust_tools::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
 }
