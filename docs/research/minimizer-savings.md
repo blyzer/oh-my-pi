@@ -3,9 +3,10 @@
 Status: research; nothing here is approved or implemented
 Date: 2026-11-05
 
-Baseline: PR #515 head `df8b485bcf` (every filter and all 59 defs), whose merge base with `origin/omp2`
-is `69895da5a4`. The minimizer stays unwired: the measurement calls `omp_minimizer::apply` from an
-example and models the output path around it.
+Baseline: PR #515 head `df8b485bcf`, which is `omp2` at `69895da5a4` plus #515's 59 defs. `omp2` has
+since merged more filters (#513), which the measured tree lacks; see
+[What this study did not measure](#what-this-study-did-not-measure). The minimizer stays unwired: the
+measurement calls `omp_minimizer::apply` from an example and models the output path around it.
 
 The wiring slice is gated on before/after token evidence. This report supplies it for the case that
 matters, output small enough to reach the model whole today. The per-capture tables are in
@@ -53,13 +54,14 @@ The four fixes, each found in this corpus:
   neither. MEASURED and OBSERVED.
 - **The build head/tail cap drops errors that fit inline.** A 46,001-byte failed
   `cargo nextest run --no-run` reaches the model whole today, with all 12 error locations. The
-  rewrite keeps 120 head and 60 tail lines (`condense_build` in `cargo.rs`) and shows 7. A cap must not remove
-  errors from output that would have been shown in full. MEASURED.
+  rewrite keeps 120 head and 60 tail lines (`condense_build` in `cargo.rs`) and shows 7. A cap must
+  not remove errors from output that would have been shown in full. MEASURED.
 - **The `just` def keeps the first 80 lines** (`crates/minimizer/src/defs/just.toml`,
   `primitives::max_lines` at `crates/minimizer/src/primitives.rs:360-375`). `AGENTS.md` makes `just`
   the way to run cargo here. `just test-pkg omp-minimizer` keeps compile warnings and the first `PASS`
-  lines, then elides 467 lines, the `Summary` among them. `just remote check-pkg` keeps the BuildBuddy preamble and drops the whole
-  cargo result. Route `just <recipe>` to the recipe's own filter, or keep `just` off. MEASURED.
+  lines, then elides 467 lines, the `Summary` among them. `just remote check-pkg` keeps the
+  BuildBuddy preamble and drops the whole cargo result. Route `just <recipe>` to the recipe's own
+  filter, or keep `just` off. MEASURED.
 - **Small rewrites cost more than they save.** The `gh` rewrites save -10.9% to -1.1%, because the
   artifact reference the caller must add outweighs what they remove. Across all 15
   `gh` captures the minimizer adds 0.2%. MEASURED.
@@ -232,6 +234,12 @@ the failed build leaves 41,763 tokens saved, 26.5% of today's 157,868.
   project; Bun's `tools-test` stands in. NOT MEASURED.
 - **Exact Claude counts.** The current Claude tokenizer is not published, and no API key was
   available for `count_tokens`. The three counters above bound the vocabulary effect. NOT MEASURED.
+- **Filters merged after the baseline.** `omp2` merged more filters in #513 (`0f98b515f2`). Its engine
+  labels add `pytest`, `ruff`, `mypy`, `bun`, `cmake` and `ctest`, among others. #513 conflicts with
+  #515 in `engine.rs` and `filters/mod.rs`, so the measured tree lacks them. In this corpus only
+  `uv run --with pytest pytest -v` (764 tokens today) could reach one of them. The other Python and Bun
+  captures are under the 1,000-character floor. Even a rewrite to nothing would change the saving on
+  output of 50 KiB or less by under 0.5 points (764 of 157,868 tokens). [INFERENCE]
 
 ## What would change the recommendation
 
