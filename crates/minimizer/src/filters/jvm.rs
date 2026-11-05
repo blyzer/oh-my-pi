@@ -2962,6 +2962,45 @@ mod tests {
 		assert!(o.trim().is_empty(), "all noise stripped to empty; got:\n{o}");
 	}
 
+	// ── github.com/edouard-claude/snip filters/gradlew-bat.yaml [[tests]] ──
+
+	#[test]
+	fn gradle_snip_build_success() {
+		let input = "> Task :compileJava\n> Task :processResources\n> Task :classes\n> Task \
+		             :jar\n\nBUILD SUCCESSFUL in 2s\n5 actionable tasks: 5 executed";
+		let o = filter_gradle_build(input);
+		assert!(o.contains("BUILD SUCCESSFUL in 2s"), "status kept; got:\n{o}");
+		assert!(o.contains("5 actionable tasks: 5 executed"), "actionable kept; got:\n{o}");
+		assert!(!o.contains("> Task :"), "tasks stripped; got:\n{o}");
+	}
+
+	#[test]
+	fn gradle_snip_build_failure_with_exception() {
+		let input = "> Task :compileJava FAILED\n> Task :processResources UP-TO-DATE\n\nFAILURE: \
+		             Build failed with an exception.\n\n* What went wrong:\nExecution failed for \
+		             task ':compileJava'.\n> Compilation error: package com.example does not \
+		             exist\n\nBUILD FAILED in 1s";
+		let o = filter_gradle_build(input);
+		assert!(o.contains("FAILURE: Build failed with an exception."), "FAILURE kept; got:\n{o}");
+		assert!(o.contains("Compilation error: package com.example"), "error detail kept; got:\n{o}");
+		assert!(o.contains("BUILD FAILED in 1s"), "status kept; got:\n{o}");
+		assert!(!o.contains("> Task :"), "tasks stripped; got:\n{o}");
+	}
+
+	#[test]
+	fn gradle_snip_download_and_start_noise_removed() {
+		let input = "Downloading https://services.gradle.org/distributions/gradle-8.5-bin.zip\n.....\
+		             ..................................................\nStarting a Gradle Daemon \
+		             (subsequent builds will be faster)\n\n> Task :test\nTest result: FAILURE\n\nBUILD \
+		             FAILED in 5s";
+		let o = filter_gradle_build(input);
+		assert!(o.contains("Test result: FAILURE"), "test result kept; got:\n{o}");
+		assert!(o.contains("BUILD FAILED in 5s"), "status kept; got:\n{o}");
+		assert!(!o.contains("Downloading"), "download stripped; got:\n{o}");
+		assert!(!o.contains("Starting a Gradle Daemon"), "daemon stripped; got:\n{o}");
+		assert!(!o.contains("> Task :"), "tasks stripped; got:\n{o}");
+	}
+
 	// ── Gradle dispatch smoke tests ─────────────────────────────────────────
 
 	#[test]
