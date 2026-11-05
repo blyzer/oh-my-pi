@@ -3,12 +3,12 @@
 # (branch research/grammar-bundling-harness, never merged). Runs on a BuildBuddy runner through
 # `just remote grammar-study <phase> [reps]` and prints one tab-separated `GS` line per measurement.
 set -euo pipefail
-phase=${1:?usage: grammar-study.sh dev|release|probe [reps]}
+phase=${1:?usage: grammar-study.sh check|dev|release|probe [reps] [jobs]}
 reps=${2:-5}
 root=$HOME/.cache/grammar-study
 rm -rf "$root"
 mkdir -p "$root"
-jobs=${GS_JOBS:-${CARGO_BUILD_JOBS:-4}}
+jobs=${3:-${CARGO_BUILD_JOBS:-4}}
 common=(--locked -j "$jobs" --config 'resolver.feature-unification="selected"')
 declare -A feats=(
 	[all]="--no-default-features --features grammars-all"
