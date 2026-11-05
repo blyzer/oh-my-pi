@@ -1,0 +1,92 @@
+bb-cargo-check-minimizer	0	buildbuddy-linux:just-remote-check-pkg-minimizer	worktree	cargo check -p omp-minimizer --locked
+bb-cargo-nextest-minimizer	0	buildbuddy-linux:just-remote-test-pkg-minimizer	worktree	cargo nextest run -p omp-minimizer --locked
+bb-cargo-test-doc-minimizer	0	buildbuddy-linux:just-remote-test-pkg-minimizer	worktree	cargo test --doc -p omp-minimizer --locked
+bb-just-check-pkg-minimizer	0	buildbuddy-linux:just-remote-check-pkg-minimizer	worktree	just check-pkg omp-minimizer
+bb-just-test-pkg-minimizer	0	buildbuddy-linux:just-remote-test-pkg-minimizer	worktree	just test-pkg omp-minimizer
+cat-agents-md	0	local-macos	worktree	cat AGENTS.md
+cat-dispatch-rs	0	local-macos	worktree	cat crates/agent/src/dispatch.rs
+cat-engine-rs	0	local-macos	worktree	cat crates/minimizer/src/engine.rs
+cat-justfile	0	local-macos	worktree	cat justfile
+cat-minimizer-cargo-toml	0	local-macos	worktree	cat crates/minimizer/Cargo.toml
+du-sh-crates	0	local-macos	worktree	du -sh crates/*
+find-crates-cargo-toml	0	local-macos	worktree	find crates -name Cargo.toml
+find-minimizer-rs	0	local-macos	worktree	find crates/minimizer -name '*.rs'
+gh-api-pulls-515	0	local-macos	worktree	gh api repos/blyzer/oh-my-pi/pulls/515
+gh-issue-list	1	local-macos	worktree	gh issue list
+gh-pr-checks-515	0	local-macos	worktree	gh pr checks 515
+gh-pr-diff-515	0	local-macos	worktree	gh pr diff 515
+gh-pr-list	0	local-macos	worktree	gh pr list
+gh-pr-list-merged-30	0	local-macos	worktree	gh pr list --state merged --limit 30
+gh-pr-view-515	0	local-macos	worktree	gh pr view 515
+gh-pr-view-515-comments	0	local-macos	worktree	gh pr view 515 --comments
+gh-run-list-20	0	local-macos	worktree	gh run list --limit 20
+gh-run-view-41804508029-log-failed	0	local-macos	worktree	gh run view 41804508029 --log-failed
+gh-run-view-41944709223-log-failed	0	local-macos	worktree	gh run view 41944709223 --log-failed
+gh-run-view-42019489927-log-failed	0	local-macos	worktree	gh run view 42019489927 --log-failed
+gh-run-view-42033217186-log-failed	0	local-macos	worktree	gh run view 42033217186 --log-failed
+gh-run-view-42074202980	0	local-macos	worktree	gh run view 42074202980
+gh-run-view-job-127410375533-log	0	local-macos	worktree	gh run view --job 127410375533 --log
+gha-124490258584-cargo-nextest-run-profile-ci-workspace-no-run-locked	101	gha-job:124490258584	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --no-run --locked
+gha-124490258597-cargo-clippy-workspace-all-targets-locked	101	gha-job:124490258597	Lint workspace (macOS)	cargo clippy --workspace --all-targets --locked
+gha-126488879099-cargo-nextest-run-profile-ci-p-omp-e2e-test-p7-tui-test-p7-t	100	gha-job:126488879099	Rust workspace and acceptance proofs	cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
+gha-126882651164-scripts-remote-verify-sh-remote-heavy	101	gha-job:126882651164	Remote Linux verification (BuildBuddy)	scripts/remote-verify.sh remote-heavy
+gha-126973989391-scripts-remote-verify-sh-remote-heavy	101	gha-job:126973989391	Remote Linux verification (BuildBuddy)	scripts/remote-verify.sh remote-heavy
+gha-127207059094-cargo-nextest-run-profile-ci-workspace-exclude-omp-e2e-locke	100	gha-job:127207059094	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+gha-127218465319-cargo-nextest-run-profile-ci-workspace-exclude-omp-e2e-locke	100	gha-job:127218465319	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+gha-127264733848-cargo-fmt-all-check	1	gha-job:127264733848	Rust format	cargo fmt --all -- --check
+gha-127264733989-cargo-nextest-run-profile-ci-workspace-exclude-omp-e2e-locke	100	gha-job:127264733989	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+gha-127410375331-cargo-clippy-workspace-all-targets-locked	0	gha-job:127410375331	Lint workspace (macOS)	cargo clippy --workspace --all-targets --locked
+gha-127410375481-just-license-check	0	gha-job:127410375481	License policy and release notices	just license-check
+gha-127410375505-cargo-nextest-run-profile-ci-p-omp-e2e-test-p12-daemon-appro	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --locked
+gha-127410375505-cargo-nextest-run-profile-ci-p-omp-e2e-test-p7-tui-test-p7-t	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
+gha-127410375505-cargo-nextest-run-profile-ci-p-omp-e2e-test-p8-baselines-loc	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
+gha-127410375505-cargo-nextest-run-profile-ci-workspace-exclude-omp-e2e-locke	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+gha-127410375505-cargo-nextest-run-profile-ci-workspace-no-run-locked	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest run --profile ci --workspace --no-run --locked
+gha-127410375505-cargo-nextest-show-config-version	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo nextest show-config version
+gha-127410375505-cargo-test-doc-workspace-exclude-omp-e2e-locked	0	gha-job:127410375505	Rust workspace and acceptance proofs	cargo test --doc --workspace --exclude omp-e2e --locked
+gha-127410375505-python3-scripts-check-python-examples-py	0	gha-job:127410375505	Rust workspace and acceptance proofs	python3 scripts/check-python-examples.py
+gha-127410375505-scripts-ssh-loopback-fixture-sh-cargo-nextest-run-profile-ci	0	gha-job:127410375505	Rust workspace and acceptance proofs	scripts/ssh-loopback-fixture.sh cargo nextest run --profile ci -p omp-exec-ssh --locked --run-ignored all
+gha-127410375533-cargo-fmt-all-check	0	gha-job:127410375533	Rust format	cargo fmt --all -- --check
+gha-127410375741-scripts-remote-verify-sh-remote-heavy	0	gha-job:127410375741	Remote Linux verification (BuildBuddy)	scripts/remote-verify.sh remote-heavy
+gha-127410375741-scripts-remote-verify-sh-remote-probe	0	gha-job:127410375741	Remote Linux verification (BuildBuddy)	scripts/remote-verify.sh remote-probe
+gha-127411153221-cargo-run-quiet-release-locked-manifest-path-tools-lintx-car	0	gha-job:127411153221	Error-formatting ratchet (lintx)	cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --ratchet tools/lintx/baselines/error-formatting.toml crates
+gha-127411153221-cargo-test-locked-manifest-path-tools-lintx-cargo-toml	0	gha-job:127411153221	Error-formatting ratchet (lintx)	cargo test --locked --manifest-path tools/lintx/Cargo.toml
+gha-127411153301-cargo-clippy-workspace-all-targets-locked-keep-going	0	gha-job:127411153301	Lint workspace (Linux)	cargo clippy --workspace --all-targets --locked --keep-going
+gha-127411153344-cargo-nextest-run-profile-ci-p-omp-e2e-test-tool-sources-loc	0	gha-job:127411153344	Acceptance proofs P9, P10 and tool sources (Linux)	cargo nextest run --profile ci -p omp-e2e --test tool_sources --locked
+gha-127411153456-cargo-nextest-run-profile-ci-p-omp-e2e-test-p7-tui-test-p7-t	0	gha-job:127411153456	Terminal proof P7 (Linux PTY)	cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
+git-branch-r	0	local-macos	checkout	git branch -r
+git-diff-engine-pr515	0	local-macos	worktree	git diff 69895da5a499a7e239058a3cd5bea89e32e185db..df8b485bcf646cf535af4dbaec0e64f7d6a9008c -- crates/minimizer/src/engine.rs
+git-diff-name-only-pr515	0	local-macos	worktree	git diff --name-only 69895da5a499a7e239058a3cd5bea89e32e185db..df8b485bcf646cf535af4dbaec0e64f7d6a9008c
+git-diff-pr515	0	local-macos	worktree	git diff 69895da5a499a7e239058a3cd5bea89e32e185db..df8b485bcf646cf535af4dbaec0e64f7d6a9008c
+git-diff-stat-head1	0	local-macos	worktree	git diff HEAD~1 --stat
+git-diff-stat-pr515	0	local-macos	worktree	git diff 69895da5a499a7e239058a3cd5bea89e32e185db..df8b485bcf646cf535af4dbaec0e64f7d6a9008c --stat
+git-fetch-origin	0	local-macos	checkout	git fetch origin
+git-log-10	0	local-macos	worktree	git log -10
+git-log-oneline-20	0	local-macos	worktree	git log --oneline -20
+git-log-oneline-pr515	0	local-macos	worktree	git log --oneline 69895da5a499a7e239058a3cd5bea89e32e185db..df8b485bcf646cf535af4dbaec0e64f7d6a9008c
+git-log-stat-5	0	local-macos	worktree	git log --stat -5
+git-remote-v	0	local-macos	checkout	git remote -v
+git-show-13afaa6917	0	local-macos	worktree	git show 13afaa6917
+git-show-ba975d2808	0	local-macos	worktree	git show ba975d2808
+git-show-stat-head	0	local-macos	worktree	git show --stat HEAD
+git-status-checkout	0	local-macos	checkout	git status
+git-status-clean	0	local-macos	worktree	git status
+git-status-short-checkout	0	local-macos	checkout	git status --short
+git-worktree-list	0	local-macos	checkout	git worktree list
+grep-rn-default-max-output	0	local-macos	worktree	grep -rn 'DEFAULT_MAX_OUTPUT_BYTES' crates
+grep-rn-unwrap-agent	0	local-macos	worktree	grep -rn 'unwrap()' crates/agent/src
+just-remote-check-pkg-minimizer	0	local-macos	worktree	just remote check-pkg omp-minimizer
+just-remote-test-pkg-minimizer	0	local-macos	worktree	just remote test-pkg omp-minimizer
+just-tools-test	0	local-macos	worktree	just tools-test
+ls-crates	0	local-macos	worktree	ls crates
+ls-la-filters	0	local-macos	worktree	ls -la crates/minimizer/src/filters
+ls-la-root	0	local-macos	worktree	ls -la
+py-check-ci-paths	0	local-macos	worktree	python3 scripts/check-ci-paths.py
+py-check-editing-discipline	0	local-macos	worktree	python3 scripts/check-editing-discipline.py
+rg-fn-apply-minimizer	0	local-macos	worktree	rg -n 'fn apply' crates/minimizer
+rg-minimizeroutput	0	local-macos	worktree	rg -n 'MinimizerOutput' crates
+rg-todo-crates	0	local-macos	worktree	rg -n 'TODO' crates
+tree-minimizer	0	local-macos	worktree	tree crates/minimizer
+uv-run-pytest-scripts	0	local-macos	worktree	uv run --with pytest pytest scripts/test_quiet_host.py scripts/test_measure_adr0040.py
+uv-run-pytest-scripts-v	0	local-macos	worktree	uv run --with pytest pytest -v scripts/test_quiet_host.py scripts/test_measure_adr0040.py
+wc-l-minimizer	0	local-macos	worktree	wc -l crates/minimizer/src/*.rs crates/minimizer/src/filters/*.rs
