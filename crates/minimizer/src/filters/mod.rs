@@ -3,6 +3,7 @@
 use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
+pub mod cpp;
 pub mod generic;
 pub mod js_tools;
 pub mod lint;
@@ -13,6 +14,10 @@ pub mod pkg;
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"cargo" => cargo::supports(subcommand),
+		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
+			cpp::supports(program, subcommand)
+		},
+		program if cpp::is_gtest_binary_name(program) => cpp::supports(program, subcommand),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => {
 			lint::supports(subcommand) || lint::supports_program(program, subcommand)
@@ -64,6 +69,10 @@ fn is_lint_script_token(token: &str) -> bool {
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
+			cpp::filter(ctx, input, exit_code)
+		},
+		program if cpp::is_gtest_binary_name(program) => cpp::filter(ctx, input, exit_code),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
 		"npm" | "pnpm" | "yarn" => {
