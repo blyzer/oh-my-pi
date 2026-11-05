@@ -1,0 +1,48 @@
+TAP fixtures. Each *.tap is a verbatim copy of the stdout the producer wrote, and each *.stderr is the same run's stderr. Never hand-edited.
+Sources that reproduce each fixture are under sources/. The recording scratch directory was /tmp/tap-work, recorded as /private/tmp/tap-work (neutral: no user name, no owner hostname).
+
+node.tap
+  command: node --test --test-reporter=tap outcomes.test.mjs   (cwd sources/node; exit 1; stderr empty)
+  versions: node v26.11.1
+  outcomes: pass, assertion failure, thrown error, skip, failing todo, a describe with a failing it, a describe whose before hook throws
+
+deno.tap
+  command: DENO_DIR=/tmp/tap-work/cache/deno NO_COLOR=1 deno test --reporter=tap outcomes_test.ts   (cwd sources/deno; exit 1)
+  versions: deno 2.9.7
+  stderr (not recorded): "error: Test failed"
+  outcomes: pass, thrown error, ignored test, a test with one passing and one failing step
+
+perl.tap, perl.stderr
+  command: perl outcomes.t   (cwd sources/perl; exit 2)
+  versions: perl v5.34.1, Test::More 1.302183
+  outcomes: pass, is() mismatch, skip, failing TODO, unnamed failure
+
+perl-truncated.tap, perl-truncated.stderr
+  command: perl truncated.t   (cwd sources/perl; exit 255)
+  the script dies after two tests and before done_testing, so no plan is printed
+
+perl-bail.tap
+  command: perl bail.t   (cwd sources/perl; exit 255; stderr empty)
+  BAIL_OUT after one of three planned tests
+
+DIVERGENCES THE PARSER MUST HANDLE
+  version line
+    node: TAP version 13; deno: TAP version 14; Perl: none (TAP 12 style)
+  plan position
+    node and deno: trailing plan; Perl with tests => N: leading plan; perl-truncated: no plan at all
+  subtests
+    node: 4-space indented child documents with their own trailing plan, each after a "# Subtest: <name>" comment; node prints "# Subtest:" before leaf tests too
+    deno: steps as 4-space indented child documents
+    both emit the correlated parent test point as not ok, with its own summary ("1 subtest failed", "1 test step failed.")
+  failure location
+    node: YAML key location: '<absolute path>:<line>:<column>', the test's declaration
+    deno: the YAML block is a JSON flow mapping; at.file is relative to the working directory (./outcomes_test.ts) and at.line has no column
+    Perl: no YAML; failure details go to stderr, which the parser does not read, so Perl failures carry file: None
+  failure message
+    node: YAML key error (plain, quoted or block scalar); deno: YAML key message
+  directives
+    node and deno: "# SKIP" (deno gives no reason) and "# TODO <reason>"; Perl: lowercase "# skip <reason>" on a test point with no description
+  TODO diagnostics
+    Perl prints failed-TODO diagnostics to stdout as # comments; ordinary failure diagnostics go to stderr
+  hook failure (node)
+    the child that never ran is not ok with failureType cancelledByParent; the cause sits on the parent (failureType hookFailed)
