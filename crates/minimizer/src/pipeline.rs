@@ -162,8 +162,10 @@ pub enum PipelineError {
 		/// Which registry the file feeds (`builtin`, `user`).
 		source_label: &'static str,
 		/// The TOML parser's diagnostic.
+		// Boxed: toml's error is a fat foreign struct, and inline it would make
+		// every `Result<_, PipelineError>` too large to return.
 		#[source]
-		source:       toml::de::Error,
+		source:       Box<toml::de::Error>,
 	},
 	/// The file declares a schema version this build does not read.
 	#[error(
@@ -184,6 +186,8 @@ pub enum PipelineError {
 		errors:       Vec<CompileError>,
 	},
 }
+
+const _: () = assert!(size_of::<PipelineError>() <= 48, "PipelineError must stay compact");
 
 /// A definition regex that does not compile.
 #[derive(Debug, thiserror::Error)]
@@ -511,8 +515,8 @@ pub fn parse_file(
 	contents: &str,
 	source_label: &'static str,
 ) -> Result<ParsedPipelineFile, PipelineError> {
-	let file: PipelineFile =
-		toml::from_str(contents).map_err(|source| PipelineError::Toml { source_label, source })?;
+	let file: PipelineFile = toml::from_str(contents)
+		.map_err(|source| PipelineError::Toml { source_label, source: Box::new(source) })?;
 
 	if let Some(version) = file.schema_version
 		&& version != SUPPORTED_SCHEMA_VERSION

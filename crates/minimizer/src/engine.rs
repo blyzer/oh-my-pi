@@ -471,7 +471,7 @@ mod tests {
 			.set(&ctx, true)
 			.expect("enable minimizer");
 		SV_MINIMIZER_FILTERS
-			.set(&ctx, Str::new(&path.to_string_lossy()))
+			.set(&ctx, Str::new(path.to_string_lossy()))
 			.expect("name user filters");
 		let mut cfg = MinimizerConfig::from_ctx(&ctx);
 		cfg.load_user_filters(&ctx).expect("load user filters");
@@ -576,7 +576,7 @@ strip_lines_matching = [".*"]
 		assert_eq!(out.text, "OK\n");
 		assert_eq!(out.filter, "pipeline");
 		assert_eq!(out.output_bytes, out.text.len());
-		assert_eq!(out.original_text.as_deref(), Some(input.as_str()));
+		assert_eq!(out.original_text, Some(input.as_str()));
 	}
 
 	#[test]
