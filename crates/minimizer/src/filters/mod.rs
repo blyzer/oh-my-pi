@@ -2,10 +2,12 @@
 
 use crate::{MinimizerCtx, MinimizerOutput, engine};
 
+pub mod binary_tools;
 pub mod cargo;
 pub mod generic;
 pub mod git;
 pub mod lint;
+pub mod listing;
 pub mod pkg;
 pub mod system;
 
@@ -15,6 +17,9 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"git" | "yadm" => git::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
+		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
+		| "jq" | "json" => true,
+		"xxd" | "strings" | "od" => binary_tools::supports(program, subcommand),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => {
 			lint::supports(subcommand) || lint::supports_program(program, subcommand)
@@ -71,6 +76,9 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 	match ctx.program {
 		"git" | "yadm" => git::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
+		| "jq" | "json" => listing::filter(ctx, input, exit_code),
+		"xxd" | "strings" | "od" => binary_tools::filter(ctx, input, exit_code),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
 		"npx" => filter_js_wrapper(ctx, input, exit_code),
