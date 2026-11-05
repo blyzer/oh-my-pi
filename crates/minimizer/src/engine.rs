@@ -534,6 +534,26 @@ replace = [{ pattern = "x", replacement = "y" }]
 	}
 
 	#[test]
+	fn npx_def_does_not_shadow_nx_wrapped() {
+		// `npx nx` is NOT routed by filters::supports, so apply_identity falls to
+		// the standalone resolve_pipeline branch. nx-wrapped (nx.toml) must win
+		// and strip the NX banner; the bare npx def must not claim subcommand
+		// `nx`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build \
+			 failed\n\n >  NX   Ran target build for 3 projects (2s)\n",
+		);
+		let out = apply("npx nx build", &input, 0, &cfg);
+		assert!(
+			!out.text.contains("NX   Running target"),
+			"npx def shadowed nx-wrapped; NX banner survived: {:?}",
+			out.text
+		);
+		assert!(out.text.contains("Error: build failed"));
+	}
+
+	#[test]
 	fn successful_minimization_keeps_visible_ok_when_filter_removes_all_lines() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input = format!(

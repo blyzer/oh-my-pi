@@ -4,12 +4,14 @@ use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
 pub mod generic;
+pub mod js_tools;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"cargo" => cargo::supports(subcommand),
+		"next" | "prettier" | "prisma" => js_tools::supports(program, subcommand),
 		_ => false,
 	}
 }
@@ -19,6 +21,7 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"next" | "prettier" | "prisma" => js_tools::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
 }
