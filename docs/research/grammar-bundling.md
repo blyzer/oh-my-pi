@@ -31,7 +31,9 @@ not add a WebAssembly runtime to `omp2` to load grammars.
    grammars, 24.3 s with upstream's 17 linked ones. Adding the `tree-sitter/wasm` runtime to those 17
    costs 17.5 s (41.8 s). At `-j 11` the runtime costs 14.1 s against 14.3 s for the long tail. In
    the release profile the WebAssembly variant is slower than all-native, 69.9 s against 63.2 s.
-   MEASURED.
+   Paired against no grammars, it adds 35.2 s (34.9-36.5) where the 56 native grammars add 28.2 s
+   (26.2-32.2), and the ranges do not overlap. The WebAssembly model saves no build time in any
+   profile measured. MEASURED.
 2. **Grammars cost almost nothing on an incremental build.** A no-op build takes 0.36 s with all
    grammars and 0.35 s with none. Rebuilding `omp-ast` takes 1.97 s and 1.94 s. Relinking the dev
    `omp` binary takes about 0.1 s longer of 4.2 to 5.2 s. MEASURED.
@@ -108,11 +110,31 @@ in its crate, so the cost is compile time only, and the linker drops the objects
 | `tree-sitter-md` 0.5.3 | block, inline | `LANGUAGE` (block) | 2.2 MiB | `bindings/rust/build.rs:2-39`, `lib.rs:25` |
 | `tree-sitter-xml` 0.7.0 | xml, dtd | `LANGUAGE_XML` | 0.2 MiB | `bindings/rust/build.rs:3-29`, `lib.rs:40-45` |
 
-This is the cheapest saving on paper, but it does not make the question smaller. The OCaml build
-script is the longest grammar unit: 11.9 s at `-j 4`, and 15.5 s in the first `-j 11` repetition,
-where it ends at 25.9 s and `omp-ast` starts right after it. The next grammar, Julia, ends at
-24.1 s. Removing the two unused OCaml parsers would save about 2 s of wall time at either job count,
-and it needs a vendored or patched crate. [INFERENCE from the MEASURED unit timings.]
+This is the cheapest saving on paper. It does not make the question smaller, and it is not worth
+taking. The `subgrammar` phase built `omp-ast` twice per repetition in one VM: with the four crates
+as shipped, and with thin `[patch]` crates that compile only the parser `omp-ast` references. The
+archives prove the difference: 6 objects against 2 for OCaml, and 4 against 2 for the other three.
+MEASURED:
+
+| Profile, jobs | Pairs | Shipped s | Trimmed s | Saved s, paired | CPU saved s |
+|---|---|---|---|---|---|
+| dev, `-j 4` | 5 | 40.5 (38.1-45.3) | 37.1 (35.3-38.3) | 3.4 (2.3-7.1), 9 % | 8.5 |
+| dev, `-j 11` | 5 | 26.0 (25.5-28.1) | 21.9 (21.0-23.4) | 4.3 (2.1-6.7), 16 % | 11.1 |
+| release, `-j 4` | 3 | 57.6 (55.1-58.5) | 55.9 (53.5-58.6) | 1.6 (-0.9-2.6), 3 % | 2.8 |
+
+- The OCaml build script drops from 11.3 to 4.5 s at `-j 4` and from 15.3 to 6.2 s at `-j 11`. At
+  `-j 11` that script is on the critical path, so the whole drop reaches the wall clock.
+- The release saving is inside the run-to-run noise: one of the three pairs was slower trimmed.
+- [INFERENCE] A cold `omp` build is slot-bound at `-j 4`, so 8.5 s of CPU is worth about 2 to 3 s
+  of about 400 s, under 1 %. Incremental builds and binaries gain nothing, because the linker
+  already drops these objects.
+- The price is permanent. Each crate's `build.rs` compiles every parser it ships, and none has a
+  feature that skips one. The saving therefore needs about 43 MiB of generated C vendored into the
+  repository (34.4 MiB of it OCaml's `parser.c`), or four maintained forks, redone on every grammar
+  bump.
+
+Leave them. If the saving is ever wanted, propose an opt-out Cargo feature to the four upstream
+crates. `omp2` can then turn the extra parsers off with no maintenance cost.
 
 ## How the measurements were taken
 
@@ -339,9 +361,10 @@ My view of the table:
 
 The harness lives on two branches that are never merged:
 
-- `research/grammar-bundling-harness` at `03cf2f9768`: the grammar features, the probes
+- `research/grammar-bundling-harness` at `3d4ef3d53b`: the grammar features, the probes
   (`crates/ast/examples/grammar_probe.rs`, `wasm_runtime_size.rs` and `native_runtime_size.rs`) and
-  `scripts/grammar-study.sh`.
+  `scripts/grammar-study.sh`. Every table except the sub-grammar one came from `03cf2f9768`. The
+  later commits add only the `subgrammar` phase.
 - `research/grammar-bundling-harness-omp` at `b04b268acd`: the same harness plus the `omp` phase.
   It turns off `omp-ast`'s default features, so the workspace's own feature unification can pick
   the grammar set.
@@ -353,8 +376,9 @@ To rerun:
    the runner.
 2. Run each phase with
    `OMP_REMOTE_KEYCHAIN_SERVICE=<service> just remote grammar-study <phase> <reps> [jobs] [variants]`.
-   The phases are `check`, `dev`, `release`, `probe`, `bytes` and `omp`. Write `omp` variants
-   as `all+none`, because `bb` splits `--env` values on commas.
+   The phases are `check`, `dev`, `release`, `probe`, `bytes` and `subgrammar` on the first branch,
+   and `omp` on the second. Write `omp` variants as `all+none`, because `bb` splits `--env` values
+   on commas.
 3. Save the `GS` lines of each log as `grammar-bundling/raw/<run>.tsv`, then run
    `python3 docs/research/grammar-bundling/analyze.py > docs/research/grammar-bundling/tables.md`.
 
