@@ -364,6 +364,19 @@ fn ensure_success_visible(output: MinimizerOutput<'_>, exit_code: i32) -> Minimi
 fn program_label(program: &str) -> &'static str {
 	match program {
 		"cargo" => "cargo",
+		"tsc" => "tsc",
+		"eslint" => "eslint",
+		"biome" => "biome",
+		"npm" => "npm",
+		"pnpm" => "pnpm",
+		"yarn" => "yarn",
+		"pip" => "pip",
+		"pip3" => "pip3",
+		"bundle" => "bundle",
+		"brew" => "brew",
+		"composer" => "composer",
+		"uv" => "uv",
+		"poetry" => "poetry",
 		_ => "builtin",
 	}
 }
