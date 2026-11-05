@@ -88,7 +88,7 @@ impl<'a> Stream<'a> {
 			return Ok(());
 		}
 		self.last = None;
-		if indent % 4 != 0 {
+		if !indent.is_multiple_of(4) {
 			return Ok(());
 		}
 		let depth = indent / 4;
