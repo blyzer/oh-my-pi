@@ -25,15 +25,28 @@ const BAIL_OUT: &str = "tap-bail-out";
 
 /// Why stdout could not be read as a TAP stream.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum TapError {
+pub enum TapError {
+	/// Stdout holds no TAP line at all.
 	#[error("stdout holds no TAP stream (no version line, plan, test point or Bail out!)")]
 	NoStream,
+	/// The stream declares a TAP version this parser does not read.
 	#[error("TAP version {version} is not supported; expected 14, 13, or no version line")]
-	Version { version: Str },
+	Version {
+		/// The declared version.
+		version: Str,
+	},
+	/// A TAP document declares a second plan.
 	#[error("line {line} declares a second plan for its TAP document")]
-	SecondPlan { line: usize },
+	SecondPlan {
+		/// One-based line of the second plan.
+		line: usize,
+	},
+	/// A test point follows its TAP document's closing plan.
 	#[error("line {line} is a test point after its TAP document's closing plan")]
-	PointAfterPlan { line: usize },
+	PointAfterPlan {
+		/// One-based line of the test point.
+		line: usize,
+	},
 }
 
 /// Reads stdout, never stderr, as one TAP stream.

@@ -1,0 +1,94 @@
+cargo --message-format=json fixtures. Each <case>.stdout and <case>.stderr is the verbatim stream cargo wrote, never hand-edited.
+
+Recorded on aarch64-apple-darwin with the stable toolchain: cargo 1.99.0 (5f94df478 2026-08-27), rustc 1.99.0 (b940084d7 2026-09-28), clippy 0.1.99 (b940084d7e 2026-09-28).
+Each case ran in its crate's directory under /private/tmp/cargo-json-repro (neutral: no user name, no hostname) with target/ removed first, and stdout and stderr redirected to separate files, never through a pipe.
+
+The commands are the shipped checkers' own arguments (crates/driver/src/cleanse/checkers.rs):
+	cargo-check    cargo check --message-format=json
+	cargo-clippy   cargo clippy --message-format=json -- -Dwarnings
+	cargo-test     cargo test --message-format=json
+
+case               crate        checker        exit
+check-clean        clean        cargo-check    0
+clippy-clean       clean        cargo-clippy   0
+test-clean         clean        cargo-test     0
+check-error        error        cargo-check    101
+test-error         error        cargo-test     101
+clippy-error       clippy       cargo-clippy   101
+test-fail          testfail     cargo-test     101
+check-buildpanic   buildpanic   cargo-check    101
+check-manifest     manifest     cargo-check    101   (stdout is empty: cargo rejects the manifest before it writes any record)
+test-doctest       doctest      cargo-test     101
+
+SOURCES
+The crates are listed here instead of committed as crates: a Cargo.toml under fixtures/ would become a cargo-check root in omp cleanse discovery, and most of these crates fail on purpose.
+Every Cargo.toml is
+
+	[package]
+	name = "cargo-json-<crate>"
+	version = "0.1.0"
+	edition = "2024"
+
+except manifest/Cargo.toml, whose third line is `version = 1`. Each listing is indented one tab; indentation inside the .rs files is one tab more.
+
+clean/build.rs
+	fn main() {
+		println!("cargo::rerun-if-changed=build.rs");
+	}
+
+clean/src/lib.rs, and testfail/src/lib.rs with 5 in place of 4
+	pub fn add(left: u32, right: u32) -> u32 {
+		left + right
+	}
+
+	#[cfg(test)]
+	mod tests {
+		#[test]
+		fn adds() {
+			assert_eq!(super::add(2, 2), 4);
+		}
+	}
+
+error/src/lib.rs
+	mod moved;
+	mod util;
+
+	pub fn answer() -> u32 {
+		let unused = 1;
+		"forty-two"
+	}
+
+error/src/moved.rs
+	pub fn moved() -> usize {
+		let text = String::new();
+		let owner = text;
+		text.len() + owner.len()
+	}
+
+error/src/util.rs
+	pub fn missing() -> u32 {
+		undefined_value
+	}
+
+clippy/src/lib.rs
+	pub fn double(value: u32) -> u32 {
+		return value * 2;
+	}
+
+buildpanic/build.rs
+	fn main() {
+		panic!("build script failed on purpose");
+	}
+
+buildpanic/src/lib.rs and manifest/src/lib.rs
+	pub fn one() -> u32 {
+		1
+	}
+
+doctest/src/lib.rs
+	/// ```
+	/// let x: u32 = "one";
+	/// ```
+	pub fn one() -> u32 {
+		1
+	}

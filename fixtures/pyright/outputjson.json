@@ -1,0 +1,77 @@
+{
+    "version": "1.1.414",
+    "time": "1793875092290",
+    "generalDiagnostics": [
+        {
+            "file": "/private/tmp/empty-result-repro/py/bad.py",
+            "severity": "error",
+            "message": "Type \"str\" is not assignable to return type \"int\"\n  \"str\" is not assignable to \"int\"",
+            "range": {
+                "start": {
+                    "line": 1,
+                    "character": 11
+                },
+                "end": {
+                    "line": 1,
+                    "character": 15
+                }
+            },
+            "rule": "reportReturnType"
+        },
+        {
+            "file": "/private/tmp/empty-result-repro/py/bad.py",
+            "severity": "information",
+            "message": "Type of \"greet\" is \"(name: str) -> int\"",
+            "range": {
+                "start": {
+                    "line": 4,
+                    "character": 12
+                },
+                "end": {
+                    "line": 4,
+                    "character": 17
+                }
+            }
+        },
+        {
+            "file": "/private/tmp/empty-result-repro/py/bad.py",
+            "severity": "warning",
+            "message": "Expression value is unused",
+            "range": {
+                "start": {
+                    "line": 5,
+                    "character": 0
+                },
+                "end": {
+                    "line": 5,
+                    "character": 6
+                }
+            },
+            "rule": "reportUnusedExpression"
+        },
+        {
+            "file": "/private/tmp/empty-result-repro/py/bad.py",
+            "severity": "error",
+            "message": "\"undefined_name\" is not defined",
+            "range": {
+                "start": {
+                    "line": 6,
+                    "character": 6
+                },
+                "end": {
+                    "line": 6,
+                    "character": 20
+                }
+            },
+            "rule": "reportUndefinedVariable"
+        }
+    ],
+    "summary": {
+        "filesAnalyzed": 2,
+        "errorCount": 2,
+        "warningCount": 1,
+        "informationCount": 1,
+        "timeInSec": 0.217
+    }
+}
+

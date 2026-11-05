@@ -1,0 +1,36 @@
+Stylelint --formatter=json fixtures. Each *.json is the verbatim stderr of one run, never hand-edited.
+Stylelint 16 and later write the report to stderr, on a clean run too; stdout was empty in every run.
+The recording scratch directory was /private/tmp/empty-result-repro (neutral: no user name, no owner hostname).
+
+Every run
+  command: npx -y stylelint@18.0.0 "**/*.{css,scss,sass,less}" --formatter=json   (the args the cleanse stylelint checker passes)
+  versions: stylelint 18.0.0 (npm), node v26.11.1
+  package.json: {"name": "repro", "private": true}
+
+format-json.json
+  cwd /private/tmp/empty-result-repro/css; exit 2
+  .stylelintrc.json: {"rules": {"color-no-invalid-hex": true, "property-no-unknown": true, "block-no-empty": [true, {"severity": "warning"}]}}
+  bad.css:
+    a {
+      color: #ff;
+    }
+
+    b {
+      colr: red;
+    }
+
+    c {}
+  broken.css (the block is never closed):
+    d {
+      color: red;
+  clean.css:
+    e {
+      color: red;
+    }
+
+format-json-clean.json
+  cwd /private/tmp/empty-result-repro/css-clean; exit 0; the same .stylelintrc.json, clean.css only
+
+format-json-invalid-option.json
+  cwd /private/tmp/empty-result-repro/css-options; exit 2; bad.css as above
+  .stylelintrc.json: {"rules": {"color-no-invalid-hex": "maybe", "property-no-unknown": true}}
