@@ -1,0 +1,4 @@
+   Compiling cargo-json-testfail v0.1.0 (/private/tmp/cargo-json-repro/testfail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (target/debug/deps/cargo_json_testfail-4f96fa56088d11e1)
+error: test failed, to rerun pass `--lib`

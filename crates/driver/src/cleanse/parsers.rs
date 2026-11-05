@@ -1,5 +1,6 @@
 //! Normalization for checker output formats.
 
+mod cargo;
 mod junit;
 
 use std::{fmt::Write as _, path::Path, sync::LazyLock};
@@ -31,9 +32,9 @@ static CODE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ParserKind {
-	/// Rust compiler JSON.
+	/// `cargo check` and `cargo clippy` with `--message-format=json`.
 	Rust,
-	/// Rust test compiler and panic output.
+	/// `cargo test --message-format=json`: compiler records and test panics.
 	RustTest,
 	/// Go compiler output.
 	Go,
@@ -111,6 +112,7 @@ pub struct ParserInput<'a> {
 /// Parses one invocation into deduplicated project-relative diagnostics.
 pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 	let mut diagnostics = match kind {
+		ParserKind::Rust | ParserKind::RustTest => cargo::parse(kind, input),
 		ParserKind::JUnit => structured(input, junit::parse(input)),
 		_ => generic(kind, input),
 	};
@@ -606,22 +608,6 @@ fn strip_control(value: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn rust_json_and_generic_locations_normalize() {
-		let root = Path::new("/repo");
-		let input = ParserInput {
-			checker:      "cargo-check",
-			checker_root: root,
-			project_root: root,
-			stdout:       r#"{"message":"bad type","level":"error","code":{"code":"E1"},"spans":[{"file_name":"src/lib.rs","line_start":2,"column_start":3}]}"#,
-			stderr:       "src/main.rs:4:5: warning: unused",
-		};
-		let diagnostics = parse(ParserKind::Rust, &input);
-		assert_eq!(diagnostics.len(), 2);
-		assert_eq!(diagnostics[0].file.as_deref(), Some("src/lib.rs"));
-		assert_eq!(diagnostics[1].severity, Severity::Warning);
-	}
 
 	fn located(checker: &str, file: &str, span: [u32; 4], code: &str, message: &str) -> Diagnostic {
 		let [line, column, end_line, end_column] = span;
