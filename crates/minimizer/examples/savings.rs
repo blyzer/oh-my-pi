@@ -2,12 +2,13 @@
 //! captured command output, without wiring it into any output path.
 //!
 //! ```text
-//! cargo run -p omp-minimizer --example savings --release -- <corpus> <name>=<tokenizer.json>...
+//! cargo run -p omp-minimizer --example savings --release -- <corpus> <name>=<tokenizer.json>... [--show=<id>,...]
 //! ```
 //!
 //! `<corpus>/manifest.tsv` holds one tab-separated row per capture: id, exit
 //! code, source, working-directory label and command. The capture itself is
-//! `<corpus>/<id>.out`. The Markdown report goes to stdout.
+//! `<corpus>/<id>.out`. The Markdown report goes to stdout; `--show` appends
+//! the text the model would see with the minimizer for the named captures.
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -40,10 +41,10 @@ const TAIL_BYTES: usize = 20 * 1024;
 const PROJECTION_LINES: usize = 500;
 /// `BYTES_PER_TOKEN` (crates/agent/src/context.rs).
 const BYTES_PER_TOKEN: usize = 4;
-/// Lines that carry a run's outcome: errors, failures, panics, format diffs
-/// and summaries.
-const SIGNAL: &str = r"(?:^|\s)error(?:\[[A-Z]\d{4}\])?:|\bFAIL(?:ED)?\b|panicked at|^Diff in |\bSummary \[|\btest result:|\btests? run:|\b\d+ (?:passed|failed)\b|^\s*Finished `";
-const SIGNAL_KEY_BYTES: usize = 80;
+/// Failure lines: compiler and lint errors, test failures, panics and format
+/// diffs.
+const FAILURE: &str = r"(?:^|\s)error(?:\[[A-Z]\d{4}\])?:|\bFAIL(?:ED)?\b|panicked at|^Diff in ";
+const FAILURE_KEY_BYTES: usize = 80;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, Ord, PartialEq, PartialOrd)]
 enum Band {
@@ -105,33 +106,39 @@ struct Tokens {
 }
 
 struct Measured<'c> {
-	capture:   &'c Capture,
-	program:   String,
-	filter:    &'static str,
-	rewritten: bool,
-	band:      Band,
-	tokens:    Vec<Tokens>,
-	signal:    [usize; 3],
+	capture:       &'c Capture,
+	program:       String,
+	filter:        &'static str,
+	rewritten:     bool,
+	rewrite_bytes: usize,
+	band:          Band,
+	tokens:        Vec<Tokens>,
+	failures:      Option<[usize; 3]>,
+	shown:         Option<String>,
 }
 
 fn main() -> Result<(), Error> {
 	let mut args = env::args().skip(1);
 	let corpus = args
 		.next()
-		.ok_or("usage: savings <corpus> <name>=<tokenizer.json>...")?;
-	let mut counters = args
-		.map(|spec| {
-			let (name, path) = spec
-				.split_once('=')
-				.ok_or_else(|| format!("tokenizer {spec} is not <name>=<path>"))?;
-			Ok(Counter { name: name.to_owned(), tokenizer: Some(Tokenizer::from_file(path)?) })
-		})
-		.collect::<Result<Vec<_>, Error>>()?;
+		.ok_or("usage: savings <corpus> <name>=<tokenizer.json>... [--show=<id>,...]")?;
+	let mut show = BTreeSet::new();
+	let mut counters = Vec::new();
+	for arg in args {
+		if let Some(ids) = arg.strip_prefix("--show=") {
+			show.extend(ids.split(',').map(str::to_owned));
+			continue;
+		}
+		let (name, path) = arg
+			.split_once('=')
+			.ok_or_else(|| format!("tokenizer {arg} is not <name>=<path>"))?;
+		counters.push(Counter { name: name.to_owned(), tokenizer: Some(Tokenizer::from_file(path)?) });
+	}
 	counters.push(Counter { name: String::from("bytes/4"), tokenizer: None });
 
 	let captures = load(Path::new(&corpus))?;
 	let config = MinimizerConfig { enabled: true, ..MinimizerConfig::default() };
-	let signal = Regex::new(SIGNAL)?;
+	let failure = Regex::new(FAILURE)?;
 	let mut measured = Vec::with_capacity(captures.len());
 	for capture in &captures {
 		let output = omp_minimizer::apply(&capture.command, &capture.text, capture.exit, &config);
@@ -155,17 +162,22 @@ fn main() -> Result<(), Error> {
 				},
 			});
 		}
-		let keys = signal_keys(&signal, &capture.text);
-		let kept = |visible: &str| keys.iter().filter(|key| visible.contains(**key)).count();
+		let failures = (capture.exit != 0).then(|| {
+			let keys = failure_keys(&failure, &capture.text);
+			let kept = |visible: &str| keys.iter().filter(|key| visible.contains(**key)).count();
+			[keys.len(), kept(&today), kept(&minimized)]
+		});
 		measured.push(Measured {
 			capture,
 			program: detect::detect(&capture.command)
 				.map_or_else(|| String::from("?"), |identity| identity.program),
 			filter: output.filter,
 			rewritten: output.changed,
+			rewrite_bytes: output.text.len(),
 			band: Band::of(&capture.text),
 			tokens,
-			signal: [keys.len(), kept(&today), kept(&minimized)],
+			failures,
+			shown: show.contains(&capture.id).then_some(minimized),
 		});
 	}
 	measured.sort_by(|a, b| {
@@ -298,13 +310,13 @@ fn prefix(text: &str, maximum: usize) -> &str {
 	&text[..end]
 }
 
-fn signal_keys<'t>(signal: &Regex, text: &'t str) -> BTreeSet<&'t str> {
+fn failure_keys<'t>(failure: &Regex, text: &'t str) -> BTreeSet<&'t str> {
 	text
 		.lines()
 		.filter_map(|line| {
-			signal
+			failure
 				.find(line)
-				.map(|found| prefix(line[found.start()..].trim(), SIGNAL_KEY_BYTES))
+				.map(|found| prefix(line[found.start()..].trim(), FAILURE_KEY_BYTES))
 		})
 		.collect()
 }
@@ -316,6 +328,12 @@ fn saved(tokens: Tokens) -> f64 {
 	(tokens.today as f64 - tokens.minimized as f64) * 100.0 / tokens.today as f64
 }
 
+fn failure_cell(failures: Option<[usize; 3]>) -> String {
+	failures.map_or_else(|| String::from("—"), |[of, today, minimized]| {
+		format!("{of} / {today} / {minimized}")
+	})
+}
+
 fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 	let mut out = String::new();
 	let primary = &counters[0].name;
@@ -324,10 +342,10 @@ fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 	let _ = writeln!(out, "## Per capture\n");
 	let _ = writeln!(
 		out,
-		"| Capture | Command | Exit | Source | Band | Filter | Raw bytes | Raw tok | Today tok | \
-		 Minimized tok | Saved | Signal kept (of / today / minimized) |"
+		"| Capture | Command | Exit | Source | Band | Filter | Raw bytes | Rewrite bytes | Raw tok | \
+		 Today tok | Minimized tok | Saved | Failure lines (of / today / minimized) |"
 	);
-	let _ = writeln!(out, "|---|---|--:|---|---|---|--:|--:|--:|--:|--:|---|");
+	let _ = writeln!(out, "|---|---|--:|---|---|---|--:|--:|--:|--:|--:|--:|---|");
 	for row in measured {
 		let tokens = row.tokens[0];
 		let band: &str = row.band.into();
@@ -338,19 +356,18 @@ fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 		};
 		let _ = writeln!(
 			out,
-			"| {} | `{}` | {} | {} | {band} | {filter} | {} | {} | {} | {} | {:.1}% | {} / {} / {} |",
+			"| {} | `{}` | {} | {} | {band} | {filter} | {} | {} | {} | {} | {} | {:.1}% | {} |",
 			row.capture.id,
 			row.capture.command.replace('|', "\\|"),
 			row.capture.exit,
 			row.capture.source,
 			row.capture.text.len(),
+			row.rewrite_bytes,
 			tokens.raw,
 			tokens.today,
 			tokens.minimized,
 			saved(tokens),
-			row.signal[0],
-			row.signal[1],
-			row.signal[2],
+			failure_cell(row.failures),
 		);
 	}
 
@@ -387,19 +404,32 @@ fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 		);
 	}
 
-	let _ = writeln!(out, "\n## Signal lines that change visibility\n");
-	let _ = writeln!(out, "| Capture | Command | Signal lines | Visible today | Visible minimized |");
-	let _ = writeln!(out, "|---|---|--:|--:|--:|");
-	for row in measured.iter().filter(|row| row.signal[1] != row.signal[2]) {
+	let _ = writeln!(out, "\n## Failure lines in failing captures\n");
+	let _ = writeln!(
+		out,
+		"| Capture | Command | Exit | Filter | Failure lines | Visible today | Visible minimized |"
+	);
+	let _ = writeln!(out, "|---|---|--:|---|--:|--:|--:|");
+	for row in measured {
+		let Some([of, today, minimized]) = row.failures else {
+			continue;
+		};
 		let _ = writeln!(
 			out,
-			"| {} | `{}` | {} | {} | {} |",
+			"| {} | `{}` | {} | {} | {of} | {today} | {minimized} |",
 			row.capture.id,
 			row.capture.command.replace('|', "\\|"),
-			row.signal[0],
-			row.signal[1],
-			row.signal[2],
+			row.capture.exit,
+			row.filter,
 		);
+	}
+
+	for row in measured {
+		let Some(shown) = &row.shown else {
+			continue;
+		};
+		let _ = writeln!(out, "\n## With the minimizer: {}\n\n`{}`\n", row.capture.id, row.capture.command);
+		let _ = writeln!(out, "````text\n{shown}````");
 	}
 	out
 }

@@ -25,4 +25,4 @@ fetch claude-legacy.json \
 tar -xzf "$here/captures.tar.gz" -C "$work/corpus"
 cp "$here/manifest.tsv" "$work/corpus/"
 cargo run --profile release-dev --locked -p omp-minimizer --example savings -- \
-	"$work/corpus" o200k="$work/o200k.json" claude-legacy="$work/claude-legacy.json"
+	"$work/corpus" o200k="$work/o200k.json" claude-legacy="$work/claude-legacy.json" "$@"
