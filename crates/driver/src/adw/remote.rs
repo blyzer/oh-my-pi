@@ -676,24 +676,34 @@ mod tests {
 	#[test]
 	fn remote_profile_returns_the_cache_policy_it_validated() {
 		let ctx = Ctx::new();
-		SV_EXEC_REMOTE_PROFILE.set(&ctx, Str::new_static("reapi")).unwrap();
-		SV_EXEC_REMOTE_CACHE.set(&ctx, Str::new_static("read-write")).unwrap();
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("reapi"))
+			.unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("read-write"))
+			.unwrap();
 		assert_eq!(
 			remote_profile(&ctx).unwrap(),
 			(Profile::reapi(), omp_exec::CachePolicy::ReadWrite)
 		);
 
-		SV_EXEC_REMOTE_PROFILE.set(&ctx, Str::new_static("buildbuddy")).unwrap();
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("buildbuddy"))
+			.unwrap();
 		let err = remote_profile(&ctx).unwrap_err();
 		assert!(matches!(err, RemoteError::CachePolicyConflict), "got {err:?}");
 
-		SV_EXEC_REMOTE_CACHE.set(&ctx, Str::new_static("off")).unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("off"))
+			.unwrap();
 		assert_eq!(
 			remote_profile(&ctx).unwrap(),
 			(Profile::buildbuddy(), omp_exec::CachePolicy::Off)
 		);
 
-		SV_EXEC_REMOTE_PROFILE.set(&ctx, Str::new_static("other")).unwrap();
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("other"))
+			.unwrap();
 		let err = remote_profile(&ctx).unwrap_err();
 		assert!(matches!(err, RemoteError::MissingConfiguration), "got {err:?}");
 	}
