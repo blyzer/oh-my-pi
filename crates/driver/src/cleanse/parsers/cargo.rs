@@ -10,6 +10,10 @@
 //! interleaves on stdout. A panic is read at the location its header names;
 //! the shared text parser reads everything else, never a record.
 //!
+//! cargo ends every build it finishes with a `build-finished` record. Output
+//! that names no diagnostic reads as clean only beside that record; without
+//! it, cargo stopped before finishing a build, so the output is unreadable.
+//!
 //! Each rule is pinned by a recorded run under `fixtures/cargo`.
 
 use std::{borrow::Cow, fmt::Write as _, sync::LazyLock};
@@ -18,7 +22,7 @@ use omp_core::{Str, StrMut};
 use regex::Regex;
 use smallvec::SmallVec;
 
-use super::{Diagnostic, ParserInput, ParserKind, Severity, parse_text, relative_path};
+use super::{Diagnostic, ParseError, ParserInput, ParserKind, Severity, parse_text, relative_path};
 
 /// `thread '<name>' (<id>) panicked at <file>:<line>:<column>:`, the line std
 /// prints above a panic message. Older toolchains print no `(<id>)`.
@@ -30,18 +34,33 @@ static PANIC: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Normalizes one cargo invocation's stdout and stderr.
-pub(super) fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
+pub(super) fn parse(
+	kind: ParserKind,
+	input: &ParserInput<'_>,
+) -> Result<Vec<Diagnostic>, ParseError> {
 	let mut diagnostics = Vec::new();
+	let mut finished = false;
 	for stream in [input.stdout, input.stderr] {
-		read(kind, stream, input, &mut diagnostics);
+		finished |= read(kind, stream, input, &mut diagnostics);
 	}
-	diagnostics
+	if finished || !diagnostics.is_empty() {
+		Ok(diagnostics)
+	} else {
+		Err(ParseError::CargoUnfinished)
+	}
 }
 
 /// Reads records and panics line by line, and hands each run of text between
 /// them to the shared text parser whole, so an `error[...]` line still pairs
-/// with the `-->` location under it.
-fn read(kind: ParserKind, stream: &str, input: &ParserInput<'_>, output: &mut Vec<Diagnostic>) {
+/// with the `-->` location under it. Returns whether the stream holds a
+/// `build-finished` record.
+fn read(
+	kind: ParserKind,
+	stream: &str,
+	input: &ParserInput<'_>,
+	output: &mut Vec<Diagnostic>,
+) -> bool {
+	let mut finished = false;
 	let mut lines = stream.split_inclusive('\n').peekable();
 	let (mut offset, mut text) = (0, 0);
 	while let Some(raw) = lines.next() {
@@ -51,6 +70,7 @@ fn read(kind: ParserKind, stream: &str, input: &ParserInput<'_>, output: &mut Ve
 		let diagnostic = if line.starts_with('{')
 			&& let Ok(record) = serde_json::from_str::<Record<'_>>(line)
 		{
+			finished |= matches!(record.reason, Reason::BuildFinished);
 			record.diagnostic(input)
 		} else if line.starts_with("thread '")
 			&& let Some(header) = PANIC.captures(line)
@@ -89,6 +109,7 @@ fn read(kind: ParserKind, stream: &str, input: &ParserInput<'_>, output: &mut Ve
 	if text < stream.len() {
 		parse_text(kind, &stream[text..], input, output);
 	}
+	finished
 }
 
 /// Whether a line ends the message under a panic header.
@@ -110,6 +131,7 @@ struct Record<'a> {
 #[serde(rename_all = "kebab-case")]
 enum Reason {
 	CompilerMessage,
+	BuildFinished,
 	#[serde(other)]
 	Metadata,
 }
@@ -231,6 +253,7 @@ mod tests {
 			stdout,
 			stderr,
 		})
+		.expect("readable cargo output")
 	}
 
 	fn error(

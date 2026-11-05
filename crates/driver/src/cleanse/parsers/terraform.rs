@@ -14,7 +14,7 @@ use super::{Diagnostic, ParserInput, Severity, relative_path};
 /// Why a `terraform validate -json` report could not be read.
 #[derive(Debug, thiserror::Error)]
 #[error("malformed `terraform validate -json` report")]
-pub(super) struct TerraformError(#[from] serde_json::Error);
+pub struct TerraformError(#[from] serde_json::Error);
 
 #[derive(serde::Deserialize)]
 struct Report<'a> {
@@ -82,7 +82,10 @@ mod tests {
 
 	use omp_core::Str;
 
-	use super::super::{Diagnostic, ParserInput, ParserKind, Severity, UNPARSEABLE, parse};
+	use super::super::{
+		CheckLogs, Diagnostic, ParseError, ParserInput, ParserKind, Severity, UNPARSEABLE, parse,
+		unparseable,
+	};
 
 	const REPORT: &str = include_str!("../../../../../fixtures/terraform/validate-json.json");
 	const MISSING_PROVIDER: &str =
@@ -128,13 +131,14 @@ mod tests {
 		                  \"missing\" has not been declared. This variable can be declared with a \
 		                  variable \"missing\" {} block.";
 		let arguments = "Too many function arguments\nFunction \"upper\" expects only 1 argument(s).";
-		assert_eq!(parse(ParserKind::Terraform, &input(root, REPORT)), vec![
+		let read = |input| parse(ParserKind::Terraform, &input).expect("terraform report");
+		assert_eq!(read(input(root, REPORT)), vec![
 			entry(Some([5, 10, 5, 26]), Severity::Warning, redundant),
 			entry(Some([14, 11, 14, 22]), Severity::Error, undeclared),
 			entry(Some([18, 27, 18, 28]), Severity::Error, arguments),
 		]);
 		let clean = Path::new("/private/tmp/empty-result-repro/tf-clean");
-		assert!(parse(ParserKind::Terraform, &input(clean, CLEAN)).is_empty());
+		assert!(read(input(clean, CLEAN)).is_empty());
 	}
 
 	#[test]
@@ -143,26 +147,28 @@ mod tests {
 		let missing = "Missing required provider\nThis configuration requires provider \
 		               registry.terraform.io/hashicorp/null, but that provider isn't available. You \
 		               may be able to install it automatically by running:\n  terraform init";
-		assert_eq!(parse(ParserKind::Terraform, &input(root, MISSING_PROVIDER)), vec![entry(
-			None,
-			Severity::Error,
-			missing
-		)]);
+		let report = parse(ParserKind::Terraform, &input(root, MISSING_PROVIDER));
+		assert_eq!(report.expect("terraform report"), vec![entry(None, Severity::Error, missing)]);
 	}
 
 	#[test]
 	fn unreadable_report_degrades_to_one_unparseable_diagnostic() {
 		let root = Path::new("/private/tmp/empty-result-repro/tf");
 		let cut = &REPORT[..REPORT.find("\"diagnostics\"").expect("diagnostics key")];
-		let diagnostics = parse(ParserKind::Terraform, &input(root, cut));
-		assert_eq!(diagnostics.len(), 1);
-		assert_eq!(diagnostics[0].file, None);
-		assert_eq!(diagnostics[0].code.as_deref(), Some(UNPARSEABLE));
+		let error = parse(ParserKind::Terraform, &input(root, cut)).expect_err("cut report");
+		assert!(matches!(error, ParseError::Terraform(_)));
+		let logs = CheckLogs::of(cut.as_bytes(), b"");
+		let diagnostic = unparseable(Str::from("terraform-validate"), &error, Some(&logs));
+		assert_eq!(diagnostic.file, None);
+		assert_eq!(diagnostic.code.as_deref(), Some(UNPARSEABLE));
 		assert!(
-			diagnostics[0]
+			diagnostic
 				.message
 				.starts_with("malformed `terraform validate -json` report: EOF while parsing")
 		);
-		assert!(diagnostics[0].message.ends_with(cut.trim()));
+		// The report is cited whole, by address, and the empty stderr not at all.
+		let citation = format!("\n[stdout: artifact://sha256/{}; {} bytes]", logs.stdout, cut.len());
+		assert!(diagnostic.message.ends_with(&citation), "{}", diagnostic.message);
+		assert!(!diagnostic.message.contains("stderr"));
 	}
 }

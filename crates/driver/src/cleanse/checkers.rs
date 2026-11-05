@@ -16,8 +16,8 @@ use omp_core::{Str, sf};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	parsers::{ParserInput, ParserKind, excerpt, parse},
-	types::{CheckResult, Checker, CheckerEffect, Diagnostic, Report, Severity, SkippedCheck},
+	parsers::{ParseError, ParserInput, ParserKind, parse},
+	types::{CheckLogs, CheckResult, Checker, CheckerEffect, Diagnostic, Report, SkippedCheck},
 };
 
 /// Binary resolution authority used during discovery.
@@ -114,6 +114,9 @@ pub struct ProcessOutput {
 	pub stdout:    Str,
 	/// Captured standard error.
 	pub stderr:    Str,
+	/// Both streams, complete, as retained in the project blob store; `None`
+	/// for partial output and when the runner retains nothing.
+	pub logs:      Option<CheckLogs>,
 }
 
 /// Supervised process authority for checker execution.
@@ -841,8 +844,9 @@ pub async fn run_suite_streaming<R: CheckerRunner>(
 	}
 	if let Some(sender) = diagnostics.as_ref() {
 		for check in &checks {
-			if !check.diagnostics.is_empty() {
-				let _ = sender.send(check.diagnostics.clone());
+			let found = check.diagnostics();
+			if !found.is_empty() {
+				let _ = sender.send(found);
 			}
 		}
 	}
@@ -866,10 +870,7 @@ pub async fn run_suite_streaming<R: CheckerRunner>(
 		.map(|(index, checker)| (checker.id.clone(), index))
 		.collect::<std::collections::HashMap<_, _>>();
 	checks.sort_by_key(|check| order.get(&check.checker.id).copied().unwrap_or(usize::MAX));
-	let diagnostics = checks
-		.iter()
-		.flat_map(|check| check.diagnostics.iter().cloned())
-		.collect();
+	let diagnostics = checks.iter().flat_map(CheckResult::diagnostics).collect();
 	Ok(Report { checks, diagnostics, skipped: suite.skipped.clone() })
 }
 
@@ -903,16 +904,16 @@ async fn run_checker_streaming<R: CheckerRunner>(
 					partials_open = false;
 					continue;
 				};
-				emit_fresh(
-					normalize_result(project_root, checker, partial).diagnostics,
-					&mut emitted,
-					diagnostics.as_ref(),
-				);
+				// Partial output streams only what it already reports: whether the
+				// run failed or is unreadable is for the complete output to say.
+				if let Ok(found) = parse_output(project_root, checker, &partial) {
+					emit_fresh(found, &mut emitted, diagnostics.as_ref());
+				}
 			},
 		}
 	};
 	let check = normalize_result(project_root, checker, output);
-	emit_fresh(check.diagnostics.clone(), &mut emitted, diagnostics.as_ref());
+	emit_fresh(check.diagnostics(), &mut emitted, diagnostics.as_ref());
 	Ok(check)
 }
 
@@ -949,39 +950,26 @@ pub fn diagnostic_key(diagnostic: &Diagnostic) -> Str {
 }
 
 fn normalize_result(project_root: &Path, checker: &Checker, process: ProcessOutput) -> CheckResult {
-	let mut diagnostics = parse(checker.parser, &ParserInput {
+	CheckResult {
+		checker:   checker.clone(),
+		exit_code: process.exit_code,
+		parsed:    parse_output(project_root, checker, &process),
+		logs:      process.logs,
+	}
+}
+
+fn parse_output(
+	project_root: &Path,
+	checker: &Checker,
+	process: &ProcessOutput,
+) -> Result<Vec<Diagnostic>, ParseError> {
+	parse(checker.parser, &ParserInput {
 		checker: checker.id.as_str(),
 		checker_root: &checker.cwd,
 		project_root,
 		stdout: process.stdout.as_str(),
 		stderr: process.stderr.as_str(),
-	});
-	if process.exit_code.is_some_and(|code| code != 0) && diagnostics.is_empty() {
-		let output = if process.stderr.is_empty() {
-			process.stdout.as_str()
-		} else {
-			process.stderr.as_str()
-		};
-		let output = excerpt(output);
-		diagnostics.push(Diagnostic {
-			checker:    checker.id.clone(),
-			file:       None,
-			line:       None,
-			column:     None,
-			end_line:   None,
-			end_column: None,
-			code:       Some(sf!("checker-failed")),
-			severity:   Severity::Error,
-			message:    Str::from(format!(
-				"Checker exited with status {}{}{}",
-				process.exit_code.unwrap_or_default(),
-				if output.trim().is_empty() { "" } else { ": " },
-				output.trim(),
-			)),
-			suggestion: None,
-		});
-	}
-	CheckResult { checker: checker.clone(), exit_code: process.exit_code, diagnostics }
+	})
 }
 
 #[cfg(test)]
@@ -1015,5 +1003,71 @@ mod tests {
 		let relative_only = env::join_paths([Path::new(".")]).expect("PATH value");
 		assert_eq!(resolve_on_path(Some(&relative_only), &["cargo"]), None);
 		assert_eq!(resolve_on_path(None, &["cargo"]), None);
+	}
+
+	/// A run that established no result, a recorded clean `cargo check` that
+	/// exited non-zero, ended by a signal, or stopped before `build-finished`,
+	/// projects to one project-wide diagnostic saying why and citing its
+	/// complete retained streams. The same run exiting 0 projects to none.
+	#[test]
+	fn unresolved_runs_project_one_diagnostic_citing_their_logs() {
+		let root = Path::new("/private/tmp/cargo-json-repro/clean");
+		let stdout = include_str!("../../../../fixtures/cargo/check-clean.stdout");
+		let stderr = include_str!("../../../../fixtures/cargo/check-clean.stderr");
+		let checker = Checker {
+			id:       sf!("cargo-check"),
+			label:    sf!("cargo check"),
+			language: sf!("Rust"),
+			cwd:      root.to_path_buf(),
+			binary:   PathBuf::from("cargo"),
+			args:     Vec::new(),
+			parser:   ParserKind::Rust,
+			effect:   CheckerEffect::ReadOnly,
+			test:     false,
+		};
+		let rows = |exit_code, stdout: &str| {
+			let logs = CheckLogs::of(stdout.as_bytes(), stderr.as_bytes());
+			let check = normalize_result(root, &checker, ProcessOutput {
+				exit_code,
+				stdout: Str::new(stdout),
+				stderr: Str::new(stderr),
+				logs: Some(logs),
+			});
+			let cited = format!(
+				"\n[stdout: artifact://sha256/{}; {} bytes]\n[stderr: artifact://sha256/{}; {} bytes]",
+				logs.stdout,
+				stdout.len(),
+				logs.stderr,
+				stderr.len()
+			);
+			let rows = check
+				.diagnostics()
+				.into_iter()
+				.map(|diagnostic| (diagnostic.file, diagnostic.code, diagnostic.message.to_string()))
+				.collect::<Vec<_>>();
+			(rows, cited)
+		};
+		assert!(rows(Some(0), stdout).0.is_empty());
+		let (failed, cited) = rows(Some(101), stdout);
+		assert_eq!(failed, [(
+			None,
+			Some(sf!("checker-failed")),
+			format!("Checker exited with status 101 without reporting a diagnostic{cited}")
+		)]);
+		let (killed, cited) = rows(None, stdout);
+		assert_eq!(killed, [(
+			None,
+			Some(sf!("checker-failed")),
+			format!("Checker ended without an exit status and reported no diagnostic{cited}")
+		)]);
+		let finished = stdout
+			.find("{\"reason\":\"build-finished\"")
+			.expect("build-finished record");
+		let (unfinished, cited) = rows(Some(0), &stdout[..finished]);
+		assert_eq!(unfinished, [(
+			None,
+			Some(sf!("unparseable")),
+			format!("cargo wrote no `build-finished` record and no diagnostic{cited}")
+		)]);
 	}
 }

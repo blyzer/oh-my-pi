@@ -16,7 +16,7 @@ use super::{Diagnostic, ParserInput, Severity, relative_path};
 /// Why a stylelint report could not be read.
 #[derive(Debug, thiserror::Error)]
 #[error("malformed stylelint JSON report")]
-pub(super) struct StylelintError(#[from] serde_json::Error);
+pub struct StylelintError(#[from] serde_json::Error);
 
 /// One linted file; `source` is absent when the CSS came from stdin.
 #[derive(serde::Deserialize)]
@@ -104,7 +104,10 @@ mod tests {
 
 	use omp_core::Str;
 
-	use super::super::{Diagnostic, ParserInput, ParserKind, Severity, UNPARSEABLE, parse};
+	use super::super::{
+		CheckLogs, Diagnostic, ParseError, ParserInput, ParserKind, Severity, UNPARSEABLE, parse,
+		unparseable,
+	};
 
 	const REPORT: &str = include_str!("../../../../../fixtures/stylelint/format-json.json");
 	const CLEAN: &str = include_str!("../../../../../fixtures/stylelint/format-json-clean.json");
@@ -168,10 +171,11 @@ mod tests {
 				"Unclosed block (CssSyntaxError)",
 			),
 		];
-		assert_eq!(parse(ParserKind::Stylelint, &input(root, "", REPORT)), expected);
-		assert_eq!(parse(ParserKind::Stylelint, &input(root, REPORT, "")), expected);
+		let read = |input| parse(ParserKind::Stylelint, &input).expect("stylelint report");
+		assert_eq!(read(input(root, "", REPORT)), expected);
+		assert_eq!(read(input(root, REPORT, "")), expected);
 		let clean = Path::new("/private/tmp/empty-result-repro/css-clean");
-		assert!(parse(ParserKind::Stylelint, &input(clean, "", CLEAN)).is_empty());
+		assert!(read(input(clean, "", CLEAN)).is_empty());
 	}
 
 	#[test]
@@ -179,7 +183,8 @@ mod tests {
 		let root = Path::new("/private/tmp/empty-result-repro/css-options");
 		let option = "Unexpected option value \"maybe\" for rule \"color-no-invalid-hex\"";
 		let unknown = "Unknown property \"colr\" (property-no-unknown)";
-		assert_eq!(parse(ParserKind::Stylelint, &input(root, "", INVALID_OPTION)), vec![
+		let report = parse(ParserKind::Stylelint, &input(root, "", INVALID_OPTION));
+		assert_eq!(report.expect("stylelint report"), vec![
 			Diagnostic {
 				file: None,
 				line: None,
@@ -195,15 +200,20 @@ mod tests {
 	fn unreadable_report_degrades_to_one_unparseable_diagnostic() {
 		let root = Path::new("/private/tmp/empty-result-repro/css");
 		let cut = &REPORT[..REPORT.find("\"warnings\"").expect("first warnings key")];
-		let diagnostics = parse(ParserKind::Stylelint, &input(root, "", cut));
-		assert_eq!(diagnostics.len(), 1);
-		assert_eq!(diagnostics[0].file, None);
-		assert_eq!(diagnostics[0].code.as_deref(), Some(UNPARSEABLE));
+		let error = parse(ParserKind::Stylelint, &input(root, "", cut)).expect_err("cut report");
+		assert!(matches!(error, ParseError::Stylelint(_)));
+		let logs = CheckLogs::of(b"", cut.as_bytes());
+		let diagnostic = unparseable(Str::from("stylelint"), &error, Some(&logs));
+		assert_eq!(diagnostic.file, None);
+		assert_eq!(diagnostic.code.as_deref(), Some(UNPARSEABLE));
 		assert!(
-			diagnostics[0]
+			diagnostic
 				.message
 				.starts_with("malformed stylelint JSON report: EOF while parsing")
 		);
-		assert!(diagnostics[0].message.ends_with(cut));
+		// The report is cited whole, by address, and the empty stdout not at all.
+		let citation = format!("\n[stderr: artifact://sha256/{}; {} bytes]", logs.stderr, cut.len());
+		assert!(diagnostic.message.ends_with(&citation), "{}", diagnostic.message);
+		assert!(!diagnostic.message.contains("stdout"));
 	}
 }

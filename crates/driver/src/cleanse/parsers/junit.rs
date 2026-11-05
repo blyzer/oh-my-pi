@@ -25,20 +25,42 @@ const PYTEST_REPORT: &str = "pytest tests";
 
 /// Why a `JUnit` report could not be read.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum JunitError {
+pub enum JunitError {
+	/// Stdout holds no report root.
 	#[error("no <testsuites> or <testsuite> element")]
 	Missing,
+	/// The root element is not a report.
 	#[error("root element <{found}> is not <testsuites> or <testsuite>")]
-	Root { found: Str },
+	Root {
+		/// The root element's name.
+		found: Str,
+	},
+	/// Text sits outside the root element.
 	#[error("text outside the root element at byte {position}")]
-	Text { position: u64 },
+	Text {
+		/// Byte offset of the text.
+		position: u64,
+	},
+	/// The report ends before its elements close.
 	#[error("report ends with {open} element(s) unclosed")]
-	Truncated { open: usize },
+	Truncated {
+		/// Elements still open at the end.
+		open: usize,
+	},
+	/// An entity reference that XML does not define.
 	#[error("undefined entity `&{name};` at byte {position}")]
-	Entity { name: Str, position: u64 },
+	Entity {
+		/// The entity's name.
+		name:     Str,
+		/// Byte offset of the reference.
+		position: u64,
+	},
+	/// The XML is malformed.
 	#[error("malformed XML at byte {position}")]
 	Xml {
+		/// Byte offset of the malformed XML.
 		position: u64,
+		/// quick-xml's reason.
 		#[source]
 		source:   quick_xml::Error,
 	},

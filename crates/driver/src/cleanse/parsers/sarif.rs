@@ -22,13 +22,19 @@ const MAX_BASE_DEPTH: u8 = 8;
 
 /// Why stdout could not be read as a SARIF log.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum SarifError {
+pub enum SarifError {
+	/// Stdout is empty.
 	#[error("stdout is empty; expected a SARIF 2.1.0 log")]
 	Empty,
+	/// Stdout is not a SARIF log's JSON.
 	#[error("stdout is not a SARIF 2.1.0 log")]
 	Json(#[from] serde_json::Error),
+	/// The log declares a SARIF version other than 2.1.0.
 	#[error("SARIF version {version} is not supported; expected 2.1.0")]
-	Version { version: Str },
+	Version {
+		/// The declared version.
+		version: Str,
+	},
 }
 
 /// Reads stdout, never stderr, as one SARIF 2.1.0 log.

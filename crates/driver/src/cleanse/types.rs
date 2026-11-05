@@ -1,10 +1,15 @@
 //! Cleanse checker, diagnostic, scheduling, and command records.
 
-use std::path::PathBuf;
+use std::{fmt::Write as _, path::PathBuf};
 
 use omp_core::Str;
+use omp_journal::blob::BlobRef;
 
-use super::parsers::ParserKind;
+use super::parsers::{ParseError, ParserKind, unparseable};
+
+/// Code of the diagnostic a checker that failed without reporting one
+/// degrades to.
+const CHECKER_FAILED: &str = "checker-failed";
 
 /// Severity normalized across checker formats.
 #[derive(
@@ -80,15 +85,86 @@ pub struct Checker {
 	pub test:     bool,
 }
 
+/// One checker run's complete standard streams, retained in the project blob
+/// store that `artifact://sha256/<hex>` addresses resolve from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckLogs {
+	/// Standard output.
+	pub stdout: BlobRef,
+	/// Standard error.
+	pub stderr: BlobRef,
+}
+
+impl CheckLogs {
+	/// Appends, for each non-empty stream, the line naming where its complete
+	/// bytes are retained: `[<stream>: artifact://sha256/<hex>; <n> bytes]`.
+	pub(super) fn cite(&self, message: &mut String) {
+		for (stream, blob) in [("stdout", self.stdout), ("stderr", self.stderr)] {
+			if blob.size != 0 {
+				let _ = write!(message, "\n[{stream}: artifact://sha256/{blob}; {} bytes]", blob.size);
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+impl CheckLogs {
+	/// The references `BlobStore::put` returns for these streams.
+	pub(super) fn of(stdout: &[u8], stderr: &[u8]) -> Self {
+		let blob =
+			|bytes: &[u8]| BlobRef { hash: omp_core::Hash32::sum(bytes), size: bytes.len() as u64 };
+		Self { stdout: blob(stdout), stderr: blob(stderr) }
+	}
+}
+
 /// Complete output of one checker.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct CheckResult {
 	/// Checker metadata.
-	pub checker:     Checker,
-	/// Process exit code.
-	pub exit_code:   Option<i32>,
-	/// Normalized diagnostics.
-	pub diagnostics: Vec<Diagnostic>,
+	pub checker:   Checker,
+	/// Process exit code; `None` when the process ended without one.
+	pub exit_code: Option<i32>,
+	/// Every diagnostic the output reports, or why the output could not be
+	/// read.
+	pub parsed:    Result<Vec<Diagnostic>, ParseError>,
+	/// The complete output, when the runner retained it.
+	pub logs:      Option<CheckLogs>,
+}
+
+impl CheckResult {
+	/// Actionable diagnostics: those the output reports, or one project-wide
+	/// diagnostic when the run established no result, because its output could
+	/// not be read or the checker failed without reporting a diagnostic.
+	pub fn diagnostics(&self) -> Vec<Diagnostic> {
+		let reported = match &self.parsed {
+			Ok(reported) => reported,
+			Err(error) => {
+				return vec![unparseable(self.checker.id.clone(), error, self.logs.as_ref())];
+			},
+		};
+		if !reported.is_empty() || self.exit_code == Some(0) {
+			return reported.clone();
+		}
+		let mut message = match self.exit_code {
+			Some(code) => format!("Checker exited with status {code} without reporting a diagnostic"),
+			None => String::from("Checker ended without an exit status and reported no diagnostic"),
+		};
+		if let Some(logs) = &self.logs {
+			logs.cite(&mut message);
+		}
+		vec![Diagnostic {
+			checker:    self.checker.id.clone(),
+			file:       None,
+			line:       None,
+			column:     None,
+			end_line:   None,
+			end_column: None,
+			code:       Some(Str::new_static(CHECKER_FAILED)),
+			severity:   Severity::Error,
+			message:    Str::from(message),
+			suggestion: None,
+		}]
+	}
 }
 
 /// Discovered checker omitted because its executable was unavailable.
@@ -103,11 +179,11 @@ pub struct SkippedCheck {
 }
 
 /// Aggregate checker pass.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct Report {
 	/// Per-checker outcomes.
 	pub checks:      Vec<CheckResult>,
-	/// Flattened diagnostics.
+	/// Flattened actionable diagnostics of every check.
 	pub diagnostics: Vec<Diagnostic>,
 	/// Unavailable checkers.
 	pub skipped:     Vec<SkippedCheck>,
@@ -183,7 +259,7 @@ pub enum CleanseStatus {
 }
 
 /// CLI exit and final report.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct CleanseExit {
 	/// Exactly 0, 1, or 130.
 	pub code:          u8,
