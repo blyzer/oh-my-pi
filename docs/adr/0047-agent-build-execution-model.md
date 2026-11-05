@@ -24,7 +24,7 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
 1. **Model E, shaped as D.** Extend the existing architecture. Do not add a parallel execution system.
    - A new pure crate `omp-exec` holds:
      - `ExecutionRequest`, `BackendCapabilities` (`input`, `stream`, `cancel`, `warm_caches`, `snapshot`, platforms, enforced posture, `max_timeout`);
-     - `ExecutionBackend`/`ExecutionRun` (enum-dispatched, copying the `ShellExec`/`ShellRun` shape);
+     - `ExecutionBackend`/`ExecutionRun` (generic traits with static dispatch, following the generic `ShellExec`/`ShellRun` shape);
      - typed `Outcome` that separates command failure from infrastructure failure;
      - `BuildSystemAdapter`, a pure `place()`, and a normalized `BuildReport`.
    - Hosting reuses `JobBoard`/`JobSettlement`, `BlobStore`/`artifact://`, `CancelTree` and envd `ExecHost`.
@@ -46,6 +46,31 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
    - **G7:** observability correlation chain.
    - **G8:** measured relief before any remote default.
 7. **Trust classes** T1 (owner workspace), T2 (third-party repo), T3 (untrusted or fork code), T4 (agent-generated changes) and T5 (release) govern placement, upload, cache writes, secrets and snapshot reuse, as tabulated in the research report. All `sv_exec_*` settings are user scope, never project.
+
+
+### Current dispatch and extension constraints
+
+`crates/exec/src/backend.rs:ExecutionBackend` defines the trait as follows:
+
+```rust
+pub trait ExecutionBackend: Clone + Send + Sync + 'static {
+	type Run: ExecutionRun;
+	fn id(&self) -> &BackendId<str>;
+	fn capabilities(&self) -> &BackendCapabilities;
+	fn start(
+		&self,
+		request: ExecutionRequest,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_;
+	fn reattach(
+		&self,
+		handle: ReattachHandle,
+	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_;
+}
+```
+
+This quote omits documentation comments. `Clone` and the opaque future returns make the trait non-dyn-compatible. The workspace has concrete implementations, not an enum dispatching execution backends (`crates/exec-local/src/lib.rs:LocalBackend`, `crates/exec-reapi/src/execute.rs:ReapiBackend`, `crates/exec-ssh/src/lib.rs:SshBackend`, `crates/exec-buildbuddy/src/lib.rs:BuildBuddyBackend`). The precedent `crates/tools/src/shell.rs:ShellExec` is also a generic trait, not an enum.
+
+An external crate can implement the trait. `crates/agent/src/jobs.rs:JobBoard::attach_execution_run` accepts any `R: ExecutionRun`. A runtime-loaded backend cannot be plugged in as `dyn ExecutionBackend`; a concrete in-core adapter could instead delegate to an out-of-core implementation. An object-safe erased bridge and the existing embedded-Python extension host are candidate routes, not tested execution-backend integrations. The existing host exposes dynamic tools through `crates/envd/src/tools.rs:RegistryBridges` and Python extensions through `crates/envd/src/exthost/extensions.rs:PyComponent`. See [ADR 0040](0040-remote-build-and-test-execution.md) for the open ownership and shipping question.
 
 ## Consequences
 
