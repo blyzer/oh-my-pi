@@ -3,6 +3,7 @@
 use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
+pub mod cpp;
 pub mod generic;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
@@ -10,6 +11,10 @@ pub mod generic;
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"cargo" => cargo::supports(subcommand),
+		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
+			cpp::supports(program, subcommand)
+		},
+		program if cpp::is_gtest_binary_name(program) => cpp::supports(program, subcommand),
 		_ => false,
 	}
 }
@@ -19,6 +24,10 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
+			cpp::filter(ctx, input, exit_code)
+		},
+		program if cpp::is_gtest_binary_name(program) => cpp::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
 }

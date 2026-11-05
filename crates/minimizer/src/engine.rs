@@ -364,6 +364,12 @@ fn ensure_success_visible(output: MinimizerOutput<'_>, exit_code: i32) -> Minimi
 fn program_label(program: &str) -> &'static str {
 	match program {
 		"cargo" => "cargo",
+		"cmake" => "cmake",
+		"ctest" => "ctest",
+		"ninja" => "ninja",
+		"gtest" => "gtest",
+		"gtest-parallel" => "gtest",
+		program if filters::cpp::is_gtest_binary_name(program) => "gtest",
 		_ => "builtin",
 	}
 }
@@ -617,6 +623,33 @@ strip_lines_matching = [".*"]
 		// unknown (per-segment minimization is the segmented runner's job).
 		assert!(!out.changed, "mixed chain must stay passthrough in whole-buffer minimization");
 		assert_eq!(out.filter, "compound");
+	}
+
+	#[test]
+	fn cpp_tools_minimize_through_dispatch() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("ctest --output-on-failure", &cfg));
+		assert!(should_minimize("./build/foo_test --gtest_filter=Foo.*", &cfg));
+
+		let ctest_input = minimizable_input(
+			"Test project /tmp/build\n1/2 Test #1: ok ........   Passed    0.01 sec\n2/2 Test #2: \
+			 bad .......***Failed    0.02 sec\nThe following tests FAILED:\n",
+		);
+		let ctest = apply("ctest --output-on-failure", &ctest_input, 8, &cfg);
+		assert!(ctest.changed);
+		assert_eq!(ctest.filter, "ctest");
+		assert!(!ctest.text.contains("Test #1"));
+		assert!(ctest.text.contains("Test #2: bad"));
+
+		let gtest_input = minimizable_input(
+			"[ RUN      ] Foo.Pass\n[       OK ] Foo.Pass (0 ms)\nfoo_test.cc:42: Failure\nExpected: \
+			 1\n[  FAILED  ] Foo.Fails\n",
+		);
+		let gtest = apply("./build/foo_test", &gtest_input, 1, &cfg);
+		assert!(gtest.changed);
+		assert_eq!(gtest.filter, "gtest");
+		assert!(!gtest.text.contains("Foo.Pass"));
+		assert!(gtest.text.contains("foo_test.cc:42: Failure"));
 	}
 
 	#[test]
