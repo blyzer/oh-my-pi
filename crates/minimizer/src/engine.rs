@@ -365,6 +365,12 @@ fn program_label(program: &str) -> &'static str {
 	match program {
 		"git" => "git",
 		"yadm" => "yadm",
+		"gt" => "gt",
+		"gh" => "gh",
+		"aws" => "aws",
+		"curl" => "curl",
+		"wget" => "wget",
+		"psql" => "psql",
 		"cargo" => "cargo",
 		"xxd" => "xxd",
 		"strings" => "strings",
@@ -710,6 +716,33 @@ only_on_exit = [0]
 			npx.text, direct.text,
 			"npx eslint output diverged from direct eslint (overlay mutated it)"
 		);
+	}
+
+	#[test]
+	fn line_capping_user_overlay_keeps_the_patch_summary() {
+		let capped = |program: &str| {
+			config_from_settings(&format!(
+				"schema_version = 1\n[filters.cap]\nmatch_command = \"^{program}$\"\nmax_lines = 20\n"
+			))
+		};
+		let mut patch = String::from(
+			"diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,100 +1,100 @@\n",
+		);
+		for i in 0..100 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		// `gt diff` runs the git filter, but the overlay the engine applies is
+		// the one for `gt`.
+		for (program, command) in [("git", "git diff"), ("gt", "gt diff")] {
+			let out = apply(command, &patch, 0, &capped(program));
+			assert!(out.text.contains("src/b.rs | 2"), "{command}: {:?}", out.text);
+			assert!(out.text.contains("2 files changed"), "{command}: {:?}", out.text);
+		}
+		let out = apply("gt diff", &patch, 0, &capped("git"));
+		assert_eq!(out.text, patch, "a git-only cap leaves gt output whole");
 	}
 
 	#[test]

@@ -1,0 +1,2 @@
+*.tap -text -diff
+*.stderr -text -diff

@@ -4,8 +4,12 @@ use crate::{MinimizerCtx, MinimizerOutput, engine};
 
 pub mod binary_tools;
 pub mod cargo;
+pub mod cloud;
 pub mod generic;
+pub mod gh;
 pub mod git;
+pub mod glab;
+pub mod gt;
 pub mod lint;
 pub mod listing;
 pub mod pkg;
@@ -16,6 +20,10 @@ pub mod system;
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
 		"git" | "yadm" => git::supports(subcommand),
+		"gt" => gt::supports(program, subcommand),
+		"aws" | "curl" | "wget" | "psql" => cloud::supports(program, subcommand),
+		"gh" => gh::supports(subcommand),
+		"glab" => glab::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
 		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
 		| "jq" | "json" => true,
@@ -75,6 +83,10 @@ fn is_lint_script_token(token: &str) -> bool {
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
 		"git" | "yadm" => git::filter(ctx, input, exit_code),
+		"gt" => gt::filter(ctx, input, exit_code),
+		"aws" | "curl" | "wget" | "psql" => cloud::filter(ctx, input, exit_code),
+		"gh" => gh::filter(ctx, input, exit_code),
+		"glab" => glab::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
 		| "jq" | "json" => listing::filter(ctx, input, exit_code),
