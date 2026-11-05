@@ -363,6 +363,8 @@ fn ensure_success_visible(output: MinimizerOutput<'_>, exit_code: i32) -> Minimi
 /// callers carry it as `&'static str` without allocation.
 fn program_label(program: &str) -> &'static str {
 	match program {
+		"git" => "git",
+		"yadm" => "yadm",
 		"cargo" => "cargo",
 		"cmake" => "cmake",
 		"ctest" => "ctest",
@@ -450,6 +452,21 @@ fn resolve_pipeline<'a>(
 	builtin_pipelines().find(program, subcommand)
 }
 
+/// Whether the pipeline overlaid on a Rust filter's output for this command
+/// drops whole lines. A filter that would return output whole checks this
+/// first: such an overlay cuts a whole patch partway through, where it would
+/// have kept the head of a summary that starts with the stat.
+pub(crate) fn overlay_caps_lines(
+	config: &MinimizerConfig,
+	program: &str,
+	subcommand: Option<&str>,
+	exit_code: i32,
+	input_bytes: usize,
+) -> bool {
+	resolve_pipeline(config, program, subcommand)
+		.is_some_and(|pipeline| pipeline.caps_lines(exit_code, input_bytes))
+}
+
 const BUILTIN_FILTERS_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
 
 // Fail safe like a panicking filter: a broken built-in set leaves output
@@ -479,9 +496,19 @@ fn minimizable_input(input: &str) -> String {
 	output
 }
 
+/// Pad `input` past
+/// [`WHOLE_OUTPUT_BYTES`](crate::primitives::WHOLE_OUTPUT_BYTES)
+/// with blank lines, which no patch parser counts.
+#[cfg(test)]
+fn past_whole_budget(input: &str) -> String {
+	use crate::primitives::WHOLE_OUTPUT_BYTES;
+	format!("{input}{}", "\n".repeat(WHOLE_OUTPUT_BYTES))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{
+		fmt::Write as _,
 		fs,
 		sync::atomic::{AtomicUsize, Ordering},
 	};
@@ -609,6 +636,151 @@ replace = [{ pattern = "x", replacement = "y" }]
 	}
 
 	#[test]
+	fn pipeline_overlay_honors_subcommand_and_exit_gates() {
+		let cfg = config_from_settings(
+			r#"
+schema_version = 1
+[filters.git_diff_overlay]
+match_command = "^git$"
+match_subcommand = "^diff$"
+strip_lines_matching = [".*"]
+on_empty = "OVERLAY"
+only_on_exit = [0]
+"#,
+		);
+		let diff_input = minimizable_input("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let diff = apply("git diff", &diff_input, 0, &cfg);
+		assert_eq!(diff.filter, "pipeline+builtin");
+		assert_eq!(diff.text, "OVERLAY");
+
+		let status_input = minimizable_input("## main\n M file.rs\n");
+		let status = apply("git status", &status_input, 0, &cfg);
+		assert_ne!(status.filter, "pipeline+builtin");
+		assert!(status.text.contains("unstaged 1"));
+
+		let past_budget = past_whole_budget(&diff_input);
+		let failed = apply("git diff", &past_budget, 1, &cfg);
+		assert_ne!(failed.filter, "pipeline+builtin");
+		assert!(failed.text.contains("file changed"));
+	}
+
+	#[test]
+	fn ssh_keeps_long_remote_lines_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::new();
+		for i in 0..4 {
+			let _ = writeln!(remote, "{{\"id\":{i},\"payload\":\"{}\"}}", "x".repeat(300));
+		}
+		let input = format!(
+			"Warning: Permanently added 'host' (ED25519) to the list of known \
+			 hosts.\n{remote}Connection to host closed.\n"
+		);
+
+		let out = apply("ssh host cat rows.jsonl", &input, 0, &cfg);
+		assert!(out.changed, "the banner lines are stripped");
+		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn ssh_keeps_blank_remote_lines() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::from("first record\n\nsecond record\n\n");
+		for i in 0..60 {
+			let _ = writeln!(remote, "row {i}: remote value");
+		}
+		let input = format!("{remote}Connection to host closed.\n");
+
+		let out = apply("ssh host cat records.txt", &input, 0, &cfg);
+		assert!(out.changed, "the banner line is stripped");
+		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn ssh_whole_budget_counts_the_captured_bytes() {
+		use crate::primitives::WHOLE_OUTPUT_BYTES;
+
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes, the last newline swapped for a character.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		at_budget.pop();
+		at_budget.push('x');
+		assert_eq!(at_budget.len(), WHOLE_OUTPUT_BYTES);
+		let out = apply("ssh host cat log.txt", &at_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 256, "{:?}", out.text);
+
+		let past_budget = format!("{at_budget}\n");
+		let out = apply("ssh host cat log.txt", &past_budget, 0, &cfg);
+		assert!(out.text.contains("ln elided"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn yadm_patch_keeps_its_summary_under_its_line_cap() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut patch = String::from(
+			"diff --git a/.zshrc b/.zshrc\n--- a/.zshrc\n+++ b/.zshrc\n@@ -1,90 +1,90 @@\n",
+		);
+		for i in 0..90 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/.vimrc b/.vimrc\n--- a/.vimrc\n+++ b/.vimrc\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		let out = apply("yadm diff", &patch, 0, &cfg);
+		assert!(out.text.contains(".vimrc"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn npx_def_does_not_overlay_routed_eslint() {
+		// `npx eslint` IS routed by filters::supports, so the Rust lint filter
+		// runs and apply_pipeline_overlay re-selects a matching pipeline. The npx
+		// def must NOT match subcommand `eslint`, so no overlay re-applies its
+		// max_lines/strip on top of the lint diagnostics. Output must equal the
+		// direct `eslint` invocation (same filter label, not "pipeline+builtin").
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..120 {
+			let _ = writeln!(input, "/src/file{i}.ts:{i}:1  error  Something is wrong  rule/name");
+		}
+		let npx = apply("npx eslint src/", &input, 1, &cfg);
+		let direct = apply("eslint src/", &input, 1, &cfg);
+		// Label differs by program token (npx -> "builtin", eslint -> "eslint"),
+		// but it must NOT be the overlay label and the TEXT must be the
+		// un-mutated lint output — same lines, no max_lines truncation.
+		assert_ne!(
+			npx.filter, "pipeline+builtin",
+			"npx def overlaid the routed eslint filter output"
+		);
+		assert_eq!(
+			npx.text, direct.text,
+			"npx eslint output diverged from direct eslint (overlay mutated it)"
+		);
+	}
+
+	#[test]
+	fn enabled_known_filter_minimizes() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("git diff", &cfg));
+		let input = past_whole_budget("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let out = apply("git diff", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("file changed"));
+	}
+
+	#[test]
+	fn enabled_config_minimizes_git_status() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("git status", &cfg));
+		let input = minimizable_input("## main\n M file.rs\n");
+		let out = apply("git status", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("unstaged 1"));
+		assert_eq!(out.filter, "git");
+	}
+
+	#[test]
 	fn successful_minimization_keeps_visible_ok_when_filter_removes_all_lines() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input = format!(
@@ -672,6 +844,24 @@ strip_lines_matching = [".*"]
 		let out = apply("echo hello", "hello\n", 0, &cfg);
 		assert_eq!(out.text, "hello\n");
 		assert!(!out.changed);
+	}
+
+	#[test]
+	fn segmented_chain_mode_is_only_for_eligible_safe_chains() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert_eq!(
+			mode_for("git diff --stat && git diff --name-only", &cfg),
+			MinimizerMode::SegmentedChain
+		);
+		assert_eq!(mode_for("git diff ; printf done", &cfg), MinimizerMode::SegmentedChain);
+		// Common shell utilities make a chain eligible for the segmented runner
+		// even when no segment has a dedicated filter — segments stream through
+		// per-segment passthrough so the chain itself is captured for telemetry.
+		assert_eq!(mode_for("false && echo no ; echo yes", &cfg), MinimizerMode::SegmentedChain);
+		assert_eq!(mode_for("foo || bar", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("git status | cat", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("sleep 1 &", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("(cd foo && make)", &cfg), MinimizerMode::None);
 	}
 
 	#[test]
@@ -932,6 +1122,116 @@ strip_lines_matching = [".*"]
 		let out = apply("exec >out ; echo hi", "hi\n", 0, &cfg);
 		assert_eq!(out.text, "hi\n");
 		assert!(!out.changed);
+	}
+
+	#[test]
+	fn rails_db_migrate_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n\n== 20240116 AddIndexToOrders: migrating\n-- \
+			 add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("✓ CreateUsers"));
+		assert!(out.text.contains("✓ AddIndexToOrders"));
+		assert!(!out.text.contains("-- create_table"));
+		assert!(!out.text.contains("-> 0.0234s"));
+		// Must NOT be an overlay label; standalone pipeline gets "pipeline".
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rails_routes_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rake_routes_regression_unminimized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rake routes", &input, 0, &cfg);
+		assert!(out.changed, "rake routes should be minimized by the rails-routes def");
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_db_migrate_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = apply("bundle exec rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("CreateUsers"));
+		assert!(!out.text.contains("-- create_table"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_routes_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("bundle exec rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn rails_db_migrate_no_double_truncation() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..100 {
+			let _ = write!(
+				input,
+				"== 20240115 Migration{i}: migrating\n-- step\n   -> 0.0s\n== 20240115 Migration{i}: \
+				 migrated\n\n"
+			);
+		}
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Only the def's max_lines=40 cap should fire; filter_rake's head_tail
+		// must NOT also condense. Both now emit `[…Nln elided…]`, so a single
+		// marker proves no double truncation (two would mean both stages
+		// fired).
+		assert_eq!(
+			out.text.matches("ln elided…]").count(),
+			1,
+			"double truncation detected: {:#?}",
+			out.text
+		);
+	}
+
+	#[test]
+	fn rails_db_migrate_keyword_in_name_not_dropped() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateTestResults: migrating\n-- create_table(:test_results)\n   -> \
+			 0.0234s\n== 20240115 CreateTestResults: migrated\n\n== 20240116 AddIndexToOrders: \
+			 migrating\n-- add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: \
+			 migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Both migrations must survive; the old overlay-on-rake would keep only
+		// lines containing "test" and silently drop AddIndexToOrders.
+		assert!(out.text.contains("CreateTestResults"), "CreateTestResults was dropped");
+		assert!(out.text.contains("AddIndexToOrders"), "AddIndexToOrders was dropped");
 	}
 }
 

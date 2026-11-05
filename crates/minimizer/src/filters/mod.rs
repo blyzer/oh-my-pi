@@ -1,22 +1,25 @@
 //! Filter dispatch table for built-in minimizer strategies.
 
-use crate::{MinimizerCtx, MinimizerOutput};
+use crate::{MinimizerCtx, MinimizerOutput, engine};
 
 pub mod bun;
 pub mod cargo;
 pub mod cpp;
 pub mod generic;
+pub mod git;
 pub mod js_tools;
 pub mod lint;
 pub mod node_tests;
 pub mod pkg;
 pub mod python;
 pub mod ruby;
+pub mod system;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
+		"git" | "yadm" => git::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::supports(program, subcommand)
@@ -26,10 +29,15 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 		| "oxlint" | "pyright" | "basedpyright" => {
 			lint::supports(subcommand) || lint::supports_program(program, subcommand)
 		},
+		"npx" => matches!(subcommand, Some("tsc" | "eslint" | "biome")),
+		"pnpm" if matches!(subcommand, Some("dlx")) => true,
+		"uv" if matches!(subcommand, Some("run")) => true,
 		"npm" | "pnpm" | "yarn" | "pip" | "pip3" | "bundle" | "brew" | "composer" | "poetry" => {
 			pkg::supports(subcommand)
 		},
 		"uv" => pkg::supports(subcommand),
+		"env" | "log" | "deps" | "summary" | "err" | "test" | "diff" | "format" | "pipe" | "ps"
+		| "ping" | "ssh" | "sops" => system::supports(program),
 		"bun" | "bunx" => bun::supports(program, subcommand),
 		"pytest" | "ruff" | "mypy" | "python" | "python3" | "py" => {
 			python::supports(program, subcommand)
@@ -89,6 +97,7 @@ fn is_lint_script_token(token: &str) -> bool {
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
+		"git" | "yadm" => git::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::filter(ctx, input, exit_code)
@@ -96,6 +105,12 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		program if cpp::is_gtest_binary_name(program) => cpp::filter(ctx, input, exit_code),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
+		"npx" => filter_js_wrapper(ctx, input, exit_code),
+		"pnpm" if matches!(ctx.subcommand, Some("dlx")) => filter_js_wrapper(ctx, input, exit_code),
+		"uv" if matches!(ctx.subcommand, Some("run")) => filter_uv_wrapper(ctx, input, exit_code),
+		"bundle" if matches!(ctx.subcommand, Some("exec")) => {
+			filter_bundle_wrapper(ctx, input, exit_code)
+		},
 		"npm" | "pnpm" | "yarn" => {
 			if is_pkg_test_invocation(ctx) {
 				node_tests::filter(ctx, input, exit_code)
@@ -108,6 +123,8 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"pip" | "pip3" | "bundle" | "brew" | "composer" | "uv" | "poetry" => {
 			pkg::filter(ctx, input, exit_code)
 		},
+		"env" | "log" | "deps" | "summary" | "err" | "test" | "diff" | "format" | "pipe" | "ps"
+		| "ping" | "ssh" | "sops" => system::filter(ctx, input, exit_code),
 		"bun" | "bunx" => bun::filter(ctx, input, exit_code),
 		"pytest" | "ruff" | "mypy" | "python" | "python3" | "py" => {
 			python::filter(ctx, input, exit_code)
@@ -119,10 +136,220 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 	}
 }
 
+fn filter_js_wrapper<'a>(
+	ctx: &MinimizerCtx<'_>,
+	input: &'a str,
+	exit_code: i32,
+) -> MinimizerOutput<'a> {
+	if let Some(tool) = wrapper_invoked_tool(ctx, &["tsc", "eslint", "biome"]) {
+		let routed = MinimizerCtx {
+			program:    tool,
+			subcommand: Some(tool),
+			command:    ctx.command,
+			config:     ctx.config,
+		};
+		lint::filter(&routed, input, exit_code)
+	} else {
+		MinimizerOutput::passthrough(input)
+	}
+}
+
+fn filter_uv_wrapper<'a>(
+	ctx: &MinimizerCtx<'_>,
+	input: &'a str,
+	exit_code: i32,
+) -> MinimizerOutput<'a> {
+	match uv_wrapper_tool(ctx) {
+		Some(tool @ ("tsc" | "eslint" | "biome" | "pyright" | "basedpyright" | "oxlint")) => {
+			let routed = MinimizerCtx {
+				program:    tool,
+				subcommand: Some(tool),
+				command:    ctx.command,
+				config:     ctx.config,
+			};
+			lint::filter(&routed, input, exit_code)
+		},
+		_ => MinimizerOutput::passthrough(input),
+	}
+}
+
+fn filter_bundle_wrapper<'a>(
+	ctx: &MinimizerCtx<'_>,
+	input: &'a str,
+	exit_code: i32,
+) -> MinimizerOutput<'a> {
+	let Some(inner_command) = bundle_wrapped_command(ctx.command) else {
+		return pkg::filter(ctx, input, exit_code);
+	};
+	engine::apply(&inner_command, input, exit_code, ctx.config)
+}
+
+/// Extract the inner command from a `bundle exec <cmd> …` invocation so the
+/// engine can re-dispatch through the wrapped tool's filter/def. Returns
+/// `None` when the command does not follow the `bundle exec` pattern.
+fn bundle_wrapped_command(command: &str) -> Option<String> {
+	let tokens: Vec<&str> = command
+		.split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&'))
+		.filter(|tok| !tok.is_empty())
+		.collect();
+	let bundle_pos = tokens.iter().position(|t| {
+		t.rsplit('/')
+			.next()
+			.is_some_and(|name| name.eq_ignore_ascii_case("bundle"))
+	})?;
+	let mut iter = tokens.iter().skip(bundle_pos + 1).copied();
+	let word = next_command_word(&mut iter)?;
+	if word != "exec" {
+		return None;
+	}
+	let tool = next_command_word(&mut iter)?;
+	let mut inner = String::from(tool);
+	for tok in iter {
+		inner.push(' ');
+		inner.push_str(tok);
+	}
+	Some(inner)
+}
+
+fn uv_wrapper_tool<'a>(ctx: &'a MinimizerCtx<'_>) -> Option<&'a str> {
+	wrapper_invoked_tool(ctx, &[
+		"pytest",
+		"ruff",
+		"mypy",
+		"tsc",
+		"eslint",
+		"biome",
+		"pyright",
+		"basedpyright",
+		"oxlint",
+		"jest",
+		"vitest",
+		"playwright",
+	])
+}
+
+/// Wrapper options whose value is the *following* token (`--with pytest`),
+/// rather than being self-contained (`--with=pytest`). When skipping flags to
+/// find the invoked command word we must also skip these options' values, or
+/// the value (`pytest`) is mistaken for the command and routes arbitrary output
+/// through that tool's filter. Covers the value-taking options of the wrappers
+/// routed here — `uv run`, `npx`, `pnpm dlx`, `bun x`. The `--opt=value` form
+/// is already a single flag token and needs no entry here.
+const WRAPPER_VALUE_OPTIONS: &[&str] = &[
+	// uv run
+	"--extra",
+	"--with",
+	"--with-requirements",
+	"--with-editable",
+	"--python",
+	"-p",
+	"--from",
+	"--directory",
+	"--project",
+	"--index",
+	"--default-index",
+	"--index-url",
+	"--extra-index-url",
+	"--find-links",
+	"-f",
+	"--cache-dir",
+	"--config-file",
+	"--refresh-package",
+	"--resolution",
+	"--prerelease",
+	"--exclude-newer",
+	"--link-mode",
+	"--color",
+	"--python-preference",
+	// npx / pnpm dlx
+	"--package",
+	"-c",
+	"--call",
+	"--workspace",
+	"-w",
+	"--node-arg",
+	// bundle exec
+	"--gemfile",
+	"--path",
+	"--jobs",
+	"--retry",
+];
+
+/// Advance `tokens` to the next invoked-command word, skipping flag tokens and
+/// the space-separated values of value-taking options (see
+/// [`WRAPPER_VALUE_OPTIONS`]). Inline `--opt=value` flags are skipped whole.
+fn next_command_word<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+	while let Some(tok) = tokens.next() {
+		if !tok.starts_with('-') {
+			return Some(tok);
+		}
+		if !tok.contains('=') && WRAPPER_VALUE_OPTIONS.contains(&tok) {
+			tokens.next(); // consume the option's value
+		}
+	}
+	None
+}
+
+/// The command/tool word a wrapper invocation actually executes: the first
+/// non-flag token after a single wrapper keyword (`run`/`dlx`/`exec`), or —
+/// when none is present — the first non-flag token after the program.
+/// Value-taking options (`--with pytest`) have their value skipped so it is not
+/// mistaken for the command. A leading `python`/`python3`/`py` interpreter is
+/// descended through its `-m`/`--module` argument so `uv run python -m pytest`
+/// resolves to `pytest`. Tool names that appear only as later arguments
+/// (`uv run build -- pytest`, `uv run echo pytest`, `uv run --with pytest
+/// echo`) are never returned.
+fn wrapper_command_word(command: &str) -> Option<&str> {
+	let mut tokens = command
+		.split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&'))
+		.filter(|tok| !tok.is_empty());
+	tokens.next()?; // drop the program token
+	let mut word = next_command_word(&mut tokens)?;
+	if matches!(word, "run" | "dlx" | "exec") {
+		word = next_command_word(&mut tokens)?;
+	}
+	if matches!(word, "python" | "python3" | "py") {
+		while let Some(tok) = tokens.next() {
+			if tok == "--" {
+				return Some(word);
+			}
+			if matches!(tok, "-c" | "--command") {
+				return Some(word);
+			}
+			if matches!(tok, "-m" | "--module") {
+				return tokens
+					.find(|candidate| !candidate.starts_with('-'))
+					.or(Some(word));
+			}
+			if tok.starts_with('-') {
+				continue;
+			}
+			return Some(tok);
+		}
+	}
+	Some(word)
+}
+
+fn wrapper_invoked_tool<'a>(ctx: &'a MinimizerCtx<'_>, tools: &[&'a str]) -> Option<&'a str> {
+	// Prefer wrapper_command_word over ctx.subcommand: it properly skips
+	// value-taking option values (e.g. -w, --workspace, --with) that
+	// detect_subcommand may mistake for the invoked tool name.
+	let word = wrapper_command_word(ctx.command)?;
+	match tools.iter().copied().find(|&tool| tool == word) {
+		Some(tool) => Some(tool),
+		None => {
+			// Fallback: detect_subcommand may have normalized case or
+			// resolved through program-specific logic.
+			ctx.subcommand
+				.and_then(|subcommand| tools.iter().copied().find(|tool| *tool == subcommand))
+		},
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::MinimizerConfig;
+	use crate::{MinimizerConfig, engine::MIN_MINIMIZE_CHARS};
 
 	fn ctx<'a>(
 		program: &'a str,
@@ -131,6 +358,14 @@ mod tests {
 		config: &'a MinimizerConfig,
 	) -> MinimizerCtx<'a> {
 		MinimizerCtx { program, subcommand, command, config }
+	}
+
+	fn minimizable_input(input: &str) -> String {
+		let mut output = input.to_string();
+		while output.chars().count() < MIN_MINIMIZE_CHARS {
+			output.push('\n');
+		}
+		output
 	}
 
 	#[test]
@@ -287,5 +522,217 @@ mod tests {
 		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
 		assert!(!out.contains("✓ ok"));
 		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn pnpm_dlx_unknown_tool_is_passthrough() {
+		let config = MinimizerConfig::default();
+		let context = ctx("pnpm", Some("dlx"), "pnpm dlx unknown-tool", &config);
+		let input = "line 1\nline 2\n";
+		let out = filter(&context, input, 0);
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
+	}
+
+	#[test]
+	fn test_wrapper_eslint_json_format_preserved() {
+		// Simulates: npx eslint -f json src/
+		let config = MinimizerConfig::default();
+		let input = r#"[{"filePath":"a.ts","messages":[],"errorCount":0}]"#;
+		let context = ctx("npx", Some("eslint"), "npx eslint -f json src/", &config);
+		let out = filter(&context, input, 0);
+		assert!(out.text.contains("filePath"), "eslint -f json via npx must not be condensed");
+	}
+
+	#[test]
+	fn uv_wrapper_ignores_tool_as_argument() {
+		let config = MinimizerConfig::default();
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run pytest", &config)),
+			Some("pytest")
+		);
+		assert_eq!(uv_wrapper_tool(&ctx("uv", Some("run"), "uv run echo pytest", &config)), None);
+		assert_eq!(uv_wrapper_tool(&ctx("uv", Some("run"), "uv run build -- pytest", &config)), None);
+	}
+
+	#[test]
+	fn uv_wrapper_skips_value_taking_option_values() {
+		let config = MinimizerConfig::default();
+		// `--with <pkg>` consumes the following token as its value; that value
+		// must not be mistaken for the invoked command and route output through
+		// it.
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with pytest echo hi", &config)),
+			None
+		);
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with pytest build", &config)),
+			None
+		);
+		// the genuinely invoked tool still routes when preceded by a value option
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --python 3.12 pytest", &config)),
+			Some("pytest")
+		);
+		// inline `--opt=value` is a single token; the command word follows it
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with=pytest echo hi", &config)),
+			None
+		);
+		// `python -m <module>` descent still resolves through a value option
+		assert_eq!(
+			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with foo python -m pytest", &config)),
+			Some("pytest")
+		);
+	}
+
+	#[test]
+	fn uv_run_with_option_value_is_left_opaque() {
+		let config = MinimizerConfig::default();
+		// `pytest` is the value of `--with`, the invoked command is `echo` —
+		// output (including PASS/✓-style lines) must pass through untouched.
+		let context = ctx("uv", Some("run"), "uv run --with pytest echo PASS", &config);
+		let input = "collected 2 items\nPASS\n";
+		let out = filter(&context, input, 0);
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
+	}
+
+	#[test]
+	fn uv_run_echo_pytest_is_left_opaque() {
+		let config = MinimizerConfig::default();
+		// `pytest` is an argument to `echo`, not the invoked command — output
+		// must pass through
+		let context = ctx("uv", Some("run"), "uv run echo pytest", &config);
+		let input = "collected 2 items\npytest\n";
+		let out = filter(&context, input, 0);
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
+	}
+
+	#[test]
+	fn uv_run_pyright_routes_to_lint_filter() {
+		let config = MinimizerConfig::default();
+		let context = ctx("uv", Some("run"), "uv run pyright", &config);
+		let input = "0 errors, 0 warnings, 0 informations\nsrc/app.ts:4:7 - error TS2322: Type \
+		             'string' is not assignable to type 'number'.\n";
+		let out = filter(&context, input, 1).text;
+		assert!(out.contains("TS2322"));
+	}
+
+	#[test]
+	fn uv_run_basedpyright_routes_to_lint_filter() {
+		let config = MinimizerConfig::default();
+		let context = ctx("uv", Some("run"), "uv run basedpyright", &config);
+		let input = "0 errors, 0 warnings, 0 notes\nsrc/app.ts:4:7 - error TS2322: Type 'string' is \
+		             not assignable to type 'number'.\n";
+		let out = filter(&context, input, 1).text;
+		assert!(out.contains("TS2322"));
+	}
+
+	#[test]
+	fn uv_run_unknown_tool_is_passthrough() {
+		let config = MinimizerConfig::default();
+		let context = ctx("uv", Some("run"), "uv run custom-tool", &config);
+		let input = "line 1\nline 2\n";
+		let out = filter(&context, input, 0);
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
+	}
+
+	// ---------------------------------------------------------------
+	// Tier 2a: uv dispatch coverage tests (m4)
+	// ---------------------------------------------------------------
+
+	const PYTEST_FAILURE_INPUT: &str = "============================= test session starts \
+	                                    ==============================\ncollected 2 \
+	                                    items\n\nFAILED tests/test_x.py::test_fail - \
+	                                    AssertionError\n========================= 1 failed, 1 \
+	                                    passed in 0.05s =========================\n";
+
+	#[test]
+	fn uv_run_python_script_with_pytest_argument_stays_opaque() {
+		let config = MinimizerConfig::default();
+		let context = ctx("uv", Some("run"), "uv run python scripts/report.py -m pytest", &config);
+		let out = filter(&context, PYTEST_FAILURE_INPUT, 1);
+		assert_eq!(out.text, PYTEST_FAILURE_INPUT);
+		assert!(!out.changed);
+	}
+
+	// -------------------------------------------------------------
+	// Tier 2b: bundle exec wrapper re-dispatch
+	// -------------------------------------------------------------
+
+	#[test]
+	fn bundle_wrapped_command_extracts_inner_command() {
+		assert_eq!(
+			bundle_wrapped_command("bundle exec rails db:migrate"),
+			Some("rails db:migrate".to_string())
+		);
+		assert_eq!(
+			bundle_wrapped_command("bundle exec rake db:migrate"),
+			Some("rake db:migrate".to_string())
+		);
+		assert_eq!(
+			bundle_wrapped_command("bundle exec rails routes"),
+			Some("rails routes".to_string())
+		);
+		assert_eq!(bundle_wrapped_command("bundle exec rspec"), Some("rspec".to_string()));
+		// Skips bundle-specific value-taking options
+		assert_eq!(
+			bundle_wrapped_command("bundle exec --gemfile foo/Gemfile rails db:migrate"),
+			Some("rails db:migrate".to_string())
+		);
+		// Non-exec subcommands return None
+		assert_eq!(bundle_wrapped_command("bundle install"), None);
+		// No bundle token returns None
+		assert_eq!(bundle_wrapped_command("gem install"), None);
+		// Path-prefixed bundle binary should still be recognized
+		assert_eq!(
+			bundle_wrapped_command("/usr/local/bin/bundle exec rails db:migrate"),
+			Some("rails db:migrate".to_string())
+		);
+		assert_eq!(
+			bundle_wrapped_command("bin/bundle exec rake db:migrate"),
+			Some("rake db:migrate".to_string())
+		);
+	}
+
+	#[test]
+	fn bundle_exec_rails_db_migrate_routes_to_def() {
+		let config = MinimizerConfig { enabled: true, ..Default::default() };
+		let context = ctx("bundle", Some("exec"), "bundle exec rails db:migrate", &config);
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = filter(&context, &input, 0);
+		assert!(out.changed);
+		assert!(out.text.contains("CreateUsers"));
+		assert!(!out.text.contains("-- create_table"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_routes_routes_to_def() {
+		let config = MinimizerConfig { enabled: true, ..Default::default() };
+		let context = ctx("bundle", Some("exec"), "bundle exec rails routes", &config);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = filter(&context, &input, 0);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn bundle_exec_unknown_tool_uses_pkg_filter() {
+		let config = MinimizerConfig { enabled: true, ..Default::default() };
+		let context = ctx("bundle", Some("exec"), "bundle exec ruby script.rb", &config);
+		let input = "hello from ruby\n";
+		let out = filter(&context, input, 0);
+		// No filter matches ruby script.rb, so it passes through
+		assert_eq!(out.text, input);
+		assert!(!out.changed);
 	}
 }
