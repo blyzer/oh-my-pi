@@ -154,4 +154,15 @@ probe() {
 	rm -rf "$dir"
 }
 
+check() {
+	local v
+	for v in "${variants[@]}"; do
+		CARGO_TARGET_DIR=$root/check cargo check -p omp-ast -p omp-kb "${common[@]}" ${feats[$v]} --message-format short
+		emit check "$v" ok
+	done
+	CARGO_TARGET_DIR=$root/check cargo check -p omp-ast --example grammar_probe "${common[@]}" --features grammars-all,wasm --message-format short
+	emit check probe ok
+	rm -rf "$root/check"
+}
+
 "$phase"
