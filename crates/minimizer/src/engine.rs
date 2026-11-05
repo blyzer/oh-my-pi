@@ -671,6 +671,33 @@ only_on_exit = [0]
 	}
 
 	#[test]
+	fn npx_def_does_not_overlay_routed_eslint() {
+		// `npx eslint` IS routed by filters::supports, so the Rust lint filter
+		// runs and apply_pipeline_overlay re-selects a matching pipeline. The npx
+		// def must NOT match subcommand `eslint`, so no overlay re-applies its
+		// max_lines/strip on top of the lint diagnostics. Output must equal the
+		// direct `eslint` invocation (same filter label, not "pipeline+builtin").
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..120 {
+			let _ = writeln!(input, "/src/file{i}.ts:{i}:1  error  Something is wrong  rule/name");
+		}
+		let npx = apply("npx eslint src/", &input, 1, &cfg);
+		let direct = apply("eslint src/", &input, 1, &cfg);
+		// Label differs by program token (npx -> "builtin", eslint -> "eslint"),
+		// but it must NOT be the overlay label and the TEXT must be the
+		// un-mutated lint output — same lines, no max_lines truncation.
+		assert_ne!(
+			npx.filter, "pipeline+builtin",
+			"npx def overlaid the routed eslint filter output"
+		);
+		assert_eq!(
+			npx.text, direct.text,
+			"npx eslint output diverged from direct eslint (overlay mutated it)"
+		);
+	}
+
+	#[test]
 	fn enabled_known_filter_minimizes() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		assert!(should_minimize("git diff", &cfg));
@@ -1006,6 +1033,116 @@ strip_lines_matching = [".*"]
 		let out = apply("exec >out ; echo hi", "hi\n", 0, &cfg);
 		assert_eq!(out.text, "hi\n");
 		assert!(!out.changed);
+	}
+
+	#[test]
+	fn rails_db_migrate_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n\n== 20240116 AddIndexToOrders: migrating\n-- \
+			 add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("✓ CreateUsers"));
+		assert!(out.text.contains("✓ AddIndexToOrders"));
+		assert!(!out.text.contains("-- create_table"));
+		assert!(!out.text.contains("-> 0.0234s"));
+		// Must NOT be an overlay label; standalone pipeline gets "pipeline".
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rails_routes_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rake_routes_regression_unminimized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rake routes", &input, 0, &cfg);
+		assert!(out.changed, "rake routes should be minimized by the rails-routes def");
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_db_migrate_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = apply("bundle exec rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("CreateUsers"));
+		assert!(!out.text.contains("-- create_table"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_routes_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("bundle exec rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn rails_db_migrate_no_double_truncation() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..100 {
+			let _ = write!(
+				input,
+				"== 20240115 Migration{i}: migrating\n-- step\n   -> 0.0s\n== 20240115 Migration{i}: \
+				 migrated\n\n"
+			);
+		}
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Only the def's max_lines=40 cap should fire; filter_rake's head_tail
+		// must NOT also condense. Both now emit `[…Nln elided…]`, so a single
+		// marker proves no double truncation (two would mean both stages
+		// fired).
+		assert_eq!(
+			out.text.matches("ln elided…]").count(),
+			1,
+			"double truncation detected: {:#?}",
+			out.text
+		);
+	}
+
+	#[test]
+	fn rails_db_migrate_keyword_in_name_not_dropped() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateTestResults: migrating\n-- create_table(:test_results)\n   -> \
+			 0.0234s\n== 20240115 CreateTestResults: migrated\n\n== 20240116 AddIndexToOrders: \
+			 migrating\n-- add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: \
+			 migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Both migrations must survive; the old overlay-on-rake would keep only
+		// lines containing "test" and silently drop AddIndexToOrders.
+		assert!(out.text.contains("CreateTestResults"), "CreateTestResults was dropped");
+		assert!(out.text.contains("AddIndexToOrders"), "AddIndexToOrders was dropped");
 	}
 }
 
