@@ -372,6 +372,39 @@ fn program_label(program: &str) -> &'static str {
 		"wget" => "wget",
 		"psql" => "psql",
 		"cargo" => "cargo",
+		"cmake" => "cmake",
+		"ctest" => "ctest",
+		"ninja" => "ninja",
+		"gtest" => "gtest",
+		"gtest-parallel" => "gtest",
+		program if filters::cpp::is_gtest_binary_name(program) => "gtest",
+		"tsc" => "tsc",
+		"eslint" => "eslint",
+		"biome" => "biome",
+		"npm" => "npm",
+		"pnpm" => "pnpm",
+		"yarn" => "yarn",
+		"pip" => "pip",
+		"pip3" => "pip3",
+		"bundle" => "bundle",
+		"brew" => "brew",
+		"composer" => "composer",
+		"uv" => "uv",
+		"poetry" => "poetry",
+		"bun" => "bun",
+		"bunx" => "bunx",
+		"pytest" => "pytest",
+		"ruff" => "ruff",
+		"mypy" => "mypy",
+		"python" => "python",
+		"python3" => "python3",
+		"rspec" => "rspec",
+		"rake" => "rake",
+		"rails" => "rails",
+		"rubocop" => "rubocop",
+		"jest" => "jest",
+		"vitest" => "vitest",
+		"playwright" => "playwright",
 		_ => "builtin",
 	}
 }
@@ -566,6 +599,48 @@ replace = [{ pattern = "x", replacement = "y" }]
 		assert_eq!(out.filter, "disabled");
 	}
 
+	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its
+	// `match_subcommand` must exclude every subcommand owned/routed elsewhere so
+	// it cannot shadow `nx-wrapped` (standalone path) or overlay the Rust
+	// lint/test filters (overlay path). These tests fail loudly if that
+	// exclusion set ever desyncs from filters::supports's npx routing.
+	#[test]
+	fn npx_def_does_not_shadow_nx_wrapped() {
+		// `npx nx` is NOT routed by filters::supports, so apply_identity falls to
+		// the standalone resolve_pipeline branch. nx-wrapped (nx.toml) must win
+		// and strip the NX banner; the bare npx def must not claim subcommand
+		// `nx`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build \
+			 failed\n\n >  NX   Ran target build for 3 projects (2s)\n",
+		);
+		let out = apply("npx nx build", &input, 0, &cfg);
+		assert!(
+			!out.text.contains("NX   Running target"),
+			"npx def shadowed nx-wrapped; NX banner survived: {:?}",
+			out.text
+		);
+		assert!(out.text.contains("Error: build failed"));
+	}
+	#[test]
+	fn npx_def_fires_for_unknown_tool() {
+		// The def must still strip the install preamble / npm warn/notice noise
+		// for genuinely UNKNOWN tools (its whole purpose). cowsay is not routed
+		// or owned by any other def, so the npx pipeline claims it.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? (y)\n\nnpm warn \
+			 deprecated foo@1.0.0: use bar instead\n< Hello >\n",
+		);
+		let out = apply("npx cowsay hello", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Need to install"));
+		assert!(!out.text.contains("Ok to proceed"));
+		assert!(!out.text.contains("npm warn"));
+		assert!(out.text.contains("< Hello >"));
+	}
+
 	#[test]
 	fn pipeline_overlay_honors_subcommand_and_exit_gates() {
 		let cfg = config_from_settings(
@@ -596,6 +671,58 @@ only_on_exit = [0]
 	}
 
 	#[test]
+	fn ssh_keeps_long_remote_lines_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::new();
+		for i in 0..4 {
+			let _ = writeln!(remote, "{{\"id\":{i},\"payload\":\"{}\"}}", "x".repeat(300));
+		}
+		let input = format!(
+			"Warning: Permanently added 'host' (ED25519) to the list of known \
+			 hosts.\n{remote}Connection to host closed.\n"
+		);
+
+		let out = apply("ssh host cat rows.jsonl", &input, 0, &cfg);
+		assert!(out.changed, "the banner lines are stripped");
+		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn ssh_keeps_blank_remote_lines() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::from("first record\n\nsecond record\n\n");
+		for i in 0..60 {
+			let _ = writeln!(remote, "row {i}: remote value");
+		}
+		let input = format!("{remote}Connection to host closed.\n");
+
+		let out = apply("ssh host cat records.txt", &input, 0, &cfg);
+		assert!(out.changed, "the banner line is stripped");
+		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn ssh_whole_budget_counts_the_captured_bytes() {
+		use crate::primitives::WHOLE_OUTPUT_BYTES;
+
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes, the last newline swapped for a character.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		at_budget.pop();
+		at_budget.push('x');
+		assert_eq!(at_budget.len(), WHOLE_OUTPUT_BYTES);
+		let out = apply("ssh host cat log.txt", &at_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 256, "{:?}", out.text);
+
+		let past_budget = format!("{at_budget}\n");
+		let out = apply("ssh host cat log.txt", &past_budget, 0, &cfg);
+		assert!(out.text.contains("ln elided"), "{:?}", out.text);
+	}
+
+	#[test]
 	fn yadm_patch_keeps_its_summary_under_its_line_cap() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let mut patch = String::from(
@@ -609,6 +736,33 @@ only_on_exit = [0]
 		);
 		let out = apply("yadm diff", &patch, 0, &cfg);
 		assert!(out.text.contains(".vimrc"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn npx_def_does_not_overlay_routed_eslint() {
+		// `npx eslint` IS routed by filters::supports, so the Rust lint filter
+		// runs and apply_pipeline_overlay re-selects a matching pipeline. The npx
+		// def must NOT match subcommand `eslint`, so no overlay re-applies its
+		// max_lines/strip on top of the lint diagnostics. Output must equal the
+		// direct `eslint` invocation (same filter label, not "pipeline+builtin").
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..120 {
+			let _ = writeln!(input, "/src/file{i}.ts:{i}:1  error  Something is wrong  rule/name");
+		}
+		let npx = apply("npx eslint src/", &input, 1, &cfg);
+		let direct = apply("eslint src/", &input, 1, &cfg);
+		// Label differs by program token (npx -> "builtin", eslint -> "eslint"),
+		// but it must NOT be the overlay label and the TEXT must be the
+		// un-mutated lint output — same lines, no max_lines truncation.
+		assert_ne!(
+			npx.filter, "pipeline+builtin",
+			"npx def overlaid the routed eslint filter output"
+		);
+		assert_eq!(
+			npx.text, direct.text,
+			"npx eslint output diverged from direct eslint (overlay mutated it)"
+		);
 	}
 
 	#[test]
@@ -761,6 +915,33 @@ strip_lines_matching = [".*"]
 		// unknown (per-segment minimization is the segmented runner's job).
 		assert!(!out.changed, "mixed chain must stay passthrough in whole-buffer minimization");
 		assert_eq!(out.filter, "compound");
+	}
+
+	#[test]
+	fn cpp_tools_minimize_through_dispatch() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("ctest --output-on-failure", &cfg));
+		assert!(should_minimize("./build/foo_test --gtest_filter=Foo.*", &cfg));
+
+		let ctest_input = minimizable_input(
+			"Test project /tmp/build\n1/2 Test #1: ok ........   Passed    0.01 sec\n2/2 Test #2: \
+			 bad .......***Failed    0.02 sec\nThe following tests FAILED:\n",
+		);
+		let ctest = apply("ctest --output-on-failure", &ctest_input, 8, &cfg);
+		assert!(ctest.changed);
+		assert_eq!(ctest.filter, "ctest");
+		assert!(!ctest.text.contains("Test #1"));
+		assert!(ctest.text.contains("Test #2: bad"));
+
+		let gtest_input = minimizable_input(
+			"[ RUN      ] Foo.Pass\n[       OK ] Foo.Pass (0 ms)\nfoo_test.cc:42: Failure\nExpected: \
+			 1\n[  FAILED  ] Foo.Fails\n",
+		);
+		let gtest = apply("./build/foo_test", &gtest_input, 1, &cfg);
+		assert!(gtest.changed);
+		assert_eq!(gtest.filter, "gtest");
+		assert!(!gtest.text.contains("Foo.Pass"));
+		assert!(gtest.text.contains("foo_test.cc:42: Failure"));
 	}
 
 	#[test]
@@ -974,6 +1155,163 @@ strip_lines_matching = [".*"]
 		let out = apply("exec >out ; echo hi", "hi\n", 0, &cfg);
 		assert_eq!(out.text, "hi\n");
 		assert!(!out.changed);
+	}
+
+	#[test]
+	fn rails_db_migrate_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n\n== 20240116 AddIndexToOrders: migrating\n-- \
+			 add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("✓ CreateUsers"));
+		assert!(out.text.contains("✓ AddIndexToOrders"));
+		assert!(!out.text.contains("-- create_table"));
+		assert!(!out.text.contains("-> 0.0234s"));
+		// Must NOT be an overlay label; standalone pipeline gets "pipeline".
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rails_routes_routes_to_standalone_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+		assert_eq!(out.filter, "pipeline");
+	}
+
+	#[test]
+	fn rake_routes_regression_unminimized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("rake routes", &input, 0, &cfg);
+		assert!(out.changed, "rake routes should be minimized by the rails-routes def");
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_db_migrate_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = apply("bundle exec rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("CreateUsers"));
+		assert!(!out.text.contains("-- create_table"));
+	}
+
+	#[test]
+	fn bundle_exec_rails_routes_reaches_def() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = apply("bundle exec rails routes", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Prefix"));
+		assert!(out.text.contains("root GET"));
+	}
+
+	#[test]
+	fn rails_db_migrate_no_double_truncation() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..100 {
+			let _ = write!(
+				input,
+				"== 20240115 Migration{i}: migrating\n-- step\n   -> 0.0s\n== 20240115 Migration{i}: \
+				 migrated\n\n"
+			);
+		}
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Only the def's max_lines=40 cap should fire; filter_rake's head_tail
+		// must NOT also condense. Both now emit `[…Nln elided…]`, so a single
+		// marker proves no double truncation (two would mean both stages
+		// fired).
+		assert_eq!(
+			out.text.matches("ln elided…]").count(),
+			1,
+			"double truncation detected: {:#?}",
+			out.text
+		);
+	}
+
+	#[test]
+	fn rails_db_migrate_keyword_in_name_not_dropped() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"== 20240115 CreateTestResults: migrating\n-- create_table(:test_results)\n   -> \
+			 0.0234s\n== 20240115 CreateTestResults: migrated\n\n== 20240116 AddIndexToOrders: \
+			 migrating\n-- add_index(:orders)\n   -> 0.0123s\n== 20240116 AddIndexToOrders: \
+			 migrated\n",
+		);
+		let out = apply("rails db:migrate", &input, 0, &cfg);
+		assert!(out.changed);
+		// Both migrations must survive; the old overlay-on-rake would keep only
+		// lines containing "test" and silently drop AddIndexToOrders.
+		assert!(out.text.contains("CreateTestResults"), "CreateTestResults was dropped");
+		assert!(out.text.contains("AddIndexToOrders"), "AddIndexToOrders was dropped");
+	}
+
+	// Regression guards for the builtin rails defs (rails-migrate.toml,
+	// rails-routes.toml). Their `match_subcommand` scopes are MANDATORY:
+	// unscoped they would overlay the Rust minitest filter output for
+	// `rails test` / `rake test` and strip failure-detail lines
+	// ('Expected: true'). These tests fail loudly if the scope is removed.
+	#[test]
+	fn rails_def_does_not_overlay_routed_minitest() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = "Run options: --seed 1\n\n# Running:\n\n.F\n\n  1) Failure:\nUserTest#test_name \
+		             [test/models/user_test.rb:8]:\nExpected: true\n  Actual: false\n\n2 runs, 2 \
+		             assertions, 1 failures, 0 errors, 0 skips\n";
+		let rails = apply("rails test", input, 1, &cfg);
+		let rake = apply("rake test", input, 1, &cfg);
+		// Must NOT be an overlay label; minitest filter gets its own program
+		// label.
+		assert_ne!(
+			rails.filter, "pipeline+builtin",
+			"rails-migrate def overlaid the routed minitest filter output"
+		);
+		assert_ne!(
+			rake.filter, "pipeline+builtin",
+			"rails-migrate def overlaid the routed minitest filter output"
+		);
+		// Failure-detail lines must survive — the rails-migrate def's
+		// keep_lines_matching would drop them.
+		assert!(rails.text.contains("Expected: true"), "rails test dropped minitest failure detail");
+		assert!(rails.text.contains("Actual: false"));
+		assert!(rake.text.contains("Expected: true"), "rake test dropped minitest failure detail");
+		assert!(rake.text.contains("Actual: false"));
+	}
+
+	#[test]
+	fn rails_routes_def_does_not_overlay_routed_minitest() {
+		// Same guard for rails-routes.toml: `match_subcommand = "^routes$"`
+		// must not leak to `rails test`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = "Run options: --seed 1\n\n# Running:\n\n.F\n\n  1) Failure:\nUserTest#test_name \
+		             [test/models/user_test.rb:8]:\nExpected: true\n  Actual: false\n\n2 runs, 2 \
+		             assertions, 1 failures, 0 errors, 0 skips\n";
+		let out = apply("rails test", input, 1, &cfg);
+		assert_ne!(
+			out.filter, "pipeline+builtin",
+			"rails-routes def overlaid the routed minitest filter output"
+		);
+		assert!(out.text.contains("Expected: true"), "rails test dropped minitest failure detail");
 	}
 }
 
