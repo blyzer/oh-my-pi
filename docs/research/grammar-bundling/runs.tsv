@@ -1,0 +1,15 @@
+raw_file	buildbuddy_invocation	branch	commit	just_remote_args	note
+raw/dev-pilot.tsv	27db2c34-b7b1-4842-b9a3-b81bebf89a16	research/grammar-bundling-harness	b02ff76c47	grammar-study dev 1	
+raw/dev-j4.tsv	bd7f3096-6c2e-409e-aa93-03eec7f56cd5	research/grammar-bundling-harness	b02ff76c47	grammar-study dev 5	
+raw/dev-j11.tsv	b7841a05-d416-4d93-8902-bebf9e3f28ac	research/grammar-bundling-harness	33a44221f4	grammar-study dev 5 11	
+raw/release-j4.tsv	25d1f787-015d-4bed-8a45-87ea79b7f522	research/grammar-bundling-harness	b02ff76c47	grammar-study release 3	run from a same-commit copy branch
+raw/probe-r1.tsv	d8aa937a-a064-44a4-9443-280406064d98	research/grammar-bundling-harness	b02ff76c47	grammar-study probe 5	run from a same-commit copy branch; first lines rejoined (rustfmt split their format string)
+raw/probe-r2.tsv	a465cc36-2827-4285-aa4f-faff2ece5362	research/grammar-bundling-harness	33a44221f4	grammar-study probe 5	run from a same-commit copy branch
+raw/bytes.tsv	e7d77041-64a4-4a30-9a3d-04c7ac73d829	research/grammar-bundling-harness	03cf2f9768	grammar-study bytes 1	
+raw/omp-o1.tsv	5b9412ac-12be-47c6-a499-cb19de018360	research/grammar-bundling-harness-omp	b04b268acd	grammar-study omp 2 4 all+none	
+raw/omp-o2.tsv	edb94106-a87f-49e9-a22e-e194720edffa	research/grammar-bundling-harness-omp	b04b268acd	grammar-study omp 2 4 none+all	run from a same-commit copy branch
+raw/omp-o3.tsv	c4f7f9fc-5923-4d2d-8298-a2afedc6809b	research/grammar-bundling-harness-omp	b04b268acd	grammar-study omp 2 4 hot+hot-wasm	run from a same-commit copy branch
+raw/omp-unification-defect/omp-pilot.tsv	94ec75b4-c8e4-490d-b5c2-08050c2f90bd	research/grammar-bundling-harness-omp	4f33acbebf	grammar-study omp 1 4 all,none	bb split the variant list on the comma, so only all ran; omp-ast defaults on
+raw/omp-unification-defect/omp-o1.tsv	c1be49f1-e195-4490-9cb4-845ba09e33ad	research/grammar-bundling-harness-omp	e104b64b84	grammar-study omp 2 4 all+none	omp-ast defaults on: every variant linked all 57 grammars; stopped after 2 builds
+raw/omp-unification-defect/omp-o2.tsv	67f3174c-9a98-45c9-ada0-3c0a7fb9b967	research/grammar-bundling-harness-omp	e104b64b84	grammar-study omp 2 4 none+all	omp-ast defaults on: every variant linked all 57 grammars; stopped after 2 builds
+raw/omp-unification-defect/omp-o3.tsv	6aa39dc1-a035-4e02-9b4e-1f6b7f2ac025	research/grammar-bundling-harness-omp	e104b64b84	grammar-study omp 2 4 hot+hot-wasm	omp-ast defaults on: every variant linked all 57 grammars; stopped after 2 builds
