@@ -33,6 +33,9 @@ RECIPES = [
     {"name": "just clippy", "local": ["just", "clippy"], "workflow": "g1-clippy"},
 ]
 REPETITIONS = 3
+# A heavy recipe keeps the one-minute load above the guard limit for minutes after it ends.
+SETTLE_POLL_S = 30.0
+SETTLE_TIMEOUT_S = 3600.0
 DURATION_RE = re.compile(r"([0-9.]+)(ns|µs|us|ms|s|m|h)")
 TIME_RE = re.compile(r"([0-9.]+)\s+real\s+([0-9.]+)\s+user\s+([0-9.]+)\s+sys")
 
@@ -470,22 +473,27 @@ def run_session(path, *, root, omp_bin, dry_run):
         status, reason, code = "complete", "", 0
         try:
 
-            def check_guard():
-                guard = (
-                    synthetic_guard()
-                    if dry_run
-                    else quiet.guard(quiet.DEFAULT_MAX_LOAD1)
-                )
-                guard.setdefault("synthetic", dry_run)
-                write_record(out, guard)
-                if not dry_run and guard["verdict"] == "refuse":
-                    for refusal in guard.get("refusals", []):
-                        print(f"REFUSED {quiet.describe(refusal)}", file=sys.stderr)
-                return guard
+            def check_guard(stage):
+                deadline = time.monotonic() + SETTLE_TIMEOUT_S
+                while True:
+                    guard = (
+                        synthetic_guard()
+                        if dry_run
+                        else quiet.guard(quiet.DEFAULT_MAX_LOAD1)
+                    )
+                    guard.setdefault("synthetic", dry_run)
+                    write_record(out, guard)
+                    if guard["verdict"] == ("synthetic" if dry_run else "pass"):
+                        return guard
+                    if not dry_run and guard["verdict"] == "refuse":
+                        for refusal in guard.get("refusals", []):
+                            print(f"REFUSED {quiet.describe(refusal)}", file=sys.stderr)
+                        if time.monotonic() < deadline:
+                            time.sleep(SETTLE_POLL_S)
+                            continue
+                    raise RuntimeError(f"{stage} guard refused")
 
-            initial = check_guard()
-            if initial["verdict"] != ("synthetic" if dry_run else "pass"):
-                raise RuntimeError("pre-flight guard refused")
+            check_guard("pre-flight")
             state = {"status": "synthetic"} if dry_run else cache_state(root, omp_bin)
             write_record(out, {"type": "cache_state", **state})
             if not dry_run and (
@@ -501,9 +509,7 @@ def run_session(path, *, root, omp_bin, dry_run):
             for recipe in RECIPES:
                 for repetition in range(1, REPETITIONS + 1):
                     for arm in ("local", "remote"):
-                        guard = check_guard()
-                        if guard["verdict"] != ("synthetic" if dry_run else "pass"):
-                            raise RuntimeError("between-repetition guard refused")
+                        guard = check_guard("between-repetition")
                         record = run_one(
                             out,
                             recipe,

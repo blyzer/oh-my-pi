@@ -298,6 +298,9 @@ python3 scripts/measure-adr0040.py --out /tmp/adr0040-g1.jsonl --omp /absolute/p
 ```
 
 The guard runs before the untimed, one-time `cargo fetch --locked` and before every repetition.
+A refused guard is recorded and repeated every 30 seconds until one passes. The session aborts
+when no guard passes within an hour. A heavy local recipe keeps the one-minute load above the
+limit for minutes after it ends, so without this wait the first guard after it ends the session.
 It observes two host snapshots 10 seconds apart and refuses any pageout or swapout counter increase.
 Ten seconds can reveal sustained paging without treating historical swap allocation as current
 pressure; zero is a conservative threshold, not proof that the host will remain quiet. Swap
