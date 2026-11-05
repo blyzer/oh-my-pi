@@ -16,7 +16,7 @@ use omp_core::{Str, sf};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	parsers::{ParserInput, ParserKind, parse},
+	parsers::{ParserInput, ParserKind, excerpt, parse},
 	types::{CheckResult, Checker, CheckerEffect, Diagnostic, Report, Severity, SkippedCheck},
 };
 
@@ -961,10 +961,7 @@ fn normalize_result(project_root: &Path, checker: &Checker, process: ProcessOutp
 		} else {
 			process.stderr.as_str()
 		};
-		let output = output
-			.char_indices()
-			.nth(12_000)
-			.map_or(output, |(cut, _)| &output[..cut]);
+		let output = excerpt(output);
 		diagnostics.push(Diagnostic {
 			checker:    checker.id.clone(),
 			file:       None,

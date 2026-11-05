@@ -1,11 +1,16 @@
-//! Normalization for the 29 checker output formats.
+//! Normalization for checker output formats.
 
-use std::{path::Path, sync::LazyLock};
+mod junit;
 
-use omp_core::Str;
+use std::{fmt::Write as _, path::Path, sync::LazyLock};
+
+use omp_core::{Str, sf};
 use regex::Regex;
 
 use super::types::{Diagnostic, Severity};
+
+/// Code of the diagnostic an unreadable structured report degrades to.
+const UNPARSEABLE: &str = "unparseable";
 
 static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(r"^(?P<file>.*?):(?P<line>\d+)(?::(?P<column>\d+))?(?::|\s+-\s+|\s+)(?P<message>.+)$")
@@ -34,6 +39,9 @@ pub enum ParserKind {
 	Go,
 	/// `go test -json`.
 	GoTest,
+	/// JUnit XML report on stdout.
+	#[serde(rename = "junit")]
+	JUnit,
 	/// staticcheck Unix output.
 	Staticcheck,
 	/// golangci-lint JSON.
@@ -102,18 +110,10 @@ pub struct ParserInput<'a> {
 
 /// Parses one invocation into deduplicated project-relative diagnostics.
 pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
-	let combined = if input.stderr.is_empty() {
-		input.stdout.to_owned()
-	} else if input.stdout.is_empty() {
-		input.stderr.to_owned()
-	} else {
-		format!("{}\n{}", input.stdout, input.stderr)
+	let mut diagnostics = match kind {
+		ParserKind::JUnit => structured(input, junit::parse(input)),
+		_ => generic(kind, input),
 	};
-	let mut diagnostics = Vec::new();
-	for value in json_values(&combined) {
-		parse_json_value(kind, &value, input, &mut diagnostics);
-	}
-	parse_text(kind, &combined, input, &mut diagnostics);
 	diagnostics.sort_by(|left, right| {
 		left
 			.file
@@ -130,6 +130,77 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 			&& left.message == right.message
 	});
 	diagnostics
+}
+
+fn generic(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
+	let combined = if input.stderr.is_empty() {
+		input.stdout.to_owned()
+	} else if input.stdout.is_empty() {
+		input.stderr.to_owned()
+	} else {
+		format!("{}\n{}", input.stdout, input.stderr)
+	};
+	let mut diagnostics = Vec::new();
+	for value in json_values(&combined) {
+		parse_json_value(kind, &value, input, &mut diagnostics);
+	}
+	parse_text(kind, &combined, input, &mut diagnostics);
+	diagnostics
+}
+
+/// Flattens a structured parser's outcome. An unreadable report becomes one
+/// project-wide `unparseable` diagnostic carrying the reason and an output
+/// excerpt, never an empty result that would read as a clean run.
+fn structured<E: std::error::Error>(
+	input: &ParserInput<'_>,
+	outcome: Result<Vec<Diagnostic>, E>,
+) -> Vec<Diagnostic> {
+	let error = match outcome {
+		Ok(diagnostics) => return diagnostics,
+		Err(error) => error,
+	};
+	let mut message = String::new();
+	let _ = write!(message, "{error}");
+	let mut source = error.source();
+	while let Some(cause) = source {
+		let mark = message.len();
+		let _ = write!(message, ": {cause}");
+		// quick-xml repeats its source in its own message.
+		if message[..mark].ends_with(&message[mark + 2..]) {
+			message.truncate(mark);
+		}
+		source = cause.source();
+	}
+	let output = if input.stdout.trim().is_empty() {
+		input.stderr
+	} else {
+		input.stdout
+	};
+	let output = excerpt(output).trim();
+	if !output.is_empty() {
+		message.push_str(": ");
+		message.push_str(output);
+	}
+	vec![Diagnostic {
+		checker:    Str::from(input.checker),
+		file:       None,
+		line:       None,
+		column:     None,
+		end_line:   None,
+		end_column: None,
+		code:       Some(sf!(UNPARSEABLE)),
+		severity:   Severity::Error,
+		message:    Str::from(message),
+		suggestion: None,
+	}]
+}
+
+/// First 12,000 characters of `output`: the raw output one diagnostic carries.
+pub(super) fn excerpt(output: &str) -> &str {
+	output
+		.char_indices()
+		.nth(12_000)
+		.map_or(output, |(cut, _)| &output[..cut])
 }
 
 fn json_values(text: &str) -> Vec<serde_json::Value> {
@@ -492,5 +563,41 @@ mod tests {
 		assert_eq!(diagnostics.len(), 2);
 		assert_eq!(diagnostics[0].file.as_deref(), Some("src/lib.rs"));
 		assert_eq!(diagnostics[1].severity, Severity::Warning);
+	}
+
+	#[test]
+	fn junit_report_flattens_and_unreadable_report_degrades_to_one_diagnostic() {
+		let root = Path::new("/repo");
+		let report = include_str!("../../../../fixtures/junit/nextest.xml");
+		let input = |stdout| ParserInput {
+			checker: "nextest",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "runner console",
+		};
+		assert_eq!(parse(ParserKind::JUnit, &input(report)).len(), 2);
+		let cut = report
+			.find("<testcase name=\"passes\"")
+			.expect("passes testcase");
+		let truncated = parse(ParserKind::JUnit, &input(&report[..cut]));
+		assert_eq!(truncated.len(), 1);
+		assert_eq!(truncated[0].file, None);
+		assert_eq!(truncated[0].code.as_deref(), Some(UNPARSEABLE));
+		assert_eq!(
+			truncated[0].message.lines().next(),
+			Some("report ends with 2 element(s) unclosed: <?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+		);
+		let inside_tag = parse(ParserKind::JUnit, &input(&report[..cut + 9]));
+		assert_eq!(
+			inside_tag[0].message.lines().next(),
+			Some(
+				format!(
+					"malformed XML at byte {cut}: syntax error: tag not closed: `>` not found before \
+					 end of input: <?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+				)
+				.as_str()
+			)
+		);
 	}
 }
