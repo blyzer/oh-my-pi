@@ -2,7 +2,9 @@
 
 mod cargo;
 mod junit;
+mod sarif;
 mod stylelint;
+mod tap;
 mod terraform;
 
 use std::{fmt::Write as _, path::Path, sync::LazyLock};
@@ -93,6 +95,10 @@ pub enum ParserKind {
 	Tflint,
 	/// Actionlint text.
 	Actionlint,
+	/// SARIF 2.1.0 log on stdout.
+	Sarif,
+	/// TAP stream on stdout: TAP 14, TAP 13, or version-less TAP 12.
+	Tap,
 	/// Generic file/line/column text or JSON.
 	Generic,
 }
@@ -118,6 +124,8 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 		ParserKind::Stylelint => structured(input, stylelint::parse(input)),
 		ParserKind::Terraform => structured(input, terraform::parse(input)),
 		ParserKind::JUnit => structured(input, junit::parse(input)),
+		ParserKind::Sarif => structured(input, sarif::parse(input)),
+		ParserKind::Tap => structured(input, tap::parse(input)),
 		_ => generic(kind, input),
 	};
 	diagnostics.sort_by(|left, right| {
@@ -904,6 +912,57 @@ mod tests {
 				)
 				.as_str()
 			)
+		);
+	}
+
+	/// The shared walk returns nothing for output it cannot read, exactly as it
+	/// does for a clean run. SARIF and TAP keep that distinction at the seam:
+	/// rejected output becomes one file-less diagnostic with reason and text.
+	#[test]
+	fn sarif_and_tap_never_read_rejected_output_as_clean() {
+		let root = Path::new("/repo");
+		let input = |stdout, stderr| ParserInput {
+			checker: "checker",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr,
+		};
+		let rows = |kind, input: &ParserInput<'_>| {
+			parse(kind, input)
+				.into_iter()
+				.map(|diagnostic| {
+					(diagnostic.file, diagnostic.code, diagnostic.message.as_str().to_owned())
+				})
+				.collect::<Vec<_>>()
+		};
+		let unparseable =
+			|message: &str| vec![(None::<Str>, Some(sf!(UNPARSEABLE)), message.to_owned())];
+		let garbage = input("checker crashed before writing its log", "");
+		assert!(parse(ParserKind::Generic, &garbage).is_empty());
+		assert_eq!(
+			rows(ParserKind::Sarif, &garbage),
+			unparseable(
+				"stdout is not a SARIF 2.1.0 log: expected value at line 1 column 1: checker crashed \
+				 before writing its log"
+			)
+		);
+		assert_eq!(
+			rows(ParserKind::Tap, &garbage),
+			unparseable(
+				"stdout holds no TAP stream (no version line, plan, test point or Bail out!): checker \
+				 crashed before writing its log"
+			)
+		);
+		assert_eq!(
+			rows(ParserKind::Sarif, &input("", "error: unknown flag --sarif")),
+			unparseable("stdout is empty; expected a SARIF 2.1.0 log: error: unknown flag --sarif")
+		);
+		let clean_sarif =
+			r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint"}},"results":[]}]}"#;
+		assert!(parse(ParserKind::Sarif, &input(clean_sarif, "")).is_empty());
+		assert!(
+			parse(ParserKind::Tap, &input("TAP version 14\n1..1\nok 1 - passes\n", "")).is_empty()
 		);
 	}
 }

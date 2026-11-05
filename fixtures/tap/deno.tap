@@ -1,0 +1,20 @@
+TAP version 14
+# ./outcomes_test.ts
+ok 1 - passes
+not ok 2 - fails an assertion
+  ---
+  {"message":"Error: expected 3\n    throw new Error(\"expected 3\");\n          ^\n    at file:///private/tmp/tap-work/deno/outcomes_test.ts:5:11","severity":"fail","at":{"file":"./outcomes_test.ts","line":3}}
+  ...
+ok 3 - skipped # SKIP
+# Subtest: steps
+    ok 1 - step passes
+    not ok 2 - step fails
+      ---
+      {"message":"Error: step failure\n    throw new Error(\"step failure\");\n          ^\n    at file:///private/tmp/tap-work/deno/outcomes_test.ts:14:11\n    at innerWrapped (ext:cli/40_test.js:300:11)\n    at exitSanitizer (ext:cli/40_test.js:201:33)\n    at Object.outerWrapped [as fn] (ext:cli/40_test.js:239:28)\n    at TestContext.step (ext:cli/40_test.js:855:37)\n    at file:///private/tmp/tap-work/deno/outcomes_test.ts:13:11","severity":"fail","at":{"file":"./outcomes_test.ts","line":13}}
+      ...
+    1..2
+not ok 4 - steps
+  ---
+  {"message":"1 test step failed.","severity":"fail","at":{"file":"./outcomes_test.ts","line":11}}
+  ...
+1..4
