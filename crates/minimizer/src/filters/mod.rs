@@ -4,6 +4,7 @@ use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
 pub mod generic;
+pub mod git;
 pub mod lint;
 pub mod pkg;
 
@@ -11,6 +12,7 @@ pub mod pkg;
 #[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
+		"git" | "yadm" => git::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => {
@@ -61,6 +63,7 @@ fn is_lint_script_token(token: &str) -> bool {
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
+		"git" | "yadm" => git::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
