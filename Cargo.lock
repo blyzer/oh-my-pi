@@ -8736,6 +8736,7 @@ dependencies = [
  "omp-shell",
  "regex",
  "serde",
+ "strum",
  "thiserror 2.0.21",
  "toml",
  "xutf",
