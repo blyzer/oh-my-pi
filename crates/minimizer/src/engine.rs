@@ -365,6 +365,7 @@ fn program_label(program: &str) -> &'static str {
 	match program {
 		"git" => "git",
 		"yadm" => "yadm",
+		"gh" => "gh",
 		"cargo" => "cargo",
 		_ => "builtin",
 	}
