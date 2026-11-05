@@ -142,7 +142,7 @@ fn generic(kind: ParserKind, input: &ParserInput<'_>) -> Vec<Diagnostic> {
 	};
 	let mut diagnostics = Vec::new();
 	for value in json_values(&combined) {
-		parse_json_value(kind, &value, input, &mut diagnostics);
+		parse_json_value(kind, &value, None, input, &mut diagnostics);
 	}
 	parse_text(kind, &combined, input, &mut diagnostics);
 	diagnostics
@@ -223,13 +223,14 @@ fn json_values(text: &str) -> Vec<serde_json::Value> {
 fn parse_json_value(
 	kind: ParserKind,
 	value: &serde_json::Value,
+	file: Option<&str>,
 	input: &ParserInput<'_>,
 	output: &mut Vec<Diagnostic>,
 ) {
 	match value {
 		serde_json::Value::Array(values) => {
 			for value in values {
-				parse_json_value(kind, value, input, output);
+				parse_json_value(kind, value, file, input, output);
 			}
 		},
 		serde_json::Value::Object(object) => {
@@ -238,31 +239,36 @@ fn parse_json_value(
 			{
 				parse_text(kind, text, input, output);
 			}
-			if let Some(diagnostic) = object_diagnostic(kind, object, input) {
+			if let Some(diagnostic) = object_diagnostic(kind, object, file, input) {
 				output.push(diagnostic);
 			}
+			// ESLint names the file once, on the parent of its `messages`.
+			let file = string_at(object, FILE_KEYS).or(file);
 			for key in ["diagnostics", "messages", "errors", "issues", "files", "results", "runs"] {
 				if let Some(value) = object.get(key) {
-					parse_json_value(kind, value, input, output);
+					parse_json_value(kind, value, file, input, output);
 				}
 			}
 			if let Some(value) = object.get("message")
 				&& value.is_object()
 			{
-				parse_json_value(kind, value, input, output);
+				parse_json_value(kind, value, file, input, output);
 			}
 		},
 		_ => {},
 	}
 }
 
+const FILE_KEYS: &[&str] = &["filePath", "filename", "file", "path", "uri"];
+
 fn object_diagnostic(
 	kind: ParserKind,
 	object: &serde_json::Map<String, serde_json::Value>,
+	inherited_file: Option<&str>,
 	input: &ParserInput<'_>,
 ) -> Option<Diagnostic> {
 	let message = string_at(object, &["message", "description", "reason", "text", "title"])?;
-	let file = string_at(object, &["filePath", "filename", "file", "path", "uri"])
+	let file = string_at(object, FILE_KEYS)
 		.or_else(|| {
 			object
 				.get("location")
@@ -271,21 +277,26 @@ fn object_diagnostic(
 		.or_else(|| {
 			first_span(object).and_then(|span| string_at(span, &["file_name", "file", "path"]))
 		})
+		.or(inherited_file)
 		.and_then(|path| relative_path(path, input));
 	let line = number_at(object, &["line", "lineNumber", "startLine"])
 		.or_else(|| position_number(object, "range", "start", "line"))
+		.or_else(|| field_number(object, "location", "row"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["line_start", "line"])))
 		.map(adjust_zero_based(kind));
 	let column = number_at(object, &["column", "columnNumber", "startColumn"])
 		.or_else(|| position_number(object, "range", "start", "character"))
+		.or_else(|| field_number(object, "location", "column"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["column_start", "column"])))
 		.map(adjust_zero_based(kind));
 	let end_line = number_at(object, &["endLine"])
 		.or_else(|| position_number(object, "range", "end", "line"))
+		.or_else(|| field_number(object, "end_location", "row"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["line_end"])))
 		.map(adjust_zero_based(kind));
 	let end_column = number_at(object, &["endColumn"])
 		.or_else(|| position_number(object, "range", "end", "character"))
+		.or_else(|| field_number(object, "end_location", "column"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["column_end"])))
 		.map(adjust_zero_based(kind));
 	let code = string_at(object, &["code", "ruleId", "rule", "symbol", "name"])
@@ -374,6 +385,14 @@ fn position_number(
 		.get(position)?
 		.get(field)
 		.and_then(number_value)
+}
+
+fn field_number(
+	object: &serde_json::Map<String, serde_json::Value>,
+	outer: &str,
+	field: &str,
+) -> Option<u32> {
+	object.get(outer)?.get(field).and_then(number_value)
 }
 
 fn adjust_zero_based(kind: ParserKind) -> impl Fn(u32) -> u32 {
@@ -563,6 +582,79 @@ mod tests {
 		assert_eq!(diagnostics.len(), 2);
 		assert_eq!(diagnostics[0].file.as_deref(), Some("src/lib.rs"));
 		assert_eq!(diagnostics[1].severity, Severity::Warning);
+	}
+
+	fn located(checker: &str, file: &str, span: [u32; 4], code: &str, message: &str) -> Diagnostic {
+		let [line, column, end_line, end_column] = span;
+		Diagnostic {
+			checker:    Str::from(checker),
+			file:       Some(Str::from(file)),
+			line:       Some(line),
+			column:     Some(column),
+			end_line:   Some(end_line),
+			end_column: Some(end_column),
+			code:       Some(Str::from(code)),
+			severity:   Severity::Error,
+			message:    Str::from(message),
+			suggestion: None,
+		}
+	}
+
+	#[test]
+	fn ruff_json_keeps_location_rows() {
+		let root = Path::new("/private/tmp/walker-repro/py");
+		let input = ParserInput {
+			checker:      "ruff",
+			checker_root: root,
+			project_root: root,
+			stdout:       include_str!("../../../../fixtures/ruff/check.json"),
+			stderr:       "",
+		};
+		assert_eq!(parse(ParserKind::Ruff, &input), vec![
+			located("ruff", "bad.py", [1, 8, 1, 10], "F401", "`os` imported but unused"),
+			located(
+				"ruff",
+				"bad.py",
+				[5, 5, 5, 6],
+				"F841",
+				"Local variable `x` is assigned to but never used"
+			),
+			located("ruff", "bad.py", [6, 12, 6, 26], "F821", "Undefined name `undefined_name`"),
+		]);
+	}
+
+	#[test]
+	fn eslint_json_messages_inherit_parent_file_path() {
+		let root = Path::new("/private/tmp/walker-repro/js");
+		let report = include_str!("../../../../fixtures/eslint/format-json.json");
+		let input = |stdout| ParserInput {
+			checker: "eslint",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "",
+		};
+		let expected = vec![
+			located(
+				"eslint",
+				"bad.js",
+				[1, 7, 1, 13],
+				"no-unused-vars",
+				"'unused' is assigned a value but never used.",
+			),
+			located("eslint", "bad.js", [3, 1, 3, 8], "no-undef", "'console' is not defined."),
+			located("eslint", "bad.js", [3, 13, 3, 20], "no-undef", "'missing' is not defined."),
+		];
+		assert_eq!(parse(ParserKind::Eslint, &input(report)), expected);
+		let unlocated =
+			report.replacen(r#""filePath":"/private/tmp/walker-repro/js/bad.js","#, "", 1);
+		let without_file = expected
+			.into_iter()
+			.map(|diagnostic| Diagnostic { file: None, ..diagnostic });
+		assert_eq!(
+			parse(ParserKind::Eslint, &input(unlocated.as_str())),
+			without_file.collect::<Vec<_>>()
+		);
 	}
 
 	#[test]
