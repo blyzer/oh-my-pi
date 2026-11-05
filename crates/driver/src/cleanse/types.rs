@@ -34,7 +34,8 @@ pub struct Diagnostic {
 	pub column:     Option<u32>,
 	/// One-based inclusive end line.
 	pub end_line:   Option<u32>,
-	/// One-based exclusive end column: one past the last character, as checkers report it.
+	/// One-based exclusive end column: one past the last character, as checkers
+	/// report it.
 	pub end_column: Option<u32>,
 	/// Checker-specific rule code.
 	pub code:       Option<Str>,
