@@ -1,0 +1,6 @@
+host: 11 cpus, 16 GB; jobs=4; cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0; rustc 1.99.0-nightly (1a98b1e13 2026-08-07)
+GS	bytes	omp-kb-all	97347448	7984037	5502824
+GS	bytes	omp-kb-hot	12990872	1873958	1471633
+GS	bytes	omp-kb-none	1224856	563100	487147
+GS	bytes	wasm_runtime_size	5527736	2313474	1896232
+GS	bytes	native_runtime_size	975400	465188	418752

@@ -1,0 +1,8 @@
+1..5
+ok 1 - passes
+not ok 2 - fails an assertion
+ok 3 # skip not on this platform
+not ok 4 - todo fails # TODO not implemented yet
+#   Failed (TODO) test 'todo fails'
+#   at outcomes.t line 13.
+not ok 5

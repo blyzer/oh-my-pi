@@ -1,0 +1,1133 @@
+host: 11 cpus, 16 GB; jobs=4; cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0; rustc 1.99.0-nightly (1a98b1e13 2026-08-07)
+GS	load	release	all	1	5.07 4.63 4.72
+GS	cold-ast	release	all	1	68.012	206.975	26.622	659
+GS	timings	release	all	1	346	68.0	235.1	168	114.8	107.0	54.5	56.1	11.8
+GS	unit	release	all	tree-sitter-ocaml	0.24.2	build-script (run)	38.52	14.21
+GS	unit	release	all	omp-ast	2.0.0	lib	56.15	11.80
+GS	unit	release	all	tree-sitter-julia	0.23.1	build-script (run)	28.18	9.06
+GS	unit	release	all	jiff	0.2.38	lib	21.92	6.33
+GS	unit	release	all	tree-sitter-verilog	1.0.3	build-script (run)	22.26	6.18
+GS	unit	release	all	regex-automata	0.4.18	lib	5.81	5.93
+GS	unit	release	all	omp-core	2.0.0	lib	52.73	5.45
+GS	unit	release	all	tree-sitter-kotlin-sg	0.4.1	build-script (run)	28.45	5.38
+GS	unit	release	all	tree-sitter-fortran	0.6.0	build-script (run)	40.25	4.98
+GS	unit	release	all	tree-sitter	0.25.10	build-script (run)	7.41	4.94
+GS	unit	release	all	tree-sitter-tlaplus	1.5.0	build-script (run)	34.53	4.77
+GS	unit	release	all	tree-sitter-scala	0.26.3	build-script (run)	31.83	4.65
+GS	unit	release	all	regex-syntax	0.8.11	lib	3.24	4.32
+GS	unit	release	all	syn	2.0.119	lib	7.68	4.32
+GS	unit	release	all	omp-walker	2.0.0	lib	52.86	3.93
+GS	unit	release	all	tree-sitter-swift	0.7.4	build-script (run)	48.09	3.90
+GS	unit	release	all	tree-sitter-haskell	0.23.1	build-script (run)	43.08	3.48
+GS	unit	release	all	tree-sitter-objc	3.0.2	build-script (run)	23.55	3.29
+GS	unit	release	all	tree-sitter-sequel	0.3.11	build-script (run)	45.23	3.25
+GS	unit	release	all	tree-sitter-c-sharp	0.23.5	build-script (run)	47.17	3.22
+GS	unit	release	all	ignore	0.4.33	lib	51.99	3.19
+GS	unit	release	all	schemars	1.2.3	lib	22.09	3.04
+GS	unit	release	all	tree-sitter-php	0.24.2	build-script (run)	40.07	3.01
+GS	unit	release	all	aho-corasick	1.1.5	lib	2.74	3.00
+GS	unit	release	all	syn	3.0.9	lib	1.65	2.84
+GS	unit	release	all	tree-sitter-typescript	0.23.2	build-script (run)	37.24	2.83
+GS	unit	release	all	serde_derive	1.0.229	lib	12.51	2.38
+GS	unit	release	all	rayon	1.12.0	lib	49.30	2.24
+GS	unit	release	all	serde_core	1.0.229	lib	6.59	2.20
+GS	unit	release	all	tree-sitter-cpp	0.23.4	build-script (run)	35.51	2.13
+GS	unit	release	all	tree-sitter-odin	1.3.0	build-script (run)	26.84	2.11
+GS	unit	release	all	serde_core	1.0.229	lib	2.16	2.08
+GS	unit	release	all	tree-sitter-ruby	0.23.1	build-script (run)	30.55	2.06
+GS	unit	release	all	icu_locale_core	2.3.0	lib	9.43	1.86
+GS	unit	release	all	tree-sitter-rust	0.24.2	build-script (run)	42.45	1.77
+GS	unit	release	all	tree-sitter-elisp	1.7.2	build-script (run)	26.44	1.73
+GS	unit	release	all	strum_macros	0.28.0	lib	16.66	1.72
+GS	unit	release	all	tree-sitter-bash	0.25.1	build-script (run)	45.97	1.72
+GS	unit	release	all	serde_json	1.0.154	lib	17.31	1.64
+GS	unit	release	all	tree-sitter-md	0.5.3	build-script (run)	22.03	1.52
+GS	unit	release	all	tree-sitter-powershell	0.26.4	build-script (run)	29.04	1.51
+GS	unit	release	all	tree-sitter-elixir	0.3.5	build-script (run)	39.30	1.51
+GS	unit	release	all	globset	0.4.20	lib	16.52	1.50
+GS	unit	release	all	tree-sitter-dart	0.2.0	build-script (run)	37.63	1.35
+GS	unit	release	all	url	2.5.8	lib	50.64	1.35
+GS	unit	release	all	cc	1.2.67	lib	0.85	1.31
+GS	unit	release	all	schemars_derive	1.2.3	lib	16.88	1.23
+GS	unit	release	all	icu_properties	2.3.0	lib	14.01	1.21
+GS	unit	release	all	jiff-core	0.1.1	lib	20.83	1.20
+GS	unit	release	all	idna	1.1.0	lib	18.15	1.15
+GS	unit	release	all	tree-sitter-make	1.1.1	build-script (run)	36.48	1.14
+GS	unit	release	all	data-encoding	2.11.1	lib	20.87	1.11
+GS	unit	release	all	tree-sitter-clojure	0.1.0	build-script (run)	34.45	1.06
+GS	unit	release	all	tree-sitter-javascript	0.25.0	build-script (run)	44.21	1.06
+GS	unit	release	all	libc	0.2.191	lib	11.29	1.05
+GS	unit	release	all	tree-sitter-solidity	1.2.13	build-script (run)	33.03	1.00
+GS	unit	release	all	serde_json	1.0.154	lib	5.74	0.98
+GS	unit	release	all	tracing-attributes	0.1.31	lib	15.59	0.91
+GS	unit	release	all	rayon-core	1.13.0	lib	18.50	0.90
+GS	unit	release	all	memchr	2.8.3	lib	1.11	0.89
+GS	unit	release	all	zerovec-derive	0.11.6	lib	4.49	0.89
+GS	unit	release	all	thiserror-impl	2.0.21	lib	14.70	0.87
+GS	unit	release	all	tree-sitter-yaml	0.7.2	build-script (run)	39.07	0.84
+GS	unit	release	all	tree-sitter-java	0.23.5	build-script (run)	31.00	0.83
+GS	unit	release	all	tree-sitter	0.25.10	lib	13.84	0.82
+GS	unit	release	all	regex	1.13.1	lib	13.00	0.80
+GS	unit	release	all	tree-sitter-zig	1.1.2	build-script (run)	28.25	0.78
+GS	unit	release	all	tree-sitter-xml	0.7.0	build-script (run)	25.69	0.75
+GS	unit	release	all	tree-sitter-python	0.25.0	build-script (run)	30.03	0.75
+GS	unit	release	all	zerofrom-derive	0.1.8	lib	4.60	0.74
+GS	unit	release	all	bytes	1.12.1	lib	18.23	0.74
+GS	unit	release	all	heapless	0.9.3	lib	52.04	0.71
+GS	unit	release	all	icu_normalizer	2.3.0	lib	14.00	0.70
+GS	unit	release	all	tree-sitter-c	0.24.2	build-script (run)	33.83	0.70
+GS	unit	release	all	tree-sitter-dockerfile-updated	0.2.0	build-script (run)	45.28	0.69
+GS	unit	release	all	ast-grep-core	0.39.9	lib	54.50	0.69
+GS	unit	release	all	serde_derive_internals	0.30.0	lib	15.68	0.67
+GS	unit	release	all	hashbrown	0.14.5	lib	20.87	0.66
+GS	unit	release	all	smol_bitmap	0.3.2	lib	21.45	0.64
+GS	unit	release	all	rand	0.10.3	lib	51.53	0.64
+GS	unit	release	all	typenum	1.20.1	lib	12.65	0.61
+GS	unit	release	all	tree-sitter-r	1.3.0	build-script (run)	41.84	0.61
+GS	unit	release	all	tree-sitter-starlark	1.3.0	build-script (run)	46.56	0.61
+GS	unit	release	all	indexmap	2.14.2	lib	2.13	0.59
+GS	unit	release	all	generic-array	0.14.7	lib	13.26	0.59
+GS	unit	release	all	serde	1.0.229	lib	14.89	0.57
+GS	unit	release	all	tree-sitter-diff	0.1.0	build-script (run)	25.12	0.57
+GS	unit	release	all	zerovec	0.11.8	lib	6.03	0.55
+GS	unit	release	all	tracing-core	0.1.36	lib	15.55	0.55
+GS	unit	release	all	hashbrown	0.17.1	lib	1.60	0.53
+GS	unit	release	all	memchr	2.8.3	lib	2.72	0.52
+GS	unit	release	all	tree-sitter-language	0.1.9	build-script	0.50	0.51
+GS	unit	release	all	proc-macro2	1.0.107	build-script	0.52	0.50
+GS	unit	release	all	proc-macro2	1.0.107	lib	1.10	0.50
+GS	unit	release	all	parking_lot	0.12.5	lib	18.95	0.50
+GS	unit	release	all	tree-sitter-nix	0.3.0	build-script (run)	37.63	0.50
+GS	unit	release	all	tree-sitter-hcl	1.1.0	build-script (run)	40.82	0.50
+GS	unit	release	all	bstr	1.13.1	lib	15.92	0.49
+GS	unit	release	all	yoke-derive	0.8.4	lib	5.38	0.48
+GS	unit	release	all	crossbeam-utils	0.8.23	lib	11.74	0.48
+GS	unit	release	all	icu_collections	2.3.0	lib	12.41	0.44
+GS	unit	release	all	tree-sitter-toml-ng	0.7.0	build-script (run)	48.77	0.43
+GS	unit	release	all	tree-sitter-go	0.25.0	build-script (run)	29.62	0.42
+GS	unit	release	all	tree-sitter-astro-next	0.1.1	build-script (run)	32.61	0.42
+GS	unit	release	all	tree-sitter-svelte-next	0.1.1	build-script (run)	34.02	0.42
+GS	unit	release	all	displaydoc	0.2.7	lib	5.41	0.41
+GS	unit	release	all	icu_provider	2.3.1	lib	12.45	0.41
+GS	unit	release	all	walkdir	2.5.0	lib	16.70	0.40
+GS	unit	release	all	tree-sitter-cmake	0.7.5	build-script (run)	47.69	0.40
+GS	unit	release	all	dashmap	6.2.1	lib	21.53	0.39
+GS	unit	release	all	tree-sitter-vue-next	0.1.0	build-script (run)	38.14	0.39
+GS	unit	release	all	tree-sitter-erlang	0.16.0	build-script (run)	28.94	0.37
+GS	unit	release	all	shlex	2.0.1	lib	0.50	0.36
+GS	unit	release	all	synstructure	0.14.0	lib	4.23	0.36
+GS	unit	release	all	tree-sitter-css	0.25.0	build-script (run)	21.09	0.36
+GS	unit	release	all	tree-sitter-just	0.2.0	build-script (run)	39.91	0.34
+GS	unit	release	all	find-msvc-tools	0.1.15	lib	0.50	0.33
+GS	unit	release	all	crossbeam-epoch	0.9.21	lib	12.98	0.33
+GS	unit	release	all	zerotrie	0.2.5	lib	12.09	0.32
+GS	unit	release	all	zeroize_derive	1.5.0	lib	18.97	0.32
+GS	unit	release	all	ref-cast-impl	1.0.27	lib	15.62	0.30
+GS	unit	release	all	tree-sitter-html	0.23.2	build-script (run)	29.31	0.30
+GS	unit	release	all	tree-sitter-lua	0.5.0	build-script (run)	48.48	0.30
+GS	unit	release	all	sha2	0.10.9	lib	21.98	0.28
+GS	unit	release	all	bytes-utils	0.1.4	lib	50.39	0.25
+GS	unit	release	all	smallvec	2.0.0-beta.3	lib	52.17	0.25
+GS	unit	release	all	libc	0.2.191	build-script	6.83	0.24
+GS	unit	release	all	streaming-iterator	0.1.9	lib	13.31	0.24
+GS	unit	release	all	zmij	1.0.23	lib	2.14	0.23
+GS	unit	release	all	zmij	1.0.23	lib	15.44	0.23
+GS	unit	release	all	writeable	0.6.4	lib	8.79	0.22
+GS	unit	release	all	tree-sitter-graphql	0.1.0	build-script (run)	30.78	0.22
+GS	unit	release	all	tracing	0.1.44	lib	16.54	0.21
+GS	unit	release	all	chacha20	0.10.2	lib	17.10	0.21
+GS	unit	release	all	version_check	0.9.5	lib	9.16	0.20
+GS	unit	release	all	bit-vec	0.8.0	lib	20.79	0.20
+GS	unit	release	all	tree-sitter-regex	0.25.0	build-script (run)	41.47	0.20
+GS	unit	release	all	parking_lot_core	0.9.12	lib	14.67	0.19
+GS	unit	release	all	serde_core	1.0.229	build-script	1.26	0.18
+GS	unit	release	all	quote	1.0.47	lib	1.48	0.17
+GS	unit	release	all	yoke	0.8.3	lib	5.86	0.17
+GS	unit	release	all	lock_api	0.4.14	lib	13.84	0.17
+GS	unit	release	all	digest	0.10.7	lib	18.06	0.17
+GS	unit	release	all	tree-sitter-ini	1.4.0	build-script (run)	41.67	0.17
+GS	unit	release	all	quote	1.0.47	build-script	0.87	0.16
+GS	unit	release	all	smallvec	1.16.3	lib	7.19	0.16
+GS	unit	release	all	serde_core	1.0.229	build-script	2.57	0.15
+GS	unit	release	all	litemap	0.8.3	lib	9.01	0.15
+GS	unit	release	all	thiserror	2.0.21	build-script	13.68	0.15
+GS	unit	release	all	tree-sitter-proto	0.4.0	build-script (run)	41.32	0.15
+GS	unit	release	all	either	1.19.0	lib	15.14	0.14
+GS	unit	release	all	percent-encoding	2.3.2	lib	16.27	0.14
+GS	unit	release	all	form_urlencoded	1.2.2	lib	16.74	0.14
+GS	unit	release	all	zmij	1.0.23	build-script	1.09	0.13
+GS	unit	release	all	once_cell	1.21.4	lib	13.54	0.13
+GS	unit	release	all	crossbeam-deque	0.8.8	lib	13.87	0.13
+GS	unit	release	all	itoa	1.0.18	lib	16.10	0.13
+GS	unit	release	all	heck	0.5.0	lib	16.35	0.13
+GS	unit	release	all	heapless	0.9.3	build-script	16.48	0.13
+GS	unit	release	all	byteorder	1.5.0	lib	16.50	0.13
+GS	unit	release	all	crossbeam-utils	0.8.23	build-script	7.07	0.12
+GS	unit	release	all	serde	1.0.229	build-script	12.35	0.12
+GS	unit	release	all	crossbeam-deque	0.8.8	build-script	12.53	0.12
+GS	unit	release	all	icu_properties_data	2.3.0	lib	12.86	0.12
+GS	unit	release	all	ref-cast	1.0.27	build-script	15.30	0.12
+GS	unit	release	all	log	0.4.34	lib	16.41	0.12
+GS	unit	release	all	getrandom	0.4.3	lib	18.38	0.12
+GS	unit	release	all	tree-sitter-lua	0.5.0	build-script	19.30	0.12
+GS	unit	release	all	tree-sitter-cmake	0.7.5	build-script	19.39	0.12
+GS	unit	release	all	tree-sitter-c-sharp	0.23.5	build-script	19.42	0.12
+GS	unit	release	all	tree-sitter-just	0.2.0	build-script	19.84	0.12
+GS	unit	release	all	tree-sitter-vue-next	0.1.0	build-script	19.95	0.12
+GS	unit	release	all	tree-sitter	0.25.10	build-script	6.72	0.11
+GS	unit	release	all	tinystr	0.8.4	lib	7.56	0.11
+GS	unit	release	all	utf8_iter	1.0.4	lib	12.30	0.11
+GS	unit	release	all	tree-sitter-swift	0.7.4	build-script	19.40	0.11
+GS	unit	release	all	tree-sitter-starlark	1.3.0	build-script	19.45	0.11
+GS	unit	release	all	tree-sitter-bash	0.25.1	build-script	19.51	0.11
+GS	unit	release	all	tree-sitter-dockerfile-updated	0.2.0	build-script	19.52	0.11
+GS	unit	release	all	tree-sitter-sequel	0.3.11	build-script	19.54	0.11
+GS	unit	release	all	tree-sitter-javascript	0.25.0	build-script	19.56	0.11
+GS	unit	release	all	tree-sitter-haskell	0.23.1	build-script	19.62	0.11
+GS	unit	release	all	tree-sitter-rust	0.24.2	build-script	19.63	0.11
+GS	unit	release	all	tree-sitter-r	1.3.0	build-script	19.65	0.11
+GS	unit	release	all	tree-sitter-ini	1.4.0	build-script	19.67	0.11
+GS	unit	release	all	tree-sitter-php	0.24.2	build-script	19.83	0.11
+GS	unit	release	all	tree-sitter-yaml	0.7.2	build-script	19.87	0.11
+GS	unit	release	all	tree-sitter-ocaml	0.24.2	build-script	19.95	0.11
+GS	unit	release	all	tree-sitter-typescript	0.23.2	build-script	20.07	0.11
+GS	unit	release	all	tree-sitter-c	0.24.2	build-script	20.18	0.11
+GS	unit	release	all	tree-sitter-scala	0.26.3	build-script	20.27	0.11
+GS	unit	release	all	tree-sitter-powershell	0.26.4	build-script	20.46	0.11
+GS	unit	release	all	tree-sitter-xml	0.7.0	build-script	20.61	0.11
+GS	unit	release	all	tree-sitter-md	0.5.3	build-script	20.72	0.11
+GS	unit	release	all	foldhash	0.2.0	lib	52.41	0.11
+GS	unit	release	all	serde_json	1.0.154	build-script	2.03	0.10
+GS	unit	release	all	foldhash	0.2.0	lib	2.37	0.10
+GS	unit	release	all	itoa	1.0.18	lib	2.48	0.10
+GS	unit	release	all	crossbeam-epoch	0.9.21	build-script	12.34	0.10
+GS	unit	release	all	parking_lot_core	0.9.12	build-script	12.85	0.10
+GS	unit	release	all	sha2-asm	0.6.4	build-script	14.85	0.10
+GS	unit	release	all	tree-sitter-toml-ng	0.7.0	build-script	19.29	0.10
+GS	unit	release	all	tree-sitter-regex	0.25.0	build-script	19.73	0.10
+GS	unit	release	all	tree-sitter-proto	0.4.0	build-script	19.73	0.10
+GS	unit	release	all	tree-sitter-hcl	1.1.0	build-script	19.75	0.10
+GS	unit	release	all	tree-sitter-fortran	0.6.0	build-script	19.78	0.10
+GS	unit	release	all	tree-sitter-elixir	0.3.5	build-script	19.86	0.10
+GS	unit	release	all	tree-sitter-dart	0.2.0	build-script	20.03	0.10
+GS	unit	release	all	tree-sitter-make	1.1.1	build-script	20.07	0.10
+GS	unit	release	all	tree-sitter-cpp	0.23.4	build-script	20.08	0.10
+GS	unit	release	all	tree-sitter-tlaplus	1.5.0	build-script	20.12	0.10
+GS	unit	release	all	tree-sitter-svelte-next	0.1.1	build-script	20.17	0.10
+GS	unit	release	all	tree-sitter-astro-next	0.1.1	build-script	20.27	0.10
+GS	unit	release	all	tree-sitter-java	0.23.5	build-script	20.29	0.10
+GS	unit	release	all	tree-sitter-graphql	0.1.0	build-script	20.32	0.10
+GS	unit	release	all	tree-sitter-ruby	0.23.1	build-script	20.36	0.10
+GS	unit	release	all	tree-sitter-python	0.25.0	build-script	20.38	0.10
+GS	unit	release	all	tree-sitter-go	0.25.0	build-script	20.39	0.10
+GS	unit	release	all	tree-sitter-html	0.23.2	build-script	20.42	0.10
+GS	unit	release	all	tree-sitter-erlang	0.16.0	build-script	20.48	0.10
+GS	unit	release	all	tree-sitter-kotlin-sg	0.4.1	build-script	20.49	0.10
+GS	unit	release	all	tree-sitter-elisp	1.7.2	build-script	20.59	0.10
+GS	unit	release	all	tree-sitter-objc	3.0.2	build-script	20.67	0.10
+GS	unit	release	all	tree-sitter-verilog	1.0.3	build-script	20.69	0.10
+GS	unit	release	all	tree-sitter-css	0.25.0	build-script	20.76	0.10
+GS	unit	release	all	bit-set	0.8.0	lib	20.99	0.10
+GS	unit	release	all	tree-sitter-json	0.24.8	build-script (run)	38.98	0.10
+GS	unit	release	all	potential_utf	0.1.6	lib	11.99	0.09
+GS	unit	release	all	icu_properties_data	2.3.0	build-script	12.41	0.09
+GS	unit	release	all	getrandom	0.4.3	build-script	14.97	0.09
+GS	unit	release	all	rand_core	0.10.1	lib	15.22	0.09
+GS	unit	release	all	block-buffer	0.10.4	lib	15.46	0.09
+GS	unit	release	all	tree-sitter-json	0.24.8	build-script	19.94	0.09
+GS	unit	release	all	tree-sitter-nix	0.3.0	build-script	19.98	0.09
+GS	unit	release	all	tree-sitter-clojure	0.1.0	build-script	20.17	0.09
+GS	unit	release	all	tree-sitter-solidity	1.2.13	build-script	20.22	0.09
+GS	unit	release	all	tree-sitter-zig	1.1.2	build-script	20.52	0.09
+GS	unit	release	all	tree-sitter-julia	0.23.1	build-script	20.57	0.09
+GS	unit	release	all	tree-sitter-odin	1.3.0	build-script	20.58	0.09
+GS	unit	release	all	tree-sitter-diff	0.1.0	build-script	20.67	0.09
+GS	unit	release	all	zeroize	1.9.1	lib	49.20	0.09
+GS	unit	release	all	icu_normalizer_data	2.3.0	build-script	12.22	0.08
+GS	unit	release	all	serde_json	1.0.154	build-script	15.27	0.08
+GS	unit	release	all	sha2-asm	0.6.4	build-script (run)	15.45	0.08
+GS	unit	release	all	futures-core	0.3.34	lib	52.52	0.08
+GS	unit	release	all	proc-macro2	1.0.107	build-script (run)	1.02	0.07
+GS	unit	release	all	unicode-ident	1.0.27	lib	1.03	0.07
+GS	unit	release	all	zerofrom	0.1.8	lib	5.34	0.07
+GS	unit	release	all	generic-array	0.14.7	build-script	9.36	0.07
+GS	unit	release	all	rayon-core	1.13.0	build-script	15.07	0.07
+GS	unit	release	all	idna_adapter	1.2.2	lib	15.38	0.07
+GS	unit	release	all	same-file	1.0.6	lib	16.41	0.07
+GS	unit	release	all	hash32	0.3.1	lib	16.63	0.07
+GS	unit	release	all	dyn-clone	1.0.20	lib	20.77	0.07
+GS	unit	release	all	crypto-common	0.1.7	lib	15.53	0.06
+GS	unit	release	all	tree-sitter-language	0.1.9	lib	1.03	0.05
+GS	unit	release	all	thiserror	2.0.21	lib	15.58	0.05
+GS	unit	release	all	heapless	0.9.3	build-script (run)	16.61	0.05
+GS	unit	release	all	strum	0.28.0	lib	51.99	0.05
+GS	unit	release	all	tree-sitter-swift	0.7.4	lib	52.60	0.05
+GS	unit	release	all	tree-sitter-c-sharp	0.23.5	lib	52.65	0.05
+GS	unit	release	all	tree-sitter-ocaml	0.24.2	lib	52.73	0.05
+GS	unit	release	all	tree-sitter-haskell	0.23.1	lib	52.86	0.05
+GS	unit	release	all	tree-sitter-verilog	1.0.3	lib	54.25	0.05
+GS	unit	release	all	stable_deref_trait	1.2.1	lib	1.22	0.04
+GS	unit	release	all	equivalent	1.0.3	lib	1.99	0.04
+GS	unit	release	all	icu_normalizer_data	2.3.0	lib	12.96	0.04
+GS	unit	release	all	scopeguard	1.2.0	lib	13.80	0.04
+GS	unit	release	all	thiserror	2.0.21	build-script (run)	13.83	0.04
+GS	unit	release	all	pin-project-lite	0.2.17	lib	16.48	0.04
+GS	unit	release	all	ref-cast	1.0.27	lib	18.02	0.04
+GS	unit	release	all	sha2-asm	0.6.4	lib	18.11	0.04
+GS	unit	release	all	cpufeatures	0.2.17	lib	20.84	0.04
+GS	unit	release	all	tree-sitter-toml-ng	0.7.0	lib	52.70	0.04
+GS	unit	release	all	tree-sitter-sequel	0.3.11	lib	52.78	0.04
+GS	unit	release	all	tree-sitter-bash	0.25.1	lib	52.82	0.04
+GS	unit	release	all	tree-sitter-dockerfile-updated	0.2.0	lib	52.90	0.04
+GS	unit	release	all	tree-sitter-javascript	0.25.0	lib	52.94	0.04
+GS	unit	release	all	tree-sitter-fortran	0.6.0	lib	52.98	0.04
+GS	unit	release	all	tree-sitter-rust	0.24.2	lib	53.02	0.04
+GS	unit	release	all	tree-sitter-regex	0.25.0	lib	53.15	0.04
+GS	unit	release	all	tree-sitter-elixir	0.3.5	lib	53.25	0.04
+GS	unit	release	all	tree-sitter-typescript	0.23.2	lib	53.32	0.04
+GS	unit	release	all	tree-sitter-tlaplus	1.5.0	lib	53.39	0.04
+GS	unit	release	all	tree-sitter-dart	0.2.0	lib	53.46	0.04
+GS	unit	release	all	tree-sitter-cpp	0.23.4	lib	53.56	0.04
+GS	unit	release	all	tree-sitter-julia	0.23.1	lib	53.64	0.04
+GS	unit	release	all	tree-sitter-scala	0.26.3	lib	53.68	0.04
+GS	unit	release	all	tree-sitter-clojure	0.1.0	lib	53.72	0.04
+GS	unit	release	all	tree-sitter-svelte-next	0.1.1	lib	53.79	0.04
+GS	unit	release	all	tree-sitter-kotlin-sg	0.4.1	lib	53.86	0.04
+GS	unit	release	all	tree-sitter-ruby	0.23.1	lib	53.93	0.04
+GS	unit	release	all	tree-sitter-zig	1.1.2	lib	54.18	0.04
+GS	unit	release	all	tree-sitter-objc	3.0.2	lib	54.33	0.04
+GS	unit	release	all	cfg-if	1.0.5	lib	7.35	0.03
+GS	unit	release	all	cpufeatures	0.3.1	lib	16.23	0.03
+GS	unit	release	all	tree-sitter-lua	0.5.0	lib	52.75	0.03
+GS	unit	release	all	tree-sitter-cmake	0.7.5	lib	52.78	0.03
+GS	unit	release	all	tree-sitter-starlark	1.3.0	lib	52.82	0.03
+GS	unit	release	all	tree-sitter-php	0.24.2	lib	53.06	0.03
+GS	unit	release	all	tree-sitter-r	1.3.0	lib	53.09	0.03
+GS	unit	release	all	tree-sitter-ini	1.4.0	lib	53.12	0.03
+GS	unit	release	all	tree-sitter-proto	0.4.0	lib	53.19	0.03
+GS	unit	release	all	tree-sitter-hcl	1.1.0	lib	53.22	0.03
+GS	unit	release	all	tree-sitter-just	0.2.0	lib	53.29	0.03
+GS	unit	release	all	tree-sitter-yaml	0.7.2	lib	53.36	0.03
+GS	unit	release	all	tree-sitter-json	0.24.8	lib	53.43	0.03
+GS	unit	release	all	tree-sitter-vue-next	0.1.0	lib	53.51	0.03
+GS	unit	release	all	tree-sitter-nix	0.3.0	lib	53.53	0.03
+GS	unit	release	all	tree-sitter-make	1.1.1	lib	53.60	0.03
+GS	unit	release	all	tree-sitter-c	0.24.2	lib	53.76	0.03
+GS	unit	release	all	tree-sitter-solidity	1.2.13	lib	53.82	0.03
+GS	unit	release	all	tree-sitter-astro-next	0.1.1	lib	53.90	0.03
+GS	unit	release	all	tree-sitter-java	0.23.5	lib	53.96	0.03
+GS	unit	release	all	tree-sitter-graphql	0.1.0	lib	54.00	0.03
+GS	unit	release	all	tree-sitter-python	0.25.0	lib	54.03	0.03
+GS	unit	release	all	tree-sitter-powershell	0.26.4	lib	54.06	0.03
+GS	unit	release	all	tree-sitter-go	0.25.0	lib	54.09	0.03
+GS	unit	release	all	tree-sitter-html	0.23.2	lib	54.12	0.03
+GS	unit	release	all	tree-sitter-erlang	0.16.0	lib	54.15	0.03
+GS	unit	release	all	tree-sitter-odin	1.3.0	lib	54.22	0.03
+GS	unit	release	all	tree-sitter-elisp	1.7.2	lib	54.30	0.03
+GS	unit	release	all	tree-sitter-xml	0.7.0	lib	54.37	0.03
+GS	unit	release	all	tree-sitter-diff	0.1.0	lib	54.40	0.03
+GS	unit	release	all	tree-sitter-md	0.5.3	lib	54.43	0.03
+GS	unit	release	all	tree-sitter-css	0.25.0	lib	54.46	0.03
+GS	unit	release	all	serde_core	1.0.229	build-script (run)	1.44	0.02
+GS	unit	release	all	zmij	1.0.23	build-script (run)	1.46	0.02
+GS	unit	release	all	serde_core	1.0.229	build-script (run)	2.72	0.02
+GS	unit	release	all	libc	0.2.191	build-script (run)	7.39	0.02
+GS	unit	release	all	serde	1.0.229	build-script (run)	12.47	0.02
+GS	unit	release	all	generic-array	0.14.7	build-script (run)	12.51	0.02
+GS	unit	release	all	zmij	1.0.23	build-script (run)	14.96	0.02
+GS	unit	release	all	ref-cast	1.0.27	build-script (run)	15.43	0.02
+GS	unit	release	all	tree-sitter-language	0.1.9	build-script (run)	1.01	0.01
+GS	unit	release	all	quote	1.0.47	build-script (run)	1.07	0.01
+GS	unit	release	all	serde_json	1.0.154	build-script (run)	2.13	0.01
+GS	unit	release	all	crossbeam-utils	0.8.23	build-script (run)	7.38	0.01
+GS	unit	release	all	crossbeam-epoch	0.9.21	build-script (run)	12.44	0.01
+GS	unit	release	all	icu_normalizer_data	2.3.0	build-script (run)	12.49	0.01
+GS	unit	release	all	icu_properties_data	2.3.0	build-script (run)	12.50	0.01
+GS	unit	release	all	crossbeam-deque	0.8.8	build-script (run)	12.86	0.01
+GS	unit	release	all	parking_lot_core	0.9.12	build-script (run)	12.95	0.01
+GS	unit	release	all	serde_json	1.0.154	build-script (run)	15.35	0.01
+GS	unit	release	all	rayon-core	1.13.0	build-script (run)	15.36	0.01
+GS	unit	release	all	getrandom	0.4.3	build-script (run)	15.37	0.01
+GS	build-kb	release	all	1	33.723	97.942	7.254
+GS	size-kb-release	all	97347448	4212088	92117860	184400	0	0
+GS	load	release	none	1	3.69 4.34 4.60
+GS	cold-ast	release	none	1	35.771	101.132	10.416	259
+GS	timings	release	none	1	178	35.7	109.6	0	0.0	0.0	0.0	25.1	10.7
+GS	unit	release	none	omp-ast	2.0.0	lib	25.05	10.65
+GS	unit	release	none	regex-automata	0.4.18	lib	7.56	5.50
+GS	unit	release	none	jiff	0.2.38	lib	18.20	4.93
+GS	unit	release	none	omp-core	2.0.0	lib	22.36	4.68
+GS	unit	release	none	tree-sitter	0.25.10	build-script (run)	14.77	4.42
+GS	unit	release	none	syn	2.0.119	lib	1.87	4.06
+GS	unit	release	none	regex-syntax	0.8.11	lib	5.51	3.81
+GS	unit	release	none	omp-walker	2.0.0	lib	22.26	3.16
+GS	unit	release	none	ignore	0.4.33	lib	21.27	2.97
+GS	unit	release	none	aho-corasick	1.1.5	lib	3.54	2.91
+GS	unit	release	none	schemars	1.2.3	lib	18.40	2.73
+GS	unit	release	none	serde_derive	1.0.229	lib	6.50	2.63
+GS	unit	release	none	syn	3.0.9	lib	1.26	2.46
+GS	unit	release	none	rayon	1.12.0	lib	19.54	2.26
+GS	unit	release	none	serde_core	1.0.229	lib	0.71	2.14
+GS	unit	release	none	serde_core	1.0.229	lib	9.36	1.96
+GS	unit	release	none	strum_macros	0.28.0	lib	13.63	1.60
+GS	unit	release	none	serde_json	1.0.154	lib	14.39	1.51
+GS	unit	release	none	jiff-core	0.1.1	lib	16.97	1.43
+GS	unit	release	none	icu_locale_core	2.3.0	lib	5.76	1.41
+GS	unit	release	none	globset	0.4.20	lib	13.74	1.36
+GS	unit	release	none	url	2.5.8	lib	19.97	1.24
+GS	unit	release	none	data-encoding	2.11.1	lib	16.97	1.23
+GS	unit	release	none	idna	1.1.0	lib	15.10	1.17
+GS	unit	release	none	cc	1.2.67	lib	0.81	1.11
+GS	unit	release	none	icu_properties	2.3.0	lib	10.39	1.11
+GS	unit	release	none	schemars_derive	1.2.3	lib	13.55	1.04
+GS	unit	release	none	serde_json	1.0.154	lib	11.32	1.02
+GS	unit	release	none	libc	0.2.191	lib	2.55	0.99
+GS	unit	release	none	thiserror-impl	2.0.21	lib	11.09	0.94
+GS	unit	release	none	ast-grep-core	0.39.9	lib	23.13	0.88
+GS	unit	release	none	rayon-core	1.13.0	lib	15.42	0.85
+GS	unit	release	none	zerovec-derive	0.11.6	lib	4.26	0.84
+GS	unit	release	none	tracing-attributes	0.1.31	lib	12.51	0.84
+GS	unit	release	none	memchr	2.8.3	lib	0.48	0.79
+GS	unit	release	none	serde_derive_internals	0.30.0	lib	12.76	0.79
+GS	unit	release	none	tree-sitter	0.25.10	lib	19.19	0.79
+GS	unit	release	none	regex	1.13.1	lib	16.27	0.70
+GS	unit	release	none	icu_normalizer	2.3.0	lib	10.24	0.68
+GS	unit	release	none	heapless	0.9.3	lib	21.68	0.68
+GS	unit	release	none	smol_bitmap	0.3.2	lib	18.26	0.62
+GS	unit	release	none	typenum	1.20.1	lib	7.05	0.61
+GS	unit	release	none	bstr	1.13.1	lib	12.93	0.61
+GS	unit	release	none	tracing-core	0.1.36	lib	12.33	0.60
+GS	unit	release	none	hashbrown	0.14.5	lib	16.71	0.59
+GS	unit	release	none	bytes	1.12.1	lib	16.30	0.58
+GS	unit	release	none	zerofrom-derive	0.1.8	lib	3.72	0.57
+GS	unit	release	none	rand	0.10.3	lib	21.13	0.54
+GS	unit	release	none	serde	1.0.229	lib	9.13	0.52
+GS	unit	release	none	zerovec	0.11.8	lib	5.09	0.51
+GS	unit	release	none	proc-macro2	1.0.107	lib	0.62	0.49
+GS	unit	release	none	yoke-derive	0.8.4	lib	3.77	0.49
+GS	unit	release	none	indexmap	2.14.2	lib	7.97	0.49
+GS	unit	release	none	memchr	2.8.3	lib	9.50	0.49
+GS	unit	release	none	generic-array	0.14.7	lib	8.49	0.48
+GS	unit	release	none	displaydoc	0.2.7	lib	4.49	0.47
+GS	unit	release	none	crossbeam-utils	0.8.23	lib	2.84	0.46
+GS	unit	release	none	parking_lot	0.12.5	lib	15.91	0.46
+GS	unit	release	none	dashmap	6.2.1	lib	17.81	0.44
+GS	unit	release	none	icu_collections	2.3.0	lib	6.26	0.43
+GS	unit	release	none	synstructure	0.14.0	lib	3.30	0.39
+GS	unit	release	none	hashbrown	0.17.1	lib	7.18	0.38
+GS	unit	release	none	zeroize_derive	1.5.0	lib	16.37	0.34
+GS	unit	release	none	walkdir	2.5.0	lib	13.62	0.33
+GS	unit	release	none	icu_provider	2.3.1	lib	6.69	0.32
+GS	unit	release	none	bytes-utils	0.1.4	lib	19.12	0.29
+GS	unit	release	none	zerotrie	0.2.5	lib	4.96	0.25
+GS	unit	release	none	streaming-iterator	0.1.9	lib	17.30	0.25
+GS	unit	release	none	smallvec	2.0.0-beta.3	lib	21.80	0.25
+GS	unit	release	none	zmij	1.0.23	lib	12.19	0.24
+GS	unit	release	none	ref-cast-impl	1.0.27	lib	12.52	0.24
+GS	unit	release	none	sha2	0.10.9	lib	18.88	0.24
+GS	unit	release	none	crossbeam-epoch	0.9.21	lib	9.27	0.23
+GS	unit	release	none	libc	0.2.191	build-script	1.28	0.21
+GS	unit	release	none	tracing	0.1.44	lib	14.19	0.21
+GS	unit	release	none	writeable	0.6.4	lib	2.28	0.20
+GS	unit	release	none	zmij	1.0.23	lib	8.98	0.20
+GS	unit	release	none	chacha20	0.10.2	lib	13.99	0.20
+GS	unit	release	none	smallvec	1.16.3	lib	1.63	0.19
+GS	unit	release	none	version_check	0.9.5	lib	1.92	0.19
+GS	unit	release	none	lock_api	0.4.14	lib	10.04	0.19
+GS	unit	release	none	parking_lot_core	0.9.12	lib	10.91	0.18
+GS	unit	release	none	crossbeam-deque	0.8.8	lib	10.22	0.17
+GS	unit	release	none	litemap	0.8.3	lib	2.11	0.16
+GS	unit	release	none	tinystr	0.8.4	lib	5.60	0.16
+GS	unit	release	none	bit-vec	0.8.0	lib	17.55	0.16
+GS	unit	release	none	proc-macro2	1.0.107	build-script	0.42	0.15
+GS	unit	release	none	quote	1.0.47	lib	1.11	0.15
+GS	unit	release	none	yoke	0.8.3	lib	4.34	0.15
+GS	unit	release	none	thiserror	2.0.21	build-script	10.03	0.15
+GS	unit	release	none	getrandom	0.4.3	lib	15.26	0.15
+GS	unit	release	none	crossbeam-utils	0.8.23	build-script	1.49	0.14
+GS	unit	release	none	digest	0.10.7	lib	14.63	0.14
+GS	unit	release	none	zeroize	1.9.1	lib	19.41	0.14
+GS	unit	release	none	zmij	1.0.23	build-script	0.45	0.13
+GS	unit	release	none	serde_core	1.0.229	build-script	0.56	0.13
+GS	unit	release	none	find-msvc-tools	0.1.15	lib	0.68	0.13
+GS	unit	release	none	serde_core	1.0.229	build-script	6.10	0.13
+GS	unit	release	none	once_cell	1.21.4	lib	9.82	0.13
+GS	unit	release	none	ref-cast	1.0.27	build-script	11.63	0.13
+GS	unit	release	none	either	1.19.0	lib	11.87	0.13
+GS	unit	release	none	percent-encoding	2.3.2	lib	13.38	0.13
+GS	unit	release	none	byteorder	1.5.0	lib	13.43	0.13
+GS	unit	release	none	foldhash	0.2.0	lib	22.13	0.13
+GS	unit	release	none	quote	1.0.47	build-script	0.42	0.12
+GS	unit	release	none	heapless	0.9.3	build-script	13.31	0.12
+GS	unit	release	none	heck	0.5.0	lib	13.52	0.12
+GS	unit	release	none	form_urlencoded	1.2.2	lib	13.63	0.12
+GS	unit	release	none	serde	1.0.229	build-script	5.21	0.11
+GS	unit	release	none	sha2-asm	0.6.4	build-script	11.50	0.11
+GS	unit	release	none	getrandom	0.4.3	build-script	11.76	0.11
+GS	unit	release	none	rand_core	0.10.1	lib	12.00	0.11
+GS	unit	release	none	tree-sitter	0.25.10	build-script	12.34	0.11
+GS	unit	release	none	itoa	1.0.18	lib	13.06	0.11
+GS	unit	release	none	shlex	2.0.1	lib	0.58	0.10
+GS	unit	release	none	crossbeam-epoch	0.9.21	build-script	5.33	0.10
+GS	unit	release	none	crossbeam-deque	0.8.8	build-script	7.83	0.10
+GS	unit	release	none	log	0.4.34	lib	13.21	0.10
+GS	unit	release	none	bit-set	0.8.0	lib	17.71	0.10
+GS	unit	release	none	utf8_iter	1.0.4	lib	6.01	0.09
+GS	unit	release	none	parking_lot_core	0.9.12	build-script	7.66	0.09
+GS	unit	release	none	icu_properties_data	2.3.0	lib	9.18	0.09
+GS	unit	release	none	icu_normalizer_data	2.3.0	build-script	5.43	0.08
+GS	unit	release	none	potential_utf	0.1.6	lib	5.93	0.08
+GS	unit	release	none	serde_json	1.0.154	build-script	7.75	0.08
+GS	unit	release	none	itoa	1.0.18	lib	9.66	0.08
+GS	unit	release	none	foldhash	0.2.0	lib	9.74	0.08
+GS	unit	release	none	tree-sitter-language	0.1.9	build-script	9.95	0.08
+GS	unit	release	none	rayon-core	1.13.0	build-script	12.03	0.08
+GS	unit	release	none	serde_json	1.0.154	build-script	12.11	0.08
+GS	unit	release	none	sha2-asm	0.6.4	build-script (run)	12.20	0.08
+GS	unit	release	none	block-buffer	0.10.4	lib	12.44	0.08
+GS	unit	release	none	same-file	1.0.6	lib	13.54	0.08
+GS	unit	release	none	futures-core	0.3.34	lib	22.05	0.08
+GS	unit	release	none	generic-array	0.14.7	build-script	2.48	0.07
+GS	unit	release	none	icu_properties_data	2.3.0	build-script	3.70	0.07
+GS	unit	release	none	crypto-common	0.1.7	lib	12.45	0.07
+GS	unit	release	none	hash32	0.3.1	lib	13.56	0.07
+GS	unit	release	none	dyn-clone	1.0.20	lib	16.91	0.07
+GS	unit	release	none	unicode-ident	1.0.27	lib	0.42	0.06
+GS	unit	release	none	idna_adapter	1.2.2	lib	12.27	0.06
+GS	unit	release	none	proc-macro2	1.0.107	build-script (run)	0.57	0.05
+GS	unit	release	none	zerofrom	0.1.8	lib	4.29	0.05
+GS	unit	release	none	scopeguard	1.2.0	lib	9.99	0.05
+GS	unit	release	none	strum	0.28.0	lib	21.22	0.05
+GS	unit	release	none	equivalent	1.0.3	lib	7.93	0.04
+GS	unit	release	none	icu_normalizer_data	2.3.0	lib	9.32	0.04
+GS	unit	release	none	thiserror	2.0.21	build-script (run)	10.18	0.04
+GS	unit	release	none	thiserror	2.0.21	lib	12.12	0.04
+GS	unit	release	none	pin-project-lite	0.2.17	lib	13.17	0.04
+GS	unit	release	none	ref-cast	1.0.27	lib	14.59	0.04
+GS	unit	release	none	stable_deref_trait	1.2.1	lib	0.42	0.03
+GS	unit	release	none	cfg-if	1.0.5	lib	1.81	0.03
+GS	unit	release	none	cpufeatures	0.3.1	lib	13.35	0.03
+GS	unit	release	none	heapless	0.9.3	build-script (run)	13.95	0.03
+GS	unit	release	none	sha2-asm	0.6.4	lib	15.23	0.03
+GS	unit	release	none	tree-sitter-language	0.1.9	lib	16.27	0.03
+GS	unit	release	none	cpufeatures	0.2.17	lib	16.88	0.03
+GS	unit	release	none	quote	1.0.47	build-script (run)	0.54	0.02
+GS	unit	release	none	serde_core	1.0.229	build-script (run)	0.69	0.02
+GS	unit	release	none	libc	0.2.191	build-script (run)	1.85	0.02
+GS	unit	release	none	serde_core	1.0.229	build-script (run)	6.24	0.02
+GS	unit	release	none	serde	1.0.229	build-script (run)	6.48	0.02
+GS	unit	release	none	generic-array	0.14.7	build-script (run)	7.01	0.02
+GS	unit	release	none	zmij	1.0.23	build-script (run)	7.03	0.02
+GS	unit	release	none	zmij	1.0.23	build-script (run)	11.61	0.02
+GS	unit	release	none	ref-cast	1.0.27	build-script (run)	12.18	0.02
+GS	unit	release	none	crossbeam-utils	0.8.23	build-script (run)	1.85	0.01
+GS	unit	release	none	icu_normalizer_data	2.3.0	build-script (run)	6.45	0.01
+GS	unit	release	none	crossbeam-epoch	0.9.21	build-script (run)	6.47	0.01
+GS	unit	release	none	icu_properties_data	2.3.0	build-script (run)	6.49	0.01
+GS	unit	release	none	crossbeam-deque	0.8.8	build-script (run)	8.46	0.01
+GS	unit	release	none	serde_json	1.0.154	build-script (run)	8.47	0.01
+GS	unit	release	none	parking_lot_core	0.9.12	build-script (run)	8.48	0.01
+GS	unit	release	none	tree-sitter-language	0.1.9	build-script (run)	10.04	0.01
+GS	unit	release	none	rayon-core	1.13.0	build-script (run)	12.11	0.01
+GS	unit	release	none	getrandom	0.4.3	build-script (run)	12.16	0.01
+GS	unit	release	none	serde_json	1.0.154	build-script (run)	12.18	0.01
+GS	build-kb	release	none	1	31.380	96.443	6.593
+GS	size-kb-release	none	1224856	946493	87107	20568	0	0
+GS	load	release	hot	1	3.32 4.12 4.51
+GS	cold-ast	release	hot	1	42.360	123.030	14.017	320
+GS	timings	release	hot	1	229	42.3	135.1	51	19.9	17.3	29.6	31.6	10.7
+GS	unit	release	hot	omp-ast	2.0.0	lib	31.59	10.70
+GS	unit	release	hot	jiff	0.2.38	lib	19.01	6.21
+GS	unit	release	hot	regex-automata	0.4.18	lib	6.78	6.05
+GS	unit	release	hot	omp-core	2.0.0	lib	28.43	5.49
+GS	unit	release	hot	tree-sitter	0.25.10	build-script (run)	15.44	5.38
+GS	unit	release	hot	syn	2.0.119	lib	1.85	4.01
+GS	unit	release	hot	regex-syntax	0.8.11	lib	3.83	3.72
+GS	unit	release	hot	omp-walker	2.0.0	lib	28.92	3.64
+GS	unit	release	hot	tree-sitter-typescript	0.23.2	build-script (run)	21.93	3.63
+GS	unit	release	hot	ignore	0.4.33	lib	26.84	3.22
+GS	unit	release	hot	schemars	1.2.3	lib	18.76	2.82
+GS	unit	release	hot	aho-corasick	1.1.5	lib	3.57	2.64
+GS	unit	release	hot	tree-sitter-cpp	0.23.4	build-script (run)	22.74	2.64
+GS	unit	release	hot	syn	3.0.9	lib	1.37	2.57
+GS	unit	release	hot	rayon	1.12.0	lib	26.35	2.57
+GS	unit	release	hot	serde_derive	1.0.229	lib	7.14	2.48
+GS	unit	release	hot	serde_core	1.0.229	lib	1.00	2.10
+GS	unit	release	hot	serde_core	1.0.229	lib	9.83	1.93
+GS	unit	release	hot	icu_locale_core	2.3.0	lib	6.44	1.66
+GS	unit	release	hot	tree-sitter-md	0.5.3	build-script (run)	25.22	1.62
+GS	unit	release	hot	tree-sitter-bash	0.25.1	build-script (run)	24.14	1.60
+GS	unit	release	hot	serde_json	1.0.154	lib	13.91	1.59
+GS	unit	release	hot	strum_macros	0.28.0	lib	14.40	1.59
+GS	unit	release	hot	globset	0.4.20	lib	13.96	1.47
+GS	unit	release	hot	tree-sitter-javascript	0.25.0	build-script (run)	22.68	1.46
+GS	unit	release	hot	idna	1.1.0	lib	15.43	1.35
+GS	unit	release	hot	data-encoding	2.11.1	lib	17.63	1.35
+GS	unit	release	hot	jiff-core	0.1.1	lib	17.74	1.27
+GS	unit	release	hot	cc	1.2.67	lib	0.54	1.21
+GS	unit	release	hot	icu_properties	2.3.0	lib	10.81	1.20
+GS	unit	release	hot	schemars_derive	1.2.3	lib	14.04	1.17
+GS	unit	release	hot	tree-sitter-rust	0.24.2	build-script (run)	21.65	1.09
+GS	unit	release	hot	url	2.5.8	lib	26.61	1.08
+GS	unit	release	hot	tree-sitter-yaml	0.7.2	build-script (run)	25.38	0.97
+GS	unit	release	hot	heapless	0.9.3	lib	27.51	0.95
+GS	unit	release	hot	tracing-attributes	0.1.31	lib	12.86	0.92
+GS	unit	release	hot	libc	0.2.191	lib	2.47	0.90
+GS	unit	release	hot	serde_json	1.0.154	lib	11.77	0.90
+GS	unit	release	hot	ast-grep-core	0.39.9	lib	28.69	0.88
+GS	unit	release	hot	rand	0.10.3	lib	26.66	0.84
+GS	unit	release	hot	thiserror-impl	2.0.21	lib	11.59	0.83
+GS	unit	release	hot	tree-sitter	0.25.10	lib	20.81	0.83
+GS	unit	release	hot	tree-sitter-python	0.25.0	build-script (run)	21.45	0.82
+GS	unit	release	hot	typenum	1.20.1	lib	8.40	0.80
+GS	unit	release	hot	rayon-core	1.13.0	lib	15.67	0.75
+GS	unit	release	hot	memchr	2.8.3	lib	0.65	0.73
+GS	unit	release	hot	serde_derive_internals	0.30.0	lib	12.90	0.73
+GS	unit	release	hot	memchr	2.8.3	lib	10.10	0.71
+GS	unit	release	hot	indexmap	2.14.2	lib	8.54	0.67
+GS	unit	release	hot	zerovec-derive	0.11.6	lib	5.11	0.64
+GS	unit	release	hot	generic-array	0.14.7	lib	9.20	0.63
+GS	unit	release	hot	tree-sitter-go	0.25.0	build-script (run)	25.71	0.63
+GS	unit	release	hot	icu_normalizer	2.3.0	lib	10.60	0.61
+GS	unit	release	hot	regex	1.13.1	lib	16.42	0.61
+GS	unit	release	hot	smol_bitmap	0.3.2	lib	19.49	0.61
+GS	unit	release	hot	proc-macro2	1.0.107	lib	0.62	0.58
+GS	unit	release	hot	zerovec	0.11.8	lib	5.75	0.56
+GS	unit	release	hot	tracing-core	0.1.36	lib	12.78	0.56
+GS	unit	release	hot	tree-sitter-c	0.24.2	build-script (run)	20.33	0.56
+GS	unit	release	hot	tree-sitter-java	0.23.5	build-script (run)	26.10	0.56
+GS	unit	release	hot	hashbrown	0.14.5	lib	18.15	0.55
+GS	unit	release	hot	bytes	1.12.1	lib	16.37	0.54
+GS	unit	release	hot	zerofrom-derive	0.1.8	lib	3.94	0.53
+GS	unit	release	hot	icu_collections	2.3.0	lib	6.61	0.52
+GS	unit	release	hot	hashbrown	0.17.1	lib	8.03	0.50
+GS	unit	release	hot	serde	1.0.229	lib	9.62	0.50
+GS	unit	release	hot	bstr	1.13.1	lib	13.20	0.50
+GS	unit	release	hot	crossbeam-utils	0.8.23	lib	3.10	0.47
+GS	unit	release	hot	tree-sitter-css	0.25.0	build-script (run)	20.99	0.46
+GS	unit	release	hot	yoke-derive	0.8.4	lib	4.55	0.45
+GS	unit	release	hot	dashmap	6.2.1	lib	18.97	0.41
+GS	unit	release	hot	tree-sitter-html	0.23.2	build-script (run)	22.27	0.41
+GS	unit	release	hot	icu_provider	2.3.1	lib	7.55	0.39
+GS	unit	release	hot	displaydoc	0.2.7	lib	5.86	0.38
+GS	unit	release	hot	parking_lot	0.12.5	lib	15.99	0.38
+GS	unit	release	hot	synstructure	0.14.0	lib	3.37	0.36
+GS	unit	release	hot	zeroize_derive	1.5.0	lib	16.78	0.35
+GS	unit	release	hot	tree-sitter-diff	0.1.0	build-script (run)	21.58	0.35
+GS	unit	release	hot	ref-cast-impl	1.0.27	lib	12.90	0.30
+GS	unit	release	hot	walkdir	2.5.0	lib	14.10	0.29
+GS	unit	release	hot	zerotrie	0.2.5	lib	6.24	0.27
+GS	unit	release	hot	crossbeam-epoch	0.9.21	lib	9.46	0.27
+GS	unit	release	hot	tree-sitter-toml-ng	0.7.0	build-script (run)	25.74	0.27
+GS	unit	release	hot	libc	0.2.191	build-script	1.38	0.26
+GS	unit	release	hot	parking_lot_core	0.9.12	lib	11.34	0.25
+GS	unit	release	hot	zmij	1.0.23	lib	12.61	0.24
+GS	unit	release	hot	zmij	1.0.23	lib	9.23	0.23
+GS	unit	release	hot	streaming-iterator	0.1.9	lib	17.69	0.23
+GS	unit	release	hot	bit-vec	0.8.0	lib	17.92	0.23
+GS	unit	release	hot	sha2	0.10.9	lib	20.10	0.23
+GS	unit	release	hot	bytes-utils	0.1.4	lib	26.35	0.22
+GS	unit	release	hot	smallvec	2.0.0-beta.3	lib	27.70	0.22
+GS	unit	release	hot	tracing	0.1.44	lib	13.84	0.20
+GS	unit	release	hot	chacha20	0.10.2	lib	13.91	0.19
+GS	unit	release	hot	writeable	0.6.4	lib	1.92	0.18
+GS	unit	release	hot	digest	0.10.7	lib	15.25	0.18
+GS	unit	release	hot	smallvec	1.16.3	lib	1.75	0.17
+GS	unit	release	hot	quote	1.0.47	lib	1.21	0.16
+GS	unit	release	hot	version_check	0.9.5	lib	2.23	0.16
+GS	unit	release	hot	thiserror	2.0.21	build-script	10.12	0.16
+GS	unit	release	hot	lock_api	0.4.14	lib	10.41	0.16
+GS	unit	release	hot	either	1.19.0	lib	12.51	0.15
+GS	unit	release	hot	tree-sitter-regex	0.25.0	build-script (run)	25.56	0.15
+GS	unit	release	hot	proc-macro2	1.0.107	build-script	0.43	0.14
+GS	unit	release	hot	serde_core	1.0.229	build-script	0.84	0.14
+GS	unit	release	hot	crossbeam-utils	0.8.23	build-script	1.64	0.14
+GS	unit	release	hot	serde_core	1.0.229	build-script	6.29	0.14
+GS	unit	release	hot	tinystr	0.8.4	lib	6.31	0.14
+GS	unit	release	hot	crossbeam-deque	0.8.8	lib	11.21	0.14
+GS	unit	release	hot	heapless	0.9.3	build-script	13.66	0.14
+GS	unit	release	hot	byteorder	1.5.0	lib	13.69	0.14
+GS	unit	release	hot	percent-encoding	2.3.2	lib	13.70	0.14
+GS	unit	release	hot	tree-sitter-md	0.5.3	build-script	17.14	0.14
+GS	unit	release	hot	find-msvc-tools	0.1.15	lib	0.43	0.13
+GS	unit	release	hot	quote	1.0.47	build-script	0.43	0.13
+GS	unit	release	hot	litemap	0.8.3	lib	2.10	0.13
+GS	unit	release	hot	serde	1.0.229	build-script	6.59	0.13
+GS	unit	release	hot	once_cell	1.21.4	lib	9.97	0.13
+GS	unit	release	hot	ref-cast	1.0.27	build-script	12.39	0.13
+GS	unit	release	hot	heck	0.5.0	lib	13.34	0.13
+GS	unit	release	hot	itoa	1.0.18	lib	13.78	0.13
+GS	unit	release	hot	form_urlencoded	1.2.2	lib	13.84	0.13
+GS	unit	release	hot	getrandom	0.4.3	lib	15.53	0.13
+GS	unit	release	hot	tree-sitter-c	0.24.2	build-script	17.57	0.13
+GS	unit	release	hot	zmij	1.0.23	build-script	0.72	0.12
+GS	unit	release	hot	log	0.4.34	lib	13.54	0.12
+GS	unit	release	hot	tree-sitter-java	0.23.5	build-script	16.90	0.12
+GS	unit	release	hot	tree-sitter-toml-ng	0.7.0	build-script	17.02	0.12
+GS	unit	release	hot	tree-sitter-go	0.25.0	build-script	17.03	0.12
+GS	unit	release	hot	tree-sitter-regex	0.25.0	build-script	17.14	0.12
+GS	unit	release	hot	tree-sitter-css	0.25.0	build-script	17.51	0.12
+GS	unit	release	hot	yoke	0.8.3	lib	5.00	0.11
+GS	unit	release	hot	getrandom	0.4.3	build-script	12.12	0.11
+GS	unit	release	hot	tree-sitter	0.25.10	build-script	12.67	0.11
+GS	unit	release	hot	tree-sitter-yaml	0.7.2	build-script	17.15	0.11
+GS	unit	release	hot	tree-sitter-cpp	0.23.4	build-script	17.25	0.11
+GS	unit	release	hot	tree-sitter-bash	0.25.1	build-script	17.26	0.11
+GS	unit	release	hot	tree-sitter-javascript	0.25.0	build-script	17.28	0.11
+GS	unit	release	hot	tree-sitter-typescript	0.23.2	build-script	17.37	0.11
+GS	unit	release	hot	tree-sitter-rust	0.24.2	build-script	17.40	0.11
+GS	unit	release	hot	tree-sitter-python	0.25.0	build-script	17.48	0.11
+GS	unit	release	hot	bit-set	0.8.0	lib	19.38	0.11
+GS	unit	release	hot	foldhash	0.2.0	lib	27.98	0.11
+GS	unit	release	hot	shlex	2.0.1	lib	0.44	0.10
+GS	unit	release	hot	crossbeam-epoch	0.9.21	build-script	3.73	0.10
+GS	unit	release	hot	parking_lot_core	0.9.12	build-script	8.19	0.10
+GS	unit	release	hot	crossbeam-deque	0.8.8	build-script	8.30	0.10
+GS	unit	release	hot	icu_properties_data	2.3.0	lib	9.73	0.10
+GS	unit	release	hot	foldhash	0.2.0	lib	9.88	0.10
+GS	unit	release	hot	sha2-asm	0.6.4	build-script	12.00	0.10
+GS	unit	release	hot	block-buffer	0.10.4	lib	12.80	0.10
+GS	unit	release	hot	tree-sitter-html	0.23.2	build-script	17.37	0.10
+GS	unit	release	hot	tree-sitter-diff	0.1.0	build-script	17.47	0.10
+GS	unit	release	hot	tree-sitter-json	0.24.8	build-script	17.59	0.10
+GS	unit	release	hot	tree-sitter-json	0.24.8	build-script (run)	20.90	0.10
+GS	unit	release	hot	tree-sitter-language	0.1.9	build-script	0.59	0.09
+GS	unit	release	hot	serde_json	1.0.154	build-script	8.10	0.09
+GS	unit	release	hot	itoa	1.0.18	lib	10.32	0.09
+GS	unit	release	hot	rand_core	0.10.1	lib	12.22	0.09
+GS	unit	release	hot	zeroize	1.9.1	lib	26.01	0.09
+GS	unit	release	hot	generic-array	0.14.7	build-script	2.39	0.08
+GS	unit	release	hot	zerofrom	0.1.8	lib	4.47	0.08
+GS	unit	release	hot	icu_properties_data	2.3.0	build-script	6.21	0.08
+GS	unit	release	hot	potential_utf	0.1.6	lib	6.43	0.08
+GS	unit	release	hot	icu_normalizer_data	2.3.0	build-script	6.51	0.08
+GS	unit	release	hot	utf8_iter	1.0.4	lib	6.52	0.08
+GS	unit	release	hot	serde_json	1.0.154	build-script	12.31	0.08
+GS	unit	release	hot	rayon-core	1.13.0	build-script	12.43	0.08
+GS	unit	release	hot	sha2-asm	0.6.4	build-script (run)	12.65	0.08
+GS	unit	release	hot	idna_adapter	1.2.2	lib	12.73	0.07
+GS	unit	release	hot	crypto-common	0.1.7	lib	12.83	0.07
+GS	unit	release	hot	same-file	1.0.6	lib	13.46	0.07
+GS	unit	release	hot	hash32	0.3.1	lib	13.83	0.07
+GS	unit	release	hot	futures-core	0.3.34	lib	27.92	0.07
+GS	unit	release	hot	unicode-ident	1.0.27	lib	0.56	0.06
+GS	unit	release	hot	dyn-clone	1.0.20	lib	18.70	0.06
+GS	unit	release	hot	proc-macro2	1.0.107	build-script (run)	0.57	0.05
+GS	unit	release	hot	thiserror	2.0.21	lib	12.55	0.05
+GS	unit	release	hot	strum	0.28.0	lib	26.56	0.05
+GS	unit	release	hot	cfg-if	1.0.5	lib	1.78	0.04
+GS	unit	release	hot	equivalent	1.0.3	lib	8.00	0.04
+GS	unit	release	hot	icu_normalizer_data	2.3.0	lib	9.84	0.04
+GS	unit	release	hot	scopeguard	1.2.0	lib	10.28	0.04
+GS	unit	release	hot	thiserror	2.0.21	build-script (run)	10.56	0.04
+GS	unit	release	hot	pin-project-lite	0.2.17	lib	13.66	0.04
+GS	unit	release	hot	heapless	0.9.3	build-script (run)	13.80	0.04
+GS	unit	release	hot	ref-cast	1.0.27	lib	15.21	0.04
+GS	unit	release	hot	cpufeatures	0.2.17	lib	17.70	0.04
+GS	unit	release	hot	tree-sitter-java	0.23.5	lib	28.12	0.04
+GS	unit	release	hot	tree-sitter-yaml	0.7.2	lib	28.16	0.04
+GS	unit	release	hot	tree-sitter-go	0.25.0	lib	28.20	0.04
+GS	unit	release	hot	tree-sitter-toml-ng	0.7.0	lib	28.24	0.04
+GS	unit	release	hot	tree-sitter-bash	0.25.1	lib	28.27	0.04
+GS	unit	release	hot	tree-sitter-typescript	0.23.2	lib	28.35	0.04
+GS	unit	release	hot	tree-sitter-cpp	0.23.4	lib	28.39	0.04
+GS	unit	release	hot	tree-sitter-javascript	0.25.0	lib	28.46	0.04
+GS	unit	release	hot	tree-sitter-rust	0.24.2	lib	28.49	0.04
+GS	unit	release	hot	tree-sitter-html	0.23.2	lib	28.53	0.04
+GS	unit	release	hot	tree-sitter-diff	0.1.0	lib	28.61	0.04
+GS	unit	release	hot	tree-sitter-css	0.25.0	lib	28.65	0.04
+GS	unit	release	hot	tree-sitter-c	0.24.2	lib	29.60	0.04
+GS	unit	release	hot	stable_deref_trait	1.2.1	lib	0.62	0.03
+GS	unit	release	hot	tree-sitter-language	0.1.9	lib	0.69	0.03
+GS	unit	release	hot	libc	0.2.191	build-script (run)	1.83	0.03
+GS	unit	release	hot	cpufeatures	0.3.1	lib	13.63	0.03
+GS	unit	release	hot	sha2-asm	0.6.4	lib	15.50	0.03
+GS	unit	release	hot	tree-sitter-md	0.5.3	lib	28.09	0.03
+GS	unit	release	hot	tree-sitter-regex	0.25.0	lib	28.31	0.03
+GS	unit	release	hot	tree-sitter-python	0.25.0	lib	28.57	0.03
+GS	unit	release	hot	tree-sitter-json	0.24.8	lib	29.57	0.03
+GS	unit	release	hot	quote	1.0.47	build-script (run)	0.56	0.02
+GS	unit	release	hot	serde_core	1.0.229	build-script (run)	0.98	0.02
+GS	unit	release	hot	serde	1.0.229	build-script (run)	6.73	0.02
+GS	unit	release	hot	serde_core	1.0.229	build-script (run)	6.75	0.02
+GS	unit	release	hot	generic-array	0.14.7	build-script (run)	7.96	0.02
+GS	unit	release	hot	zmij	1.0.23	build-script (run)	7.98	0.02
+GS	unit	release	hot	zmij	1.0.23	build-script (run)	12.10	0.02
+GS	unit	release	hot	ref-cast	1.0.27	build-script (run)	12.52	0.02
+GS	unit	release	hot	tree-sitter-language	0.1.9	build-script (run)	0.68	0.01
+GS	unit	release	hot	crossbeam-utils	0.8.23	build-script (run)	1.81	0.01
+GS	unit	release	hot	icu_normalizer_data	2.3.0	build-script (run)	6.60	0.01
+GS	unit	release	hot	icu_properties_data	2.3.0	build-script (run)	6.77	0.01
+GS	unit	release	hot	crossbeam-epoch	0.9.21	build-script (run)	7.94	0.01
+GS	unit	release	hot	crossbeam-deque	0.8.8	build-script (run)	9.20	0.01
+GS	unit	release	hot	serde_json	1.0.154	build-script (run)	9.22	0.01
+GS	unit	release	hot	rayon-core	1.13.0	build-script (run)	12.54	0.01
+GS	unit	release	hot	serde_json	1.0.154	build-script (run)	12.60	0.01
+GS	unit	release	hot	getrandom	0.4.3	build-script (run)	12.61	0.01
+GS	unit	release	hot	parking_lot_core	0.9.12	build-script (run)	9.21	0.00
+GS	build-kb	release	hot	1	31.063	95.392	6.451
+GS	size-kb-release	hot	12990872	1670776	10917508	64608	0	0
+GS	load	release	hot-wasm	1	3.11 3.89 4.40
+GS	cold-ast	release	hot-wasm	1	72.273	240.546	20.675	487
+GS	timings	release	hot-wasm	1	319	72.2	258.4	51	19.9	17.6	60.1	62.5	9.7
+GS	unit	release	hot-wasm	cranelift-codegen	0.116.1	lib	13.23	25.22
+GS	unit	release	hot-wasm	wasmtime	29.0.1	lib	35.54	22.01
+GS	unit	release	hot-wasm	wasmparser	0.221.3	lib	11.31	14.12
+GS	unit	release	hot-wasm	wasmtime-cranelift	29.0.1	lib	32.59	12.12
+GS	unit	release	hot-wasm	omp-ast	2.0.0	lib	62.50	9.69
+GS	unit	release	hot-wasm	regex-automata	0.4.18	lib	16.30	5.70
+GS	unit	release	hot-wasm	omp-core	2.0.0	lib	59.56	5.59
+GS	unit	release	hot-wasm	jiff	0.2.38	lib	48.39	5.45
+GS	unit	release	hot-wasm	tree-sitter	0.25.10	build-script (run)	41.45	4.93
+GS	unit	release	hot-wasm	object	0.36.7	lib	22.95	4.78
+GS	unit	release	hot-wasm	wasmtime-environ	29.0.1	lib	27.16	4.77
+GS	unit	release	hot-wasm	gimli	0.31.1	lib	8.43	4.30
+GS	unit	release	hot-wasm	regex-syntax	0.8.11	lib	14.12	4.02
+GS	unit	release	hot-wasm	wasmprinter	0.221.3	lib	18.15	3.75
+GS	unit	release	hot-wasm	cranelift-codegen	0.116.1	build-script (run)	9.53	3.71
+GS	unit	release	hot-wasm	zerocopy	0.8.63	lib	3.39	3.69
+GS	unit	release	hot-wasm	omp-walker	2.0.0	lib	59.49	3.64
+GS	unit	release	hot-wasm	syn	2.0.119	lib	1.73	3.58
+GS	unit	release	hot-wasm	wasmtime-c-api-impl	29.0.1	lib	42.56	3.41
+GS	unit	release	hot-wasm	ignore	0.4.33	lib	58.15	3.29
+GS	unit	release	hot-wasm	tree-sitter-typescript	0.23.2	build-script (run)	55.93	3.22
+GS	unit	release	hot-wasm	aho-corasick	1.1.5	lib	13.08	2.98
+GS	unit	release	hot-wasm	schemars	1.2.3	lib	48.88	2.71
+GS	unit	release	hot-wasm	tree-sitter-bash	0.25.1	build-script (run)	53.54	2.63
+GS	unit	release	hot-wasm	serde_derive	1.0.229	lib	3.54	2.48
+GS	unit	release	hot-wasm	syn	3.0.9	lib	1.22	2.32
+GS	unit	release	hot-wasm	serde_core	1.0.229	lib	0.74	2.31
+GS	unit	release	hot-wasm	tree-sitter-md	0.5.3	build-script (run)	49.96	2.21
+GS	unit	release	hot-wasm	regalloc2	0.11.2	lib	9.22	2.09
+GS	unit	release	hot-wasm	rayon	1.12.0	lib	56.50	2.04
+GS	unit	release	hot-wasm	tree-sitter-cpp	0.23.4	build-script (run)	53.58	1.99
+GS	unit	release	hot-wasm	cranelift-codegen-meta	0.116.1	lib	7.25	1.92
+GS	unit	release	hot-wasm	serde_json	1.0.154	lib	37.35	1.92
+GS	unit	release	hot-wasm	cranelift-frontend	0.116.1	lib	29.63	1.80
+GS	unit	release	hot-wasm	cranelift-isle	0.116.1	lib	7.60	1.73
+GS	unit	release	hot-wasm	serde_core	1.0.229	lib	28.88	1.72
+GS	unit	release	hot-wasm	globset	0.4.20	lib	39.81	1.62
+GS	unit	release	hot-wasm	strum_macros	0.28.0	lib	38.61	1.61
+GS	unit	release	hot-wasm	rustix	1.1.5	lib	27.30	1.58
+GS	unit	release	hot-wasm	itertools	0.12.1	lib	31.07	1.52
+GS	unit	release	hot-wasm	url	2.5.8	lib	57.55	1.52
+GS	unit	release	hot-wasm	jiff-core	0.1.1	lib	47.43	1.35
+GS	unit	release	hot-wasm	icu_locale_core	2.3.0	lib	11.02	1.34
+GS	unit	release	hot-wasm	libm	0.2.16	lib	28.32	1.31
+GS	unit	release	hot-wasm	cc	1.2.67	lib	0.57	1.28
+GS	unit	release	hot-wasm	tree-sitter-rust	0.24.2	build-script (run)	55.18	1.22
+GS	unit	release	hot-wasm	schemars_derive	1.2.3	lib	40.23	1.18
+GS	unit	release	hot-wasm	data-encoding	2.11.1	lib	47.56	1.13
+GS	unit	release	hot-wasm	tree-sitter-javascript	0.25.0	build-script (run)	56.17	1.07
+GS	unit	release	hot-wasm	wasm-encoder	0.221.3	lib	21.90	1.05
+GS	unit	release	hot-wasm	icu_properties	2.3.0	lib	33.20	1.03
+GS	unit	release	hot-wasm	idna	1.1.0	lib	41.56	1.00
+GS	unit	release	hot-wasm	rayon-core	1.13.0	lib	44.93	0.98
+GS	unit	release	hot-wasm	thiserror-impl	2.0.21	lib	6.62	0.94
+GS	unit	release	hot-wasm	heapless	0.9.3	lib	58.54	0.94
+GS	unit	release	hot-wasm	libc	0.2.191	lib	2.72	0.93
+GS	unit	release	hot-wasm	rustix	0.38.44	lib	32.22	0.91
+GS	unit	release	hot-wasm	tracing-attributes	0.1.31	lib	23.27	0.89
+GS	unit	release	hot-wasm	serde_json	1.0.154	lib	32.40	0.89
+GS	unit	release	hot-wasm	rand	0.10.3	lib	57.24	0.86
+GS	unit	release	hot-wasm	thiserror-impl	1.0.69	lib	24.16	0.85
+GS	unit	release	hot-wasm	tree-sitter-java	0.23.5	build-script (run)	52.61	0.83
+GS	unit	release	hot-wasm	tree-sitter-yaml	0.7.2	build-script (run)	52.75	0.83
+GS	unit	release	hot-wasm	tree-sitter-python	0.25.0	build-script (run)	53.84	0.82
+GS	unit	release	hot-wasm	ast-grep-core	0.39.9	lib	60.14	0.82
+GS	unit	release	hot-wasm	tree-sitter	0.25.10	lib	47.59	0.81
+GS	unit	release	hot-wasm	arbitrary	1.5.0	lib	8.82	0.78
+GS	unit	release	hot-wasm	indexmap	2.14.2	lib	6.13	0.74
+GS	unit	release	hot-wasm	hashbrown	0.17.1	lib	5.43	0.70
+GS	unit	release	hot-wasm	indexmap	2.14.2	lib	26.48	0.68
+GS	unit	release	hot-wasm	icu_normalizer	2.3.0	lib	33.62	0.68
+GS	unit	release	hot-wasm	bytes	1.12.1	lib	46.33	0.68
+GS	unit	release	hot-wasm	memchr	2.8.3	lib	1.07	0.67
+GS	unit	release	hot-wasm	regex	1.13.1	lib	45.98	0.67
+GS	unit	release	hot-wasm	zerovec-derive	0.11.6	lib	4.85	0.65
+GS	unit	release	hot-wasm	tree-sitter-c	0.24.2	build-script (run)	49.31	0.65
+GS	unit	release	hot-wasm	hashbrown	0.14.5	lib	7.28	0.64
+GS	unit	release	hot-wasm	generic-array	0.14.7	lib	26.66	0.62
+GS	unit	release	hot-wasm	serde_derive_internals	0.30.0	lib	35.26	0.62
+GS	unit	release	hot-wasm	smol_bitmap	0.3.2	lib	48.69	0.62
+GS	unit	release	hot-wasm	typenum	1.20.1	lib	26.05	0.61
+GS	unit	release	hot-wasm	yoke-derive	0.8.4	lib	4.17	0.53
+GS	unit	release	hot-wasm	tracing-core	0.1.36	lib	25.01	0.53
+GS	unit	release	hot-wasm	hashbrown	0.15.5	lib	5.91	0.51
+GS	unit	release	hot-wasm	hashbrown	0.17.1	lib	25.54	0.51
+GS	unit	release	hot-wasm	bstr	1.13.1	lib	35.88	0.47
+GS	unit	release	hot-wasm	zerofrom-derive	0.1.8	lib	3.65	0.46
+GS	unit	release	hot-wasm	dashmap	6.2.1	lib	59.07	0.45
+GS	unit	release	hot-wasm	serde	1.0.229	lib	6.02	0.44
+GS	unit	release	hot-wasm	zerovec	0.11.8	lib	6.59	0.44
+GS	unit	release	hot-wasm	icu_collections	2.3.0	lib	22.10	0.44
+GS	unit	release	hot-wasm	tree-sitter-go	0.25.0	build-script (run)	52.18	0.44
+GS	unit	release	hot-wasm	parking_lot	0.12.5	lib	45.90	0.43
+GS	unit	release	hot-wasm	crossbeam-utils	0.8.23	lib	12.50	0.42
+GS	unit	release	hot-wasm	memchr	2.8.3	lib	31.98	0.42
+GS	unit	release	hot-wasm	proc-macro2	1.0.107	lib	0.61	0.41
+GS	unit	release	hot-wasm	tree-sitter-toml-ng	0.7.0	build-script (run)	52.34	0.41
+GS	unit	release	hot-wasm	linux-raw-sys	0.12.1	lib	25.99	0.39
+GS	unit	release	hot-wasm	displaydoc	0.2.7	lib	6.87	0.37
+GS	unit	release	hot-wasm	walkdir	2.5.0	lib	39.45	0.36
+GS	unit	release	hot-wasm	tree-sitter-html	0.23.2	build-script (run)	55.57	0.36
+GS	unit	release	hot-wasm	postcard	1.1.3	lib	22.90	0.35
+GS	unit	release	hot-wasm	synstructure	0.14.0	lib	3.05	0.34
+GS	unit	release	hot-wasm	icu_provider	2.3.1	lib	22.56	0.33
+GS	unit	release	hot-wasm	tree-sitter-css	0.25.0	build-script (run)	51.80	0.33
+GS	unit	release	hot-wasm	tree-sitter-diff	0.1.0	build-script (run)	54.66	0.33
+GS	unit	release	hot-wasm	anyhow	1.0.104	lib	9.63	0.32
+GS	unit	release	hot-wasm	zeroize_derive	1.5.0	lib	46.38	0.31
+GS	unit	release	hot-wasm	cranelift-entity	0.116.1	lib	7.50	0.30
+GS	unit	release	hot-wasm	allocator-api2	0.2.21	lib	7.92	0.30
+GS	unit	release	hot-wasm	paste	1.0.15	lib	34.30	0.30
+GS	unit	release	hot-wasm	ref-cast-impl	1.0.27	lib	35.26	0.28
+GS	unit	release	hot-wasm	target-lexicon	0.13.5	build-script	7.21	0.27
+GS	unit	release	hot-wasm	target-lexicon	0.13.5	lib	8.16	0.27
+GS	unit	release	hot-wasm	semver	1.0.28	lib	10.51	0.26
+GS	unit	release	hot-wasm	termcolor	1.4.1	lib	13.48	0.26
+GS	unit	release	hot-wasm	zmij	1.0.23	lib	34.95	0.25
+GS	unit	release	hot-wasm	libc	0.2.191	build-script	2.03	0.24
+GS	unit	release	hot-wasm	cranelift-bforest	0.116.1	lib	9.95	0.24
+GS	unit	release	hot-wasm	zerotrie	0.2.5	lib	12.84	0.24
+GS	unit	release	hot-wasm	crossbeam-epoch	0.9.21	lib	30.66	0.24
+GS	unit	release	hot-wasm	streaming-iterator	0.1.9	lib	47.34	0.24
+GS	unit	release	hot-wasm	smallvec	2.0.0-beta.3	lib	59.15	0.23
+GS	unit	release	hot-wasm	linux-raw-sys	0.4.15	lib	31.63	0.22
+GS	unit	release	hot-wasm	quote	1.0.47	lib	1.01	0.21
+GS	unit	release	hot-wasm	bumpalo	3.20.3	lib	8.23	0.21
+GS	unit	release	hot-wasm	tracing	0.1.44	lib	27.77	0.21
+GS	unit	release	hot-wasm	sha2	0.10.9	lib	51.59	0.21
+GS	unit	release	hot-wasm	tree-sitter-regex	0.25.0	build-script (run)	52.13	0.21
+GS	unit	release	hot-wasm	bitflags	2.13.2	lib	7.08	0.20
+GS	unit	release	hot-wasm	zmij	1.0.23	lib	28.08	0.20
+GS	unit	release	hot-wasm	parking_lot_core	0.9.12	lib	34.24	0.20
+GS	unit	release	hot-wasm	bytes-utils	0.1.4	lib	54.99	0.20
+GS	unit	release	hot-wasm	zerocopy	0.8.63	build-script	2.27	0.19
+GS	unit	release	hot-wasm	cranelift-codegen	0.116.1	build-script	9.33	0.19
+GS	unit	release	hot-wasm	chacha20	0.10.2	lib	39.27	0.18
+GS	unit	release	hot-wasm	getrandom	0.4.3	lib	44.75	0.18
+GS	unit	release	hot-wasm	version_check	0.9.5	lib	0.87	0.17
+GS	unit	release	hot-wasm	writeable	0.6.4	lib	10.30	0.17
+GS	unit	release	hot-wasm	rustix	0.38.44	build-script	25.43	0.17
+GS	unit	release	hot-wasm	lock_api	0.4.14	lib	32.04	0.17
+GS	unit	release	hot-wasm	byteorder	1.5.0	lib	37.13	0.17
+GS	unit	release	hot-wasm	bit-vec	0.8.0	lib	47.38	0.17
+GS	unit	release	hot-wasm	smallvec	1.16.3	lib	6.42	0.16
+GS	unit	release	hot-wasm	cranelift-bitset	0.116.1	lib	6.46	0.16
+GS	unit	release	hot-wasm	anyhow	1.0.104	build-script	7.80	0.16
+GS	unit	release	hot-wasm	memfd	0.6.6	lib	33.46	0.16
+GS	unit	release	hot-wasm	wasmtime-c-api-macros	29.0.1	lib	36.35	0.16
+GS	unit	release	hot-wasm	once_cell	1.21.4	lib	1.85	0.15
+GS	unit	release	hot-wasm	yoke	0.8.3	lib	4.70	0.15
+GS	unit	release	hot-wasm	either	1.19.0	lib	7.96	0.15
+GS	unit	release	hot-wasm	litemap	0.8.3	lib	10.77	0.15
+GS	unit	release	hot-wasm	wasmtime-versioned-export-macros	29.0.1	lib	12.99	0.15
+GS	unit	release	hot-wasm	itoa	1.0.18	lib	36.98	0.15
+GS	unit	release	hot-wasm	find-msvc-tools	0.1.15	lib	0.43	0.14
+GS	unit	release	hot-wasm	serde_core	1.0.229	build-script	0.58	0.14
+GS	unit	release	hot-wasm	thiserror	2.0.21	build-script	5.70	0.14
+GS	unit	release	hot-wasm	ahash	0.8.12	lib	7.02	0.14
+GS	unit	release	hot-wasm	crc32fast	1.5.2	lib	12.37	0.14
+GS	unit	release	hot-wasm	rustix	1.1.5	build-script	13.74	0.14
+GS	unit	release	hot-wasm	proc-macro2	1.0.107	build-script	0.43	0.13
+GS	unit	release	hot-wasm	serde_core	1.0.229	build-script	14.00	0.13
+GS	unit	release	hot-wasm	crossbeam-deque	0.8.8	lib	33.28	0.13
+GS	unit	release	hot-wasm	ref-cast	1.0.27	build-script	34.68	0.13
+GS	unit	release	hot-wasm	heck	0.5.0	lib	36.62	0.13
+GS	unit	release	hot-wasm	digest	0.10.7	lib	41.43	0.13
+GS	unit	release	hot-wasm	serde	1.0.229	build-script	0.70	0.12
+GS	unit	release	hot-wasm	zmij	1.0.23	build-script	5.31	0.12
+GS	unit	release	hot-wasm	crossbeam-utils	0.8.23	build-script	8.69	0.12
+GS	unit	release	hot-wasm	libm	0.2.16	build-script	13.36	0.12
+GS	unit	release	hot-wasm	paste	1.0.15	build-script	25.75	0.12
+GS	unit	release	hot-wasm	crossbeam-deque	0.8.8	build-script	25.87	0.12
+GS	unit	release	hot-wasm	itoa	1.0.18	lib	31.51	0.12
+GS	unit	release	hot-wasm	wasmtime-c-api-impl	29.0.1	build-script	31.86	0.12
+GS	unit	release	hot-wasm	percent-encoding	2.3.2	lib	36.75	0.12
+GS	unit	release	hot-wasm	form_urlencoded	1.2.2	lib	38.49	0.12
+GS	unit	release	hot-wasm	quote	1.0.47	build-script	0.43	0.11
+GS	unit	release	hot-wasm	log	0.4.34	lib	2.59	0.11
+GS	unit	release	hot-wasm	wasmparser	0.221.3	build-script	8.58	0.11
+GS	unit	release	hot-wasm	tinystr	0.8.4	lib	10.19	0.11
+GS	unit	release	hot-wasm	cobs	0.3.0	lib	12.73	0.11
+GS	unit	release	hot-wasm	thiserror	1.0.69	build-script	13.88	0.11
+GS	unit	release	hot-wasm	tree-sitter	0.25.10	build-script	35.07	0.11
+GS	unit	release	hot-wasm	heapless	0.9.3	build-script	36.87	0.11
+GS	unit	release	hot-wasm	tree-sitter-css	0.25.0	build-script	47.20	0.11
+GS	unit	release	hot-wasm	tree-sitter-md	0.5.3	build-script	47.24	0.11
+GS	unit	release	hot-wasm	foldhash	0.2.0	lib	59.45	0.11
+GS	unit	release	hot-wasm	shlex	2.0.1	lib	0.49	0.10
+GS	unit	release	hot-wasm	cranelift-isle	0.116.1	build-script	5.50	0.10
+GS	unit	release	hot-wasm	foldhash	0.1.5	lib	5.60	0.10
+GS	unit	release	hot-wasm	crossbeam-epoch	0.9.21	build-script	16.11	0.10
+GS	unit	release	hot-wasm	parking_lot_core	0.9.12	build-script	25.61	0.10
+GS	unit	release	hot-wasm	rand_core	0.10.1	lib	34.65	0.10
+GS	unit	release	hot-wasm	getrandom	0.4.3	build-script	34.83	0.10
+GS	unit	release	hot-wasm	tree-sitter-javascript	0.25.0	build-script	46.64	0.10
+GS	unit	release	hot-wasm	tree-sitter-typescript	0.23.2	build-script	46.70	0.10
+GS	unit	release	hot-wasm	tree-sitter-html	0.23.2	build-script	46.74	0.10
+GS	unit	release	hot-wasm	tree-sitter-rust	0.24.2	build-script	46.80	0.10
+GS	unit	release	hot-wasm	tree-sitter-diff	0.1.0	build-script	46.84	0.10
+GS	unit	release	hot-wasm	tree-sitter-python	0.25.0	build-script	46.90	0.10
+GS	unit	release	hot-wasm	tree-sitter-cpp	0.23.4	build-script	46.94	0.10
+GS	unit	release	hot-wasm	tree-sitter-yaml	0.7.2	build-script	47.05	0.10
+GS	unit	release	hot-wasm	tree-sitter-toml-ng	0.7.0	build-script	47.11	0.10
+GS	unit	release	hot-wasm	tree-sitter-regex	0.25.0	build-script	47.18	0.10
+GS	unit	release	hot-wasm	tree-sitter-c	0.24.2	build-script	47.28	0.10
+GS	unit	release	hot-wasm	bit-set	0.8.0	lib	48.78	0.10
+GS	unit	release	hot-wasm	zeroize	1.9.1	lib	56.40	0.10
+GS	unit	release	hot-wasm	tree-sitter-language	0.1.9	build-script	0.59	0.09
+GS	unit	release	hot-wasm	ahash	0.8.12	build-script	2.50	0.09
+GS	unit	release	hot-wasm	crc32fast	1.5.2	build-script	8.49	0.09
+GS	unit	release	hot-wasm	object	0.36.7	build-script	10.92	0.09
+GS	unit	release	hot-wasm	wasmtime	29.0.1	build-script	30.98	0.09
+GS	unit	release	hot-wasm	sha2-asm	0.6.4	build-script	34.48	0.09
+GS	unit	release	hot-wasm	tree-sitter-bash	0.25.1	build-script	47.00	0.09
+GS	unit	release	hot-wasm	tree-sitter-json	0.24.8	build-script	47.01	0.09
+GS	unit	release	hot-wasm	tree-sitter-java	0.23.5	build-script	47.09	0.09
+GS	unit	release	hot-wasm	tree-sitter-go	0.25.0	build-script	47.15	0.09
+GS	unit	release	hot-wasm	tree-sitter-json	0.24.8	build-script (run)	53.44	0.09
+GS	unit	release	hot-wasm	serde_json	1.0.154	build-script	26.38	0.08
+GS	unit	release	hot-wasm	icu_properties_data	2.3.0	lib	30.90	0.08
+GS	unit	release	hot-wasm	foldhash	0.2.0	lib	31.43	0.08
+GS	unit	release	hot-wasm	wasmtime	29.0.1	build-script (run)	33.12	0.08
+GS	unit	release	hot-wasm	serde_json	1.0.154	build-script	34.61	0.08
+GS	unit	release	hot-wasm	wasmtime-slab	29.0.1	lib	34.75	0.08
+GS	unit	release	hot-wasm	rayon-core	1.13.0	build-script	34.81	0.08
+GS	unit	release	hot-wasm	sha2-asm	0.6.4	build-script (run)	34.93	0.08
+GS	unit	release	hot-wasm	block-buffer	0.10.4	lib	35.18	0.08
+GS	unit	release	hot-wasm	dyn-clone	1.0.20	lib	47.35	0.08
+GS	unit	release	hot-wasm	potential_utf	0.1.6	lib	12.93	0.07
+GS	unit	release	hot-wasm	generic-array	0.14.7	build-script	13.15	0.07
+GS	unit	release	hot-wasm	icu_normalizer_data	2.3.0	build-script	13.21	0.07
+GS	unit	release	hot-wasm	utf8_iter	1.0.4	lib	13.28	0.07
+GS	unit	release	hot-wasm	icu_properties_data	2.3.0	build-script	16.21	0.07
+GS	unit	release	hot-wasm	same-file	1.0.6	lib	36.52	0.07
+GS	unit	release	hot-wasm	unicode-ident	1.0.27	lib	0.43	0.06
+GS	unit	release	hot-wasm	zerofrom	0.1.8	lib	4.11	0.06
+GS	unit	release	hot-wasm	cranelift-native	0.116.1	lib	30.60	0.06
+GS	unit	release	hot-wasm	wasmtime-c-api-impl	29.0.1	build-script (run)	31.98	0.06
+GS	unit	release	hot-wasm	idna_adapter	1.2.2	lib	35.01	0.06
+GS	unit	release	hot-wasm	crypto-common	0.1.7	lib	35.20	0.06
+GS	unit	release	hot-wasm	futures-core	0.3.34	lib	59.38	0.06
+GS	unit	release	hot-wasm	cranelift-codegen-shared	0.116.1	lib	7.16	0.05
+GS	unit	release	hot-wasm	rustc-hash	2.1.3	lib	8.44	0.05
+GS	unit	release	hot-wasm	leb128	0.2.7	lib	16.06	0.05
+GS	unit	release	hot-wasm	thiserror	1.0.69	lib	28.04	0.05
+GS	unit	release	hot-wasm	sptr	0.3.2	lib	34.60	0.05
+GS	unit	release	hot-wasm	hash32	0.3.1	lib	37.30	0.05
+GS	unit	release	hot-wasm	proc-macro2	1.0.107	build-script (run)	0.57	0.04
+GS	unit	release	hot-wasm	stable_deref_trait	1.2.1	lib	1.99	0.04
+GS	unit	release	hot-wasm	thiserror	2.0.21	build-script (run)	5.87	0.04
+GS	unit	release	hot-wasm	thiserror	2.0.21	lib	7.56	0.04
+GS	unit	release	hot-wasm	anyhow	1.0.104	build-script (run)	8.11	0.04
+GS	unit	release	hot-wasm	cranelift-codegen-shared	0.116.1	lib	10.47	0.04
+GS	unit	release	hot-wasm	rustix	1.1.5	build-script (run)	22.05	0.04
+GS	unit	release	hot-wasm	pin-project-lite	0.2.17	lib	25.71	0.04
+GS	unit	release	hot-wasm	rustix	0.38.44	build-script (run)	28.00	0.04
+GS	unit	release	hot-wasm	icu_normalizer_data	2.3.0	lib	28.28	0.04
+GS	unit	release	hot-wasm	scopeguard	1.2.0	lib	31.94	0.04
+GS	unit	release	hot-wasm	wasmtime-math	29.0.1	lib	33.42	0.04
+GS	unit	release	hot-wasm	heapless	0.9.3	build-script (run)	38.46	0.04
+GS	unit	release	hot-wasm	ref-cast	1.0.27	lib	41.41	0.04
+GS	unit	release	hot-wasm	strum	0.28.0	lib	58.11	0.04
+GS	unit	release	hot-wasm	tree-sitter-typescript	0.23.2	lib	59.53	0.04
+GS	unit	release	hot-wasm	tree-sitter-cpp	0.23.4	lib	59.70	0.04
+GS	unit	release	hot-wasm	tree-sitter-yaml	0.7.2	lib	59.81	0.04
+GS	unit	release	hot-wasm	tree-sitter-json	0.24.8	lib	59.85	0.04
+GS	unit	release	hot-wasm	tree-sitter-toml-ng	0.7.0	lib	59.92	0.04
+GS	unit	release	hot-wasm	tree-sitter-go	0.25.0	lib	59.95	0.04
+GS	unit	release	hot-wasm	tree-sitter-md	0.5.3	lib	60.03	0.04
+GS	unit	release	hot-wasm	tree-sitter-c	0.24.2	lib	60.10	0.04
+GS	unit	release	hot-wasm	cfg-if	1.0.5	lib	0.84	0.03
+GS	unit	release	hot-wasm	tree-sitter-language	0.1.9	lib	1.04	0.03
+GS	unit	release	hot-wasm	equivalent	1.0.3	lib	5.84	0.03
+GS	unit	release	hot-wasm	cranelift-control	0.116.1	lib	9.60	0.03
+GS	unit	release	hot-wasm	thiserror	1.0.69	build-script (run)	22.02	0.03
+GS	unit	release	hot-wasm	equivalent	1.0.3	lib	26.46	0.03
+GS	unit	release	hot-wasm	wasmtime-jit-icache-coherence	29.0.1	lib	34.44	0.03
+GS	unit	release	hot-wasm	wasmtime-asm-macros	29.0.1	lib	34.57	0.03
+GS	unit	release	hot-wasm	cpufeatures	0.3.1	lib	36.58	0.03
+GS	unit	release	hot-wasm	sha2-asm	0.6.4	lib	44.72	0.03
+GS	unit	release	hot-wasm	cpufeatures	0.2.17	lib	47.31	0.03
+GS	unit	release	hot-wasm	tree-sitter-javascript	0.25.0	lib	59.57	0.03
+GS	unit	release	hot-wasm	tree-sitter-rust	0.24.2	lib	59.61	0.03
+GS	unit	release	hot-wasm	tree-sitter-bash	0.25.1	lib	59.64	0.03
+GS	unit	release	hot-wasm	tree-sitter-html	0.23.2	lib	59.67	0.03
+GS	unit	release	hot-wasm	tree-sitter-diff	0.1.0	lib	59.75	0.03
+GS	unit	release	hot-wasm	tree-sitter-python	0.25.0	lib	59.78	0.03
+GS	unit	release	hot-wasm	tree-sitter-java	0.23.5	lib	59.89	0.03
+GS	unit	release	hot-wasm	tree-sitter-regex	0.25.0	lib	59.99	0.03
+GS	unit	release	hot-wasm	tree-sitter-css	0.25.0	lib	60.07	0.03
+GS	unit	release	hot-wasm	quote	1.0.47	build-script (run)	0.55	0.02
+GS	unit	release	hot-wasm	serde_core	1.0.229	build-script (run)	0.72	0.02
+GS	unit	release	hot-wasm	serde	1.0.229	build-script (run)	0.82	0.02
+GS	unit	release	hot-wasm	zerocopy	0.8.63	build-script (run)	2.46	0.02
+GS	unit	release	hot-wasm	libc	0.2.191	build-script (run)	2.48	0.02
+GS	unit	release	hot-wasm	ahash	0.8.12	build-script (run)	2.70	0.02
+GS	unit	release	hot-wasm	target-lexicon	0.13.5	build-script (run)	7.48	0.02
+GS	unit	release	hot-wasm	wasmparser	0.221.3	build-script (run)	9.18	0.02
+GS	unit	release	hot-wasm	object	0.36.7	build-script (run)	11.01	0.02
+GS	unit	release	hot-wasm	serde_core	1.0.229	build-script (run)	22.00	0.02
+GS	unit	release	hot-wasm	generic-array	0.14.7	build-script (run)	22.54	0.02
+GS	unit	release	hot-wasm	zmij	1.0.23	build-script (run)	23.25	0.02
+GS	unit	release	hot-wasm	crossbeam-deque	0.8.8	build-script (run)	27.73	0.02
+GS	unit	release	hot-wasm	paste	1.0.15	build-script (run)	27.75	0.02
+GS	unit	release	hot-wasm	ref-cast	1.0.27	build-script (run)	34.90	0.02
+GS	unit	release	hot-wasm	tree-sitter-language	0.1.9	build-script (run)	0.69	0.01
+GS	unit	release	hot-wasm	cranelift-isle	0.116.1	build-script (run)	6.58	0.01
+GS	unit	release	hot-wasm	crossbeam-utils	0.8.23	build-script (run)	9.17	0.01
+GS	unit	release	hot-wasm	crc32fast	1.5.2	build-script (run)	9.20	0.01
+GS	unit	release	hot-wasm	icu_properties_data	2.3.0	build-script (run)	16.28	0.01
+GS	unit	release	hot-wasm	crossbeam-epoch	0.9.21	build-script (run)	16.29	0.01
+GS	unit	release	hot-wasm	libm	0.2.16	build-script (run)	22.09	0.01
+GS	unit	release	hot-wasm	icu_normalizer_data	2.3.0	build-script (run)	22.54	0.01
+GS	unit	release	hot-wasm	serde_json	1.0.154	build-script (run)	27.28	0.01
+GS	unit	release	hot-wasm	parking_lot_core	0.9.12	build-script (run)	27.99	0.01
+GS	unit	release	hot-wasm	zmij	1.0.23	build-script (run)	34.47	0.01
+GS	unit	release	hot-wasm	rayon-core	1.13.0	build-script (run)	34.89	0.01
+GS	unit	release	hot-wasm	serde_json	1.0.154	build-script (run)	34.92	0.01
+GS	unit	release	hot-wasm	getrandom	0.4.3	build-script (run)	34.93	0.01
+GS	build-kb	release	hot-wasm	1	67.836	234.469	10.378
+GS	size-kb-release	hot-wasm	13540584	1977695	10949444	83936	0	0
+GS	load	release	none	2	3.57 3.79 4.28
+GS	cold-ast	release	none	2	34.928	100.551	10.383	259
+GS	timings	release	none	2	178	34.9	109.0	0	0.0	0.0	0.0	24.6	10.3
+GS	build-kb	release	none	2	32.169	101.374	6.796
+GS	size-kb-release	none	1224856	946493	87107	20568	0	0
+GS	load	release	hot	2	3.43 3.72 4.22
+GS	cold-ast	release	hot	2	41.248	121.566	13.628	320
+GS	timings	release	hot	2	229	41.2	133.0	51	17.8	15.4	29.3	30.9	10.3
+GS	build-kb	release	hot	2	33.084	98.282	6.880
+GS	size-kb-release	hot	12990872	1670776	10917508	64608	0	0
+GS	load	release	hot-wasm	2	2.93 3.54 4.12
+GS	cold-ast	release	hot-wasm	2	69.853	230.685	19.811	487
+GS	timings	release	hot-wasm	2	319	69.8	247.7	51	17.4	15.1	57.9	60.2	9.5
+GS	build-kb	release	hot-wasm	2	62.275	225.932	9.984
+GS	size-kb-release	hot-wasm	13540584	1977695	10949444	83936	0	0
+GS	load	release	all	2	3.42 3.53 4.03
+GS	cold-ast	release	all	2	63.171	196.254	23.300	659
+GS	timings	release	all	2	346	63.1	218.1	168	105.8	97.7	51.7	52.2	10.9
+GS	build-kb	release	all	2	31.375	92.314	6.732
+GS	size-kb-release	all	97347448	4212088	92117860	184400	0	0
+GS	load	release	hot	3	3.26 3.49 3.97
+GS	cold-ast	release	hot	3	36.435	105.166	12.452	320
+GS	timings	release	hot	3	229	36.4	115.5	51	16.1	13.9	25.0	26.8	9.6
+GS	build-kb	release	hot	3	29.069	89.425	6.444
+GS	size-kb-release	hot	12990872	1670776	10917508	64608	0	0
+GS	load	release	hot-wasm	3	3.23 3.45 3.92
+GS	cold-ast	release	hot-wasm	3	67.412	224.324	18.801	487
+GS	timings	release	hot-wasm	3	319	67.3	240.5	51	17.7	15.4	56.2	58.0	9.3
+GS	build-kb	release	hot-wasm	3	60.585	215.449	9.299
+GS	size-kb-release	hot-wasm	13540584	1977695	10949444	83936	0	0
+GS	load	release	all	3	3.29 3.44 3.86
+GS	cold-ast	release	all	3	58.472	182.743	22.414	659
+GS	timings	release	all	3	346	58.4	203.6	168	96.7	88.9	47.9	48.6	9.8
+GS	build-kb	release	all	3	30.289	88.382	6.768
+GS	size-kb-release	all	97347448	4212088	92117860	184400	0	0
+GS	load	release	none	3	3.45 3.49 3.85
+GS	cold-ast	release	none	3	32.230	93.450	10.052	259
+GS	timings	release	none	3	178	32.2	101.5	0	0.0	0.0	0.0	23.1	9.1
+GS	build-kb	release	none	3	29.596	90.801	6.170
+GS	size-kb-release	none	1224856	946493	87107	20568	0	0

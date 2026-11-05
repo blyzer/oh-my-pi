@@ -3,10 +3,15 @@
 use crate::{MinimizerCtx, MinimizerOutput};
 
 pub mod cargo;
+pub mod cloud;
 pub mod cpp;
 pub mod dotnet;
 pub mod generic;
+pub mod gh;
+pub mod git;
+pub mod glab;
 pub mod go;
+pub mod gt;
 pub mod jvm;
 pub mod rust_tools;
 
@@ -14,6 +19,11 @@ pub mod rust_tools;
 #[must_use]
 pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 	match program {
+		"git" | "yadm" => git::supports(subcommand),
+		"gt" => gt::supports(program, subcommand),
+		"aws" | "curl" | "wget" | "psql" => cloud::supports(program, subcommand),
+		"gh" => gh::supports(subcommand),
+		"glab" => glab::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
 		"go" | "golangci-lint" => go::supports(program, subcommand),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
@@ -37,6 +47,11 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	match ctx.program {
+		"git" | "yadm" => git::filter(ctx, input, exit_code),
+		"gt" => gt::filter(ctx, input, exit_code),
+		"aws" | "curl" | "wget" | "psql" => cloud::filter(ctx, input, exit_code),
+		"gh" => gh::filter(ctx, input, exit_code),
+		"glab" => glab::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
 		"go" | "golangci-lint" => go::filter(ctx, input, exit_code),
 		"dotnet" => dotnet::filter(ctx, input, exit_code),

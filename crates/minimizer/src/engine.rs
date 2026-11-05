@@ -363,6 +363,14 @@ fn ensure_success_visible(output: MinimizerOutput<'_>, exit_code: i32) -> Minimi
 /// callers carry it as `&'static str` without allocation.
 fn program_label(program: &str) -> &'static str {
 	match program {
+		"git" => "git",
+		"yadm" => "yadm",
+		"gt" => "gt",
+		"gh" => "gh",
+		"aws" => "aws",
+		"curl" => "curl",
+		"wget" => "wget",
+		"psql" => "psql",
 		"cargo" => "cargo",
 		"go" => "go",
 		"cmake" => "cmake",
@@ -429,6 +437,21 @@ fn resolve_pipeline<'a>(
 	builtin_pipelines().find(program, subcommand)
 }
 
+/// Whether the pipeline overlaid on a Rust filter's output for this command
+/// drops whole lines. A filter that would return output whole checks this
+/// first: such an overlay cuts a whole patch partway through, where it would
+/// have kept the head of a summary that starts with the stat.
+pub(crate) fn overlay_caps_lines(
+	config: &MinimizerConfig,
+	program: &str,
+	subcommand: Option<&str>,
+	exit_code: i32,
+	input_bytes: usize,
+) -> bool {
+	resolve_pipeline(config, program, subcommand)
+		.is_some_and(|pipeline| pipeline.caps_lines(exit_code, input_bytes))
+}
+
 const BUILTIN_FILTERS_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
 
 // Fail safe like a panicking filter: a broken built-in set leaves output
@@ -458,9 +481,19 @@ fn minimizable_input(input: &str) -> String {
 	output
 }
 
+/// Pad `input` past
+/// [`WHOLE_OUTPUT_BYTES`](crate::primitives::WHOLE_OUTPUT_BYTES)
+/// with blank lines, which no patch parser counts.
+#[cfg(test)]
+fn past_whole_budget(input: &str) -> String {
+	use crate::primitives::WHOLE_OUTPUT_BYTES;
+	format!("{input}{}", "\n".repeat(WHOLE_OUTPUT_BYTES))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{
+		fmt::Write as _,
 		fs,
 		sync::atomic::{AtomicUsize, Ordering},
 	};
@@ -546,6 +579,99 @@ replace = [{ pattern = "x", replacement = "y" }]
 	}
 
 	#[test]
+	fn pipeline_overlay_honors_subcommand_and_exit_gates() {
+		let cfg = config_from_settings(
+			r#"
+schema_version = 1
+[filters.git_diff_overlay]
+match_command = "^git$"
+match_subcommand = "^diff$"
+strip_lines_matching = [".*"]
+on_empty = "OVERLAY"
+only_on_exit = [0]
+"#,
+		);
+		let diff_input = minimizable_input("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let diff = apply("git diff", &diff_input, 0, &cfg);
+		assert_eq!(diff.filter, "pipeline+builtin");
+		assert_eq!(diff.text, "OVERLAY");
+
+		let status_input = minimizable_input("## main\n M file.rs\n");
+		let status = apply("git status", &status_input, 0, &cfg);
+		assert_ne!(status.filter, "pipeline+builtin");
+		assert!(status.text.contains("unstaged 1"));
+
+		let past_budget = past_whole_budget(&diff_input);
+		let failed = apply("git diff", &past_budget, 1, &cfg);
+		assert_ne!(failed.filter, "pipeline+builtin");
+		assert!(failed.text.contains("file changed"));
+	}
+
+	#[test]
+	fn yadm_patch_keeps_its_summary_under_its_line_cap() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut patch = String::from(
+			"diff --git a/.zshrc b/.zshrc\n--- a/.zshrc\n+++ b/.zshrc\n@@ -1,90 +1,90 @@\n",
+		);
+		for i in 0..90 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/.vimrc b/.vimrc\n--- a/.vimrc\n+++ b/.vimrc\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		let out = apply("yadm diff", &patch, 0, &cfg);
+		assert!(out.text.contains(".vimrc"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn line_capping_user_overlay_keeps_the_patch_summary() {
+		let capped = |program: &str| {
+			config_from_settings(&format!(
+				"schema_version = 1\n[filters.cap]\nmatch_command = \"^{program}$\"\nmax_lines = 20\n"
+			))
+		};
+		let mut patch = String::from(
+			"diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,100 +1,100 @@\n",
+		);
+		for i in 0..100 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		// `gt diff` runs the git filter, but the overlay the engine applies is
+		// the one for `gt`.
+		for (program, command) in [("git", "git diff"), ("gt", "gt diff")] {
+			let out = apply(command, &patch, 0, &capped(program));
+			assert!(out.text.contains("src/b.rs | 2"), "{command}: {:?}", out.text);
+			assert!(out.text.contains("2 files changed"), "{command}: {:?}", out.text);
+		}
+		let out = apply("gt diff", &patch, 0, &capped("git"));
+		assert_eq!(out.text, patch, "a git-only cap leaves gt output whole");
+	}
+
+	#[test]
+	fn enabled_known_filter_minimizes() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("git diff", &cfg));
+		let input = past_whole_budget("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let out = apply("git diff", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("file changed"));
+	}
+
+	#[test]
+	fn enabled_config_minimizes_git_status() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("git status", &cfg));
+		let input = minimizable_input("## main\n M file.rs\n");
+		let out = apply("git status", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(out.text.contains("unstaged 1"));
+		assert_eq!(out.filter, "git");
+	}
+
+	#[test]
 	fn successful_minimization_keeps_visible_ok_when_filter_removes_all_lines() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input = format!(
@@ -609,6 +735,24 @@ strip_lines_matching = [".*"]
 		let out = apply("echo hello", "hello\n", 0, &cfg);
 		assert_eq!(out.text, "hello\n");
 		assert!(!out.changed);
+	}
+
+	#[test]
+	fn segmented_chain_mode_is_only_for_eligible_safe_chains() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert_eq!(
+			mode_for("git diff --stat && git diff --name-only", &cfg),
+			MinimizerMode::SegmentedChain
+		);
+		assert_eq!(mode_for("git diff ; printf done", &cfg), MinimizerMode::SegmentedChain);
+		// Common shell utilities make a chain eligible for the segmented runner
+		// even when no segment has a dedicated filter — segments stream through
+		// per-segment passthrough so the chain itself is captured for telemetry.
+		assert_eq!(mode_for("false && echo no ; echo yes", &cfg), MinimizerMode::SegmentedChain);
+		assert_eq!(mode_for("foo || bar", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("git status | cat", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("sleep 1 &", &cfg), MinimizerMode::None);
+		assert_eq!(mode_for("(cd foo && make)", &cfg), MinimizerMode::None);
 	}
 
 	#[test]
