@@ -2,12 +2,16 @@
 
 use crate::{MinimizerCtx, MinimizerOutput};
 
+pub mod bun;
 pub mod cargo;
 pub mod cpp;
 pub mod generic;
 pub mod js_tools;
 pub mod lint;
+pub mod node_tests;
 pub mod pkg;
+pub mod python;
+pub mod ruby;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
 #[must_use]
@@ -26,9 +30,20 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 			pkg::supports(subcommand)
 		},
 		"uv" => pkg::supports(subcommand),
+		"bun" | "bunx" => bun::supports(program, subcommand),
+		"pytest" | "ruff" | "mypy" | "python" | "python3" | "py" => {
+			python::supports(program, subcommand)
+		},
+		"rspec" | "rake" | "rails" | "rubocop" => ruby::supports(program, subcommand),
+		"jest" | "vitest" | "playwright" => true,
 		"next" | "prettier" | "prisma" => js_tools::supports(program, subcommand),
 		_ => false,
 	}
+}
+
+fn is_test_script_token(token: &str) -> bool {
+	let token = token.trim_matches(|ch| matches!(ch, '\'' | '"' | '`'));
+	matches!(token, "test" | "t" | "e2e" | "spec") || token.starts_with("test:")
 }
 
 /// The script/command word a `run`-style invocation targets: the first
@@ -47,6 +62,12 @@ fn run_invoked_word(command: &str) -> Option<&str> {
 		.by_ref()
 		.find(|tok| matches!(*tok, "run" | "-m" | "--module"))?;
 	tokens.find(|tok| !tok.starts_with('-'))
+}
+
+fn is_pkg_test_invocation(ctx: &MinimizerCtx<'_>) -> bool {
+	matches!(ctx.subcommand, Some("test" | "t"))
+		|| (matches!(ctx.subcommand, Some("run"))
+			&& run_invoked_word(ctx.command).is_some_and(is_test_script_token))
 }
 
 fn is_pkg_lint_invocation(ctx: &MinimizerCtx<'_>) -> bool {
@@ -76,7 +97,9 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
 		"npm" | "pnpm" | "yarn" => {
-			if is_pkg_lint_invocation(ctx) {
+			if is_pkg_test_invocation(ctx) {
+				node_tests::filter(ctx, input, exit_code)
+			} else if is_pkg_lint_invocation(ctx) {
 				lint::filter(ctx, input, exit_code)
 			} else {
 				pkg::filter(ctx, input, exit_code)
@@ -85,6 +108,12 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"pip" | "pip3" | "bundle" | "brew" | "composer" | "uv" | "poetry" => {
 			pkg::filter(ctx, input, exit_code)
 		},
+		"bun" | "bunx" => bun::filter(ctx, input, exit_code),
+		"pytest" | "ruff" | "mypy" | "python" | "python3" | "py" => {
+			python::filter(ctx, input, exit_code)
+		},
+		"rspec" | "rake" | "rails" | "rubocop" => ruby::filter(ctx, input, exit_code),
+		"jest" | "vitest" | "playwright" => node_tests::filter(ctx, input, exit_code),
 		"next" | "prettier" | "prisma" => js_tools::filter(ctx, input, exit_code),
 		_ => generic::filter(ctx, input, exit_code),
 	}
@@ -132,6 +161,16 @@ mod tests {
 	}
 
 	#[test]
+	fn pkg_test_routing_ignores_test_as_argument() {
+		let config = MinimizerConfig::default();
+		// a non-test script that merely passes `test` as an argument must not
+		// route as a test
+		assert!(!is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run build -- test", &config)));
+		assert!(is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run test", &config)));
+		assert!(is_pkg_test_invocation(&ctx("npm", Some("test"), "npm test", &config)));
+	}
+
+	#[test]
 	fn pkg_lint_routing_ignores_tool_as_argument() {
 		let config = MinimizerConfig::default();
 		assert!(!is_pkg_lint_invocation(&ctx(
@@ -142,6 +181,69 @@ mod tests {
 		)));
 		assert!(is_pkg_lint_invocation(&ctx("pnpm", Some("run"), "pnpm run lint", &config)));
 		assert!(is_pkg_lint_invocation(&ctx("pnpm", Some("run"), "pnpm run tsc", &config)));
+	}
+
+	#[test]
+	fn npm_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("npm", Some("test"), "npm test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn npm_run_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("npm", Some("run"), "npm run test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn npm_run_quoted_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("npm", Some("run"), "npm run \"test\"", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn pnpm_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("pnpm", Some("test"), "pnpm test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn pnpm_run_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("pnpm", Some("run"), "pnpm run test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn yarn_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("yarn", Some("test"), "yarn test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
+	}
+
+	#[test]
+	fn yarn_run_test_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("yarn", Some("run"), "yarn run test", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
 	}
 
 	#[test]
@@ -176,5 +278,14 @@ mod tests {
 				"{command} should condense lint output"
 			);
 		}
+	}
+
+	#[test]
+	fn npm_t_routes_to_node_tests() {
+		let config = MinimizerConfig::default();
+		let context = ctx("npm", Some("t"), "npm t", &config);
+		let out = filter(&context, "✓ ok\nFAIL app.test.ts\nTests 1 failed\n", 1).text;
+		assert!(!out.contains("✓ ok"));
+		assert!(out.contains("FAIL app.test.ts"));
 	}
 }

@@ -383,6 +383,20 @@ fn program_label(program: &str) -> &'static str {
 		"composer" => "composer",
 		"uv" => "uv",
 		"poetry" => "poetry",
+		"bun" => "bun",
+		"bunx" => "bunx",
+		"pytest" => "pytest",
+		"ruff" => "ruff",
+		"mypy" => "mypy",
+		"python" => "python",
+		"python3" => "python3",
+		"rspec" => "rspec",
+		"rake" => "rake",
+		"rails" => "rails",
+		"rubocop" => "rubocop",
+		"jest" => "jest",
+		"vitest" => "vitest",
+		"playwright" => "playwright",
 		_ => "builtin",
 	}
 }
@@ -552,6 +566,11 @@ replace = [{ pattern = "x", replacement = "y" }]
 		assert_eq!(out.filter, "disabled");
 	}
 
+	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its
+	// `match_subcommand` must exclude every subcommand owned/routed elsewhere so
+	// it cannot shadow `nx-wrapped` (standalone path) or overlay the Rust
+	// lint/test filters (overlay path). These tests fail loudly if that
+	// exclusion set ever desyncs from filters::supports's npx routing.
 	#[test]
 	fn npx_def_does_not_shadow_nx_wrapped() {
 		// `npx nx` is NOT routed by filters::supports, so apply_identity falls to
@@ -570,6 +589,23 @@ replace = [{ pattern = "x", replacement = "y" }]
 			out.text
 		);
 		assert!(out.text.contains("Error: build failed"));
+	}
+	#[test]
+	fn npx_def_fires_for_unknown_tool() {
+		// The def must still strip the install preamble / npm warn/notice noise
+		// for genuinely UNKNOWN tools (its whole purpose). cowsay is not routed
+		// or owned by any other def, so the npx pipeline claims it.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? (y)\n\nnpm warn \
+			 deprecated foo@1.0.0: use bar instead\n< Hello >\n",
+		);
+		let out = apply("npx cowsay hello", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Need to install"));
+		assert!(!out.text.contains("Ok to proceed"));
+		assert!(!out.text.contains("npm warn"));
+		assert!(out.text.contains("< Hello >"));
 	}
 
 	#[test]
