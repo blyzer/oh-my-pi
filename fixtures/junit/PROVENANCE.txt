@@ -1,0 +1,37 @@
+JUnit XML fixtures. Each *.xml is a verbatim copy of a file the runner wrote, never hand-edited.
+Sources that reproduce each fixture are under sources/. The recording scratch directory was /tmp/junit-work (neutral: no user name, no owner hostname).
+
+Shared outcomes in every runner: pass, fail (assertion), error (exception or setup failure), skip (ignored or disabled).
+
+ENVIRONMENT OVERRIDES (the only departures from a stock run; each keeps the runner's own writer)
+  pytest: platform.node() supplies the hostname attribute. sources/pytest/neutral_hostname.py replaces it with "ci-runner" when loaded via -p. No other change.
+  surefire: -Duser.name=ci -Duser.home=/tmp/junit-work/home -Djava.io.tmpdir=/tmp/junit-work/tmp -Djava.library.path=/usr/lib/java:. -Dmaven.repo.local=/tmp/junit-work/m2, and JAVA_HOME points at Temurin 25 under /Library. These become the forked JVM properties Surefire writes into <properties>.
+
+pytest.xml
+  command: PYTHONPATH=. uv run --no-project --with pytest python -m pytest -p neutral_hostname --junitxml=pytest.xml test_outcomes.py   (cwd sources/pytest)
+  versions: python 3.12.14 (uv-managed), pytest 9.2.0, junit_family default (xunit2)
+  error = autouse fixture raising at setup
+
+pytest-xunit1.xml
+  command: PYTHONPATH=. uv run --no-project --with pytest python -m pytest -p neutral_hostname -o junit_family=xunit1 --junitxml=pytest-xunit1.xml test_outcomes.py
+  versions: as pytest.xml
+
+nextest.xml
+  command: cargo nextest run --profile ci   (cwd sources/nextest)
+  versions: cargo-nextest 0.9.148, cargo 1.99.0
+  config: sources/nextest/.config/nextest.toml. Its [profile.ci] copies the repo's .config/nextest.toml CI settings (fail-fast false, retries 0). The only addition is [profile.ci.junit] path = "junit.xml". The repo's own .config/nextest.toml has no JUnit output.
+  error = panicking test (exit 101), emitted as <failure>. No <error> element.
+
+nextest-abort.xml
+  command: cargo nextest run --profile ci   (cwd sources/nextest-abort, same profile config, crate renamed junit_abort)
+  test calls std::process::abort(); emitted as <failure type="test abort">
+
+jest.xml
+  command: npm ci && npx jest --ci   (cwd sources/jest; jest.config.js uses the jest-junit reporter with outputDirectory ".")
+  versions: node v26.11.1, jest 30.5.2, jest-junit 17.0.0
+  error = throw inside beforeAll (describe "setup"); emitted as a <failure> on test "setup errors"
+
+surefire.xml
+  command: JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home mvn -B -Dmaven.repo.local=... -Duser.name=ci -Duser.home=... -Djava.io.tmpdir=... -Djava.library.path=/usr/lib/java:. test   (cwd sources/junit5)
+  versions: Apache Maven 3.9.12, OpenJDK 25.0.4.1 (Temurin), junit-jupiter 5.11.4, maven-surefire-plugin 3.5.2
+  error = non-assertion exception thrown from the test body (IllegalStateException)

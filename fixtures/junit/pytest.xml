@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="4" time="0.390" timestamp="2026-11-05T01:21:15.402195-04:00" hostname="ci-runner"><testcase classname="test_outcomes" name="test_pass" time="0.000" /><testcase classname="test_outcomes" name="test_fail" time="0.000"><failure message="AssertionError: intentional failure&#10;assert False">&gt;   def test_fail(): assert False, "intentional failure"
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: intentional failure
+E   assert False
+
+test_outcomes.py:3: AssertionError</failure></testcase><testcase classname="test_outcomes" name="test_error_fixture" time="0.000"><error message="failed on setup with &quot;RuntimeError: intentional error&quot;">request = &lt;SubRequest 'setup_error' for &lt;Function test_error_fixture&gt;&gt;
+
+    @pytest.fixture(autouse=True)
+    def setup_error(request):
+&gt;       if request.node.name == "test_error_fixture": raise RuntimeError("intentional error")
+                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       RuntimeError: intentional error
+
+test_outcomes.py:7: RuntimeError</error></testcase><testcase classname="test_outcomes" name="test_skip" time="0.000"><skipped type="pytest.skip" message="intentional skip">/private/tmp/junit-work/pytest/test_outcomes.py:8: intentional skip</skipped></testcase></testsuite></testsuites>

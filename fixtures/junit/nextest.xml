@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" skipped="0" failures="2" errors="0" uuid="832446bd-1e6d-4873-874c-6d28a4858599" timestamp="2026-11-05T01:21:14.956-04:00" time="0.089">
+    <testsuite name="junit_fixture" tests="3" skipped="0" errors="0" failures="2">
+        <testcase name="errors" classname="junit_fixture" timestamp="2026-11-05T01:21:14.966-04:00" time="0.055">
+            <failure message="thread &apos;errors&apos; (23924076) panicked at src/lib.rs:12:15" type="test failure with exit code 101">thread &apos;errors&apos; (23924076) panicked at src/lib.rs:12:15:
+intentional error
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test errors ... FAILED
+
+failures:
+
+failures:
+    errors
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;errors&apos; (23924076) panicked at src/lib.rs:12:15:
+intentional error
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="passes" classname="junit_fixture" timestamp="2026-11-05T01:21:14.966-04:00" time="0.070"/>
+        <testcase name="fails" classname="junit_fixture" timestamp="2026-11-05T01:21:14.966-04:00" time="0.072">
+            <failure message="thread &apos;fails&apos; (23924079) panicked at src/lib.rs:5:14" type="test failure with exit code 101">thread &apos;fails&apos; (23924079) panicked at src/lib.rs:5:14:
+assertion `left == right` failed: intentional failure
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test fails ... FAILED
+
+failures:
+
+failures:
+    fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;fails&apos; (23924079) panicked at src/lib.rs:5:14:
+assertion `left == right` failed: intentional failure
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+</testsuites>
