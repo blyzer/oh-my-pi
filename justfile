@@ -146,8 +146,8 @@ remote-probe:
 
 # Research harness for docs/research/grammar-bundling.md (branch research/grammar-bundling-harness, never merged).
 [group('remote')]
-grammar-study phase reps="5" jobs="":
-    scripts/grammar-study.sh {{ phase }} {{ reps }} {{ jobs }}
+grammar-study phase reps="5" jobs="" order="":
+    scripts/grammar-study.sh {{ phase }} {{ reps }} {{ jobs }} {{ order }}
 
 # Run the Linux-valid Cargo verification set in one remote runner so the
 # runner-home Cargo target and Python cache are reused between phases. Protobuf

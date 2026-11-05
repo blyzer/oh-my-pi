@@ -12,7 +12,7 @@ description = "Revision-aware derived code knowledge base from SCIP producers an
 workspace = true
 
 [features]
-default = ["grammars-all"]
+default = []
 grammars-all = ["omp-ast/grammars-all"]
 grammars-hot = ["omp-ast/grammars-hot"]
 wasm = ["omp-ast/wasm"]

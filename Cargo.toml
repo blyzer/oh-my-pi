@@ -125,7 +125,7 @@ omp-app = { path = "crates/app", version = "2.0.0" }
 omp-chat = { path = "crates/chat", version = "2.0.0" }
 omp-con = { path = "crates/con", version = "2.0.0" }
 omp-ar = { path = "crates/ar", version = "2.0.0" }
-omp-ast = { path = "crates/ast", version = "2.0.0" }
+omp-ast = { path = "crates/ast", version = "2.0.0", default-features = false }
 omp-audio = { path = "crates/audio", version = "2.0.0" }
 omp-core = { path = "crates/core", version = "2.0.0", features = ["schemars"] }
 omp-dom = { path = "crates/dom", version = "2.0.0" }

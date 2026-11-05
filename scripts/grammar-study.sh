@@ -9,6 +9,7 @@ root=$HOME/.cache/grammar-study
 rm -rf "$root"
 mkdir -p "$root"
 jobs=${3:-${CARGO_BUILD_JOBS:-4}}
+order=${4:-}
 common=(--locked -j "$jobs" --config 'resolver.feature-unification="selected"')
 declare -A feats=(
 	[all]="--no-default-features --features grammars-all"
@@ -125,6 +126,40 @@ release() {
 			sizes size-kb-release "$v" "$dir/release/omp-kb"
 			rm -rf "$dir"
 		done
+	done
+}
+
+declare -A appfeats=(
+	[all]="--features omp-kb/grammars-all"
+	[hot]="--features omp-kb/grammars-hot"
+	[none]=""
+	[hot-wasm]="--features omp-kb/grammars-hot,omp-kb/wasm"
+)
+
+# Cold `omp` dev builds with the workspace's own feature unification (no --config override), in the
+# order given by the fourth argument (default all,none), rotated every repetition.
+omp() {
+	local r v dir t i out list
+	IFS=, read -r -a list <<<"${order:-all,none}"
+	for ((r = 1; r <= reps; r++)); do
+		for v in "${list[@]}"; do
+			dir=$root/o-$v
+			rm -rf "$dir"
+			emit load omp "$v" "$r" "$(cut -d' ' -f1-3 /proc/loadavg)"
+			t=$(timed env CARGO_TARGET_DIR="$dir" cargo build -p omp-app --bin omp --locked -j "$jobs" ${appfeats[$v]} --timings)
+			emit cold-ast omp "$v" "$r" $t "$(du -sm "$dir" | cut -f1)"
+			timings "$dir/cargo-timings/cargo-timing.html" omp "$v" "$r"
+			sizes size-omp-dev "$v" "$dir/debug/omp"
+			for i in 1 2 3; do
+				cfg_rep=$((cfg_rep + 1))
+				out=$(CARGO_TARGET_DIR=$dir cargo rustc -p omp-app --bin omp --locked -j "$jobs" ${appfeats[$v]} -- \
+					-Z time-passes --cfg "gs_rep_$cfg_rep" 2>&1) || { echo "$out" | tail -40 >&2; return 1; }
+				emit relink-omp "$v" "$i" "$(echo "$out" | awk '/run_linker/ {sub(/;/, "", $2); print $2; exit}')" \
+					"$(echo "$out" | awk '/link_binary/ {sub(/;/, "", $2); print $2; exit}')"
+			done
+			rm -rf "$dir"
+		done
+		list=("${list[@]:1}" "${list[0]}")
 	done
 }
 
