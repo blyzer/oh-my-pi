@@ -1,0 +1,55 @@
+omp-minimizer attribution notice
+================================
+
+This crate ports the shell-output minimizer of oh-my-pi's `pi-shell` crate
+(`crates/pi-shell/src/minimizer`, pinned at commit
+88a69582c755bd000e8dc0290981fc787a4f400c).
+
+Upstream project: https://github.com/can1357/oh-my-pi
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+The upstream work is licensed under the MIT License. Complete MIT terms are in
+`LICENSE`. Copyright in the upstream material remains with its upstream
+owner; this notice does not claim ownership of that material.
+
+That minimizer adapts an algorithm from RTK. Upstream's NOTICE follows
+verbatim; the paths it names are relative to upstream's `crates/pi-shell`.
+
+-------------------------------------------------------------------------------
+
+This file documents third-party attribution for the shell-output minimizer in
+this crate, which adapts an algorithm from RTK (https://github.com/rtk-ai/rtk),
+used under the MIT License.
+
+  Copyright (c) the RTK authors (rtk-ai/rtk)
+
+Adapted component: the `build_pytest_summary` algorithm from the upstream
+`src/cmds/python/pytest_cmd.rs` (pinned at commit
+878af7de99e0ba71da2e8fd996f6b52a1836e06c), re-implemented here in
+`src/minimizer/filters/python.rs` as the pytest state machine (`filter_pytest`,
+`pytest_success`, `is_pytest_*`, `looks_like_pytest_summary_part`). It preserves
+failures, errors, and the final summary line; strips header framing, progress
+dots, and verbose `PASSED` rows; and falls through unchanged on unknown-state
+lines (RTK's defensive default) so xdist `[gwN]` prefixes and custom reporters
+never cause data loss.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -73,6 +73,7 @@ area/shell:
       - any-glob-to-any-file:
           - 'crates/shell/**'
           - 'crates/shell-builtins/**'
+          - 'crates/minimizer/**'
 
 area/python:
   - changed-files:

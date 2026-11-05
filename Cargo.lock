@@ -8728,6 +8728,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-minimizer"
+version = "2.0.0"
+dependencies = [
+ "omp-con",
+ "omp-core",
+ "omp-shell",
+ "regex",
+ "serde",
+ "thiserror 2.0.21",
+ "toml",
+ "xutf",
+]
+
+[[package]]
 name = "omp-oauth"
 version = "2.0.0"
 dependencies = [
