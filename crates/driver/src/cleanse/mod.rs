@@ -270,7 +270,7 @@ pub fn discovery_schema() -> serde_json::Value {
 				"cwd": {"type": "string"},
 				"binary": {"type": "string", "minLength": 1},
 				"args": {"type": "array", "items": {"type": "string"}},
-				"parser": {"enum": ["rust", "rust-test", "go", "go-test", "junit", "staticcheck", "golangci", "ruff", "pyright", "mypy", "pylint", "flake8", "ty", "eslint", "biome", "oxlint", "deno-lint", "stylelint", "rubocop", "phpstan", "psalm", "swiftlint", "dart", "credo", "shellcheck", "hlint", "terraform", "tflint", "actionlint", "generic"]},
+				"parser": {"enum": ["rust", "rust-test", "go", "go-test", "junit", "staticcheck", "golangci", "ruff", "pyright", "mypy", "pylint", "flake8", "ty", "eslint", "biome", "oxlint", "deno-lint", "stylelint", "rubocop", "phpstan", "psalm", "swiftlint", "dart", "credo", "shellcheck", "hlint", "terraform", "tflint", "actionlint", "sarif", "tap", "generic"]},
 				"mutating": {"type": "boolean"}
 			}
 		}

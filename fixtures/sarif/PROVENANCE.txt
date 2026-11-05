@@ -1,0 +1,45 @@
+SARIF 2.1.0 fixtures. Each *.sarif is a verbatim copy of the stdout the tool wrote, never hand-edited.
+Sources that reproduce each fixture are under sources/. The recording scratch directory was /tmp/sarif-work, which macOS resolves to /private/tmp/sarif-work, the path the logs record (neutral: no user name, no owner hostname).
+
+ruff.sarif
+  command: ruff check --no-cache --output-format sarif .   (cwd sources/ruff; exit 1; stderr empty)
+  versions: ruff 0.17.3
+  config: sources/ruff/ruff.toml selects the F rules only.
+  outcomes: F401 twice, F821 and F841 in outcomes.py; two invalid-syntax results for broken.py.
+
+biome.sarif
+  command: biome lint --reporter=sarif .   (cwd sources/biome; exit 1)
+  versions: biome 2.6.4
+  stderr (not recorded): the human-readable deprecation notice for biome.json and the run summary.
+  outcomes: noUnusedVariables (warning), noDoubleEquals and noDebugger (error), three parse results for broken.js, and a deserialize note for biome.json.
+
+golangci-lint.sarif
+  command: golangci-lint run --output.sarif.path=stdout --show-stats=false ./...   (cwd sources/golangci; exit 1; stderr empty)
+  environment: GOCACHE, GOLANGCI_LINT_CACHE and GOPATH under /tmp/sarif-work/cache, GOTOOLCHAIN=local
+  versions: golangci-lint 2.14.0 (built with go1.27.1), go 1.27.2
+  config: sources/golangci/.golangci.yml enables errcheck, govet, staticcheck and unused only.
+  outcomes: errcheck, govet (printf) and unused, all in outcomes.go.
+
+clippy-sarif is not installed on the recording machine, and cargo clippy --message-format=json is not SARIF, so no Rust fixture exists.
+
+DIVERGENCES THE PARSER MUST HANDLE
+  artifactLocation.uri
+    ruff: absolute file:// URI (file:///private/tmp/sarif-work/ruff/outcomes.py)
+    biome: bare absolute path with no scheme (/private/tmp/sarif-work/biome/outcomes.js)
+    golangci-lint: relative path (outcomes.go) with no uriBaseId; it resolves against the checker's working directory
+  artifactLocation.index
+    golangci-lint: index 0 on every result, but the run has no artifacts array (a dangling index)
+  result.level
+    all three set it on every result; ruff also sets rules[].defaultConfiguration.level, biome and golangci-lint do not
+  tool.driver.rules
+    ruff and biome list rules; golangci-lint lists none
+  region
+    ruff and biome give start and end line and column; golangci-lint gives startLine and startColumn only
+  fixes
+    ruff only (fixes[].description.text); biome and golangci-lint emit none
+  configuration diagnostics
+    biome reports its own configuration notice as a result (ruleId deserialize, level note) located in biome.json
+  syntax errors
+    ruff: ruleId invalid-syntax; biome: ruleId parse; both located, level error
+  invocations, suppressions, kind, baselineState, run.artifacts, originalUriBaseIds
+    none of the three emits them; inline degradation tests cover the parser's handling of those levels

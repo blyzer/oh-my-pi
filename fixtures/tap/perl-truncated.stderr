@@ -1,0 +1,5 @@
+#   Failed test 'fails before the crash'
+#   at truncated.t line 6.
+crashed mid-run
+# Tests were run but no plan was declared and done_testing() was not seen.
+# Looks like your test exited with 255 just after 2.
