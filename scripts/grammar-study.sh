@@ -137,10 +137,10 @@ declare -A appfeats=(
 )
 
 # Cold `omp` dev builds with the workspace's own feature unification (no --config override), in the
-# order given by the fourth argument (default all,none), rotated every repetition.
+# order given by the fourth argument (default all+none; bb splits --env values on commas), rotated
 omp() {
 	local r v dir t i out list
-	IFS=, read -r -a list <<<"${order:-all,none}"
+	IFS=+ read -r -a list <<<"${order:-all+none}"
 	for ((r = 1; r <= reps; r++)); do
 		for v in "${list[@]}"; do
 			dir=$root/o-$v
