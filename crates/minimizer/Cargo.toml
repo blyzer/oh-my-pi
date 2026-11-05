@@ -1,0 +1,24 @@
+[package]
+name = "omp-minimizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shell-output minimizer: classifies a command with the omp shell parser and condenses its captured output through built-in and declarative filters"
+# Ported from oh-my-pi's pi-shell minimizer; portions of that minimizer adapt
+# MIT-licensed algorithms from rtk-ai/rtk. See NOTICE at this crate root.
+
+[lints]
+workspace = true
+
+[dependencies]
+omp-con.workspace = true
+omp-core.workspace = true
+omp-shell.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+xutf.workspace = true

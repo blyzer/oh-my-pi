@@ -1,4 +1,4 @@
-//! Native shell profile, interception, direnv, and minimizer settings.
+//! Native shell profile, interception, and direnv settings.
 
 use omp_con::{Ctx, Kv, Value};
 use omp_core::Str;
