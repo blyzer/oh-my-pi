@@ -15,6 +15,40 @@ stamp() { printf '\n=== %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 stamp "runner: $(uname -sm), $(nproc) cpus, $(free -g | awk '/Mem:/ {print $2 " GB"}')"
 git status --short | head -20 # the local changes bb mirrored, if any
 
+# The Cargo caches grow without bound: every run, pull requests included, resumes the omp2 snapshot
+# (bb checks each one out as branch omp2), and every dependency graph a run builds leaves its
+# artifacts behind. The disk is mounted noatime and cargo has no target-dir GC, so live artifacts
+# cannot be told from dead ones: evict whole caches. This runs before the toolchain step, so that
+# an install on a full disk still has room.
+target_dir="$HOME/.cache/omp-target"
+caches=("$HOME"/.cache/omp-target*) # with the justfile's omp-target-clippy
+disk_gb() { df -k --output="$1" "$HOME" | awk 'NR == 2 {print int($1 / 1048576)}'; }
+# One run grew the cache 9 GB (43 -> 52 GB, omp2 run 41906599079); the rest is room for the link
+# outputs and test files a run writes and deletes again.
+need_gb=15
+evict() {
+	local before
+	before=$(disk_gb avail)
+	rm -rf "${caches[@]}"
+	stamp "evicted the Cargo caches ($1): ${before} -> $(disk_gb avail) GB free"
+}
+stamp "disk: $(disk_gb avail) of $(disk_gb size) GB free"
+# rustc's version is in every artifact's hash: another toolchain's cache is all dead weight, and
+# rebuilding everything needs far more than need_gb.
+toolchain_stamp="$target_dir/rust-toolchain.stamp"
+if [ "$(disk_gb avail)" -lt "$need_gb" ]; then
+	evict "under ${need_gb} GB free"
+elif [ -f "$toolchain_stamp" ] && ! cmp -s rust-toolchain.toml "$toolchain_stamp"; then
+	evict "built by another rust-toolchain.toml"
+fi
+avail=$(disk_gb avail)
+if [ "$avail" -lt "$need_gb" ]; then
+	echo "error: could not reclaim $((need_gb - avail)) GB: ${avail} GB free with the Cargo caches evicted, and a run needs ${need_gb} GB" >&2
+	exit 1
+fi
+mkdir -p "$target_dir"
+cp rust-toolchain.toml "$toolchain_stamp"
+
 stamp "toolchain"
 if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
 	sudo apt-get update
@@ -54,7 +88,7 @@ stamp "open files: soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
 
  
 
-export CARGO_TARGET_DIR="$HOME/.cache/omp-target"
+export CARGO_TARGET_DIR="$target_dir"
 mkdir -p "$HOME/.cache/omp-vendor"
 [ -L vendor ] || ln -sfn "$HOME/.cache/omp-vendor" vendor
 if [ -f vendor/python/pyo3-config.txt ]; then
@@ -68,5 +102,5 @@ start=$(date +%s)
 status=0
 # shellcheck disable=SC2086 # the recipe and its arguments are words on purpose
 just ${OMP_REMOTE_JUST_ARGS} || status=$?
-stamp "exit ${status} after $(($(date +%s) - start))s; target $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
+stamp "exit ${status} after $(($(date +%s) - start))s; target $(du -sh "$CARGO_TARGET_DIR" | cut -f1); $(disk_gb avail) GB free"
 exit "$status"
