@@ -27,6 +27,21 @@ Citation rules for this record:
 - **[I]** marks an inference.
 - **UNVERIFIED** marks what could not be checked without a BuildBuddy account or a live run.
 
+
+### Open owner question: remote execution in core or an extension?
+
+Should remote build execution remain in omp core, or move outside as an extension? This question remains open and does not reverse the existing acceptance gate. The following observations describe the tree at `3271627d1e`, not the historical source pin above.
+
+- `crates/exec/src/backend.rs:ExecutionBackend` is a generic, statically dispatched trait, not an enum or a dyn-compatible trait. An external crate can implement it, and `crates/agent/src/jobs.rs:JobBoard::attach_execution_run` accepts a generic `ExecutionRun`. No runtime-loaded backend can be dropped in as `dyn ExecutionBackend`. A concrete in-core adapter could delegate to an external implementation. An object-safe erased bridge and the existing embedded-Python extension host are untested candidate routes; the host already has dynamic-tool registration (`crates/envd/src/tools.rs:RegistryBridges`) and Python components (`crates/envd/src/exthost/extensions.rs:PyComponent`). See ADR 0047 for the trait definition.
+- Among omp crates, `crates/exec-reapi/Cargo.toml` depends on `omp-exec`, `omp-adw`, `omp-core`, and `omp-observability`; `crates/exec-buildbuddy/Cargo.toml` depends on `omp-exec`, `omp-adw`, `omp-core`, and optionally `omp-exec-reapi`. Neither backend depends on envd, driver, session, journal, or agent. They can be separated from envd without first replacing envd internals, though their other dependencies and composition still need handling. `crates/exec-local/src/lib.rs:LocalBackend` uses `omp_envd::exec::ExecHost`, and `crates/exec-ssh/src/lib.rs:SshBackend` uses `omp_envd::ssh::SshService`; moving those backends independently requires replacing or exposing those dependencies.
+- `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote` calls `repo_pins`, which reads `rust-toolchain.toml`, `.github/workflows/ci.yml`, and `crates/py/scripts/fetch-python.sh` and requires their expected pin formats. Its `eligible` function admits a defined set of `just` recipes. This path is specific to this repository's layout and recipes, not a general arbitrary-project build path. A different repository that reproduces those inputs could satisfy the same checks.
+- No workspace crate declares a dependency on `omp-exec-buildbuddy` (`Cargo.toml` and `crates/*/Cargo.toml`). `crates/exec/src/report.rs:BuildReport` and `BuildStatus` have no consumers outside `crates/exec`, apart from their re-export in `crates/exec/src/lib.rs`.
+- The installed [`omp-claude-bridge`](https://www.npmjs.com/package/@thealtoclef/omp-claude-bridge) is an omp extension that integrates the Claude Agent SDK rather than requiring omp to implement it (`src/index.ts` imports the SDK; `package.json` declares it). This is a precedent for external integration, not proof that the current execution API supports that integration.
+
+The decision has three separate dimensions. Code location controls maintenance ownership. Moving a crate to another repository alone does not stop it shipping: if omp links that dependency, its vendor client is still part of the product binary. The shipping choice is whether the vendor client is linked or supplied outside the binary. The integration choice is how an out-of-core backend is reached: an erased bridge, the existing extension host, or a new mechanism. Neither candidate adapter route has been tested for execution backends.
+
+Keeping remote execution in core retains direct integration and a single delivery, but core maintains and ships the linked remote code and its dependencies. Moving vendor execution outside the binary can avoid shipping that client in core, but requires an adapter and a separately delivered implementation, with compatibility, lifecycle, security, and operational responsibilities to define and verify. Moving only the repository changes maintenance, not binary contents. These are costs to evaluate, not a recommendation.
+
 ### Source pins
 
 | Key | Source |

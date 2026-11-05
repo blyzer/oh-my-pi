@@ -116,6 +116,18 @@ Client CPU and peak memory do not need BuildBuddy `usage_stats` fields. ADR 0040
 samples the client's own process tree, which `scripts/measure-recipe.py` does (wall and user+sys CPU
 from `wait4` rusage of the whole tree, summed process-tree RSS once a second).
 
+
+**Boundary qualification.** The REAPI G1 runs below measured only the client process tree. They did
+not record whether the client attached a pre-existing environment daemon. In the current code,
+`ProductionAdwHost::run_remote` sends `EnvClient::capture_inputs`; `route_data` routes the
+workspace request to the environment owner, where `WorkspaceOperations::capture_inputs` performs
+enumeration, scanning and hashing. `ProjectEnvironment::attach` may reconnect an existing owner,
+and the spawned daemon can outlive its launcher. If an October run attached such an out-of-tree
+owner, its recorded CPU and process-tree RSS omitted that owner's work. The historical attachment
+mode and omitted amount were not recorded, so the figures cannot establish complete client cost.
+This qualification concerns the omp REAPI runs, not the earlier `bb remote` measurement.
+
+
 ### G1 measurement, `omp-envd`, 2026-10-20
 
 Local recipe `just test-pkg omp-envd` against `just remote-test-pkg omp-envd` (the `bb remote` path,
@@ -271,3 +283,63 @@ completing with exit 0 and 54/54 tests passing. The criterion is met.
 | Runner launched and produced an invocation ID | ✅ `03d524aa-71d2-40ed-b92f-f1da843c63af` |
 | Run completed with exit 0 | ✅ 54/54 tests passed |
 | Wall time within 1.5× warm local (≤ ~5 min 9 s) | ✅ 82 s runner / 97 s client |
+
+
+### Quiet-host G1 rerun procedure
+
+The driver records the three approved recipes in interleaved local and cold-remote arms, with
+three repetitions per arm. It requires a prebuilt `omp` from the checkout, workspace trust for
+its G1 workflows, the BuildBuddy REAPI profile, a digest-pinned image and an existing
+`sv_exec_remote_cache off` setting. The driver reads these settings; it does not change them.
+Put its result outside the checkout so that input capture cannot include its own growing file:
+
+```sh
+python3 scripts/measure-adr0040.py --out /tmp/adr0040-g1.jsonl --omp /absolute/path/to/omp
+```
+
+The guard runs before the untimed, one-time `cargo fetch --locked` and before every repetition.
+It observes two host snapshots 10 seconds apart and refuses any pageout or swapout counter increase.
+Ten seconds can reveal sustained paging without treating historical swap allocation as current
+pressure; zero is a conservative threshold, not proof that the host will remain quiet. Swap
+occupancy is metadata only. The one-minute load limit is 1.0 as a backstop. macOS load includes
+I/O-blocked threads, so paging-counter deltas are the more direct pressure signal. The guard records
+all three launchd runner services, permits idle listeners, and refuses a `Runner.Worker` job, an
+unattributed worker, an unknown listener state, a counter reset, or a failed probe. It does not stop
+services. Sampling continues during each recipe, so inspect the series for load, paging, runner
+activity and probe errors even if both boundary guards passed.
+
+The append-only JSONL file contains the guards, per-second samples, outputs, timing, and a G1-shaped
+summary. Each record is flushed as it is produced. A refusal or interruption leaves earlier records
+intact; an interrupted last line may be incomplete. Failed repetitions keep their exit code and
+output, are excluded from summary means, and are never retried. The `omp-envd` process-lifecycle
+failures, if present, appear in that output. The file may contain project paths and command output;
+treat it as potentially sensitive.
+
+The measurement boundary is defined by role, not process ancestry. Content is the command tree plus
+the environment owner serving this client. Host load, other processes, and other clients are
+conditions, not added to the measured content. The file keeps `conditions` and `content`
+separate. For remote repetitions the sampler matches Unix socket peers from `lsof` to identify the
+serving envd PID, records its socket evidence and per-second RSS and cumulative CPU, and records
+whether it was pre-existing or spawned when observable. It checks for other visible peers. A shared
+owner cannot be apportioned: the in-tree value and the value including the whole owner are conditional
+lower and upper bounds, not a point estimate. Samples can miss peaks, inaccessible peers and CPU
+changes between probes. If identity or ownership is unresolved, it records that instead of adding an
+unrelated process. Repetitions with different attachment or sharing states are not averaged together.
+The driver withholds client-ratio verdicts while this boundary remains unresolved.
+
+`/usr/bin/time -l` wall and user-plus-system CPU are recorded separately from the sampler's
+process-tree RSS. The `time` maximum RSS is the largest single descendant, not the tree peak.
+The REAPI trace exposes capture, inclusive upload, downloaded-output time, uploaded bytes, and
+worker timestamps when available. FindMissing time is explicitly not captured because no span
+exposes it; inclusive upload includes that work. Missing metrics distinguish failed runs from
+unavailable instrumentation and captured zeroes. The driver records target sizes and observed cache
+settings and does not prime or purge caches. It records CAS hit/miss counts if the trace supplies
+them. The BuildBuddy REAPI profile requests no recycling, but the runner's actual freshness is not
+independently verified. No warm remote arm or warm-wall criterion can be reported from this path.
+The per-second `ps`, `vm_stat` and `lsof` probes themselves add host work; they are conditions,
+not client content, and their possible measurement overhead remains unquantified.
+
+For an integration check without recipes, run the same command with `--dry-run` and a new output
+path. It executes `/usr/bin/true` instead of the fetch and recipes and marks the session, guards,
+metrics and repetitions as synthetic in the file. A synthetic guard is never accepted for a real run.
+
