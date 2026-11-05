@@ -1,0 +1,13 @@
+ESLint --format=json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: eslint . --format=json   (cwd /private/tmp/cleanrun/cases/eslint; the args the cleanse eslint checker passes)
+  versions: eslint v10.14.0 (npm, project-local install), node v26.11.1
+  exit 0; stdout 450 bytes, stderr 0 bytes
+  package.json:
+    {"private":true,"type":"module"}
+  eslint.config.js:
+    export default [{ rules: { "no-unused-vars": "error", "no-undef": "error" } }];
+  clean.js:
+    export const greeting = "hello";

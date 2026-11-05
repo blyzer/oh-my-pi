@@ -216,8 +216,12 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Result<Vec<Diagnostic
 	Ok(diagnostics)
 }
 
-/// Reads every JSON value and every diagnostic text line of the combined
-/// output, and returns why the output is not JSON when it holds no JSON value.
+/// Reads every JSON value of the combined output, and returns why the output
+/// is not JSON when it holds no JSON value. Diagnostic text lines are read only
+/// where no report was: a report, once read, is the checker's whole result, and
+/// the lines around it are its progress and build output. `go test -json`
+/// events and generic output carry diagnostics in text as well, so their text
+/// lines are always read.
 fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<serde_json::Error>) {
 	let combined = if input.stderr.is_empty() {
 		input.stdout.to_owned()
@@ -236,7 +240,9 @@ fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<s
 		},
 		Err(error) => Some(error),
 	};
-	parse_text(kind, &combined, input, &mut diagnostics);
+	if not_json.is_some() || matches!(kind, ParserKind::GoTest | ParserKind::Generic) {
+		parse_text(kind, &combined, input, &mut diagnostics);
+	}
 	(diagnostics, not_json)
 }
 
@@ -277,20 +283,45 @@ pub(super) fn unparseable(
 	}
 }
 
-/// Every JSON value in `text`: the whole text as one document, else each line
-/// that holds one. `Err` is why the whole text is not JSON, when no line is.
+/// Every JSON value in `text`: the whole text as one document, else each value
+/// that starts a line and ends one, so a report may span lines and sit among a
+/// checker's other output. `Err` is why the whole text is not JSON, when no
+/// line holds a whole value.
 fn json_values(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
 	let error = match serde_json::from_str(text.trim()) {
 		Ok(value) => return Ok(vec![value]),
 		Err(error) => error,
 	};
 	let mut values = Vec::new();
-	for line in text.lines() {
-		let line = line.trim();
-		if (line.starts_with('{') || line.starts_with('['))
-			&& let Ok(value) = serde_json::from_str(line)
-		{
-			values.push(value);
+	let mut line_start = 0;
+	let mut consumed = 0;
+	for line in text.split_inclusive('\n') {
+		let start = line_start;
+		line_start += line.len();
+		let trimmed = line.trim_start();
+		if start < consumed || !trimmed.starts_with(['{', '[']) {
+			continue;
+		}
+		let value_start = start + line.len() - trimmed.len();
+		let mut stream =
+			serde_json::Deserializer::from_str(&text[value_start..]).into_iter::<serde_json::Value>();
+		match stream.next() {
+			Some(Ok(value)) => {
+				let end = value_start + stream.byte_offset();
+				if text[end..]
+					.lines()
+					.next()
+					.unwrap_or_default()
+					.trim()
+					.is_empty()
+				{
+					values.push(value);
+					consumed = end;
+				}
+			},
+			// Every later line is inside this value, which never closes.
+			Some(Err(error)) if error.is_eof() => break,
+			_ => {},
 		}
 	}
 	if values.is_empty() {
@@ -1128,6 +1159,119 @@ mod tests {
 		assert!(matches!(
 			run(ParserKind::Tap, perl, "").expect_err("no TAP stream"),
 			ParseError::Tap(TapError::NoStream)
+		));
+	}
+
+	/// A clean run of every JSON-report checker below, recorded under
+	/// `fixtures` (`PROVENANCE.txt` beside each), reads as a report naming no
+	/// problem: with the progress a checker writes to stderr, and with the build
+	/// output `mix` writes to stdout before Credo's report on a cold run. The
+	/// same stdout cut short, or empty, never reads as zero failures: a checker
+	/// that writes no report has not reported a clean run.
+	#[test]
+	fn recorded_clean_runs_read_as_zero_failures() {
+		let root = Path::new("/private/tmp/cleanrun/cases");
+		let read = |kind, stdout, stderr| {
+			parse(kind, &ParserInput {
+				checker: "checker",
+				checker_root: root,
+				project_root: root,
+				stdout,
+				stderr,
+			})
+		};
+		let clean = [
+			(
+				"eslint",
+				ParserKind::Eslint,
+				include_str!("../../../../fixtures/eslint/clean.stdout"),
+				include_str!("../../../../fixtures/eslint/clean.stderr"),
+			),
+			(
+				"pyright",
+				ParserKind::Pyright,
+				include_str!("../../../../fixtures/pyright/clean.stdout"),
+				include_str!("../../../../fixtures/pyright/clean.stderr"),
+			),
+			(
+				"pylint",
+				ParserKind::Pylint,
+				include_str!("../../../../fixtures/pylint/clean.stdout"),
+				include_str!("../../../../fixtures/pylint/clean.stderr"),
+			),
+			(
+				"rubocop",
+				ParserKind::Rubocop,
+				include_str!("../../../../fixtures/rubocop/clean.stdout"),
+				include_str!("../../../../fixtures/rubocop/clean.stderr"),
+			),
+			(
+				"phpstan",
+				ParserKind::Phpstan,
+				include_str!("../../../../fixtures/phpstan/clean.stdout"),
+				include_str!("../../../../fixtures/phpstan/clean.stderr"),
+			),
+			(
+				"psalm",
+				ParserKind::Psalm,
+				include_str!("../../../../fixtures/psalm/clean.stdout"),
+				include_str!("../../../../fixtures/psalm/clean.stderr"),
+			),
+			(
+				"swiftlint",
+				ParserKind::Swiftlint,
+				include_str!("../../../../fixtures/swiftlint/clean.stdout"),
+				include_str!("../../../../fixtures/swiftlint/clean.stderr"),
+			),
+			(
+				"credo",
+				ParserKind::Credo,
+				include_str!("../../../../fixtures/credo/clean.stdout"),
+				include_str!("../../../../fixtures/credo/clean.stderr"),
+			),
+			(
+				"credo cold",
+				ParserKind::Credo,
+				include_str!("../../../../fixtures/credo/clean-cold.stdout"),
+				include_str!("../../../../fixtures/credo/clean-cold.stderr"),
+			),
+			(
+				"hlint",
+				ParserKind::Hlint,
+				include_str!("../../../../fixtures/hlint/clean.stdout"),
+				include_str!("../../../../fixtures/hlint/clean.stderr"),
+			),
+			(
+				"tflint",
+				ParserKind::Tflint,
+				include_str!("../../../../fixtures/tflint/clean.stdout"),
+				include_str!("../../../../fixtures/tflint/clean.stderr"),
+			),
+		];
+		let outcomes = clean
+			.iter()
+			.map(|&(name, kind, stdout, stderr)| {
+				(name, read(kind, stdout, stderr).map_err(|error| error.to_string()))
+			})
+			.collect::<Vec<_>>();
+		let zero_failures = clean
+			.iter()
+			.map(|&(name, ..)| (name, Ok(Vec::new())))
+			.collect::<Vec<_>>();
+		assert_eq!(outcomes, zero_failures);
+		for (name, kind, stdout, stderr) in clean {
+			for unreadable in [&stdout[..stdout.len() / 2], ""] {
+				let outcome = read(kind, unreadable, stderr);
+				assert!(
+					!matches!(outcome, Ok(ref found) if found.is_empty()),
+					"{name}: {unreadable:?} read as clean"
+				);
+			}
+		}
+		// A line that only opens with a JSON value is not a report.
+		assert!(matches!(
+			read(ParserKind::Swiftlint, "[1]    4242 killed     swiftlint\n", ""),
+			Err(ParseError::NoJson(_))
 		));
 	}
 }

@@ -1,0 +1,15 @@
+HLint --json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: hlint . --json   (cwd /private/tmp/cleanrun/cases/hlint; the args the cleanse hlint checker passes)
+  versions: HLint v3.10 (Homebrew bottle, arm64)
+  exit 0; stdout 3 bytes, stderr 0 bytes
+  stack.yaml:
+    resolver: lts-22.0
+    packages: [.]
+  Clean.hs:
+    module Clean (greet) where
+
+    greet :: String -> String
+    greet name = "hello " ++ name

@@ -20,3 +20,14 @@ outputjson.json
   clean.py:
     def add(left: int, right: int) -> int:
         return left + right
+
+clean.stdout, clean.stderr
+  the verbatim streams of one run; scratch directory /private/tmp/cleanrun/cases (neutral)
+  command: pyright --outputjson   (cwd /private/tmp/cleanrun/cases/pyright)
+  versions: pyright 1.1.414 (npm, project-local install), node v26.11.1
+  exit 0; stdout 251 bytes, stderr 0 bytes
+  pyrightconfig.json:
+    {}
+  clean.py:
+    def greet(name: str) -> str:
+        return "hello " + name
