@@ -50,7 +50,7 @@ pub(super) struct Provenance {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct Location {
 	pub path:         Str,
-	pub start_line:   u64,
+	pub start_line:   Option<u64>,
 	pub end_line:     Option<u64>,
 	pub start_column: Option<u64>,
 	pub end_column:   Option<u64>,

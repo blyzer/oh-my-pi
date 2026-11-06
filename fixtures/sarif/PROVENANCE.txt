@@ -20,6 +20,17 @@ golangci-lint.sarif
   config: sources/golangci/.golangci.yml enables errcheck, govet, staticcheck and unused only.
   outcomes: errcheck, govet (printf) and unused, all in outcomes.go.
 
+biome-unreadable.sarif
+  command: biome lint --reporter=sarif missing.js outcomes.js   (cwd sources/biome; exit 1; missing.js does not exist)
+  versions: biome 2.6.4
+  stderr (not recorded): the biome.json deprecation notice and the run summary.
+  outcomes: noUnusedVariables, noDoubleEquals and noDebugger in outcomes.js; internalError/io for missing.js, whose location names the file and carries no region.
+
+ruff-outside.sarif
+  command: ruff check --no-cache --output-format sarif outcomes.py ../stray/stray.py   (cwd sources/ruff; exit 1; stderr empty)
+  versions: ruff 0.17.3
+  outcomes: the four outcomes.py results of ruff.sarif, then F401 in sources/stray/stray.py, a file outside the sources/ruff project root.
+
 clippy-sarif is not installed on the recording machine, and cargo clippy --message-format=json is not SARIF, so no Rust fixture exists.
 
 DIVERGENCES THE PARSER MUST HANDLE
