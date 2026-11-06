@@ -463,14 +463,22 @@ impl SecurityScanService {
 		scan.sarif = Some(sarif::export(&scan, &self.root));
 		let scan_id = scan.id.clone();
 		let count = scan.findings.len();
+		let unlocated = scan
+			.findings
+			.iter()
+			.filter(|finding| finding.locations.is_empty())
+			.count();
 		self.mutate(|state| {
 			state.scans.insert(scan_id.clone(), scan);
 			Ok(())
 		})?;
 		Ok(payload(
 			Action::ImportSarif,
-			format!("Imported {count} SARIF finding(s) as security scan {scan_id}."),
-			json!({"scan": {"id": scan_id, "finding_count": count}}),
+			format!(
+				"Imported {count} SARIF finding(s) as security scan {scan_id}, {unlocated} without a \
+				 location in the workspace."
+			),
+			json!({"scan": {"id": scan_id, "finding_count": count, "unlocated_count": unlocated}}),
 		))
 	}
 
@@ -1193,7 +1201,7 @@ fn scan_workspace(
 			let normalized = relative.to_string_lossy().replace('\\', "/");
 			let location = Location {
 				path:         Str::new(normalized.as_str()),
-				start_line:   (index + 1) as u64,
+				start_line:   Some((index + 1) as u64),
 				end_line:     None,
 				start_column: None,
 				end_column:   None,
@@ -1349,7 +1357,10 @@ fn taxonomy_location_match(left: &Finding, right: &Finding) -> bool {
 	left.locations.iter().any(|left| {
 		right.locations.iter().any(|right| {
 			left.path.eq_ignore_ascii_case(&right.path)
-				&& left.start_line.abs_diff(right.start_line) <= 3
+				&& match (left.start_line, right.start_line) {
+					(Some(left), Some(right)) => left.abs_diff(right) <= 3,
+					(left, right) => left == right,
+				}
 		})
 	})
 }
@@ -1676,7 +1687,7 @@ fn render_findings_index(body: &mut String, scan: &Scan) {
 	for finding in &scan.findings {
 		let location = finding.locations.first();
 		let suffix = location
-			.map(|location| format!(" (`{}:{}`)", sanitize_text(&location.path), location.start_line))
+			.map(|location| format!(" (`{}`)", location_label(location)))
 			.unwrap_or_default();
 		let _ = writeln!(
 			body,
@@ -1702,8 +1713,7 @@ fn render_finding(body: &mut String, finding: &Finding) {
 		enum_json(finding.validation.status),
 	);
 	for location in &finding.locations {
-		let _ =
-			writeln!(body, "- Location: `{}:{}`", sanitize_text(&location.path), location.start_line,);
+		let _ = writeln!(body, "- Location: `{}`", location_label(location));
 	}
 	let _ = writeln!(body, "\n{}\n", sanitize_text(&finding.summary));
 	if let Some(summary) = &finding.validation.summary {
@@ -1736,6 +1746,13 @@ fn render_finding(body: &mut String, finding: &Finding) {
 	}
 	if let Some(remediation) = &finding.remediation {
 		let _ = writeln!(body, "### Remediation\n\n{}\n", sanitize_text(remediation));
+	}
+}
+fn location_label(location: &Location) -> String {
+	let path = sanitize_text(&location.path);
+	match location.start_line {
+		Some(line) => format!("{path}:{line}"),
+		None => path,
 	}
 }
 fn sanitize_text(value: &str) -> String {

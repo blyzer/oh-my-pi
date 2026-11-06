@@ -90,6 +90,8 @@ class DriverTests(unittest.TestCase):
                     driver, "fetch_crates", return_value={"type": "fetch", "exit": 0}
                 ),
                 mock.patch.object(driver, "run_one", side_effect=fake_run),
+                mock.patch.object(driver, "SETTLE_TIMEOUT_S", 0.0),
+                mock.patch.object(driver.time, "sleep") as sleep,
             ):
                 code = driver.run_session(
                     result, root=Path(directory), omp_bin="omp", dry_run=False
@@ -102,6 +104,62 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(len(repetitions), 2)
         self.assertIn("three process-lifecycle tests failed", repetitions[-1]["stdout"])
         self.assertEqual(records[-1]["status"], "aborted")
+        self.assertIn("between-repetition guard refused", records[-1]["reason"])
+        sleep.assert_not_called()
+
+    def test_refused_guard_waits_for_the_host_to_settle(self):
+        good = {"type": "guard", "verdict": "pass", "snapshot": {}}
+        bad = {
+            "type": "guard",
+            "verdict": "refuse",
+            "refusals": [{"condition": "load_avg_1m", "value": 4.2, "limit": 1.0}],
+            "snapshot": {},
+        }
+        verdicts = iter([good, bad])
+        used = []
+
+        def fake_run(out, recipe, arm, repetition, **kwargs):
+            used.append(kwargs["guard"]["verdict"])
+            return {
+                "type": "repetition",
+                "recipe": recipe["name"],
+                "arm": arm,
+                "repetition": repetition,
+                "status": "passed",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "settled.jsonl"
+            with (
+                mock.patch.object(
+                    driver.quiet,
+                    "guard",
+                    side_effect=lambda _limit: dict(next(verdicts, good)),
+                ),
+                mock.patch.object(
+                    driver,
+                    "cache_state",
+                    return_value={"action_cache": "off", "profile": "buildbuddy"},
+                ),
+                mock.patch.object(
+                    driver, "fetch_crates", return_value={"type": "fetch", "exit": 0}
+                ),
+                mock.patch.object(driver, "run_one", side_effect=fake_run),
+                mock.patch.object(driver.time, "sleep") as sleep,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                code = driver.run_session(
+                    result, root=Path(directory), omp_bin="omp", dry_run=False
+                )
+            records = [json.loads(line) for line in result.read_text().splitlines()]
+        self.assertEqual(code, 0)
+        self.assertEqual(records[-1]["status"], "complete")
+        sleep.assert_called_once_with(driver.SETTLE_POLL_S)
+        self.assertIn("REFUSED load_avg_1m: 4.2 > limit 1.0", stderr.getvalue())
+        guards = [r["verdict"] for r in records if r["type"] == "guard"]
+        self.assertEqual(guards[:3], ["pass", "refuse", "pass"])
+        self.assertEqual(len(guards), 20)
+        self.assertEqual(used, ["pass"] * 18)
 
     def test_cli_refuses_result_inside_checkout(self):
         result = SCRIPT.parent.parent / "measurement-result.jsonl"

@@ -28,9 +28,9 @@ Citation rules for this record:
 - **UNVERIFIED** marks what could not be checked without a BuildBuddy account or a live run.
 
 
-### Open owner question: remote execution in core or an extension?
+### Owner question: remote execution in core or an extension?
 
-Should remote build execution remain in omp core, or move outside as an extension? This question remains open and does not reverse the existing acceptance gate. The following observations describe the tree at `3271627d1e`, not the historical source pin above.
+Should remote build execution remain in omp core, or move outside as an extension? The [2026-11-05 amendment](#amendment-2026-11-05-vendor-integration-leaves-core) records the owner's ruling. Dimension 1 is decided, and dimension 2 is scoped but not built. The ruling does not reverse the existing acceptance gate. The following observations describe the tree at `3271627d1e`, not the historical source pin above.
 
 - `crates/exec/src/backend.rs:ExecutionBackend` is a generic, statically dispatched trait, not an enum or a dyn-compatible trait. An external crate can implement it, and `crates/agent/src/jobs.rs:JobBoard::attach_execution_run` accepts a generic `ExecutionRun`. A runtime-loaded backend cannot be dropped in as `dyn ExecutionBackend`. [INFERENCE] A concrete in-core adapter could delegate to an external implementation. See ADR 0047 for the trait definition.
 - Among omp crates, `crates/exec-reapi/Cargo.toml` depends on `omp-exec`, `omp-adw`, `omp-core`, and `omp-observability`; `crates/exec-buildbuddy/Cargo.toml` depends on `omp-exec`, `omp-adw`, `omp-core`, and optionally `omp-exec-reapi`. Neither backend depends on envd, driver, session, journal, or agent. They can be separated from envd without first replacing envd internals, though their other dependencies and composition still need handling. `crates/exec-local/src/lib.rs:LocalBackend` uses `omp_envd::exec::ExecHost`, and `crates/exec-ssh/src/lib.rs:SshBackend` uses `omp_envd::ssh::SshService`; moving those backends independently requires replacing or exposing those dependencies.
@@ -38,7 +38,7 @@ Should remote build execution remain in omp core, or move outside as an extensio
 - No workspace crate declares a dependency on `omp-exec-buildbuddy` (`Cargo.toml` and `crates/*/Cargo.toml`). `crates/exec/src/report.rs:BuildReport` and `BuildStatus` have no consumers outside `crates/exec`, apart from their re-export in `crates/exec/src/lib.rs`.
 - Correction of record: the installed `omp-claude-bridge` version 2026.10.17 is a TypeScript extension. Its `package.json` names `src/index.ts`; that file uses `pi.registerProvider`, `pi.registerTool`, and `@anthropic-ai/claude-agent-sdk` with `pathToClaudeCodeExecutable`. It delegates to a subprocess in the TypeScript host. The Rust omp has no JS/TS plugin runtime (`AGENTS.md`, Locked Deviations from pi). It is not evidence that `crates/py` and envd can host a backend.
 
-The decision has three separate dimensions. Code location controls maintenance ownership. Moving a crate to another repository alone does not stop it shipping: if omp links that dependency, its vendor client is still part of the product binary. The shipping choice is whether the vendor client is linked or supplied outside the binary. The integration choice is how an out-of-core backend is reached. Phase 0 answers that third question below; ownership and shipping remain open.
+The decision has three separate dimensions. Code location controls maintenance ownership. Moving a crate to another repository alone does not stop it shipping: if omp links that dependency, its vendor client is still part of the product binary. The shipping choice is whether the vendor client is linked or supplied outside the binary. The integration choice is how an out-of-core backend is reached. Phase 0 answers that third question below. The 2026-11-05 amendment decides ownership and scopes shipping.
 
 Keeping remote execution in core retains direct integration and a single delivery, but core maintains and ships the linked remote code and its dependencies. Moving vendor execution outside the binary can avoid shipping that client in core, but requires an adapter and a separately delivered implementation, with compatibility, lifecycle, security, and operational responsibilities to define and verify. Moving only the repository changes maintenance, not binary contents. These are costs to evaluate, not a recommendation.
 
@@ -1696,6 +1696,10 @@ None touches a backend.
    and result persistence need a product-created journaled job, not library-only tests of unused
    paths. [ADR 0047](0047-agent-build-execution-model.md) is the companion for agent builds; its
    proposed job-board integration does not yet specify the producer caller.
+9. **Code location and shipping: dimension 1 DECIDED 2026-11-05.** BuildBuddy does not stay in
+   `omp2`. Core keeps only the generic, extensible ground, and vendor integration moves outside as
+   an extension. Dimension 2, what ships in the binary, is scoped but not built. See
+   [Amendment (2026-11-05)](#amendment-2026-11-05-vendor-integration-leaves-core).
 
 ### Review record (2026-10-08)
 
@@ -1766,6 +1770,82 @@ from the Run API's returned invocation ID.
 Production gate: journal replay, accepted-action crash handling, typed result persistence, and
 owning-crate tests MUST pass before this ADR can move from proposed to accepted. The full BuildBuddy
 warm-snapshot path remains a follow-up provider verification, not a hidden fallback.
+
+## Amendment (2026-11-05): vendor integration leaves core
+
+The owner ruled on the first two dimensions of the owner question in Context.
+
+- **Dimension 1, code location, is decided.** BuildBuddy does not stay in `omp2`. Core keeps only
+  the generic, extensible ground. Vendor integration moves outside as an extension.
+- **Dimension 2, what ships in the binary, is scoped but not built.** The owner ruled to build
+  what is needed and left the shape to engineering judgement.
+  [docs/research/exec-out-of-core.md](../research/exec-out-of-core.md) proposes that shape.
+- **Dimension 3, integration, stands as Phase 0 recorded it.** No existing host carries an
+  out-of-core backend as it stands.
+
+Nothing in this amendment is implemented. At `230efc0df8` every vendor item named below is still
+in core. This record stays proposed. The production gate of the 2026-10-31 amendment, the gap to
+acceptance, and the success criteria are unchanged.
+
+### Grounds for the ruling
+
+These grounds come from this record and the tree at `230efc0df8`. They are not quotations of the
+owner.
+
+1. Context makes BuildBuddy never a hard dependency, and the 2026-10-10 amendment keeps
+   BuildBuddy-specific features out of the core contract. Vendor code still reached core crates.
+   `omp-exec-reapi` holds `Profile::buildbuddy` and the `buildbuddy-cancel` module, and
+   `crates/driver/Cargo.toml:51` enables that feature for every `omp-driver` build.
+   `crates/driver/src/adw/remote.rs` branches on the name `"buildbuddy"` three times, although
+   Part A.3 says "No other code branches on a vendor name".
+2. The vendor code separates without first replacing envd internals. `omp-exec-buildbuddy` and
+   `omp-exec-reapi` depend on no envd, driver, session, journal, or agent crate, and no workspace
+   crate depends on `omp-exec-buildbuddy`.
+3. Providers already follow this rule. `AGENTS.md` makes providers catalog data and keeps code for
+   genuinely distinct wire behavior. BuildBuddy's distinct wire behavior now leaves core with the
+   vendor.
+4. Context notes that moving a crate to another repository does not stop it shipping. Placing the
+   vendor integration in an extension settles its location and also keeps the vendor client out of
+   the binary.
+
+### What this supersedes
+
+- In Part A.1, the `ExecutionBackend` layer becomes `Local (envd ExecHost) | Reapi | Ssh |
+  Delegated | …`. `Delegated` is one in-core adapter for a backend outside the binary. REAPI has
+  no named vendor profile in core, and its profile values are operator or extension data.
+- In Part A.3, "BuildBuddy is mostly a profile, as data" still holds for the data, which moves out
+  of core constants. "One piece is code", the `buildbuddy-cancel` module in `omp-exec-reapi`, is
+  superseded. Invocation cancel moves to the extension.
+- In the 2026-10-10 amendment, BuildBuddy Run API snapshots remain the measured warm path. The Run
+  API backend is reached through the extension, not through a core crate.
+
+The title still says "BuildBuddy is one replaceable REAPI backend". Read it as a backend reached
+through operator data or an extension.
+
+### The line at `230efc0df8`
+
+| Crate | Verdict |
+|---|---|
+| `omp-exec` | Generic ground. `CargoJust` and `RepoPins` encode this repository's recipes and pins, and they must become generic. |
+| `omp-exec-local` | Generic ground. |
+| `omp-exec-ssh` | Generic ground with no composer. PR #486 (`f796e0b78f`) removed it from `crates/driver/Cargo.toml`, so "Status in omp" is out of date on that point. |
+| `omp-exec-reapi` | Generic ground, except for three vendor items: `Profile::buildbuddy`, the `buildbuddy-cancel` feature with its vendored protos, and the canceller that `omp-exec-buildbuddy` uses. |
+| `omp-exec-buildbuddy` | Vendor integration. The whole crate moves to the extension. |
+
+### Dimension 2 is scoped but not built
+
+`ExecutionBackend` is statically dispatched and not dyn-compatible, so the binary must carry one
+concrete adapter that delegates outward. The research note recommends four short operations
+(`describe`, `start`, `poll`, and `cancel`) carried by a Python extension. Core owns the run loop,
+the journal record, and the reattach handle, so no delegated call outlives its reply. The note
+costs four alternatives: an erased in-process bridge, a long-lived program under the envd
+named-process supervisor, a one-shot program, and a local REAPI shim. It also names the generic
+ground that must replace `repo_pins`, which today makes `ProductionAdwHost::run_remote` work only
+in this repository.
+
+The recommendation needs Phase 0 changes 1 and 3, a route that core can call and the model
+cannot, an envd entry point for extension calls, and the composition enum that the gap's item 2
+already needs. It does not need Phase 0 changes 2 or 4. None of this is built.
 
 
 ## References

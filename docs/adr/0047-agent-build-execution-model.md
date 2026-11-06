@@ -70,7 +70,7 @@ pub trait ExecutionBackend: Clone + Send + Sync + 'static {
 
 This quote omits documentation comments. `Clone` and the opaque future returns make the trait non-dyn-compatible. The workspace has concrete implementations, not an enum dispatching execution backends (`crates/exec-local/src/lib.rs:LocalBackend`, `crates/exec-reapi/src/execute.rs:ReapiBackend`, `crates/exec-ssh/src/lib.rs:SshBackend`, `crates/exec-buildbuddy/src/lib.rs:BuildBuddyBackend`). The precedent `crates/tools/src/shell.rs:ShellExec` is also a generic trait, not an enum.
 
-An external crate can implement the trait. `crates/agent/src/jobs.rs:JobBoard::attach_execution_run` accepts any `R: ExecutionRun`. A runtime-loaded backend cannot be plugged in as `dyn ExecutionBackend`; [INFERENCE] a concrete in-core adapter could delegate to an out-of-core implementation. Phase 0 found that no existing host carries such a backend as it stands: connection close cancelled a Python invocation, and reinvoking the same ID started it again. The envd named-process supervisor survived client close and reattached by name, but extensions were denied `env.process`. `RegistryBridges::{dynamic_tools,dynamic_tool_factories}` is a Rust composition seam, not the Python registration path. See [ADR 0040's Phase 0 verdict](0040-remote-build-and-test-execution.md#phase-0-out-of-core-host-feasibility) for the ranked observations, corrections, and core changes. Ownership and shipping remain open.
+An external crate can implement the trait. `crates/agent/src/jobs.rs:JobBoard::attach_execution_run` accepts any `R: ExecutionRun`. A runtime-loaded backend cannot be plugged in as `dyn ExecutionBackend`; [INFERENCE] a concrete in-core adapter could delegate to an out-of-core implementation. Phase 0 found that no existing host carries such a backend as it stands: connection close cancelled a Python invocation, and reinvoking the same ID started it again. The envd named-process supervisor survived client close and reattached by name, but extensions were denied `env.process`. `RegistryBridges::{dynamic_tools,dynamic_tool_factories}` is a Rust composition seam, not the Python registration path. See [ADR 0040's Phase 0 verdict](0040-remote-build-and-test-execution.md#phase-0-out-of-core-host-feasibility) for the ranked observations, corrections, and core changes. ADR 0040's [2026-11-05 amendment](0040-remote-build-and-test-execution.md#amendment-2026-11-05-vendor-integration-leaves-core) decides ownership and scopes shipping. Neither is implemented.
 
 ## Consequences
 
@@ -113,6 +113,25 @@ Instead, `omp-exec` holds `ExecutionRequest`, `ExecutionBackend`, `place()`, and
 with the four separate backends named above. ADR 0040 now measures memory relief, not the
 superseded client-memory ratio; its numeric thresholds, repetition rule, and role-inclusive
 measurement remain open. Warm wall-time acceptance requires a warm-state product backend.
+
+## Amendment (2026-11-05): vendor clients leave core
+
+ADR 0040's [2026-11-05 amendment](0040-remote-build-and-test-execution.md#amendment-2026-11-05-vendor-integration-leaves-core)
+records the owner's ruling. BuildBuddy does not stay in `omp2`. Core keeps only the generic,
+extensible ground, and vendor integration moves outside as an extension. What ships in the binary
+is scoped in [docs/research/exec-out-of-core.md](../research/exec-out-of-core.md) and not built.
+
+The ruling changes three parts of this record. None of the changes is implemented.
+
+- Decision item 2 says that BuildBuddy remains two backends, Run API and generic REAPI. Generic
+  REAPI now stays in core, with BuildBuddy's differences supplied as profile data. The Run API
+  backend and invocation cancel move to the extension, behind one in-core adapter.
+- Decision item 3 says that vendor clients live outside envd. They now live outside omp's crates.
+- Consequences prohibit vendor names, headers, and properties in `omp-exec`. The prohibition now
+  covers every core crate, including `omp-exec-reapi` and `omp-driver`.
+
+"Status in omp" still describes the four backends that exist at `230efc0df8`. The ruling's target
+removes `omp-exec-buildbuddy` from the workspace, and that has not happened.
 
 ## References
 
