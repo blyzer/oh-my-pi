@@ -1,0 +1,4 @@
+    Checking cargo-json-short v0.1.0 (/private/tmp/cargo-json-repro/short)
+src/lib.rs:2:6: warning: unused variable: `unused`: help: if this is intentional, prefix it with an underscore: `_unused`
+warning: `cargo-json-short` (lib) generated 1 warning (run `cargo fix --lib -p cargo-json-short` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.26s

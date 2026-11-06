@@ -216,12 +216,7 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Result<Vec<Diagnostic
 	Ok(diagnostics)
 }
 
-/// Reads every JSON value of the combined output, and returns why the output
-/// is not JSON when it holds no JSON value. Diagnostic text lines are read only
-/// where no report was: a report, once read, is the checker's whole result, and
-/// the lines around it are its progress and build output. `go test -json`
-/// events and generic output carry diagnostics in text as well, so their text
-/// lines are always read.
+/// Reads JSON values and diagnostic text lines from the combined output.
 fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<serde_json::Error>) {
 	let combined = if input.stderr.is_empty() {
 		input.stdout.to_owned()
@@ -231,7 +226,8 @@ fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<s
 		format!("{}\n{}", input.stdout, input.stderr)
 	};
 	let mut diagnostics = Vec::new();
-	let not_json = match json_values(&combined) {
+	let mut text_only = combined.clone();
+	let not_json = match json_values(&combined, &mut text_only) {
 		Ok(values) => {
 			for value in &values {
 				parse_json_value(kind, value, None, input, &mut diagnostics);
@@ -240,9 +236,7 @@ fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<s
 		},
 		Err(error) => Some(error),
 	};
-	if not_json.is_some() || matches!(kind, ParserKind::GoTest | ParserKind::Generic) {
-		parse_text(kind, &combined, input, &mut diagnostics);
-	}
+	parse_text(kind, &text_only, input, &mut diagnostics);
 	(diagnostics, not_json)
 }
 
@@ -283,16 +277,20 @@ pub(super) fn unparseable(
 	}
 }
 
-/// Every JSON value in `text`: the whole text as one document, else each value
-/// that starts a line and ends one, so a report may span lines and sit among a
-/// checker's other output. `Err` is why the whole text is not JSON, when no
-/// line holds a whole value.
-fn json_values(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+/// Reads complete JSON values, including multiline reports among other output.
+fn json_values(
+	text: &str,
+	text_only: &mut String,
+) -> Result<Vec<serde_json::Value>, serde_json::Error> {
 	let error = match serde_json::from_str(text.trim()) {
-		Ok(value) => return Ok(vec![value]),
+		Ok(value) => {
+			text_only.clear();
+			return Ok(vec![value]);
+		},
 		Err(error) => error,
 	};
 	let mut values = Vec::new();
+	let mut spans = Vec::new();
 	let mut line_start = 0;
 	let mut consumed = 0;
 	for line in text.split_inclusive('\n') {
@@ -315,15 +313,22 @@ fn json_values(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> 
 					.trim()
 					.is_empty()
 				{
+					spans.push(value_start..end);
 					values.push(value);
 					consumed = end;
 				}
 			},
-			// Every later line is inside this value, which never closes.
 			Some(Err(error)) if error.is_eof() => break,
 			_ => {},
 		}
 	}
+	text_only.clear();
+	let mut cursor = 0;
+	for span in spans {
+		text_only.push_str(&text[cursor..span.start]);
+		cursor = span.end;
+	}
+	text_only.push_str(&text[cursor..]);
 	if values.is_empty() {
 		Err(error)
 	} else {
@@ -589,6 +594,20 @@ fn parse_text(kind: ParserKind, text: &str, input: &ParserInput<'_>, output: &mu
 		let line = strip_control(line);
 		let line = line.trim();
 		if line.is_empty() {
+			continue;
+		}
+		if matches!(kind, ParserKind::Credo)
+			&& line.as_bytes().get(0..13).is_some_and(|prefix| {
+				prefix[0..2].iter().all(u8::is_ascii_digit)
+					&& prefix[2] == b':'
+					&& prefix[3..5].iter().all(u8::is_ascii_digit)
+					&& prefix[5] == b':'
+					&& prefix[6..8].iter().all(u8::is_ascii_digit)
+					&& prefix[8] == b'.'
+					&& prefix[9..12].iter().all(u8::is_ascii_digit)
+					&& prefix[12] == b' '
+			}) && line[13..].starts_with("[info] ")
+		{
 			continue;
 		}
 		if let Some(capture) = CODE_PREFIX.captures(line) {
@@ -1273,5 +1292,55 @@ mod tests {
 			read(ParserKind::Swiftlint, "[1]    4242 killed     swiftlint\n", ""),
 			Err(ParseError::NoJson(_))
 		));
+	}
+
+	#[test]
+	fn credo_preserves_text_diagnostics_beside_json() {
+		let root = Path::new("/project");
+		let stdout = concat!(
+			"14:31:49.961 [info] Compiling file system watcher for Mac...\n",
+			"14:31:51.354 [info] Done.\n",
+			"{\n  \"issues\": []\n}\n",
+			"lib/example.ex:7:2: error: real problem\n"
+		);
+		let found = parse(ParserKind::Credo, &ParserInput {
+			checker: "credo",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "",
+		})
+		.unwrap();
+		assert_eq!(found.len(), 1);
+		assert_eq!(found[0].file.as_deref(), Some("lib/example.ex"));
+		assert_eq!(found[0].line, Some(7));
+		assert_eq!(found[0].message.as_str(), "real problem");
+	}
+
+	#[test]
+	fn json_strings_are_not_parsed_as_text_diagnostics() {
+		let root = Path::new("/project");
+		let stdout = "{\n  \"issues\": [],\n  \"metadata\": \"lib/fake.ex:7:2: not a \
+		              diagnostic\"\n}\nlib/real.ex:9:3: error: real problem\n";
+		let found = parse(ParserKind::Credo, &ParserInput {
+			checker: "credo",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "",
+		})
+		.unwrap();
+		assert_eq!(found.len(), 1);
+		assert_eq!(found[0].file.as_deref(), Some("lib/real.ex"));
+	}
+
+	#[test]
+	fn multiple_json_reports_preserve_text_offsets() {
+		let text =
+			"progress é\n{\"issues\":[]}\nlib/real.ex:9:3: error: real problem\n{\"issues\":[]}\n";
+		let mut text_only = text.to_owned();
+		let values = json_values(text, &mut text_only).unwrap();
+		assert_eq!(values.len(), 2);
+		assert_eq!(text_only, "progress é\n\nlib/real.ex:9:3: error: real problem\n\n");
 	}
 }

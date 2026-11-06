@@ -404,6 +404,50 @@ class GuardTests(unittest.TestCase):
         self.assertIsNone(record["tree_peak_rss_mib"])
         self.assertEqual(record["tree_peak_status"], "not_captured")
 
+    def test_upper_bound_keeps_a_tree_peak_from_before_envd_spawned(self):
+        def sampled(root, interval, t0, emit, stop, peak, **kwargs):
+            peak[0] = 5120
+            kwargs["envd_seen"][(50, "c")] = {
+                "pid": 50,
+                "started": "c",
+                "in_tree": True,
+                "max_combined_rss_kib": 3072,
+                "max_tree_without_envd_rss_kib": 1024,
+            }
+            kwargs["proofs"].append(
+                {
+                    "status": "identified",
+                    "pid": 50,
+                    "started": "c",
+                    "sharing": "no_other_peer_observed",
+                    "other_peer_pids": [],
+                    "socket_pairs": [],
+                }
+            )
+
+        with (
+            mock.patch.object(quiet, "snapshot_or_error", return_value={}),
+            mock.patch.object(
+                quiet,
+                "envd_snapshot",
+                return_value={"status": "captured", "processes": []},
+            ),
+            mock.patch.object(quiet, "sample_loop", side_effect=sampled),
+        ):
+            record = quiet.run_recipe(
+                ["/usr/bin/true"],
+                "",
+                "test",
+                1,
+                None,
+                output=io.StringIO(),
+                project_root="/repo",
+                echo=False,
+            )
+        self.assertEqual(record["tree_peak_rss_mib"], 5.0)
+        self.assertEqual(record["tree_plus_envd_peak_rss_mib"], 5.0)
+        self.assertEqual(record["tree_without_envd_peak_rss_mib"], 1.0)
+
     def test_listener_is_idle_but_worker_child_is_busy(self):
         launch = "PID\tStatus\tLabel\n10\t0\tactions.runner.example\n"
         idle = "10 1 /bin/bash\n11 10 /runner/Runner.Listener\n"

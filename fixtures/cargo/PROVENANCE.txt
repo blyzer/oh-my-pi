@@ -7,6 +7,8 @@ The commands are the shipped checkers' own arguments (crates/driver/src/cleanse/
 	cargo-check    cargo check --message-format=json
 	cargo-clippy   cargo clippy --message-format=json -- -Dwarnings
 	cargo-test     cargo test --message-format=json
+plus one form no shipped checker runs, the human short format a discovered checker may declare with the `rust` parser:
+	cargo-check-short   cargo check --message-format=short
 
 case               crate        checker        exit
 check-clean        clean        cargo-check    0
@@ -19,6 +21,7 @@ test-fail          testfail     cargo-test     101
 check-buildpanic   buildpanic   cargo-check    101
 check-manifest     manifest     cargo-check    101   (stdout is empty: cargo rejects the manifest before it writes any record)
 test-doctest       doctest      cargo-test     101
+check-short        short        cargo-check-short   0   (stdout is empty: the short format writes no records)
 
 SOURCES
 The crates are listed here instead of committed as crates: a Cargo.toml under fixtures/ would become a cargo-check root in omp cleanse discovery, and most of these crates fail on purpose.
@@ -91,4 +94,10 @@ doctest/src/lib.rs
 	/// ```
 	pub fn one() -> u32 {
 		1
+	}
+
+short/src/lib.rs
+	pub fn answer() -> u32 {
+		let unused = 1;
+		42
 	}
