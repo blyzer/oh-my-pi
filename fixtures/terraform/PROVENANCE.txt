@@ -1,0 +1,45 @@
+terraform validate -json fixtures. Each *.json is the verbatim stdout of one run, never hand-edited; stderr was empty in every run.
+The recording scratch directory was /private/tmp/empty-result-repro (neutral: no user name, no owner hostname).
+
+Every run
+  command: terraform validate -json   (the args the cleanse terraform checker passes), with no terraform init
+  versions: Terraform v1.16.6 on darwin_arm64
+
+validate-json.json
+  cwd /private/tmp/empty-result-repro/tf; exit 1 (two errors, one warning)
+  main.tf:
+    variable "name" {
+      type = string
+    }
+
+    resource "terraform_data" "x" {
+      input = var.name
+
+      lifecycle {
+        ignore_changes = [id]
+      }
+    }
+
+    output "greeting" {
+      value = var.missing
+    }
+
+    output "shout" {
+      value = upper(var.name, 1)
+    }
+
+validate-json-missing-provider.json
+  cwd /private/tmp/empty-result-repro/tf-noinit; exit 1; the one diagnostic has no range
+  main.tf:
+    resource "null_resource" "x" {}
+
+validate-json-clean.json
+  cwd /private/tmp/empty-result-repro/tf-clean; exit 0
+  main.tf:
+    variable "name" {
+      type = string
+    }
+
+    output "greeting" {
+      value = upper(var.name)
+    }

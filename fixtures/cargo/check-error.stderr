@@ -1,0 +1,2 @@
+    Checking cargo-json-error v0.1.0 (/private/tmp/cargo-json-repro/error)
+error: could not compile `cargo-json-error` (lib) due to 3 previous errors

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "diagnostics": [
+    {
+      "filename": "file:///private/tmp/offsets-repro/deno/bad.ts",
+      "range": {
+        "start": {
+          "line": 1,
+          "col": 6,
+          "bytePos": 6
+        },
+        "end": {
+          "line": 1,
+          "col": 12,
+          "bytePos": 12
+        }
+      },
+      "message": "`unused` is never used",
+      "code": "no-unused-vars",
+      "hint": "If this is intentional, prefix it with an underscore like `_unused`"
+    },
+    {
+      "filename": "file:///private/tmp/offsets-repro/deno/bad.ts",
+      "range": {
+        "start": {
+          "line": 2,
+          "col": 9,
+          "bytePos": 27
+        },
+        "end": {
+          "line": 2,
+          "col": 10,
+          "bytePos": 28
+        }
+      },
+      "message": "`f` is never used",
+      "code": "no-unused-vars",
+      "hint": "If this is intentional, prefix it with an underscore like `_f`"
+    },
+    {
+      "filename": "file:///private/tmp/offsets-repro/deno/bad.ts",
+      "range": {
+        "start": {
+          "line": 3,
+          "col": 4,
+          "bytePos": 37
+        },
+        "end": {
+          "line": 3,
+          "col": 13,
+          "bytePos": 46
+        }
+      },
+      "message": "`debugger` statement is not allowed",
+      "code": "no-debugger",
+      "hint": "Remove the `debugger` statement"
+    }
+  ],
+  "errors": [],
+  "checked_files": [
+    "/private/tmp/offsets-repro/deno/bad.ts"
+  ]
+}
