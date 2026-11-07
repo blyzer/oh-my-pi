@@ -23,9 +23,8 @@ git status --short | head -20 # the local changes bb mirrored, if any
 target_dir="$HOME/.cache/omp-target"
 caches=("$HOME"/.cache/omp-target*) # with the justfile's omp-target-clippy
 disk_gb() { df -k --output="$1" "$HOME" | awk 'NR == 2 {print int($1 / 1048576)}'; }
-# One run grew the cache 9 GB (43 -> 52 GB, omp2 run 41906599079); the rest is room for the link
-# outputs and test files a run writes and deletes again.
-need_gb=15
+# The failed 16 GB-headroom run grew its target by 17 GB before exhausting disk.
+need_gb=25
 evict() {
 	local before
 	before=$(disk_gb avail)
@@ -100,6 +99,13 @@ fi
 stamp "just ${OMP_REMOTE_JUST_ARGS}"
 start=$(date +%s)
 status=0
+(
+	while sleep 60; do
+		stamp "disk: $(disk_gb avail) of $(disk_gb size) GB free"
+	done
+) &
+monitor=$!
+trap 'kill "$monitor" 2>/dev/null || true; wait "$monitor" 2>/dev/null || true' EXIT
 # shellcheck disable=SC2086 # the recipe and its arguments are words on purpose
 just ${OMP_REMOTE_JUST_ARGS} || status=$?
 stamp "exit ${status} after $(($(date +%s) - start))s; target $(du -sh "$CARGO_TARGET_DIR" | cut -f1); $(disk_gb avail) GB free"
