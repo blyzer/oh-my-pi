@@ -1,0 +1,10 @@
+   Compiling cargo-json-buildpanic v0.1.0 (/private/tmp/cargo-json-repro/buildpanic)
+error: failed to run custom build command for `cargo-json-buildpanic v0.1.0 (/private/tmp/cargo-json-repro/buildpanic)`
+
+Caused by:
+  process didn't exit successfully: `/private/tmp/cargo-json-repro/buildpanic/target/debug/build/cargo-json-buildpanic-bf40280b36dbf749/build-script-build` (exit status: 101)
+  --- stderr
+
+  thread 'main' (25920062) panicked at build.rs:2:5:
+  build script failed on purpose
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

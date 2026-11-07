@@ -1,0 +1,23 @@
+{"reason":"compiler-artifact","package_id":"path+file:///private/tmp/cargo-json-repro/testfail#cargo-json-testfail@0.1.0","manifest_path":"/private/tmp/cargo-json-repro/testfail/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"cargo_json_testfail","src_path":"/private/tmp/cargo-json-repro/testfail/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":true},"features":[],"filenames":["/private/tmp/cargo-json-repro/testfail/target/debug/deps/cargo_json_testfail-4f96fa56088d11e1"],"executable":"/private/tmp/cargo-json-repro/testfail/target/debug/deps/cargo_json_testfail-4f96fa56088d11e1","fresh":false}
+{"reason":"compiler-artifact","package_id":"path+file:///private/tmp/cargo-json-repro/testfail#cargo-json-testfail@0.1.0","manifest_path":"/private/tmp/cargo-json-repro/testfail/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"cargo_json_testfail","src_path":"/private/tmp/cargo-json-repro/testfail/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/private/tmp/cargo-json-repro/testfail/target/debug/deps/libcargo_json_testfail-f453c6cafbd1205b.rlib","/private/tmp/cargo-json-repro/testfail/target/debug/deps/libcargo_json_testfail-f453c6cafbd1205b.rmeta"],"executable":null,"fresh":false}
+{"reason":"build-finished","success":true}
+
+running 1 test
+test tests::adds ... FAILED
+
+failures:
+
+---- tests::adds stdout ----
+
+thread 'tests::adds' (25564210) panicked at src/lib.rs:9:9:
+assertion `left == right` failed
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::adds
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
