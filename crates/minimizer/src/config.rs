@@ -9,10 +9,27 @@ use std::{fs, io, path::PathBuf, sync::Arc};
 
 use omp_con::Ctx;
 use omp_core::{FastHashSet, Str};
+use strum::{EnumString, IntoStaticStr};
 
 use crate::pipeline::{self, PipelineError, PipelineRegistry};
 
 const DEFAULT_MAX_CAPTURE_BYTES: u32 = 4 * 1024 * 1024;
+
+/// How hard `cat`/`read` of a source file is outlined.
+#[derive(
+	Clone, Copy, Debug, Default, EnumString, Eq, IntoStaticStr, PartialEq, strum::VariantNames,
+)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum OutlineLevel {
+	/// Outline only when the input is large enough to warrant it.
+	#[default]
+	Default,
+	/// Strip function/method bodies regardless of size for supported source
+	/// languages (`ts`, `tsx`, `js`, `jsx`, `py`, `rs`, `go`).
+	Aggressive,
+}
+
+omp_con::con_enum!(OutlineLevel);
 
 omp_con::var! {
 	/// Minimize shell output. Off by default; the other `sv_minimizer_*`
@@ -36,6 +53,12 @@ omp_con::var! {
 	pub static SV_MINIMIZER_MAX_CAPTURE_BYTES = sv_minimizer_max_capture_bytes: u32 {
 		default: DEFAULT_MAX_CAPTURE_BYTES,
 		min: 1024,
+		flags: archive,
+	};
+	/// How hard `cat`/`read` of a source file is outlined: `default` outlines
+	/// only large files, `aggressive` strips function bodies regardless of size.
+	pub static SV_MINIMIZER_SOURCE_OUTLINE_LEVEL = sv_minimizer_source_outline_level: OutlineLevel {
+		default: OutlineLevel::Default,
 		flags: archive,
 	};
 	/// Kill switch: filters that shrink output by default keep their
@@ -66,6 +89,8 @@ pub struct MinimizerConfig {
 	/// Compiled user-defined pipelines from `sv_minimizer_filters`. Searched
 	/// before the built-in pipelines so user filters win.
 	pub user_pipelines:        Option<Arc<PipelineRegistry>>,
+	/// How hard `cat`/`read` of a source file is outlined.
+	pub source_outline_level:  OutlineLevel,
 	/// Resolved kill-switch: when true, opted-in filters return their
 	/// conservative passthrough and chains are never segmented.
 	pub legacy_filters_active: bool,
@@ -79,6 +104,7 @@ impl Default for MinimizerConfig {
 			except:                FastHashSet::default(),
 			max_capture_bytes:     DEFAULT_MAX_CAPTURE_BYTES,
 			user_pipelines:        None,
+			source_outline_level:  OutlineLevel::Default,
 			legacy_filters_active: false,
 		}
 	}
@@ -118,6 +144,7 @@ impl MinimizerConfig {
 			except:                lowercase_set(&SV_MINIMIZER_EXCEPT.get(ctx)),
 			max_capture_bytes:     SV_MINIMIZER_MAX_CAPTURE_BYTES.get(ctx),
 			user_pipelines:        None,
+			source_outline_level:  SV_MINIMIZER_SOURCE_OUTLINE_LEVEL.get(ctx),
 			legacy_filters_active: SV_MINIMIZER_LEGACY_FILTERS.get(ctx),
 		}
 	}
@@ -252,5 +279,23 @@ mod tests {
 	#[test]
 	fn legacy_filters_default_inactive() {
 		assert!(!MinimizerConfig::from_ctx(&Ctx::new()).legacy_filters_active());
+	}
+
+	#[test]
+	fn source_outline_level_defaults_to_default() {
+		assert_eq!(
+			MinimizerConfig::from_ctx(&Ctx::new()).source_outline_level,
+			OutlineLevel::Default
+		);
+	}
+
+	#[test]
+	fn source_outline_level_convar_selects_aggressive() {
+		let ctx = Ctx::new();
+		SV_MINIMIZER_SOURCE_OUTLINE_LEVEL
+			.set(&ctx, OutlineLevel::Aggressive)
+			.unwrap();
+		assert_eq!(MinimizerConfig::from_ctx(&ctx).source_outline_level, OutlineLevel::Aggressive);
+		assert_eq!("AGGRESSIVE".parse::<OutlineLevel>(), Ok(OutlineLevel::Aggressive));
 	}
 }
