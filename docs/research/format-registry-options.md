@@ -31,6 +31,27 @@ The Python extension host is the preferred carrier only if its required host cha
 
 This decision does not implement the registry. Complete the ordered tasks in `docs/adr/TASKS.md` after the current minimizer work.
 
+## Carrier prerequisites, verified 2026-11-07
+
+N3 task 1. Read at the working branch, not run. Each row is OBSERVED unless marked.
+
+| Prerequisite | Status | Evidence |
+|---|---|---|
+| Manifest registration | Planned, not built | The admitted declaration kinds have no format kind, and an unknown kind is a hard error (`crates/ext/src/config.rs:2192-2215`). The separate Phase 0 tool-row mismatch is Rust reading the whole key as the name while Python expects `name@family.rev` (`crates/driver/src/discovery/native.rs:550-564`, `crates/py/python/omp/_registry.py:2513-2539`). ADR 0040 plans the fix (`docs/adr/0040-remote-build-and-test-execution.md:60-64`). |
+| Deadline cancellation | Planned, partial | `DispatchRouter::expire` sends `DispatchError::Deadline` to the caller and does not cancel the extension (`crates/envd/src/exthost/dispatch.rs:1498-1508`). Python honours an explicit `CancelDispatch` (`crates/py/python/omp/_host.py:660-662`). An uncooperative body needs the host killed and replaced (`crates/py/python/omp/_host.py:769-782`). |
+| Route the model cannot call | Planned, not built | Tool registrations enter the `dyn` catalog (`docs/py/01-devices.md:3-7`). ADR 0040 calls for a core-only route and records it as unbuilt (`docs/adr/0040-remote-build-and-test-execution.md:1846-1848`). |
+| envd entry point | Transport exists; format route planned | `ProjectEnvironment::extension_callback_dispatcher()` gives authenticated callbacks (`crates/envd/src/lib.rs:1370-1373`). Cleanse attaches with no trusted extensions (`crates/driver/src/cleanse/production.rs:177-190`), and its parser is synchronous (`crates/driver/src/cleanse/checkers.rs:952-970`). |
+
+Verdict: the Python host is a feasible carrier after four host changes, all already planned in ADR 0040. It is not usable today. Per the owner decision, Python stays the carrier because its prerequisites are planned; N3 implementation waits for them.
+
+Host changes N3 needs, smallest first:
+
+1. An admitted `format` declaration kind, with the Rust and Python tool identity aligned.
+2. Deadline propagation that sends `CancelDispatch` on expiry, and kill-and-replace for a host that ignores it.
+3. A host-only format callback operation with format-ID lookup and an envd entry point, kept out of `dyn`.
+4. Trusted extension specs passed into cleanse, and an async parse seam with bounded, typed results and explicit unavailable-format outcomes.
+
+
 ## Recommendation
 
 1. **Record first.** Record a failing run for each of the 16 per-tool kinds that have none. Then
