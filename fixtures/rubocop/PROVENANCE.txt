@@ -1,0 +1,27 @@
+RuboCop --format json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: rubocop --format json   (cwd /private/tmp/cleanrun/cases/rubocop; the args the cleanse rubocop checker passes)
+  versions: rubocop 1.50.2 on ruby 2.6.10p210 (the host's system Ruby; newer RuboCop needs Ruby >= 2.7),
+    gems installed into a throwaway GEM_HOME
+  exit 0; stdout 314 bytes, stderr 0 bytes
+  Gemfile:
+    # frozen_string_literal: true
+
+    source 'https://rubygems.org'
+
+    gem 'rubocop'
+  .rubocop.yml:
+    AllCops:
+      NewCops: enable
+      SuggestExtensions: false
+  lib/greeter.rb:
+    # frozen_string_literal: true
+
+    # Greets people.
+    module Greeter
+      def self.greet(name)
+        "hello #{name}"
+      end
+    end

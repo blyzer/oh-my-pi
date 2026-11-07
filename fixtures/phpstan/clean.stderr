@@ -1,0 +1,10 @@
+Note: Using configuration file /private/tmp/cleanrun/cases/phpstan/phpstan.neon.
+
+ ! [NOTE] PHPStan runs without PHPStan Turbo.                                   
+ !        With PHPStan Turbo, analysis is up to 60% faster.                     
+ !        Install PHPStan with Composer: composer require --dev phpstan/phpstan 
+ !        Or install PHPStan Turbo with PIE: pie install phpstan/turbo:2.3.5    
+
+ 0/1 [░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   0%
+ 1/1 [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓] 100%
+

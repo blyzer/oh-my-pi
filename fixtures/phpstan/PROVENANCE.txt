@@ -1,0 +1,28 @@
+PHPStan --error-format=json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: phpstan analyse --error-format=json   (cwd /private/tmp/cleanrun/cases/phpstan; the args the cleanse phpstan checker passes)
+  versions: PHPStan 2.3.5 (phpstan.phar from the GitHub release), PHP 8.4.23 cli (static-php-cli 2.8.6 build, run with -n)
+  exit 0; stdout 62 bytes (the report), stderr 602 bytes (config note, Turbo notice, progress bar)
+  composer.json:
+    {"name":"clean/clean","autoload":{"psr-4":{"Clean\\":"src/"}}}
+  phpstan.neon:
+    parameters:
+        level: 9
+        paths:
+            - src
+  src/Greeter.php:
+    <?php
+
+    declare(strict_types=1);
+
+    namespace Clean;
+
+    final class Greeter
+    {
+        public function greet(string $name): string
+        {
+            return 'hello ' . $name;
+        }
+    }
