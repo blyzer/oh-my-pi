@@ -90,10 +90,18 @@ Work is ordered below. **PENDING** means work remains, including work in flight.
 
 1. **PENDING** N1 parsers: implement `ParserKind::JUnit`, `ParserKind::Sarif`, and `ParserKind::Tap`. Work is in flight. Neutral JUnit fixtures and runner divergences landed in PR #499, not the parser.
 2. **PENDING** N2 seam: return a typed outcome distinguishing parsed with failures, parsed with zero failures, and could not parse with a reason; retain the original log as `artifact://`. Migrate all approximately 20 existing `ParserKind` variants in one wave. N2 precedes N3 because a registry built on a signature unable to express parse failure would export that ambiguity permanently to every third-party format author.
-3. **PENDING** N3 registry: implement the Layer 2 requirement that an extension may register a format. This is implementation work, not an open question about whether the registry should exist. Its carrier is unresolved: the Phase 0 STOP verdict removed the obvious existing host (PR #496). Decide the admission rule before N3.
-4. **PENDING** M minimizer port: port the foundation crate, resolve how `plan.rs` classifies commands using the brush parser, and port the remaining 22 filters. Carry the upstream NOTICE and RTK pytest attribution. Wire the live path only after before/after token evidence. Upstream v1 has 24 filters; the foundation and remaining filters are work to land, not evidence of completion.
+3. **PENDING** N3 registry: queued behind the minimizer work, not blocked on an owner decision. The owner decided on 2026-11-07 that JUnit, SARIF, TAP and generic parsing remain in core, existing per-tool formats move outside core, and first-party formats ship by default so existing checks continue to work. Prefer the Python host only after confirming its required changes are already planned and feasible. Phase 0 reports the manifest mismatch, deadline cancellation gap and missing model-inaccessible route; ADR 0040 records the host work as unbuilt.
 
-- **OPEN** owner decision on format admission before N3: a published-standards-only rule conflicts with the approximately 20 existing per-tool parsers, including cargo JSON. Decide whether that rule applies only to new formats or the existing parsers should change.
+   Ordered N3 tasks:
+   1. Revalidate current code and plans for manifest registration, deadline cancellation, a model-inaccessible host route and the envd entry point. Record evidence and select Python only if those prerequisites are planned and feasible; otherwise assess the remaining carriers.
+   2. Record failing runs and expected diagnostics for every migrating checker, and verify mixed JSON and text diagnostics are retained.
+   3. Define the format identity, trusted registration, bounded typed result and failure contract. Keep standard formats and generic parsing in core.
+   4. Implement the chosen registration and dispatch seam with cancellation, validation and explicit unavailable-format diagnostics.
+   5. Package first-party formats for default installation and migrate every per-tool caller without disabling existing checks.
+   6. Verify recorded fixtures, malformed output, missing extensions, cancellation, default installation and end-to-end cleanse behavior before removing obsolete parser variants.
+4. **PENDING** M minimizer port: port the foundation crate, resolve how `plan.rs` classifies commands using the brush parser, and port the remaining 22 filters. Carry the upstream NOTICE and RTK pytest attribution. Wire the live path only after before/after token evidence. Upstream v1 has 24 filters; the foundation and remaining filters are work to land, not evidence of completion. The four correctness defects the savings measurement found are fixed (nextest `TIMEOUT`/`SIGKILL`, truncated failed-build diagnostics, `just` truncation, `gh pr checks` token growth); the recorded corpus replay keeps all 12 failure lines of the failed `--no-run` build and cuts `gh pr checks 515` from 645 to 62 tokens. Wiring only the cargo filter at `finish_session_command` is in progress.
+
+- **RESOLVED** format admission: the 2026-11-07 owner decision applies to existing per-tool formats; core retains the standard formats and generic parsing. See [format registry options](../research/format-registry-options.md#owner-decision-2026-11-07).
 
 ## Snapshot JSON byte preservation
 

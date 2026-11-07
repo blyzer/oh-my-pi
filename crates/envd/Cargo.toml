@@ -51,6 +51,7 @@ omp-ai.workspace = true
 omp-journal.workspace = true
 omp-http.workspace = true
 omp-memory.workspace = true
+omp-minimizer.workspace = true
 omp-oauth.workspace = true
 omp-proto.workspace = true
 omp-py.workspace = true

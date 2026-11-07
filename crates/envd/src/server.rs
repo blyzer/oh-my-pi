@@ -9842,6 +9842,7 @@ fn output_projection(
 		inline_bytes,
 		omitted,
 		artifact,
+		model_text: None,
 	}
 }
 

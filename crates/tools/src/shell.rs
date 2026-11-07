@@ -164,6 +164,9 @@ pub struct ExecStatus {
 	pub wall_clock_ms:      u64,
 	/// Host-provided reference to output omitted from the live transcript.
 	pub spilled_output:     Option<BlobRef>,
+	/// Host-provided replacement for the model-visible transcript.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model_text:         Option<Str>,
 	/// Whether cancellation happened after launch.
 	pub aborted:            bool,
 	/// Whether the host cannot establish the final effect state.
@@ -1011,8 +1014,7 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							break;
 						}
 					}
-					push_transcript(&mut projection, &payload.transcript);
-					push_spilled_output(&mut projection, payload.status.spilled_output.as_ref());
+					push_output(&mut projection, payload);
 					if !caps.media {
 						push_attachment_fallbacks(&mut projection, attachments);
 					}
@@ -1024,8 +1026,7 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 					payload.status.outcome, payload.status.exit_code, payload.status.signal,
 				);
 				if projection.push(&status) {
-					push_transcript(&mut projection, &payload.transcript);
-					push_spilled_output(&mut projection, payload.status.spilled_output.as_ref());
+					push_output(&mut projection, payload);
 					if !caps.media {
 						push_attachment_fallbacks(&mut projection, attachments);
 					}
@@ -1242,6 +1243,16 @@ fn push_attachment_fallbacks(projection: &mut TextProjection, attachments: &[Blo
 		)) {
 			break;
 		}
+	}
+}
+
+fn push_output(projection: &mut TextProjection, payload: &Payload) {
+	if let Some(text) = &payload.status.model_text {
+		push_spilled_output(projection, payload.status.spilled_output.as_ref());
+		projection.push(text.as_str());
+	} else {
+		push_transcript(projection, &payload.transcript);
+		push_spilled_output(projection, payload.status.spilled_output.as_ref());
 	}
 }
 

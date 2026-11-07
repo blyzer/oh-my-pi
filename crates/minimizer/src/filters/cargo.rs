@@ -32,6 +32,16 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	let cleaned = input.to_ansi_stripped();
+	if exit_code != 0
+		&& matches!(ctx.subcommand, Some("build" | "check" | "clippy" | "doc" | "run" | "nextest"))
+		&& cleaned.lines().any(|line| {
+			let line = line.trim_start();
+			// nextest ends every failed test run with this line; it is not a diagnostic.
+			(line.starts_with("error:") && !line.starts_with("error: test run failed"))
+				|| line.starts_with("error[")
+		}) {
+		return MinimizerOutput::passthrough(input);
+	}
 	// Owned because the passthrough arm below moves `cleaned`; allocates only
 	// when cargo waited.
 	let lock_line = first_lock_wait_line(&cleaned).map(str::to_owned);
@@ -315,7 +325,10 @@ fn filter_nextest(input: &str) -> String {
 			canceled = true;
 			continue;
 		}
-		if trimmed.starts_with("FAIL ") {
+		if trimmed.starts_with("FAIL ")
+			|| trimmed.starts_with("TIMEOUT ")
+			|| trimmed.starts_with("SIGKILL ")
+		{
 			in_failure = true;
 			out.push_str(trimmed);
 			out.push('\n');
@@ -510,6 +523,12 @@ fn extract_lint_rule(line: &str) -> Option<String> {
 	Some(rule.to_string())
 }
 
+/// Locations listed per lint rule; the rest are counted. Every rule stays
+/// visible.
+const CLIPPY_LOCATIONS_PER_RULE: usize = 10;
+/// Warnings without a rule note listed before the rest are counted.
+const CLIPPY_UNGROUPED_SHOWN: usize = 40;
+
 fn format_clippy_grouped(warnings: &[ClippyWarning], exit_code: i32) -> String {
 	let mut groups: BTreeMap<String, Vec<&ClippyWarning>> = BTreeMap::new();
 	let mut ungrouped = Vec::new();
@@ -534,14 +553,28 @@ fn format_clippy_grouped(warnings: &[ClippyWarning], exit_code: i32) -> String {
 			let _ = writeln!(out, "clippy: {} — {}{}", rule, loc, warns[0].message);
 		} else {
 			let _ = writeln!(out, "clippy: {} ({} warnings)", rule, warns.len());
-			for w in warns {
+			for w in warns.iter().take(CLIPPY_LOCATIONS_PER_RULE) {
 				let _ = writeln!(out, "  {}  {}", w.location, w.message);
+			}
+			if let Some(more) = warns
+				.len()
+				.checked_sub(CLIPPY_LOCATIONS_PER_RULE)
+				.filter(|&n| n > 0)
+			{
+				let _ = writeln!(out, "  … {more} more");
 			}
 		}
 	}
 
-	for w in &ungrouped {
+	for w in ungrouped.iter().take(CLIPPY_UNGROUPED_SHOWN) {
 		let _ = writeln!(out, "clippy warning: {}  {}", w.location, w.message);
+	}
+	if let Some(more) = ungrouped
+		.len()
+		.checked_sub(CLIPPY_UNGROUPED_SHOWN)
+		.filter(|&n| n > 0)
+	{
+		let _ = writeln!(out, "clippy warning: … {more} more");
 	}
 
 	if exit_code != 0 {
@@ -559,20 +592,6 @@ fn format_clippy_grouped(warnings: &[ClippyWarning], exit_code: i32) -> String {
 mod tests {
 	use super::*;
 	use crate::MinimizerConfig;
-
-	#[test]
-	fn strips_compiling_noise() {
-		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = MinimizerCtx {
-			program:    "cargo",
-			subcommand: Some("build"),
-			command:    "cargo build",
-			config:     &cfg,
-		};
-		let out = filter(&ctx, "   Compiling foo v0.1.0\nerror: nope\nsrc/lib.rs:1:1 bad\n", 1);
-		assert!(!out.text.contains("Compiling"));
-		assert!(out.text.contains("error: nope"));
-	}
 
 	#[test]
 	fn build_keeps_one_blocking_lock_line_and_strips_warning_rollup() {
@@ -734,6 +753,31 @@ mod tests {
 		);
 	}
 	#[test]
+	fn nextest_preserves_timeouts_and_killed_tests() {
+		let input = concat!(
+			"Starting 3 tests\n",
+			"TIMEOUT [ 60.000s] app::slow\nslow test output\n",
+			"SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+			 exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n",
+			"    (test aborted with signal 9: SIGKILL)\n",
+			"Summary [ 60.1s] 2 tests run: 2 failed\n",
+			"SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+			 exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n",
+		);
+		let expected = input
+			.strip_prefix("Starting 3 tests\n")
+			.unwrap()
+			.rsplit_once("SIGKILL [   0.529s]")
+			.unwrap()
+			.0;
+		assert_eq!(filter_nextest(input), expected);
+		let killed = "SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+		              exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n    \
+		              (test aborted with signal 9: SIGKILL)\nSummary [ 1s] 1 test run: 1 failed\n";
+		assert_eq!(filter_nextest(killed), killed);
+	}
+
+	#[test]
 	fn install_strips_noise_keeps_summary() {
 		assert!(supports(Some("install")));
 		let input = concat!(
@@ -813,6 +857,24 @@ mod tests {
 		assert!(out.contains("2 warnings"));
 		assert!(out.contains("src/lib.rs:2:9"));
 		assert!(out.contains("src/lib.rs:5:9"));
+	}
+
+	#[test]
+	fn clippy_caps_locations_per_rule_and_counts_the_rest() {
+		let mut input = String::new();
+		for i in 0..25 {
+			input.push_str(&format!(
+				"warning: redundant clone\n --> src/f{i}.rs:1:1\n  |\n  = note: \
+				 `#[warn(clippy::redundant_clone)]` on by default\n\n"
+			));
+		}
+
+		let out = filter_clippy(&input, 0);
+
+		assert!(out.starts_with("clippy: clippy::redundant_clone (25 warnings)\n"), "{out}");
+		assert!(out.contains("src/f9.rs:1:1"));
+		assert!(!out.contains("src/f10.rs:1:1"));
+		assert!(out.contains("  … 15 more\n"));
 	}
 
 	#[test]

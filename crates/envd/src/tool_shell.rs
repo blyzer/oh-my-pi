@@ -563,6 +563,10 @@ pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				signal,
 				wall_clock_ms: status.wall_clock_ms,
 				spilled_output,
+				model_text: status
+					.projection
+					.and_then(|projection| projection.model_text)
+					.map(Str::from),
 				aborted: status.aborted,
 				effects_unknown: false,
 				diags: status
@@ -672,6 +676,117 @@ mod tests {
 			ShellSettings::default(),
 			&SandboxSettings::default(),
 		)
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn cargo_projection_minimizes_with_retrievable_original_and_other_commands_pass_through() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		use futures::StreamExt as _;
+		use omp_tool::{
+			CapsBase, Ev, IncomingParams, ModelClass, Part, PromptCaps, Tool as _, ToolTerminal,
+		};
+
+		let root = tempfile::tempdir().expect("workspace");
+		let output = format!(
+			"{}    Finished \x60dev\x60 profile in 0.10s\n",
+			"   Compiling example v0.1.0\n".repeat(80)
+		);
+		let output_path = root.path().join("output");
+		std::fs::write(&output_path, output.as_bytes()).expect("write cargo output fixture");
+		let cargo = root.path().join("cargo");
+		std::fs::write(&cargo, format!("#!/bin/sh\n/bin/cat '{}'\n", output_path.display()))
+			.expect("write cargo fixture");
+		std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755))
+			.expect("make cargo fixture executable");
+
+		let blobs = BlobHost::open(root.path().join("blobs")).expect("blob host");
+		let exec = ExecHost::new().with_output_store(blobs.store().clone());
+		let host = ShellExecHost::new(
+			exec,
+			blobs.clone(),
+			Str::from(
+				Url::from_directory_path(root.path())
+					.expect("workspace URI")
+					.to_string(),
+			),
+			Arc::new(ResolverTable::default()),
+			ShellSettings::default(),
+			&SandboxSettings { mode: ExecSandboxMode::Off, ..SandboxSettings::default() },
+		);
+		let tool = omp_tools::shell::shell(host);
+		let caps = PromptCaps::for_tool(
+			CapsBase {
+				maximum_parts:      1,
+				maximum_text_bytes: 32 * 1024,
+				media:              false,
+				model_class:        ModelClass::Standard,
+			},
+			&tool.spec().rev,
+		);
+		let path = format!("{}:/usr/bin:/bin", root.path().display());
+
+		for command in [
+			"cargo build".to_owned(),
+			format!("cat '{}'", output_path.display()),
+			"cargo build | cat".to_owned(),
+			"cargo build && true".to_owned(),
+		] {
+			let (feed, params) = IncomingParams::channel();
+			feed
+				.args_committed(Str::from(
+					serde_json::json!({ "command": &command, "env": { "PATH": &path } }).to_string(),
+				))
+				.expect("commit command arguments");
+			let events = tool.call(params);
+			futures::pin_mut!(events);
+			let payload = loop {
+				match events.next().await {
+					Some(Ev::Done(ToolTerminal::Done { result, .. })) => {
+						break result.expect("command succeeds");
+					},
+					Some(_) => {},
+					None => panic!("shell command ended without a result"),
+				}
+			};
+			let streamed = payload
+				.transcript
+				.iter()
+				.flat_map(|frame| frame.data.as_ref().iter().copied())
+				.collect::<Vec<_>>();
+			assert_eq!(streamed, output.as_bytes());
+			let parts = tool.prompt(Ok(&payload), &caps);
+			let [Part::Text { text }] = parts.as_slice() else {
+				panic!("expected one text part")
+			};
+			let visible = text.split_once('\n').expect("status line").1;
+			if command == "cargo build" {
+				assert!(!visible.contains("Compiling example"));
+				assert!(
+					visible.len() * 4 < output.len(),
+					"model-visible text, artifact line included, must stay well under the raw capture: \
+					 {visible:?}"
+				);
+				let artifact = payload
+					.status
+					.spilled_output
+					.as_ref()
+					.expect("original output artifact");
+				assert!(visible.contains(&format!("artifact://sha256/{}", artifact.hash)));
+				let hash = omp_core::Hash32::sum(output.as_bytes());
+				assert_eq!(artifact.hash.as_str(), hash.to_hex().as_str());
+				let original = blobs
+					.store()
+					.get(&omp_journal::blob::BlobRef { hash, size: artifact.byte_len })
+					.expect("original output remains retrievable");
+				assert_eq!(original.as_ref(), output.as_bytes());
+			} else {
+				assert_eq!(visible.as_bytes(), output.as_bytes());
+				assert!(payload.status.spilled_output.is_none());
+				assert!(payload.status.model_text.is_none());
+			}
+		}
 	}
 
 	#[cfg(target_os = "macos")]
