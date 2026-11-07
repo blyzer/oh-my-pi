@@ -975,6 +975,38 @@ strip_lines_matching = [".*"]
 	}
 
 	#[test]
+	fn failed_nextest_build_preserves_middle_diagnostics() {
+		let mut input = String::new();
+		for i in 0..220 {
+			input.push_str(&format!("warning: diagnostic {i}\n --> src/file.rs:{i}:1\n"));
+		}
+		input.push_str("\x1b[1;31merror[E0063]\x1b[0m: missing field\n --> src/middle.rs:123:4\n");
+		for i in 0..100 {
+			input.push_str(&format!("warning: trailing warning {i}\n"));
+		}
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		for command in [
+			"cargo build",
+			"cargo check",
+			"cargo clippy",
+			"cargo nextest run --no-run",
+			"cargo nextest run \"--no-run\"",
+		] {
+			let out = apply(command, &input, 101, &cfg);
+			assert_eq!(out.text, input, "{command}");
+		}
+	}
+
+	#[test]
+	fn just_recipe_output_keeps_final_summary() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input =
+			format!("{}Summary [1s] 100 tests run: 100 passed\n", "PASS example::test\n".repeat(100));
+		let out = apply("just test-pkg omp-minimizer", &input, 0, &cfg);
+		assert_eq!(out.text, input);
+	}
+
+	#[test]
 	fn unknown_command_is_passthrough() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		assert!(!should_minimize("echo hello", &cfg));

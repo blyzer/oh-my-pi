@@ -32,6 +32,14 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	let cleaned = input.to_ansi_stripped();
+	if exit_code != 0
+		&& matches!(ctx.subcommand, Some("build" | "check" | "clippy" | "doc" | "run" | "nextest"))
+		&& cleaned.lines().any(|line| {
+			let line = line.trim_start();
+			line.starts_with("error:") || line.starts_with("error[")
+		}) {
+		return MinimizerOutput::passthrough(input);
+	}
 	// Owned because the passthrough arm below moves `cleaned`; allocates only
 	// when cargo waited.
 	let lock_line = first_lock_wait_line(&cleaned).map(str::to_owned);
@@ -315,7 +323,10 @@ fn filter_nextest(input: &str) -> String {
 			canceled = true;
 			continue;
 		}
-		if trimmed.starts_with("FAIL ") {
+		if trimmed.starts_with("FAIL ")
+			|| trimmed.starts_with("TIMEOUT ")
+			|| trimmed.starts_with("SIGKILL ")
+		{
 			in_failure = true;
 			out.push_str(trimmed);
 			out.push('\n');
@@ -561,20 +572,6 @@ mod tests {
 	use crate::MinimizerConfig;
 
 	#[test]
-	fn strips_compiling_noise() {
-		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = MinimizerCtx {
-			program:    "cargo",
-			subcommand: Some("build"),
-			command:    "cargo build",
-			config:     &cfg,
-		};
-		let out = filter(&ctx, "   Compiling foo v0.1.0\nerror: nope\nsrc/lib.rs:1:1 bad\n", 1);
-		assert!(!out.text.contains("Compiling"));
-		assert!(out.text.contains("error: nope"));
-	}
-
-	#[test]
 	fn build_keeps_one_blocking_lock_line_and_strips_warning_rollup() {
 		// The first `Blocking waiting for file lock` line is kept once, at the
 		// top; the `warning: \`crate\` (lib) generated N warnings` rollup
@@ -733,6 +730,31 @@ mod tests {
 			"post-Summary trailer must be dropped: {out:?}"
 		);
 	}
+	#[test]
+	fn nextest_preserves_timeouts_and_killed_tests() {
+		let input = concat!(
+			"Starting 3 tests\n",
+			"TIMEOUT [ 60.000s] app::slow\nslow test output\n",
+			"SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+			 exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n",
+			"    (test aborted with signal 9: SIGKILL)\n",
+			"Summary [ 60.1s] 2 tests run: 2 failed\n",
+			"SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+			 exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n",
+		);
+		let expected = input
+			.strip_prefix("Starting 3 tests\n")
+			.unwrap()
+			.rsplit_once("SIGKILL [   0.529s]")
+			.unwrap()
+			.0;
+		assert_eq!(filter_nextest(input), expected);
+		let killed = "SIGKILL [   0.529s] ( 5629/11077) omp-envd \
+		              exec::tests::sandboxed_session_preserves_ordinary_environment_mutations\n    \
+		              (test aborted with signal 9: SIGKILL)\nSummary [ 1s] 1 test run: 1 failed\n";
+		assert_eq!(filter_nextest(killed), killed);
+	}
+
 	#[test]
 	fn install_strips_noise_keeps_summary() {
 		assert!(supports(Some("install")));
