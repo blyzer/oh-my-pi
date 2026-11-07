@@ -38,7 +38,7 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		Some("pr") if primitives::command_has_ordered_tokens(ctx.command, "pr", "checks") => {
 			match filter_pr_checks(&cleaned) {
 				Some(summary) => summary,
-				None => markdown_view(&cleaned, exit_code),
+				None => return MinimizerOutput::passthrough(input),
 			}
 		},
 		Some("pr" | "issue") => markdown_view(&cleaned, exit_code),
@@ -337,11 +337,18 @@ mod tests {
 	fn pr_checks_preserves_unknown_non_tty_status() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
-		let input = "build\tpass\t1s\thttps://ci.test/build\nnew check\tunknown\t0\thttps://ci.test/new\n";
+		let mut input = String::new();
+		for i in 0..150 {
+			input.push_str(&format!("build {i}\tpass\t1s\thttps://ci.test/build/{i}\n"));
+		}
+		input.push_str("new check\tunknown\t0\thttps://ci.test/new\n");
+		for i in 0..150 {
+			input.push_str(&format!("lint {i}\tpass\t1s\thttps://ci.test/lint/{i}\n"));
+		}
 
-		let out = filter(&ctx, input, 0);
+		let out = filter(&ctx, &input, 0);
 
-		assert!(out.text.contains("new check\tunknown\t0\thttps://ci.test/new"));
+		assert_eq!(out.text, input);
 	}
 
 	#[test]
