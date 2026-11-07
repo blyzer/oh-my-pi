@@ -22,12 +22,13 @@ use omp_exec::{
 	Platform, PlatformRequirement, ResourceRequirements, ToolchainId, place,
 };
 use omp_exec_local::{Config as LocalConfig, LocalBackend};
+use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	Assignment, BinaryResolver, Checker, CheckerEffect, CheckerRunner, CleanseHost,
+	Assignment, BinaryResolver, CheckLogs, Checker, CheckerEffect, CheckerRunner, CleanseHost,
 	FilesystemResolver, ProcessOutput, RepairOutcome, Report, TargetChoice, assignment_prompt,
 	discovery_schema, scan_project_files,
 };
@@ -82,6 +83,9 @@ pub enum ProductionError {
 	/// The execution backend failed.
 	#[error("cleanse execution backend failed")]
 	Execution(#[source] ExecutionError),
+	/// The project blob store could not retain a checker's output.
+	#[error("cleanse could not retain checker output")]
+	Logs(#[from] omp_journal::blob::Error),
 }
 
 /// Production owner for one standalone cleanse run.
@@ -92,6 +96,9 @@ pub struct ProductionCleanseHost {
 	ctx:          Arc<omp_con::Ctx>,
 	resolver:     FilesystemResolver,
 	journal:      parking_lot::Mutex<Session>,
+	/// The project blob store `artifact://sha256/<hex>` resolves from: every
+	/// checker's complete output is retained here.
+	logs:         BlobStore,
 	presentation: Arc<dyn CleansePresentation>,
 	/// The project Environment, started by the first routed checker.
 	environment:  OnceCell<omp_envd::ProjectEnvironment>,
@@ -124,6 +131,7 @@ impl ProductionCleanseHost {
 		let root = std::fs::canonicalize(root)?;
 		let files = scan_project_files(&root).map_err(|source| std::io::Error::other(source))?;
 		let state = omp_env::project_state::directory(&data_dir, &root)?;
+		let logs = BlobStore::open(omp_env::project_state::blob_store(&state))?;
 		let sessions = state.join("sessions");
 		std::fs::create_dir_all(&sessions)?;
 		let path = sessions.join(format!("cleanse-{}.oms", omp_core::Ulid::generate()));
@@ -135,6 +143,7 @@ impl ProductionCleanseHost {
 			ctx,
 			resolver: FilesystemResolver,
 			journal: parking_lot::Mutex::new(journal),
+			logs,
 			presentation,
 			environment: OnceCell::new(),
 		})
@@ -222,6 +231,12 @@ impl ProductionCleanseHost {
 			AdwExecPolicy::RemoteOnly => FallbackPolicy::RemoteOnly,
 		};
 		ExecutionPolicy { fallback, cache: omp_exec::CachePolicy::Off }
+	}
+
+	/// Retains a checker's complete streams where `artifact://` addresses
+	/// resolve, so a diagnostic cites them instead of carrying a cut excerpt.
+	fn retain(&self, stdout: &[u8], stderr: &[u8]) -> Result<CheckLogs, ProductionError> {
+		Ok(CheckLogs { stdout: self.logs.put(stdout)?, stderr: self.logs.put(stderr)? })
 	}
 }
 
@@ -330,10 +345,14 @@ impl CheckerRunner for ProductionCleanseHost {
 			let mut run = match backend.start(request).await {
 				Ok(run) => run,
 				Err(error) if matches!(&error, ExecutionError::Infrastructure { .. }) => {
+					// The refusal is the run's only output: retain it like any stream so
+					// the diagnostic it yields cites it.
+					let refused = sf!("command refused by the workspace sandbox");
 					return Ok(ProcessOutput {
 						exit_code: Some(1),
 						stdout:    Str::empty(),
-						stderr:    sf!("command refused by the workspace sandbox"),
+						logs:      Some(self.retain(b"", refused.as_bytes())?),
+						stderr:    refused,
 					});
 				},
 				Err(error) => return Err(ProductionError::Execution(error)),
@@ -346,7 +365,12 @@ impl CheckerRunner for ProductionCleanseHost {
 					event = run.next_event() => event,
 					() = cancel.cancelled() => {
 						let _ = run.cancel().await;
-						return Ok(ProcessOutput { exit_code: None, stdout: sf!(""), stderr: sf!("cancelled") });
+						return Ok(ProcessOutput {
+							exit_code: None,
+							stdout:    sf!(""),
+							stderr:    sf!("cancelled"),
+							logs:      None,
+						});
 					},
 				};
 				match event {
@@ -366,6 +390,7 @@ impl CheckerRunner for ProductionCleanseHost {
 							},
 							stdout:    Str::new(String::from_utf8_lossy(&stdout)),
 							stderr:    Str::new(String::from_utf8_lossy(&stderr)),
+							logs:      Some(self.retain(&stdout, &stderr)?),
 						};
 						if let Some(tx) = partials {
 							let _ = tx.send(output.clone());
@@ -499,12 +524,65 @@ impl CleanseHost for ProductionCleanseHost {
 
 #[cfg(test)]
 mod tests {
-	use super::child_kernel_options;
+	use std::{future::Future, pin::Pin, sync::Arc};
+
+	use omp_core::Str;
+	use omp_journal::blob::BlobStore;
+	use tokio_util::sync::CancellationToken;
+
+	use super::{
+		CleansePresentation, PresentationError, ProductionCleanseHost, child_kernel_options,
+	};
+	use crate::cleanse::{Checker, TargetChoice};
+
+	struct Cancelling;
+
+	impl CleansePresentation for Cancelling {
+		fn pick_target<'a>(
+			&'a self,
+			_: &'a [Checker],
+			_: &'a CancellationToken,
+		) -> Pin<Box<dyn Future<Output = Result<TargetChoice, PresentationError>> + 'a>> {
+			Box::pin(std::future::ready(Ok(TargetChoice::Cancel)))
+		}
+
+		fn prompt_request<'a>(
+			&'a self,
+			_: &'a CancellationToken,
+		) -> Pin<Box<dyn Future<Output = Result<Option<Str>, PresentationError>> + 'a>> {
+			Box::pin(std::future::ready(Ok(None)))
+		}
+	}
 
 	#[test]
 	fn model_phase_kernels_exclude_workspace_extensions() {
 		let options = child_kernel_options();
 		assert!(!options.extensions.include_workspace);
 		assert!(options.ephemeral);
+	}
+
+	/// A recorded 23 KB `cargo test` run, far past the 12,000 characters a
+	/// diagnostic once carried, lands whole in the project blob store that
+	/// `artifact://sha256/<hex>` addresses resolve from.
+	#[test]
+	fn checker_output_is_retained_whole_where_artifact_addresses_resolve() {
+		let project = tempfile::tempdir().expect("project");
+		let data = tempfile::tempdir().expect("data directory");
+		let host = ProductionCleanseHost::open(
+			project.path().to_path_buf(),
+			data.path().to_path_buf(),
+			Arc::new(omp_con::Ctx::new()),
+			Arc::new(Cancelling),
+		)
+		.expect("cleanse host");
+		let stdout = include_bytes!("../../../../fixtures/cargo/test-error.stdout");
+		let stderr = include_bytes!("../../../../fixtures/cargo/test-error.stderr");
+		let logs = host.retain(stdout, stderr).expect("retained output");
+		let state =
+			omp_env::project_state::directory(data.path(), project.path()).expect("project state");
+		let store =
+			BlobStore::open(omp_env::project_state::blob_store(&state)).expect("project blob store");
+		assert_eq!(store.get(&logs.stdout).expect("stdout").as_ref(), stdout);
+		assert_eq!(store.get(&logs.stderr).expect("stderr").as_ref(), stderr);
 	}
 }

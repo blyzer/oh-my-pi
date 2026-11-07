@@ -375,6 +375,12 @@ fn program_label(program: &str) -> &'static str {
 		"xxd" => "xxd",
 		"strings" => "strings",
 		"od" => "od",
+		"cmake" => "cmake",
+		"ctest" => "ctest",
+		"ninja" => "ninja",
+		"gtest" => "gtest",
+		"gtest-parallel" => "gtest",
+		program if filters::cpp::is_gtest_binary_name(program) => "gtest",
 		"tsc" => "tsc",
 		"eslint" => "eslint",
 		"biome" => "biome",
@@ -400,6 +406,20 @@ fn program_label(program: &str) -> &'static str {
 		"du" => "du",
 		"df" => "df",
 		"jq" => "jq",
+		"bun" => "bun",
+		"bunx" => "bunx",
+		"pytest" => "pytest",
+		"ruff" => "ruff",
+		"mypy" => "mypy",
+		"python" => "python",
+		"python3" => "python3",
+		"rspec" => "rspec",
+		"rake" => "rake",
+		"rails" => "rails",
+		"rubocop" => "rubocop",
+		"jest" => "jest",
+		"vitest" => "vitest",
+		"playwright" => "playwright",
 		_ => "builtin",
 	}
 }
@@ -592,6 +612,48 @@ replace = [{ pattern = "x", replacement = "y" }]
 		assert!(!out.changed);
 		assert_eq!(out.text, input);
 		assert_eq!(out.filter, "disabled");
+	}
+
+	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its
+	// `match_subcommand` must exclude every subcommand owned/routed elsewhere so
+	// it cannot shadow `nx-wrapped` (standalone path) or overlay the Rust
+	// lint/test filters (overlay path). These tests fail loudly if that
+	// exclusion set ever desyncs from filters::supports's npx routing.
+	#[test]
+	fn npx_def_does_not_shadow_nx_wrapped() {
+		// `npx nx` is NOT routed by filters::supports, so apply_identity falls to
+		// the standalone resolve_pipeline branch. nx-wrapped (nx.toml) must win
+		// and strip the NX banner; the bare npx def must not claim subcommand
+		// `nx`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build \
+			 failed\n\n >  NX   Ran target build for 3 projects (2s)\n",
+		);
+		let out = apply("npx nx build", &input, 0, &cfg);
+		assert!(
+			!out.text.contains("NX   Running target"),
+			"npx def shadowed nx-wrapped; NX banner survived: {:?}",
+			out.text
+		);
+		assert!(out.text.contains("Error: build failed"));
+	}
+	#[test]
+	fn npx_def_fires_for_unknown_tool() {
+		// The def must still strip the install preamble / npm warn/notice noise
+		// for genuinely UNKNOWN tools (its whole purpose). cowsay is not routed
+		// or owned by any other def, so the npx pipeline claims it.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = minimizable_input(
+			"Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? (y)\n\nnpm warn \
+			 deprecated foo@1.0.0: use bar instead\n< Hello >\n",
+		);
+		let out = apply("npx cowsay hello", &input, 0, &cfg);
+		assert!(out.changed);
+		assert!(!out.text.contains("Need to install"));
+		assert!(!out.text.contains("Ok to proceed"));
+		assert!(!out.text.contains("npm warn"));
+		assert!(out.text.contains("< Hello >"));
 	}
 
 	#[test]
@@ -868,6 +930,33 @@ strip_lines_matching = [".*"]
 		// unknown (per-segment minimization is the segmented runner's job).
 		assert!(!out.changed, "mixed chain must stay passthrough in whole-buffer minimization");
 		assert_eq!(out.filter, "compound");
+	}
+
+	#[test]
+	fn cpp_tools_minimize_through_dispatch() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert!(should_minimize("ctest --output-on-failure", &cfg));
+		assert!(should_minimize("./build/foo_test --gtest_filter=Foo.*", &cfg));
+
+		let ctest_input = minimizable_input(
+			"Test project /tmp/build\n1/2 Test #1: ok ........   Passed    0.01 sec\n2/2 Test #2: \
+			 bad .......***Failed    0.02 sec\nThe following tests FAILED:\n",
+		);
+		let ctest = apply("ctest --output-on-failure", &ctest_input, 8, &cfg);
+		assert!(ctest.changed);
+		assert_eq!(ctest.filter, "ctest");
+		assert!(!ctest.text.contains("Test #1"));
+		assert!(ctest.text.contains("Test #2: bad"));
+
+		let gtest_input = minimizable_input(
+			"[ RUN      ] Foo.Pass\n[       OK ] Foo.Pass (0 ms)\nfoo_test.cc:42: Failure\nExpected: \
+			 1\n[  FAILED  ] Foo.Fails\n",
+		);
+		let gtest = apply("./build/foo_test", &gtest_input, 1, &cfg);
+		assert!(gtest.changed);
+		assert_eq!(gtest.filter, "gtest");
+		assert!(!gtest.text.contains("Foo.Pass"));
+		assert!(gtest.text.contains("foo_test.cc:42: Failure"));
 	}
 
 	#[test]
@@ -1191,6 +1280,53 @@ strip_lines_matching = [".*"]
 		// lines containing "test" and silently drop AddIndexToOrders.
 		assert!(out.text.contains("CreateTestResults"), "CreateTestResults was dropped");
 		assert!(out.text.contains("AddIndexToOrders"), "AddIndexToOrders was dropped");
+	}
+
+	// Regression guards for the builtin rails defs (rails-migrate.toml,
+	// rails-routes.toml). Their `match_subcommand` scopes are MANDATORY:
+	// unscoped they would overlay the Rust minitest filter output for
+	// `rails test` / `rake test` and strip failure-detail lines
+	// ('Expected: true'). These tests fail loudly if the scope is removed.
+	#[test]
+	fn rails_def_does_not_overlay_routed_minitest() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = "Run options: --seed 1\n\n# Running:\n\n.F\n\n  1) Failure:\nUserTest#test_name \
+		             [test/models/user_test.rb:8]:\nExpected: true\n  Actual: false\n\n2 runs, 2 \
+		             assertions, 1 failures, 0 errors, 0 skips\n";
+		let rails = apply("rails test", input, 1, &cfg);
+		let rake = apply("rake test", input, 1, &cfg);
+		// Must NOT be an overlay label; minitest filter gets its own program
+		// label.
+		assert_ne!(
+			rails.filter, "pipeline+builtin",
+			"rails-migrate def overlaid the routed minitest filter output"
+		);
+		assert_ne!(
+			rake.filter, "pipeline+builtin",
+			"rails-migrate def overlaid the routed minitest filter output"
+		);
+		// Failure-detail lines must survive — the rails-migrate def's
+		// keep_lines_matching would drop them.
+		assert!(rails.text.contains("Expected: true"), "rails test dropped minitest failure detail");
+		assert!(rails.text.contains("Actual: false"));
+		assert!(rake.text.contains("Expected: true"), "rake test dropped minitest failure detail");
+		assert!(rake.text.contains("Actual: false"));
+	}
+
+	#[test]
+	fn rails_routes_def_does_not_overlay_routed_minitest() {
+		// Same guard for rails-routes.toml: `match_subcommand = "^routes$"`
+		// must not leak to `rails test`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let input = "Run options: --seed 1\n\n# Running:\n\n.F\n\n  1) Failure:\nUserTest#test_name \
+		             [test/models/user_test.rb:8]:\nExpected: true\n  Actual: false\n\n2 runs, 2 \
+		             assertions, 1 failures, 0 errors, 0 skips\n";
+		let out = apply("rails test", input, 1, &cfg);
+		assert_ne!(
+			out.filter, "pipeline+builtin",
+			"rails-routes def overlaid the routed minitest filter output"
+		);
+		assert!(out.text.contains("Expected: true"), "rails test dropped minitest failure detail");
 	}
 }
 
