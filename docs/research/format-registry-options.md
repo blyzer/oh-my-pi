@@ -1,6 +1,6 @@
 # Format registry options for cleanse parsers
 
-Status: research; nothing here is approved or implemented. This document builds no registry.
+Status: owner scope decided; carrier conditional and registry not implemented.
 Date: 2026-11-05
 
 Baseline: `origin/omp2` at `230efc0df8`. A pull request cited by number is open and is not on the
@@ -22,6 +22,14 @@ Evidence labels:
 - **[GUESS]**: an estimate with no measurement behind it.
 
 [How to recount](#how-to-recount) lists the commands behind each count.
+
+## Owner decision, 2026-11-07
+
+Core retains JUnit, SARIF, TAP and generic parsing. Existing per-tool formats move outside core, not only future formats. First-party formats must be installed by default so existing checks continue to work.
+
+The Python extension host is the preferred carrier only if its required host changes are already planned and verified. Phase 0 reported no existing host route, a manifest mismatch, incomplete deadline cancellation, and no dedicated model-inaccessible format route. ADR 0040 records these as unbuilt prerequisites; verify their current status before selecting the carrier. If they are not planned or feasible, reassess the carrier rather than silently choosing Python.
+
+This decision does not implement the registry. Complete the ordered tasks in `docs/adr/TASKS.md` after the current minimizer work.
 
 ## Recommendation
 
