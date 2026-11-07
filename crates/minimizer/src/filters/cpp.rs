@@ -14,7 +14,7 @@ enum CppTool {
 	GTest,
 }
 
-/// Whether `program` names a CMake, CTest, Ninja, or GoogleTest binary.
+/// Whether `program` is a `CMake`, `CTest`, `Ninja`, or `GoogleTest` binary.
 #[must_use]
 pub fn supports(program: &str, _subcommand: Option<&str>) -> bool {
 	direct_tool(program).is_some()
@@ -27,8 +27,8 @@ pub fn supports_invocation(command: &str) -> bool {
 	command_tokens(command).any(|token| token_tool(token).is_some())
 }
 
-/// Whether `program` names a GoogleTest binary: `gtest`, `gtest-parallel`, or
-/// a `_test`, `_tests`, `-test`, `-tests`, or `.test` name.
+/// Whether `program` names a `GoogleTest` binary: `gtest`, `gtest-parallel`,
+/// or a `_test`, `_tests`, `-test`, `-tests`, or `.test` name.
 #[must_use]
 pub fn is_gtest_binary_name(program: &str) -> bool {
 	matches!(program, "gtest" | "gtest-parallel")
@@ -41,8 +41,8 @@ pub fn is_gtest_binary_name(program: &str) -> bool {
 			.is_some_and(|ext| ext.eq_ignore_ascii_case("test"))
 }
 
-/// Condense CMake, CTest, Ninja, or GoogleTest output: drop progress and
-/// passing noise, keep failures and diagnostics.
+/// Condense `CMake`, `CTest`, `Ninja`, or `GoogleTest` output: drop progress
+/// and passing noise, keep failures and diagnostics.
 #[must_use]
 pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> MinimizerOutput<'a> {
 	let cleaned = input.to_ansi_stripped();

@@ -1,0 +1,26 @@
+TFLint --format=json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: tflint --format=json   (cwd /private/tmp/cleanrun/cases/tflint; the args the cleanse tflint checker passes)
+  versions: TFLint 0.65.0 + ruleset.terraform 0.15.0-bundled (tflint_darwin_arm64.zip from the GitHub release)
+  exit 0; stdout 25 bytes, stderr 0 bytes
+  .tflint.hcl:
+    plugin "terraform" {
+      enabled = true
+      preset  = "recommended"
+    }
+  main.tf:
+    terraform {
+      required_version = ">= 1.0"
+    }
+
+    variable "name" {
+      type        = string
+      description = "Greeting target."
+    }
+
+    output "greeting" {
+      value       = "hello ${var.name}"
+      description = "Greeting."
+    }

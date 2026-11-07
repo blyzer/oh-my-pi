@@ -1,0 +1,19 @@
+SwiftLint --reporter json clean-run fixture. clean.stdout and clean.stderr are the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+clean.stdout, clean.stderr
+  command: swiftlint lint --reporter json   (cwd /private/tmp/cleanrun/cases/swiftlint; the args the cleanse swiftlint checker passes)
+  versions: SwiftLint 0.65.1 (portable_swiftlint.zip from the GitHub release), Apple Swift 6.4.2, macOS arm64
+  exit 0; stdout 5 bytes (an empty array over three lines), stderr 163 bytes (progress and summary)
+  Package.swift:
+    // swift-tools-version:5.9
+    import PackageDescription
+
+    let package = Package(
+        name: "Clean",
+        targets: [.target(name: "Clean")]
+    )
+  Sources/Clean/Clean.swift:
+    public func greet(_ name: String) -> String {
+        "hello " + name
+    }
