@@ -133,7 +133,10 @@ fn main() -> Result<(), Error> {
 		let (name, path) = arg
 			.split_once('=')
 			.ok_or_else(|| format!("tokenizer {arg} is not <name>=<path>"))?;
-		counters.push(Counter { name: name.to_owned(), tokenizer: Some(Tokenizer::from_file(path)?) });
+		counters.push(Counter {
+			name:      name.to_owned(),
+			tokenizer: Some(Tokenizer::from_file(path)?),
+		});
 	}
 	counters.push(Counter { name: String::from("bytes/4"), tokenizer: None });
 
@@ -182,7 +185,11 @@ fn main() -> Result<(), Error> {
 		});
 	}
 	measured.sort_by(|a, b| {
-		(a.band, a.capture.text.len(), &a.capture.id).cmp(&(b.band, b.capture.text.len(), &b.capture.id))
+		(a.band, a.capture.text.len(), &a.capture.id).cmp(&(
+			b.band,
+			b.capture.text.len(),
+			&b.capture.id,
+		))
 	});
 	print!("{}", report(&counters, &measured));
 	Ok(())
@@ -195,7 +202,11 @@ fn load(corpus: &Path) -> Result<Vec<Capture>, Error> {
 		.filter(|line| !line.is_empty())
 		.map(|line| {
 			let mut fields = line.splitn(5, '\t');
-			let mut field = || fields.next().ok_or_else(|| format!("malformed manifest row: {line}"));
+			let mut field = || {
+				fields
+					.next()
+					.ok_or_else(|| format!("malformed manifest row: {line}"))
+			};
 			let id = field()?;
 			let exit = field()?.parse()?;
 			let source = field()?;
@@ -335,9 +346,10 @@ fn saved(tokens: Tokens) -> f64 {
 }
 
 fn failure_cell(failures: Option<[usize; 3]>) -> String {
-	failures.map_or_else(|| String::from("—"), |[of, today, minimized]| {
-		format!("{of} / {today} / {minimized}")
-	})
+	failures.map_or_else(
+		|| String::from("—"),
+		|[of, today, minimized]| format!("{of} / {today} / {minimized}"),
+	)
 }
 
 fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
@@ -348,8 +360,8 @@ fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 	let _ = writeln!(out, "## Per capture\n");
 	let _ = writeln!(
 		out,
-		"| Capture | Command | Exit | Source | Band | Filter | Raw bytes | Rewrite bytes | Raw tok | \
-		 Today tok | Minimized tok | Saved | Failure lines (of / today / minimized) |"
+		"| Capture | Command | Exit | Source | Band | Filter | Raw bytes | Rewrite bytes | Raw tok \
+		 | Today tok | Minimized tok | Saved | Failure lines (of / today / minimized) |"
 	);
 	let _ = writeln!(out, "|---|---|--:|---|---|---|--:|--:|--:|--:|--:|--:|---|");
 	for row in measured {
@@ -434,7 +446,11 @@ fn report(counters: &[Counter], measured: &[Measured<'_>]) -> String {
 		let Some(shown) = &row.shown else {
 			continue;
 		};
-		let _ = writeln!(out, "\n## With the minimizer: {}\n\n`{}`\n", row.capture.id, row.capture.command);
+		let _ = writeln!(
+			out,
+			"\n## With the minimizer: {}\n\n`{}`\n",
+			row.capture.id, row.capture.command
+		);
 		let _ = writeln!(out, "````text\n{shown}````");
 	}
 	out
@@ -466,7 +482,10 @@ fn group(
 	let _ = writeln!(out, "|---|--:|--:|--:|--:|--:|--:|---|");
 	for (name, rows) in groups {
 		let sum = total(rows.iter().copied(), 0);
-		let mut each = rows.iter().map(|row| saved(row.tokens[0])).collect::<Vec<_>>();
+		let mut each = rows
+			.iter()
+			.map(|row| saved(row.tokens[0]))
+			.collect::<Vec<_>>();
 		each.sort_by(f64::total_cmp);
 		let _ = writeln!(
 			out,
