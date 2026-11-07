@@ -115,19 +115,19 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 		let mut fields = trimmed.split('\t');
 		let first = fields.next().unwrap_or_default();
 		let second = fields.next().unwrap_or_default();
-		let symbol = match first {
-			"✓" => '✓',
-			"X" | "✗" | "×" => 'X',
-			"*" => '*',
-			"-" => '-',
-			_ if fields.next().is_some() && fields.next().is_some() => match second {
-				"pass" => '✓',
-				"fail" | "cancel" => 'X',
-				"pending" => '*',
-				"skipping" => '-',
-				_ => return None,
-			},
-			_ => continue,
+		// A recognized status in field two wins, so a check named like a glyph is not miscounted.
+		let status = (fields.clone().count() >= 2).then_some(second);
+		let symbol = match (status, first) {
+			(Some("pass"), _) => '✓',
+			(Some("fail" | "cancel"), _) => 'X',
+			(Some("pending"), _) => '*',
+			(Some("skipping"), _) => '-',
+			(_, "✓") => '✓',
+			(_, "X" | "✗" | "×") => 'X',
+			(_, "*") => '*',
+			(_, "-") => '-',
+			(Some(_), _) => return None,
+			(None, _) => continue,
 		};
 		match symbol {
 			'✓' => {
@@ -331,6 +331,17 @@ mod tests {
 		let out = filter(&ctx, input, 1);
 
 		assert_eq!(out.text, "checks: 1 passed, 1 failed, 1 pending, 1 skipping\nTest suite\tfail\t2m\thttps://ci.test/test");
+	}
+
+	#[test]
+	fn pr_checks_status_column_wins_over_glyph_named_check() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let input = "build\tpass\t1s\thttps://ci.test/build\n✓\tfail\t1s\thttps://ci.test/check\n";
+
+		let out = filter(&ctx, input, 1);
+
+		assert_eq!(out.text, "checks: 1 passed, 1 failed\n✓\tfail\t1s\thttps://ci.test/check");
 	}
 
 	#[test]

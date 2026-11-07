@@ -36,7 +36,9 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		&& matches!(ctx.subcommand, Some("build" | "check" | "clippy" | "doc" | "run" | "nextest"))
 		&& cleaned.lines().any(|line| {
 			let line = line.trim_start();
-			line.starts_with("error:") || line.starts_with("error[")
+			// nextest ends every failed test run with this line; it is not a diagnostic.
+			(line.starts_with("error:") && !line.starts_with("error: test run failed"))
+				|| line.starts_with("error[")
 		}) {
 		return MinimizerOutput::passthrough(input);
 	}

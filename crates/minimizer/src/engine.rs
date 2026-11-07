@@ -998,6 +998,25 @@ strip_lines_matching = [".*"]
 	}
 
 	#[test]
+	fn failed_nextest_run_is_minimized_and_keeps_failures() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::from("Starting 202 tests\n");
+		for i in 0..200 {
+			input.push_str(&format!("        PASS [   0.010s] app tests::pass_{i}\n"));
+		}
+		input.push_str("     TIMEOUT [  60.000s] app tests::slow\n");
+		input.push_str("        FAIL [   0.020s] app tests::broken\n");
+		input.push_str("     Summary [  60.1s] 202 tests run: 200 passed, 2 failed\n");
+		input.push_str("error: test run failed\n");
+
+		let out = apply("cargo nextest run", &input, 100, &cfg);
+
+		assert!(out.text.len() < input.len() / 4, "{}", out.text);
+		assert!(out.text.contains("TIMEOUT [  60.000s] app tests::slow"));
+		assert!(out.text.contains("FAIL [   0.020s] app tests::broken"));
+	}
+
+	#[test]
 	fn just_recipe_output_keeps_final_summary() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input =
