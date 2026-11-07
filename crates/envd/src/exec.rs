@@ -2855,8 +2855,37 @@ async fn finish_session_command(
 		result = RunTerminal::Cancelled;
 	}
 	command.control.finished.store(true, Ordering::Release);
-	let (spilled_output, projection) = match command.output.lock().finish_with_projection() {
-		Ok((spilled, projection)) => (spilled.as_ref().map(wire_blob), Some(projection)),
+	let finished = command.output.lock().finish_with_projection();
+	let (spilled_output, projection) = match finished {
+		Ok((spilled, projection)) => {
+			let spilled = spilled.as_ref().map(wire_blob);
+			let store = command
+				.host
+				.upgrade()
+				.and_then(|host| host.output_store.lock().clone());
+			match (&result, store) {
+				(RunTerminal::Exited(exit_code), Some(store))
+					if is_single_cargo_command(&command.source) =>
+				{
+					let (source, exit_code) = (command.source.clone(), *exit_code);
+					let fallback = projection.clone();
+					let mut projection = projection;
+					// The blob read and the filter are blocking work; keep them off the runtime
+					// thread.
+					let minimized = task::spawn_blocking(move || {
+						let original = minimize_cargo_output(&source, exit_code, &mut projection, &store);
+						(original, projection)
+					})
+					.await;
+					match minimized {
+						Ok((Some(original), projection)) => (Some(original), Some(projection)),
+						Ok((None, projection)) => (spilled, Some(projection)),
+						Err(_) => (spilled, Some(fallback)),
+					}
+				},
+				_ => (spilled, Some(projection)),
+			}
+		},
 		Err(_) => {
 			result = RunTerminal::Failed;
 			(None, None)
@@ -2911,6 +2940,37 @@ async fn finish_session_command(
 	// runtime that is an outright deadlock, and on a multi-thread one it wedges
 	// a worker and stalls the session actor.
 	let _ = command.events.send_async(event).await;
+}
+
+/// Whether `command` is one plain `cargo` invocation, the only shape envd
+/// minimizes.
+fn is_single_cargo_command(command: &str) -> bool {
+	matches!(omp_minimizer::plan::analyze(command), omp_minimizer::plan::CommandPlan::Single { .. })
+		&& omp_minimizer::detect::detect(command).is_some_and(|identity| identity.program == "cargo")
+}
+
+fn minimize_cargo_output(
+	command: &str,
+	exit_code: i32,
+	projection: &mut v1::OutputProjection,
+	store: &BlobStore,
+) -> Option<WireBlob> {
+	let config = omp_minimizer::MinimizerConfig { enabled: true, ..Default::default() };
+	let artifact = projection.artifact.as_ref()?;
+	if artifact.size > u64::from(config.max_capture_bytes) {
+		return None;
+	}
+	let hash: [u8; 32] = artifact.hash.as_ref().try_into().ok()?;
+	let captured = store
+		.get(&omp_journal::blob::BlobRef { hash: Hash32::new(hash), size: artifact.size })
+		.ok()?;
+	let original = std::str::from_utf8(&captured).ok()?;
+	let minimized = omp_minimizer::apply(command, original, exit_code, &config);
+	if !minimized.changed || minimized.filter != "cargo" {
+		return None;
+	}
+	projection.model_text = Some(minimized.text.into_owned());
+	Some(artifact.clone())
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -3355,6 +3415,7 @@ impl OutputCapture {
 			inline_bytes: u64::try_from(self.projected_bytes).unwrap_or(u64::MAX),
 			omitted:      self.spilled,
 			artifact:     artifact.as_ref().map(wire_blob),
+			model_text:   None,
 		};
 		Ok((self.spilled.then_some(artifact).flatten(), projection))
 	}

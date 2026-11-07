@@ -115,7 +115,8 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 		let mut fields = trimmed.split('\t');
 		let first = fields.next().unwrap_or_default();
 		let second = fields.next().unwrap_or_default();
-		// A recognized status in field two wins, so a check named like a glyph is not miscounted.
+		// A recognized status in field two wins, so a check named like a glyph is not
+		// miscounted.
 		let status = (fields.clone().count() >= 2).then_some(second);
 		let symbol = match (status, first) {
 			(Some("pass"), _) => '✓',

@@ -149,6 +149,7 @@ omp-catalog = { path = "crates/catalog", version = "2.0.0" }
 omp-ai = { path = "crates/ai", version = "2.0.0", features = ["test-support"] }
 omp-serve = { path = "crates/serve", version = "2.0.0" }
 omp-memory = { path = "crates/memory", version = "2.0.0", default-features = false }
+omp-minimizer = { path = "crates/minimizer", version = "2.0.0" }
 omp-oauth = { path = "crates/oauth", version = "2.0.0" }
 omp-macros = { path = "crates/macros", version = "2.0.0" }
 omp-proto = { path = "crates/proto", version = "2.0.0", features = ["tonic"] }

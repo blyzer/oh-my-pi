@@ -272,6 +272,7 @@ fn status(outcome: ExecOutcome) -> ExecStatus {
 		signal: None,
 		wall_clock_ms: 7,
 		spilled_output: None,
+		model_text: None,
 		aborted: matches!(outcome, ExecOutcome::Timeout | ExecOutcome::Cancelled),
 		effects_unknown: false,
 		diags: Vec::new(),

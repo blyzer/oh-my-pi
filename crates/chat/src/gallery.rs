@@ -382,6 +382,7 @@ fn shell_payload(args: &Value, value: &Value) -> shell::Payload {
 				.and_then(Value::as_u64)
 				.unwrap_or_default(),
 			spilled_output: None,
+			model_text: None,
 			aborted: false,
 			effects_unknown: false,
 			diags: Vec::new(),

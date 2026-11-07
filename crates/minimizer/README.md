@@ -6,7 +6,9 @@ records the provenance and the RTK and snip attributions that travel with it.
 
 `apply(command, captured, exit_code, &config)` returns a `MinimizerOutput`
 whose text borrows the capture whenever nothing changed. The engine is inert
-unless `MinimizerConfig::enabled` is set, and no output path calls it yet.
+unless `MinimizerConfig::enabled` is set. The environment host selectively
+uses the cargo filter for single cargo commands; it preserves live output and
+provides the original capture as an artifact when the model projection changes.
 
 ## Structure
 
