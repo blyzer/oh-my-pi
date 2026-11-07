@@ -1,0 +1,5 @@
+error: invalid type: integer `1`, expected SemVer version
+ --> Cargo.toml:3:11
+  |
+3 | version = 1
+  |           ^

@@ -1,0 +1,5 @@
+   Compiling cargo-json-doctest v0.1.0 (/private/tmp/cargo-json-repro/doctest)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s
+     Running unittests src/lib.rs (target/debug/deps/cargo_json_doctest-6cc2e3d3e8b5fc19)
+   Doc-tests cargo_json_doctest
+error: doctest failed, to rerun pass `--doc`

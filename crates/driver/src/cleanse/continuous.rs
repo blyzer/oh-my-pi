@@ -340,7 +340,12 @@ mod tests {
 	}
 
 	fn output(text: &str) -> ProcessOutput {
-		ProcessOutput { exit_code: Some(1), stdout: Str::new(text), stderr: sf!("") }
+		ProcessOutput {
+			exit_code: Some(1),
+			stdout:    Str::new(text),
+			stderr:    sf!(""),
+			logs:      None,
+		}
 	}
 
 	fn suite(ids: &[&str]) -> Suite {
@@ -584,6 +589,7 @@ mod tests {
 						exit_code: None,
 						stdout:    sf!(""),
 						stderr:    sf!("cancelled"),
+						logs:      None,
 					})
 				})
 			}),
@@ -632,6 +638,7 @@ mod tests {
 								exit_code: Some(0),
 								stdout:    sf!(""),
 								stderr:    sf!(""),
+								logs:      None,
 							})
 						}
 					})
