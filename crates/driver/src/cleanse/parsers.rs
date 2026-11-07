@@ -216,8 +216,7 @@ pub fn parse(kind: ParserKind, input: &ParserInput<'_>) -> Result<Vec<Diagnostic
 	Ok(diagnostics)
 }
 
-/// Reads every JSON value and every diagnostic text line of the combined
-/// output, and returns why the output is not JSON when it holds no JSON value.
+/// Reads JSON values and diagnostic text lines from the combined output.
 fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<serde_json::Error>) {
 	let combined = if input.stderr.is_empty() {
 		input.stdout.to_owned()
@@ -227,7 +226,8 @@ fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<s
 		format!("{}\n{}", input.stdout, input.stderr)
 	};
 	let mut diagnostics = Vec::new();
-	let not_json = match json_values(&combined) {
+	let mut text_only = combined.clone();
+	let not_json = match json_values(&combined, &mut text_only) {
 		Ok(values) => {
 			for value in &values {
 				parse_json_value(kind, value, None, input, &mut diagnostics);
@@ -236,7 +236,7 @@ fn walk(kind: ParserKind, input: &ParserInput<'_>) -> (Vec<Diagnostic>, Option<s
 		},
 		Err(error) => Some(error),
 	};
-	parse_text(kind, &combined, input, &mut diagnostics);
+	parse_text(kind, &text_only, input, &mut diagnostics);
 	(diagnostics, not_json)
 }
 
@@ -277,22 +277,58 @@ pub(super) fn unparseable(
 	}
 }
 
-/// Every JSON value in `text`: the whole text as one document, else each line
-/// that holds one. `Err` is why the whole text is not JSON, when no line is.
-fn json_values(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+/// Reads complete JSON values, including multiline reports among other output.
+fn json_values(
+	text: &str,
+	text_only: &mut String,
+) -> Result<Vec<serde_json::Value>, serde_json::Error> {
 	let error = match serde_json::from_str(text.trim()) {
-		Ok(value) => return Ok(vec![value]),
+		Ok(value) => {
+			text_only.clear();
+			return Ok(vec![value]);
+		},
 		Err(error) => error,
 	};
 	let mut values = Vec::new();
-	for line in text.lines() {
-		let line = line.trim();
-		if (line.starts_with('{') || line.starts_with('['))
-			&& let Ok(value) = serde_json::from_str(line)
-		{
-			values.push(value);
+	let mut spans = Vec::new();
+	let mut line_start = 0;
+	let mut consumed = 0;
+	for line in text.split_inclusive('\n') {
+		let start = line_start;
+		line_start += line.len();
+		let trimmed = line.trim_start();
+		if start < consumed || !trimmed.starts_with(['{', '[']) {
+			continue;
+		}
+		let value_start = start + line.len() - trimmed.len();
+		let mut stream =
+			serde_json::Deserializer::from_str(&text[value_start..]).into_iter::<serde_json::Value>();
+		match stream.next() {
+			Some(Ok(value)) => {
+				let end = value_start + stream.byte_offset();
+				if text[end..]
+					.lines()
+					.next()
+					.unwrap_or_default()
+					.trim()
+					.is_empty()
+				{
+					spans.push(value_start..end);
+					values.push(value);
+					consumed = end;
+				}
+			},
+			Some(Err(error)) if error.is_eof() => break,
+			_ => {},
 		}
 	}
+	text_only.clear();
+	let mut cursor = 0;
+	for span in spans {
+		text_only.push_str(&text[cursor..span.start]);
+		cursor = span.end;
+	}
+	text_only.push_str(&text[cursor..]);
 	if values.is_empty() {
 		Err(error)
 	} else {
@@ -558,6 +594,20 @@ fn parse_text(kind: ParserKind, text: &str, input: &ParserInput<'_>, output: &mu
 		let line = strip_control(line);
 		let line = line.trim();
 		if line.is_empty() {
+			continue;
+		}
+		if matches!(kind, ParserKind::Credo)
+			&& line.as_bytes().get(0..13).is_some_and(|prefix| {
+				prefix[0..2].iter().all(u8::is_ascii_digit)
+					&& prefix[2] == b':'
+					&& prefix[3..5].iter().all(u8::is_ascii_digit)
+					&& prefix[5] == b':'
+					&& prefix[6..8].iter().all(u8::is_ascii_digit)
+					&& prefix[8] == b'.'
+					&& prefix[9..12].iter().all(u8::is_ascii_digit)
+					&& prefix[12] == b' '
+			}) && line[13..].starts_with("[info] ")
+		{
 			continue;
 		}
 		if let Some(capture) = CODE_PREFIX.captures(line) {
@@ -1129,5 +1179,168 @@ mod tests {
 			run(ParserKind::Tap, perl, "").expect_err("no TAP stream"),
 			ParseError::Tap(TapError::NoStream)
 		));
+	}
+
+	/// A clean run of every JSON-report checker below, recorded under
+	/// `fixtures` (`PROVENANCE.txt` beside each), reads as a report naming no
+	/// problem: with the progress a checker writes to stderr, and with the build
+	/// output `mix` writes to stdout before Credo's report on a cold run. The
+	/// same stdout cut short, or empty, never reads as zero failures: a checker
+	/// that writes no report has not reported a clean run.
+	#[test]
+	fn recorded_clean_runs_read_as_zero_failures() {
+		let root = Path::new("/private/tmp/cleanrun/cases");
+		let read = |kind, stdout, stderr| {
+			parse(kind, &ParserInput {
+				checker: "checker",
+				checker_root: root,
+				project_root: root,
+				stdout,
+				stderr,
+			})
+		};
+		let clean = [
+			(
+				"eslint",
+				ParserKind::Eslint,
+				include_str!("../../../../fixtures/eslint/clean.stdout"),
+				include_str!("../../../../fixtures/eslint/clean.stderr"),
+			),
+			(
+				"pyright",
+				ParserKind::Pyright,
+				include_str!("../../../../fixtures/pyright/clean.stdout"),
+				include_str!("../../../../fixtures/pyright/clean.stderr"),
+			),
+			(
+				"pylint",
+				ParserKind::Pylint,
+				include_str!("../../../../fixtures/pylint/clean.stdout"),
+				include_str!("../../../../fixtures/pylint/clean.stderr"),
+			),
+			(
+				"rubocop",
+				ParserKind::Rubocop,
+				include_str!("../../../../fixtures/rubocop/clean.stdout"),
+				include_str!("../../../../fixtures/rubocop/clean.stderr"),
+			),
+			(
+				"phpstan",
+				ParserKind::Phpstan,
+				include_str!("../../../../fixtures/phpstan/clean.stdout"),
+				include_str!("../../../../fixtures/phpstan/clean.stderr"),
+			),
+			(
+				"psalm",
+				ParserKind::Psalm,
+				include_str!("../../../../fixtures/psalm/clean.stdout"),
+				include_str!("../../../../fixtures/psalm/clean.stderr"),
+			),
+			(
+				"swiftlint",
+				ParserKind::Swiftlint,
+				include_str!("../../../../fixtures/swiftlint/clean.stdout"),
+				include_str!("../../../../fixtures/swiftlint/clean.stderr"),
+			),
+			(
+				"credo",
+				ParserKind::Credo,
+				include_str!("../../../../fixtures/credo/clean.stdout"),
+				include_str!("../../../../fixtures/credo/clean.stderr"),
+			),
+			(
+				"credo cold",
+				ParserKind::Credo,
+				include_str!("../../../../fixtures/credo/clean-cold.stdout"),
+				include_str!("../../../../fixtures/credo/clean-cold.stderr"),
+			),
+			(
+				"hlint",
+				ParserKind::Hlint,
+				include_str!("../../../../fixtures/hlint/clean.stdout"),
+				include_str!("../../../../fixtures/hlint/clean.stderr"),
+			),
+			(
+				"tflint",
+				ParserKind::Tflint,
+				include_str!("../../../../fixtures/tflint/clean.stdout"),
+				include_str!("../../../../fixtures/tflint/clean.stderr"),
+			),
+		];
+		let outcomes = clean
+			.iter()
+			.map(|&(name, kind, stdout, stderr)| {
+				(name, read(kind, stdout, stderr).map_err(|error| error.to_string()))
+			})
+			.collect::<Vec<_>>();
+		let zero_failures = clean
+			.iter()
+			.map(|&(name, ..)| (name, Ok(Vec::new())))
+			.collect::<Vec<_>>();
+		assert_eq!(outcomes, zero_failures);
+		for (name, kind, stdout, stderr) in clean {
+			for unreadable in [&stdout[..stdout.len() / 2], ""] {
+				let outcome = read(kind, unreadable, stderr);
+				assert!(
+					!matches!(outcome, Ok(ref found) if found.is_empty()),
+					"{name}: {unreadable:?} read as clean"
+				);
+			}
+		}
+		// A line that only opens with a JSON value is not a report.
+		assert!(matches!(
+			read(ParserKind::Swiftlint, "[1]    4242 killed     swiftlint\n", ""),
+			Err(ParseError::NoJson(_))
+		));
+	}
+
+	#[test]
+	fn credo_preserves_text_diagnostics_beside_json() {
+		let root = Path::new("/project");
+		let stdout = concat!(
+			"14:31:49.961 [info] Compiling file system watcher for Mac...\n",
+			"14:31:51.354 [info] Done.\n",
+			"{\n  \"issues\": []\n}\n",
+			"lib/example.ex:7:2: error: real problem\n"
+		);
+		let found = parse(ParserKind::Credo, &ParserInput {
+			checker: "credo",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "",
+		})
+		.unwrap();
+		assert_eq!(found.len(), 1);
+		assert_eq!(found[0].file.as_deref(), Some("lib/example.ex"));
+		assert_eq!(found[0].line, Some(7));
+		assert_eq!(found[0].message.as_str(), "real problem");
+	}
+
+	#[test]
+	fn json_strings_are_not_parsed_as_text_diagnostics() {
+		let root = Path::new("/project");
+		let stdout = "{\n  \"issues\": [],\n  \"metadata\": \"lib/fake.ex:7:2: not a \
+		              diagnostic\"\n}\nlib/real.ex:9:3: error: real problem\n";
+		let found = parse(ParserKind::Credo, &ParserInput {
+			checker: "credo",
+			checker_root: root,
+			project_root: root,
+			stdout,
+			stderr: "",
+		})
+		.unwrap();
+		assert_eq!(found.len(), 1);
+		assert_eq!(found[0].file.as_deref(), Some("lib/real.ex"));
+	}
+
+	#[test]
+	fn multiple_json_reports_preserve_text_offsets() {
+		let text =
+			"progress é\n{\"issues\":[]}\nlib/real.ex:9:3: error: real problem\n{\"issues\":[]}\n";
+		let mut text_only = text.to_owned();
+		let values = json_values(text, &mut text_only).unwrap();
+		assert_eq!(values.len(), 2);
+		assert_eq!(text_only, "progress é\n\nlib/real.ex:9:3: error: real problem\n\n");
 	}
 }
