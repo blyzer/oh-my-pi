@@ -94,11 +94,9 @@ fn preserves_raw_mode(ctx: &MinimizerCtx<'_>) -> bool {
 
 /// Summarize the DEFAULT (non-JSON) `gh pr checks` table.
 ///
-/// Default human output is a tab-separated table:
-/// `<symbol>\t<name>\t<duration>\t<url>` where the leading status glyph is
-/// `✓`/`X`/`*`/`-` (pass/fail/pending/skipping). We re-derive against this real
-/// layout — NOT rtk's `[ok]`/`[x]` strings, which only appear on the injected
-/// `-F json` path. Failed rows stay verbatim (they carry the actionable URL);
+/// Interactive output uses `<symbol>\t<name>\t<duration>\t<url>`. Captured
+/// non-interactive output uses `<name>\t<status>\t<duration>\t<url>`.
+/// Failed rows stay verbatim (they carry the actionable URL);
 /// passed/pending/skipping collapse to counts. Returns `None` when no
 /// recognizable check rows are found so the caller can fall back to the generic
 /// path.
@@ -111,18 +109,25 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 
 	for line in input.lines() {
 		let trimmed = line.trim_start();
-		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status
-		// glyph followed by at least one TAB-delimited field. Requiring the tab
-		// shape keyed off the row's first glyph — NOT the leading char alone —
-		// rejects separators (`---`), blank-glyph lines, and bulleted
-		// annotation detail (`- ...`, `* ...`) that gh/CI tools emit, any of
-		// which would otherwise be miscounted as a phantom skipping/pending
-		// check and inflate the summary.
 		if !trimmed.contains('\t') {
 			continue;
 		}
-		let Some(symbol) = trimmed.chars().next() else {
-			continue;
+		let mut fields = trimmed.split('\t');
+		let first = fields.next().unwrap_or_default();
+		let second = fields.next().unwrap_or_default();
+		let symbol = match first {
+			"✓" => '✓',
+			"X" | "✗" | "×" => 'X',
+			"*" => '*',
+			"-" => '-',
+			_ if fields.next().is_some() && fields.next().is_some() => match second {
+				"pass" => '✓',
+				"fail" | "cancel" => 'X',
+				"pending" => '*',
+				"skipping" => '-',
+				_ => return None,
+			},
+			_ => continue,
 		};
 		match symbol {
 			'✓' => {
@@ -312,6 +317,31 @@ mod tests {
 		// Passed/pending/skipping rows collapse to counts only.
 		assert!(!out.text.contains("https://ci.test/build"));
 		assert!(!out.text.contains("https://ci.test/lint"));
+	}
+
+	#[test]
+	fn pr_checks_summarizes_non_tty_table_and_keeps_failures() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let input = "Lint workspace (Linux)\tpass\t1m25s\thttps://ci.test/lint\t\n\
+		             Test suite\tfail\t2m\thttps://ci.test/test\t\n\
+		             Deploy\tpending\t0\thttps://ci.test/deploy\t\n\
+		             Optional check\tskipping\t0\thttps://ci.test/optional\t\n";
+
+		let out = filter(&ctx, input, 1);
+
+		assert_eq!(out.text, "checks: 1 passed, 1 failed, 1 pending, 1 skipping\nTest suite\tfail\t2m\thttps://ci.test/test");
+	}
+
+	#[test]
+	fn pr_checks_preserves_unknown_non_tty_status() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let input = "build\tpass\t1s\thttps://ci.test/build\nnew check\tunknown\t0\thttps://ci.test/new\n";
+
+		let out = filter(&ctx, input, 0);
+
+		assert!(out.text.contains("new check\tunknown\t0\thttps://ci.test/new"));
 	}
 
 	#[test]
