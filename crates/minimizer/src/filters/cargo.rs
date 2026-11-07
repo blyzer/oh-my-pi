@@ -523,6 +523,12 @@ fn extract_lint_rule(line: &str) -> Option<String> {
 	Some(rule.to_string())
 }
 
+/// Locations listed per lint rule; the rest are counted. Every rule stays
+/// visible.
+const CLIPPY_LOCATIONS_PER_RULE: usize = 10;
+/// Warnings without a rule note listed before the rest are counted.
+const CLIPPY_UNGROUPED_SHOWN: usize = 40;
+
 fn format_clippy_grouped(warnings: &[ClippyWarning], exit_code: i32) -> String {
 	let mut groups: BTreeMap<String, Vec<&ClippyWarning>> = BTreeMap::new();
 	let mut ungrouped = Vec::new();
@@ -547,14 +553,28 @@ fn format_clippy_grouped(warnings: &[ClippyWarning], exit_code: i32) -> String {
 			let _ = writeln!(out, "clippy: {} — {}{}", rule, loc, warns[0].message);
 		} else {
 			let _ = writeln!(out, "clippy: {} ({} warnings)", rule, warns.len());
-			for w in warns {
+			for w in warns.iter().take(CLIPPY_LOCATIONS_PER_RULE) {
 				let _ = writeln!(out, "  {}  {}", w.location, w.message);
+			}
+			if let Some(more) = warns
+				.len()
+				.checked_sub(CLIPPY_LOCATIONS_PER_RULE)
+				.filter(|&n| n > 0)
+			{
+				let _ = writeln!(out, "  … {more} more");
 			}
 		}
 	}
 
-	for w in &ungrouped {
+	for w in ungrouped.iter().take(CLIPPY_UNGROUPED_SHOWN) {
 		let _ = writeln!(out, "clippy warning: {}  {}", w.location, w.message);
+	}
+	if let Some(more) = ungrouped
+		.len()
+		.checked_sub(CLIPPY_UNGROUPED_SHOWN)
+		.filter(|&n| n > 0)
+	{
+		let _ = writeln!(out, "clippy warning: … {more} more");
 	}
 
 	if exit_code != 0 {
@@ -837,6 +857,24 @@ mod tests {
 		assert!(out.contains("2 warnings"));
 		assert!(out.contains("src/lib.rs:2:9"));
 		assert!(out.contains("src/lib.rs:5:9"));
+	}
+
+	#[test]
+	fn clippy_caps_locations_per_rule_and_counts_the_rest() {
+		let mut input = String::new();
+		for i in 0..25 {
+			input.push_str(&format!(
+				"warning: redundant clone\n --> src/f{i}.rs:1:1\n  |\n  = note: \
+				 `#[warn(clippy::redundant_clone)]` on by default\n\n"
+			));
+		}
+
+		let out = filter_clippy(&input, 0);
+
+		assert!(out.starts_with("clippy: clippy::redundant_clone (25 warnings)\n"), "{out}");
+		assert!(out.contains("src/f9.rs:1:1"));
+		assert!(!out.contains("src/f10.rs:1:1"));
+		assert!(out.contains("  … 15 more\n"));
 	}
 
 	#[test]
