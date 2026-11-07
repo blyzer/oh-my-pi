@@ -2,22 +2,28 @@
 
 use crate::{MinimizerCtx, MinimizerOutput, engine};
 
+pub mod binary_tools;
 pub mod bun;
 pub mod cargo;
 pub mod cloud;
 pub mod cpp;
 pub mod docker;
+pub mod dotnet;
 pub mod generic;
 pub mod gh;
 pub mod git;
 pub mod glab;
+pub mod go;
 pub mod gt;
 pub mod js_tools;
+pub mod jvm;
 pub mod lint;
+pub mod listing;
 pub mod node_tests;
 pub mod pkg;
 pub mod python;
 pub mod ruby;
+pub mod rust_tools;
 pub mod system;
 
 /// Whether a built-in Rust filter claims `program` with `subcommand`.
@@ -31,10 +37,23 @@ pub fn supports(program: &str, subcommand: Option<&str>) -> bool {
 		"gh" => gh::supports(subcommand),
 		"glab" => glab::supports(subcommand),
 		"cargo" => cargo::supports(subcommand),
+		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
+		| "jq" | "json" => true,
+		"xxd" | "strings" | "od" => binary_tools::supports(program, subcommand),
+		"go" | "golangci-lint" => go::supports(program, subcommand),
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::supports(program, subcommand)
 		},
 		program if cpp::is_gtest_binary_name(program) => cpp::supports(program, subcommand),
+		"dotnet" => dotnet::supports(program, subcommand),
+		// JVM build tools: phase is decided inside jvm::filter (never by
+		// ctx.subcommand, which mis-reports `mvn clean install` as `clean`), so
+		// supports() claims every subcommand. Defensive `.cmd`/`.bat` arms cover
+		// the case where normalize_program is bypassed.
+		"mvn" | "mvnw" | "mvnw.cmd" | "gradle" | "gradlew" | "gradlew.bat" => {
+			jvm::supports(program, subcommand)
+		},
+		"rustfmt" => rust_tools::supports(program, subcommand),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => {
 			lint::supports(subcommand) || lint::supports_program(program, subcommand)
@@ -124,10 +143,19 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		"gh" => gh::filter(ctx, input, exit_code),
 		"glab" => glab::filter(ctx, input, exit_code),
 		"cargo" => cargo::filter(ctx, input, exit_code),
+		"ls" | "tree" | "find" | "grep" | "rg" | "wc" | "cat" | "read" | "stat" | "du" | "df"
+		| "jq" | "json" => listing::filter(ctx, input, exit_code),
+		"xxd" | "strings" | "od" => binary_tools::filter(ctx, input, exit_code),
+		"go" | "golangci-lint" => go::filter(ctx, input, exit_code),
+		"dotnet" => dotnet::filter(ctx, input, exit_code),
+		"mvn" | "mvnw" | "mvnw.cmd" | "gradle" | "gradlew" | "gradlew.bat" => {
+			jvm::filter(ctx, input, exit_code)
+		},
 		"cmake" | "ctest" | "ninja" | "gtest" | "gtest-parallel" => {
 			cpp::filter(ctx, input, exit_code)
 		},
 		program if cpp::is_gtest_binary_name(program) => cpp::filter(ctx, input, exit_code),
+		"rustfmt" => rust_tools::filter(ctx, input, exit_code),
 		"tsc" | "eslint" | "biome" | "shellcheck" | "markdownlint" | "hadolint" | "yamllint"
 		| "oxlint" | "pyright" | "basedpyright" => lint::filter(ctx, input, exit_code),
 		"npx" => filter_js_wrapper(ctx, input, exit_code),

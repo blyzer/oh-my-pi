@@ -1,0 +1,34 @@
+Credo --format json clean-run fixtures. Each pair is the verbatim streams of one run, never hand-edited.
+The recording scratch directory was /private/tmp/cleanrun/cases (neutral: no user name, no owner hostname).
+
+Every run
+  command: mix credo --format json   (cwd /private/tmp/cleanrun/cases/credo; the args the cleanse credo checker passes)
+  versions: credo 1.7.19, Elixir 1.20.5 on Erlang/OTP 29 (Homebrew), MIX_HOME and HEX_HOME throwaway
+  mix.exs:
+    defmodule Clean.MixProject do
+      use Mix.Project
+
+      def project do
+        [app: :clean, version: "0.1.0", elixir: "~> 1.15", deps: deps()]
+      end
+
+      defp deps do
+        [{:credo, "~> 1.7", only: [:dev, :test], runtime: false}]
+      end
+    end
+  lib/clean.ex:
+    defmodule Clean do
+      @moduledoc """
+      Greets people.
+      """
+
+      @doc "Returns a greeting."
+      def greet(name), do: "hello " <> name
+    end
+
+clean-cold.stdout, clean-cold.stderr
+  first run after `mix deps.get`: mix compiles the dependencies and writes that output to stdout
+  before the report; exit 0; stdout 337 bytes, stderr 0 bytes
+
+clean.stdout, clean.stderr
+  the next run, dependencies already compiled; exit 0; stdout 19 bytes, stderr 0 bytes

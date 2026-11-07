@@ -375,12 +375,21 @@ fn program_label(program: &str) -> &'static str {
 		"wget" => "wget",
 		"psql" => "psql",
 		"cargo" => "cargo",
+		"xxd" => "xxd",
+		"strings" => "strings",
+		"od" => "od",
+		"go" => "go",
 		"cmake" => "cmake",
 		"ctest" => "ctest",
 		"ninja" => "ninja",
 		"gtest" => "gtest",
 		"gtest-parallel" => "gtest",
 		program if filters::cpp::is_gtest_binary_name(program) => "gtest",
+		"golangci-lint" => "golangci-lint",
+		"dotnet" => "dotnet",
+		"mvn" | "mvnw" | "mvnw.cmd" => "mvn",
+		"gradle" | "gradlew" | "gradlew.bat" => "gradle",
+		"rustfmt" => "rustfmt",
 		"tsc" => "tsc",
 		"eslint" => "eslint",
 		"biome" => "biome",
@@ -394,6 +403,18 @@ fn program_label(program: &str) -> &'static str {
 		"composer" => "composer",
 		"uv" => "uv",
 		"poetry" => "poetry",
+		"ls" => "ls",
+		"tree" => "tree",
+		"find" => "find",
+		"grep" => "grep",
+		"rg" => "rg",
+		"wc" => "wc",
+		"cat" => "cat",
+		"read" => "read",
+		"stat" => "stat",
+		"du" => "du",
+		"df" => "df",
+		"jq" => "jq",
 		"bun" => "bun",
 		"bunx" => "bunx",
 		"pytest" => "pytest",
@@ -674,6 +695,21 @@ only_on_exit = [0]
 	}
 
 	#[test]
+	fn failing_jq_keeps_the_error_after_long_output() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..1000 {
+			let _ = writeln!(input, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+		}
+		input.push_str("Error: cannot use 1 as object key\n");
+
+		let out = apply("jq -c '.[]' rows.json", &input, 0, &cfg);
+		assert!(out.changed, "a successful run is truncated to its head");
+		let out = apply("jq -c '.[]' rows.json", &input, 5, &cfg);
+		assert!(out.text.ends_with("Error: cannot use 1 as object key\n"), "{:?}", out.text);
+	}
+
+	#[test]
 	fn ssh_keeps_long_remote_lines_whole() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let mut remote = String::new();
@@ -705,6 +741,54 @@ only_on_exit = [0]
 	}
 
 	#[test]
+	fn output_within_whole_budget_is_returned_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut patch = String::from(
+			"diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ \
+			 b/src/lib.rs\n@@ -1,40 +1,40 @@\n",
+		);
+		for i in 0..40 {
+			let _ = writeln!(patch, " context {i}\n-old line {i}\n+new line {i}");
+		}
+		let show = format!("commit abcdef1234567890\nAuthor: Somebody\n\n    fix: thing\n\n{patch}");
+		let mut rows = String::new();
+		for i in 0..100 {
+			let _ = writeln!(rows, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+		}
+		let mut remote = String::new();
+		for i in 0..300 {
+			let _ = writeln!(remote, "remote line {i}");
+		}
+		for (command, input, exit) in [
+			("git diff HEAD~1", &patch, 0),
+			("git show HEAD", &show, 0),
+			("diff -u a b", &patch, 1),
+			("jq -c '.[]' rows.json", &rows, 0),
+			("ssh host cat log.txt", &remote, 0),
+		] {
+			assert!(input.len() > MIN_MINIMIZE_CHARS, "{command}");
+			let out = apply(command, input, exit, &cfg);
+			assert_eq!(&out.text, input, "{command}");
+		}
+	}
+
+	#[test]
+	fn output_past_whole_budget_is_still_shortened() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut rows = String::new();
+		let mut remote = String::new();
+		for i in 0..1000 {
+			let _ = writeln!(rows, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+			let _ = writeln!(remote, "remote line {i} of a log long enough to pass the budget");
+		}
+		let jq = apply("jq -c '.[]' rows.json", &rows, 0, &cfg);
+		assert_eq!(jq.text.lines().count(), 41, "{:?}", jq.text);
+		assert!(jq.text.ends_with("[…960ln elided…]\n"), "{:?}", jq.text);
+		let ssh = apply("ssh host cat log.txt", &remote, 0, &cfg);
+		assert!(ssh.text.contains("ln elided"), "{:?}", ssh.text);
+	}
+
+	#[test]
 	fn ssh_whole_budget_counts_the_captured_bytes() {
 		use crate::primitives::WHOLE_OUTPUT_BYTES;
 
@@ -723,6 +807,26 @@ only_on_exit = [0]
 		let past_budget = format!("{at_budget}\n");
 		let out = apply("ssh host cat log.txt", &past_budget, 0, &cfg);
 		assert!(out.text.contains("ln elided"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn jq_whole_budget_ends_at_the_shared_constant() {
+		use crate::primitives::WHOLE_OUTPUT_BYTES;
+
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes: exactly the budget.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		assert_eq!(at_budget.len(), WHOLE_OUTPUT_BYTES);
+		let out = apply("jq -r '.[]' rows.json", &at_budget, 0, &cfg);
+		assert_eq!(out.text, at_budget);
+
+		let past_budget = format!("{at_budget}x");
+		let out = apply("jq -r '.[]' rows.json", &past_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 41, "{:?}", out.text);
+		assert!(out.text.ends_with("[…217ln elided…]\n"), "{:?}", out.text);
 	}
 
 	#[test]
@@ -1343,6 +1447,25 @@ mod pipeline_integration_tests {
 				.join("\n")
 		);
 		assert!(!outcomes.is_empty(), "expected built-in inline tests");
+	}
+
+	#[test]
+	fn gradle_routes_to_jvm_filter_via_apply() {
+		let ctx = Ctx::new();
+		SV_MINIMIZER_ENABLED.set(&ctx, true).unwrap();
+		let cfg = MinimizerConfig::from_ctx(&ctx);
+		let input = minimizable_input(
+			"> Task :app:compileJava UP-TO-DATE\n> Task :app:test\nBUILD SUCCESSFUL in 8s\n",
+		);
+		let out = apply("gradle build", &input, 0, &cfg);
+		// gradle.toml is deleted; gradle now dispatches to the Rust jvm Build
+		// filter, which strips `> Task :…UP-TO-DATE` task-progress noise (the
+		// carried-over defs/gradle.toml behaviour, now as a Rust filter — NOT a
+		// TOML pipeline) and keeps the BUILD status.
+		assert!(out.changed, "gradle build filter strips task-progress noise");
+		assert!(out.text.contains("BUILD SUCCESSFUL"));
+		assert!(!out.text.contains("> Task :"), "task lines stripped; got:\n{}", out.text);
+		assert_eq!(out.filter, "gradle", "telemetry label routes through jvm program_label");
 	}
 
 	#[test]
