@@ -158,12 +158,12 @@ fn uv_has_actionable_diagnostic(cleaned: &str) -> bool {
 fn strip_package_noise(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> String {
 	let mut out = String::new();
 	let mut previous_blank = false;
-	// snip keeps exactly one JS install-summary line ('added N packages…',
-	// 'up to date', pnpm 'Done in Xs'/'Packages: +N', yarn 'Done in Xs'): the
-	// count confirms lockfile/node_modules state. Keep the first such line and
-	// treat later duplicates as noise. This check precedes is_noise_line so the
-	// 'audited N packages' strip cannot eat the combined 'added…audited'
-	// summary.
+	// snip (github.com/edouard-claude/snip) keeps exactly one JS install-summary
+	// line ('added N packages…', 'up to date', pnpm 'Done in Xs'/'Packages: +N',
+	// yarn 'Done in Xs'): the count confirms lockfile/node_modules state. Keep
+	// the first such line and treat later duplicates as noise. This check
+	// precedes is_noise_line so the 'audited N packages' strip cannot eat the
+	// combined 'added…audited' summary.
 	let mut kept_install_summary = false;
 	for line in input.lines() {
 		let trimmed = line.trim();
@@ -386,8 +386,9 @@ fn is_noise_line(ctx: &MinimizerCtx<'_>, line: &str, exit_code: i32) -> bool {
 		return true;
 	}
 	// Strip: npm funding nags ("N packages are looking for funding" / "run `npm
-	// fund` for details"). snip drops both; removing 'funding' from
-	// is_audit_or_security_summary keeps real audit findings protected.
+	// fund` for details"). snip (github.com/edouard-claude/snip) drops both;
+	// removing 'funding' from is_audit_or_security_summary keeps real audit
+	// findings protected.
 	if lower.contains("looking for funding") || lower.contains("npm fund") {
 		return true;
 	}
@@ -472,8 +473,8 @@ fn is_js_program(program: &str) -> bool {
 }
 
 /// JS package-manager success-summary lines worth keeping exactly once. snip
-/// retains these so the count confirms `lockfile/node_modules` state. Callers
-/// must gate on `is_js_program` first.
+/// (github.com/edouard-claude/snip) retains these so the count confirms
+/// `lockfile/node_modules` state. Callers must gate on `is_js_program` first.
 fn is_js_install_summary(lower: &str) -> bool {
 	lower.starts_with("added ") && lower.contains("package")
 		|| lower.starts_with("removed ") && lower.contains("package")
@@ -671,8 +672,9 @@ mod tests {
 
 	#[test]
 	fn keeps_one_success_summary_strips_funding_and_zero_vulnerabilities() {
-		// snip keeps the install summary (the count confirms node_modules state)
-		// while dropping progress, funding nags, and 'found 0 vulnerabilities'.
+		// snip (github.com/edouard-claude/snip) keeps the install summary (the
+		// count confirms node_modules state) while dropping progress, funding
+		// nags, and 'found 0 vulnerabilities'.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = ctx("npm", Some("install"), "npm install", &cfg);
 		let input = "Resolving: total 10\nadded 3 packages, and audited 4 packages in 1s\n2 \

@@ -132,7 +132,8 @@ fn is_lint_noise(program: &str, line: &str, exit_code: i32) -> bool {
 	// actionable chatter, not a diagnostic; drop it while keeping the
 	// `✖ N problems (…)` summary line. Checked ahead of the diagnostic-signal
 	// guard below because the hint itself contains the word "error".
-	// (snip strips on `potentially fixable`.)
+	// (snip, github.com/edouard-claude/snip filters/eslint.yaml, strips on
+	// `potentially fixable`.)
 	if program == "eslint" && line.contains("potentially fixable") {
 		return true;
 	}
@@ -772,6 +773,117 @@ mod tests {
 		assert!(is_lint_noise("basedpyright", "Found 42 source files", 1));
 		assert!(is_lint_noise("basedpyright", "basedpyright 1.22.0", 1));
 		assert!(is_lint_noise("pyright", "Pyright 1.1.0", 1));
+	}
+
+	// -----------------------------------------------------------------
+	// CONCERN 1: tsc program-claim + code-frame strips
+	// (ported from github.com/edouard-claude/snip filters/tsc.yaml inline tests,
+	// re-rendered through the minimizer's grouped per-file + Top-codes output
+	// instead of snip's flat keep_lines)
+	// -----------------------------------------------------------------
+
+	#[test]
+	fn tsc_eslint_biome_oxlint_are_program_claimed() {
+		// Path-arg invocations resolve the subcommand to a path token that is not
+		// in the subcommand allowlist; the program claim is what routes them.
+		for program in ["tsc", "eslint", "biome", "oxlint"] {
+			assert!(
+				supports_program(program, Some("src/foo.ts")),
+				"{program} path-arg invocation must be program-claimed"
+			);
+			assert!(supports_program(program, None), "{program} bare invocation must be claimed");
+		}
+	}
+
+	#[test]
+	fn tsc_pretty_strips_code_frames_and_groups_by_file() {
+		// snip's "pretty format errors with context" fixture.
+		let input = "src/index.ts:3:1 - error TS2304: Cannot find name 'foo'.\n\n3 foo = 1;\n  \
+		             ~~~\n\nsrc/utils.ts:10:5 - error TS2322: Type 'string' is not assignable to \
+		             type 'number'.\n\n10   const x: number = \"hello\";\n     ~\n\nFound 2 errors \
+		             in 2 files.\n";
+		let out = condense_lint_output("tsc", input, 2);
+		assert!(out.contains("2 diagnostics in 2 files"), "got: {out}");
+		assert!(out.contains("TS2304"));
+		assert!(out.contains("TS2322"));
+		assert!(out.contains("Top codes:"));
+		// Code-frame body lines and underline rows are stripped.
+		assert!(!out.contains("foo = 1;"), "code-frame body must be stripped: {out}");
+		assert!(!out.contains("const x: number"), "code-frame body must be stripped: {out}");
+		assert!(!out.contains('~'), "underline rows must be stripped: {out}");
+	}
+
+	#[test]
+	fn tsc_classic_groups_by_file() {
+		// snip's "classic format errors" fixture (no code frames).
+		let input = "src/index.ts(3,1): error TS2304: Cannot find name 'foo'.\nsrc/utils.ts(10,5): \
+		             error TS2322: Type 'string' is not assignable to type 'number'.\nFound 2 \
+		             errors in 2 files.\n";
+		let out = condense_lint_output("tsc", input, 2);
+		assert!(out.contains("2 diagnostics in 2 files"), "got: {out}");
+		assert!(out.contains("src/index.ts"));
+		assert!(out.contains("src/utils.ts"));
+		assert!(out.contains("TS2304"));
+		assert!(out.contains("TS2322"));
+	}
+
+	#[test]
+	fn tsc_empty_input_condenses_to_clean() {
+		// snip emits "ok (no type errors)"; the minimizer renders empty input as
+		// empty (its own clean-build signal), so assert that behavior.
+		assert_eq!(condense_lint_output("tsc", "", 0), "");
+	}
+
+	// -----------------------------------------------------------------
+	// CONCERN 2: eslint stylish-block parsing
+	// (ported from github.com/edouard-claude/snip filters/eslint.yaml inline tests)
+	// -----------------------------------------------------------------
+
+	#[test]
+	fn eslint_stylish_groups_rows_under_headers_with_top_rules() {
+		// snip's "errors with summary" fixture (incl. a Parsing error row and the
+		// fixable hint). Codepoints normalized: × is U+00D7-free here — eslint's
+		// summary marker is the heavy ballot ✖ (U+2716), kept verbatim.
+		let input = "/home/user/project/src/file.js\n  1:10  error    Unexpected var, use let or \
+		             const instead  no-var\n  2:5   warning  Missing semicolon                     \
+		             semi\n\n/home/user/project/src/other.js\n  3:1   error    Parsing error: \
+		             Unexpected token\n\n✖ 3 problems (2 errors, 1 warning)\n  1 error and 0 \
+		             warnings potentially fixable with the `--fix` option.\n";
+		let out = condense_lint_output("eslint", input, 1);
+		// Grouped per-file rendering with the shared diagnostics header.
+		assert!(out.contains("3 diagnostics in 2 files"), "got: {out}");
+		assert!(out.contains("file.js"));
+		assert!(out.contains("other.js"));
+		// Top-rules summary derived from the trailing rule-id column.
+		assert!(out.contains("Top rules:"), "got: {out}");
+		assert!(out.contains("no-var"));
+		assert!(out.contains("semi"));
+		// The Parsing error row (no rule-id) is preserved as a diagnostic.
+		assert!(out.contains("Parsing error: Unexpected token"), "got: {out}");
+		// Summary kept, fixable hint stripped.
+		assert!(out.contains("✖ 3 problems (2 errors, 1 warning)"), "got: {out}");
+		assert!(!out.contains("potentially fixable"), "fixable hint must be stripped: {out}");
+	}
+
+	#[test]
+	fn eslint_stylish_single_file_keeps_summary() {
+		// snip's "single file error" fixture.
+		let input = "/app/src/index.js\n  5:3  error  'x' is defined but never used  \
+		             no-unused-vars\n\n✖ 1 problem (1 error, 0 warnings)\n";
+		let out = condense_lint_output("eslint", input, 1);
+		assert!(out.contains("1 diagnostics in 1 files"), "got: {out}");
+		assert!(out.contains("index.js"));
+		assert!(out.contains("no-unused-vars"));
+		assert!(out.contains("Top rules:"));
+		assert!(out.contains("✖ 1 problem (1 error, 0 warnings)"), "got: {out}");
+	}
+
+	#[test]
+	fn eslint_clean_run_condenses_to_clean() {
+		// snip's "no errors produces ok": empty eslint output renders as empty
+		// (the minimizer's clean signal). Reshape finds no rows and falls back to
+		// the empty grouped output.
+		assert_eq!(condense_lint_output("eslint", "", 0), "");
 	}
 
 	// -----------------------------------------------------------------

@@ -22,6 +22,7 @@ pub(super) fn import(input: Value, root: &Path, source: &Path) -> Result<Scan, F
 		.and_then(Value::as_array)
 		.ok_or(Fault::InvalidSarif)?;
 	let canonical_root = root.canonicalize().map_err(|_| Fault::Storage)?;
+	let root_url = Url::from_directory_path(&canonical_root).map_err(|()| Fault::InvalidSarif)?;
 	let scan_id = Str::new(format!("secscan_{}", Ulid::generate()));
 	let created = now_stamp();
 	let mut findings = Vec::new();
@@ -73,7 +74,7 @@ pub(super) fn import(input: Value, root: &Path, source: &Path) -> Result<Scan, F
 				.or_else(|| rule.and_then(|rule| rule.get("name")))
 				.and_then(Value::as_str)
 				.unwrap_or(rule_id);
-			let locations = import_locations(result, run, &canonical_root)?;
+			let locations = import_locations(result, run, &root_url, &canonical_root);
 			let vendor_fingerprints =
 				string_map(result.get("fingerprints"), result.get("partialFingerprints"));
 			let category = result
@@ -243,77 +244,61 @@ pub(super) fn export(scan: &Scan, root: &Path) -> Value {
 	})
 }
 
-fn import_locations(result: &Value, run: &Value, root: &Path) -> Result<Vec<Location>, Fault> {
-	let root_url = Url::from_directory_path(root).map_err(|()| Fault::InvalidSarif)?;
-	let mut locations = Vec::new();
-	for entry in result
+/// Imports each location of `result` that resolves to a file under `root`. One
+/// that does not is dropped, never the log: rejecting the log would hide every
+/// other finding in it. An absent `region.startLine` stays absent, and a result
+/// with no resolvable location keeps none.
+fn import_locations(result: &Value, run: &Value, root_url: &Url, root: &Path) -> Vec<Location> {
+	result
 		.get("locations")
 		.and_then(Value::as_array)
 		.into_iter()
 		.flatten()
-	{
-		let Some(uri) = entry
-			.pointer("/physicalLocation/artifactLocation/uri")
-			.and_then(Value::as_str)
-		else {
-			continue;
-		};
-		let base_id = entry
-			.pointer("/physicalLocation/artifactLocation/uriBaseId")
-			.and_then(Value::as_str);
-		let base = if let Some(base_id) = base_id {
-			if base_id == "%SRCROOT%" {
-				root_url.clone()
-			} else {
-				let declared = run
-					.pointer(&format!("/originalUriBaseIds/{}/uri", pointer_escape(base_id)))
-					.and_then(Value::as_str)
-					.ok_or(Fault::InvalidSarif)?;
-				root_url.join(declared).map_err(|_| Fault::InvalidSarif)?
-			}
-		} else {
-			root_url.clone()
-		};
-		let resolved = base
-			.join(&uri.replace('\\', "/"))
-			.map_err(|_| Fault::InvalidSarif)?;
-		if resolved.scheme() != "file" {
-			return Err(Fault::InvalidSarif);
-		}
-		let absolute = resolved.to_file_path().map_err(|()| Fault::InvalidSarif)?;
-		let normalized = normalize_candidate(&absolute, root)?;
-		let start_line = entry
-			.pointer("/physicalLocation/region/startLine")
-			.and_then(Value::as_u64);
-		let Some(start_line) = start_line.filter(|line| *line > 0) else {
-			continue;
-		};
-		locations.push(Location {
-			path: Str::new(normalized.to_string_lossy().replace('\\', "/")),
-			start_line,
-			end_line: entry
-				.pointer("/physicalLocation/region/endLine")
-				.and_then(Value::as_u64),
-			start_column: entry
-				.pointer("/physicalLocation/region/startColumn")
-				.and_then(Value::as_u64),
-			end_column: entry
-				.pointer("/physicalLocation/region/endColumn")
-				.and_then(Value::as_u64),
-			role: Some(Str::new_static("primary")),
-		});
+		.filter_map(|entry| {
+			let path = resolve_path(entry, run, root_url, root)?;
+			Some(Location {
+				path:         Str::new(path.to_string_lossy().replace('\\', "/")),
+				start_line:   entry
+					.pointer("/physicalLocation/region/startLine")
+					.and_then(Value::as_u64)
+					.filter(|line| *line > 0),
+				end_line:     entry
+					.pointer("/physicalLocation/region/endLine")
+					.and_then(Value::as_u64),
+				start_column: entry
+					.pointer("/physicalLocation/region/startColumn")
+					.and_then(Value::as_u64),
+				end_column:   entry
+					.pointer("/physicalLocation/region/endColumn")
+					.and_then(Value::as_u64),
+				role:         Some(Str::new_static("primary")),
+			})
+		})
+		.collect()
+}
+
+fn resolve_path(entry: &Value, run: &Value, root_url: &Url, root: &Path) -> Option<PathBuf> {
+	let uri = entry
+		.pointer("/physicalLocation/artifactLocation/uri")
+		.and_then(Value::as_str)?
+		.replace('\\', "/");
+	let base_id = entry
+		.pointer("/physicalLocation/artifactLocation/uriBaseId")
+		.and_then(Value::as_str);
+	let resolved = match base_id {
+		None | Some("%SRCROOT%") => root_url.join(&uri),
+		Some(base_id) => {
+			let declared = run
+				.pointer(&format!("/originalUriBaseIds/{}/uri", pointer_escape(base_id)))
+				.and_then(Value::as_str)?;
+			root_url.join(declared).and_then(|base| base.join(&uri))
+		},
 	}
-	if locations.is_empty() {
-		locations.push(Location {
-			path:         Str::new_static("unknown"),
-			start_line:   1,
-			end_line:     None,
-			start_column: None,
-			end_column:   None,
-			role:         Some(Str::new_static("unknown")),
-		});
+	.ok()?;
+	if resolved.scheme() != "file" {
+		return None;
 	}
-	Ok(locations)
+	normalize_candidate(&resolved.to_file_path().ok()?, root).ok()
 }
 
 fn normalize_candidate(candidate: &Path, root: &Path) -> Result<PathBuf, Fault> {
@@ -409,4 +394,71 @@ fn canonical_disposition(value: Option<&Value>) -> &'static str {
 
 fn pointer_escape(value: &str) -> String {
 	value.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{fs, path::PathBuf};
+
+	use omp_core::Ulid;
+	use serde_json::{Value, json};
+
+	use super::import;
+
+	const BIOME_UNREADABLE: &str = include_str!("../../../../fixtures/sarif/biome-unreadable.sarif");
+	const RUFF_OUTSIDE: &str = include_str!("../../../../fixtures/sarif/ruff-outside.sarif");
+	/// The scratch directory every fixture was recorded in
+	/// (`fixtures/sarif/PROVENANCE.txt`).
+	const RECORDED: &str = "/private/tmp/sarif-work";
+
+	/// Points the recorded absolute paths at a fresh scratch directory, so the
+	/// log resolves on any host, and returns the canonical project root inside
+	/// it.
+	fn relocated(log: &str, project: &str) -> (Value, PathBuf, PathBuf) {
+		let scratch = std::env::temp_dir().join(format!("omp-sarif-{}", Ulid::generate()));
+		fs::create_dir_all(scratch.join(project)).expect("project root");
+		let scratch = scratch.canonicalize().expect("canonical scratch");
+		let log = log.replace(RECORDED, &scratch.to_string_lossy());
+		(serde_json::from_str(&log).expect("SARIF log"), scratch.join(project), scratch)
+	}
+
+	fn imported(log: &str, project: &str) -> Vec<Value> {
+		let (log, root, scratch) = relocated(log, project);
+		let scan = import(log, &root, &root.join("results.sarif"));
+		fs::remove_dir_all(scratch).expect("remove scratch");
+		scan
+			.expect("import")
+			.findings
+			.iter()
+			.map(|finding| {
+				let locations = finding
+					.locations
+					.iter()
+					.map(|location| json!({"path": location.path, "line": location.start_line}))
+					.collect::<Vec<_>>();
+				json!({"rule": finding.rule_id, "locations": locations})
+			})
+			.collect()
+	}
+
+	#[test]
+	fn line_less_location_keeps_its_file_and_no_line() {
+		assert_eq!(imported(BIOME_UNREADABLE, "biome"), vec![
+			json!({"rule": "lint/correctness/noUnusedVariables", "locations": [{"path": "outcomes.js", "line": 2}]}),
+			json!({"rule": "internalError/io", "locations": [{"path": "missing.js", "line": null}]}),
+			json!({"rule": "lint/suspicious/noDoubleEquals", "locations": [{"path": "outcomes.js", "line": 3}]}),
+			json!({"rule": "lint/suspicious/noDebugger", "locations": [{"path": "outcomes.js", "line": 4}]}),
+		]);
+	}
+
+	#[test]
+	fn location_outside_root_drops_only_that_location() {
+		assert_eq!(imported(RUFF_OUTSIDE, "ruff"), vec![
+			json!({"rule": "F401", "locations": [{"path": "outcomes.py", "line": 1}]}),
+			json!({"rule": "F401", "locations": [{"path": "outcomes.py", "line": 2}]}),
+			json!({"rule": "F821", "locations": [{"path": "outcomes.py", "line": 6}]}),
+			json!({"rule": "F841", "locations": [{"path": "outcomes.py", "line": 10}]}),
+			json!({"rule": "F401", "locations": []}),
+		]);
+	}
 }

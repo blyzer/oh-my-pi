@@ -1,0 +1,67 @@
+[
+    {
+        "type": "convention",
+        "module": "bad",
+        "obj": "",
+        "line": 1,
+        "column": 0,
+        "endLine": null,
+        "endColumn": null,
+        "path": "bad.py",
+        "symbol": "missing-module-docstring",
+        "message": "Missing module docstring",
+        "message-id": "C0114"
+    },
+    {
+        "type": "convention",
+        "module": "bad",
+        "obj": "f",
+        "line": 4,
+        "column": 0,
+        "endLine": 4,
+        "endColumn": 5,
+        "path": "bad.py",
+        "symbol": "missing-function-docstring",
+        "message": "Missing function or method docstring",
+        "message-id": "C0116"
+    },
+    {
+        "type": "error",
+        "module": "bad",
+        "obj": "f",
+        "line": 6,
+        "column": 11,
+        "endLine": 6,
+        "endColumn": 25,
+        "path": "bad.py",
+        "symbol": "undefined-variable",
+        "message": "Undefined variable 'undefined_name'",
+        "message-id": "E0602"
+    },
+    {
+        "type": "warning",
+        "module": "bad",
+        "obj": "f",
+        "line": 5,
+        "column": 4,
+        "endLine": 5,
+        "endColumn": 5,
+        "path": "bad.py",
+        "symbol": "unused-variable",
+        "message": "Unused variable 'x'",
+        "message-id": "W0612"
+    },
+    {
+        "type": "warning",
+        "module": "bad",
+        "obj": "",
+        "line": 1,
+        "column": 0,
+        "endLine": 1,
+        "endColumn": 9,
+        "path": "bad.py",
+        "symbol": "unused-import",
+        "message": "Unused import os",
+        "message-id": "W0611"
+    }
+]
