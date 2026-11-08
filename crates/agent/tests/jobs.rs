@@ -1110,3 +1110,307 @@ async fn execution_t8_preserves_completed_supervisor_settlement() {
 	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::ResumeUnsupported));
 	assert_test_handle(&record);
 }
+
+fn mark_test_submission(session: &mut Session, handle: omp_dom::Handle) {
+	let cause = session.head().expect("journal head");
+	session
+		.patch(jobs::mark_execution_submitting(cause, handle))
+		.expect("mark submission");
+}
+
+#[tokio::test]
+async fn execution_t4_restart_after_acceptance_is_effects_unknown_without_a_second_start() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("accepted-restart.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	mark_test_submission(&mut session, handle);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit accepted handle");
+	drop(board);
+	drop(session);
+
+	let mut session =
+		Session::open(&path, ComponentRegistry::standard()).expect("reopen accepted job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let before = session
+		.entries()
+		.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+		.count();
+	let record = board.poll(&mut session).expect("settle orphan").remove(0);
+	assert_eq!(
+		session
+			.entries()
+			.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+			.count(),
+		before + 1
+	);
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+	assert_eq!(record.output_mode.as_deref(), Some("logs"));
+	assert_test_handle(&record);
+	assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
+	assert_eq!(backend.counts.reattaches.load(Ordering::SeqCst), 0);
+	let settled_head = session.head();
+	drop(board);
+	drop(session);
+
+	let mut session =
+		Session::open(&path, ComponentRegistry::standard()).expect("reopen orphan settlement");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board
+		.poll(&mut session)
+		.expect("poll settled orphan")
+		.remove(0);
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+	assert_test_handle(&record);
+	assert_eq!(session.head(), settled_head);
+	assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn execution_t5_restart_distinguishes_submitting_from_never_submitted() {
+	for submitted in [false, true] {
+		let temp = tempdir().expect("temporary session directory");
+		let path = temp.path().join("submission-restart.oms");
+		let mut session =
+			Session::create(&path, ComponentRegistry::standard()).expect("create session");
+		let handle = insert_test_execution(&mut session);
+		let board = JobBoard::new();
+		let (backend, _events) = execution_test_backend(false);
+		if submitted {
+			mark_test_submission(&mut session, handle);
+			attach_test_execution(&session, &board, handle, &backend).await;
+		}
+		drop(board);
+		drop(session);
+
+		let mut session = Session::open(&path, ComponentRegistry::standard()).expect("reopen job");
+		let board = JobBoard::new();
+		board.rebuild(&session);
+		let record = board.poll(&mut session).expect("settle orphan").remove(0);
+		let (state, failure) = if submitted {
+			(
+				omp_exec::ExecutionState::SubmissionUnknown,
+				omp_exec::ExecutionErrorKind::SubmissionUnknown,
+			)
+		} else {
+			(omp_exec::ExecutionState::NotSubmitted, omp_exec::ExecutionErrorKind::NotSubmitted)
+		};
+		assert_eq!(record.status, "failed");
+		assert_eq!(record.execution_state, Some(state));
+		assert_eq!(record.execution_failure, Some(failure));
+		assert_eq!(record.reattach_handle, None);
+		assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+		assert_eq!(backend.counts.starts.load(Ordering::SeqCst), usize::from(submitted));
+		assert_eq!(backend.counts.reattaches.load(Ordering::SeqCst), 0);
+		let settled_head = session.head();
+		drop(board);
+		drop(session);
+		let mut session =
+			Session::open(&path, ComponentRegistry::standard()).expect("reopen settled job");
+		let board = JobBoard::new();
+		board.rebuild(&session);
+		let record = board
+			.poll(&mut session)
+			.expect("poll settled job")
+			.remove(0);
+		assert_eq!(record.execution_state, Some(state));
+		assert_eq!(record.execution_failure, Some(failure));
+		assert_eq!(session.head(), settled_head);
+		assert_eq!(backend.counts.starts.load(Ordering::SeqCst), usize::from(submitted));
+	}
+}
+
+/// A stored handle that does not decode still means the backend accepted the
+/// work, so a restart settles it `EffectsUnknown` with a typed decode failure
+/// and never reports it as unsubmitted.
+#[tokio::test]
+async fn execution_restart_with_undecodable_handle_is_effects_unknown() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("invalid-handle.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let cause = session.head().expect("journal head");
+	session
+		.patch(Txn {
+			cause,
+			label: None,
+			ops: vec![Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(jobs::EXECUTION_HANDLE)),
+				value: Value::Str(Str::new_static("invalid handle")),
+			}],
+		})
+		.expect("record malformed handle");
+	drop(session);
+	let mut session = Session::open(&path, ComponentRegistry::standard()).expect("reopen job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.poll(&mut session).expect("settle orphan").remove(0);
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::InvalidHandle));
+	assert_eq!(record.reattach_handle.as_deref(), Some("invalid handle"));
+	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+}
+
+fn execution_test_result(code: i32) -> omp_exec::ExecutionResult {
+	let digest = |size| omp_exec::Digest::new(omp_core::Hash32::default(), size);
+	omp_exec::ExecutionResult {
+		id:             omp_exec::ExecutionId::new_static("exec-42"),
+		backend:        omp_exec::BackendId::new_static("fake@build.example:443/test"),
+		outcome:        omp_exec::Outcome::Exited { code },
+		logs:           Some(omp_exec::Logs { stdout: digest(11), stderr: digest(12) }),
+		artifacts:      [omp_exec::Artifact {
+			path:       Str::new_static("target/result"),
+			blob:       digest(13),
+			executable: true,
+			fetched:    true,
+		}]
+		.into(),
+		output_digests: [(Str::new_static("target/result"), digest(13))].into(),
+		timing:         omp_exec::Timing {
+			queued:    1,
+			upload:    2,
+			execution: 3,
+			download:  4,
+			total:     10,
+		},
+		transfer:       omp_exec::TransferCounts {
+			blobs_total:               5,
+			cache_hits:                2,
+			cache_misses:              3,
+			blobs_uploaded:            1,
+			bytes_uploaded:            20,
+			bytes_uploaded_compressed: 10,
+			bytes_downloaded:          30,
+		},
+		cache_hit:      true,
+		fallback:       Some(omp_exec::FallbackCause {
+			kind: omp_exec::ExecutionErrorKind::Capacity,
+		}),
+	}
+}
+
+#[tokio::test]
+async fn execution_t7_typed_results_and_failures_survive_reopen() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("typed-result.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	let expected = execution_test_result(0);
+	events
+		.send(omp_exec::ExecutionEvent::Settled(Ok(expected.clone())))
+		.expect("send result");
+	board
+		.wait(&mut session, Some(&[Str::new_static("exec-42")]))
+		.await
+		.expect("settle result")
+		.expect("job");
+	drop(board);
+	drop(session);
+	let session = Session::open(&path, ComponentRegistry::standard()).expect("reopen result");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.list().remove(0);
+	assert_eq!(record.status, "completed");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Settled));
+	assert_eq!(record.output_mode.as_deref(), Some("logs"));
+	let raw = record.execution_result.as_deref().expect("durable result");
+	assert_eq!(
+		omp_agent::resolve_execution_result(&session, raw).expect("decode result"),
+		Some(expected)
+	);
+	drop(session);
+
+	let path = temp.path().join("typed-failure.oms");
+	let mut session =
+		Session::create(&path, ComponentRegistry::standard()).expect("create failure session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	events
+		.send(omp_exec::ExecutionEvent::Settled(Err(omp_exec::ExecutionError::ResumeUnsupported {
+			backend: backend.id.clone(),
+		})))
+		.expect("send failure");
+	board
+		.wait(&mut session, Some(&[Str::new_static("exec-42")]))
+		.await
+		.expect("settle failure")
+		.expect("job");
+	drop(board);
+	drop(session);
+	let session = Session::open(&path, ComponentRegistry::standard()).expect("reopen failure");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.list().remove(0);
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Settled));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::ResumeUnsupported));
+	assert!(record.execution_result.is_none());
+	assert_test_handle(&record);
+}
+
+#[tokio::test]
+async fn execution_t9_spilled_typed_result_resolves_after_reopen() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("spilled-result.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	board.set_output_bound(128);
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	let expected = execution_test_result(7);
+	events
+		.send(omp_exec::ExecutionEvent::Settled(Ok(expected.clone())))
+		.expect("send result");
+	board
+		.wait(&mut session, Some(&[Str::new_static("exec-42")]))
+		.await
+		.expect("settle result")
+		.expect("job");
+	drop(board);
+	drop(session);
+	let session =
+		Session::open(&path, ComponentRegistry::standard()).expect("reopen spilled result");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.list().remove(0);
+	assert_eq!(record.status, "failed");
+	let raw = record.execution_result.as_deref().expect("durable result");
+	assert!(raw.get().len() <= 128);
+	let spill: omp_agent::SpilledOutput = serde_json::from_str(raw.get()).expect("spill reference");
+	assert!(spill.artifact.starts_with("artifact://sha256/"));
+	let resolved = omp_agent::resolve_output(&session, raw)
+		.expect("resolve output")
+		.expect("spill exists");
+	let stored = resolved.get();
+	assert_eq!(spill.byte_len, stored.len() as u64);
+	assert_eq!(
+		spill.artifact.as_str(),
+		format!("artifact://sha256/{}", omp_core::Hash32::sum(stored).to_hex())
+	);
+	assert_eq!(
+		omp_agent::resolve_execution_result(&session, raw).expect("decode result"),
+		Some(expected)
+	);
+}
