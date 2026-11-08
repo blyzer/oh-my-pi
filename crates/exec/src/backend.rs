@@ -123,7 +123,7 @@ pub enum CancelOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReattachContext {
 	/// Outputs requested for the execution.
-	pub outputs: crate::request::OutputSpec,
+	pub outputs:            crate::request::OutputSpec,
 	/// Time remaining before the execution deadline.
 	pub remaining_deadline: Duration,
 }
