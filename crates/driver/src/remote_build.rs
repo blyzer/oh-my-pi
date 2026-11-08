@@ -15,9 +15,9 @@ use std::{
 };
 
 use omp_agent::{
-	ApprovalBook, ApprovalRoute, ApprovalSpec, AuthorizedExecution, BackgroundToolCancellation,
-	CallControl, ExecutionStartError, ExecutionSubmission, Received, SessionTool, SessionToolCx,
-	SessionToolError, SessionToolFuture,
+	ApprovalBook, ApprovalRoute, ApprovalSpec, ApprovalTicket, AuthorizedExecution,
+	BackgroundToolCancellation, CallControl, ExecutionStartError, ExecutionSubmission, Received,
+	SessionTool, SessionToolCx, SessionToolError, SessionToolFuture,
 };
 use omp_con::Ctx;
 use omp_core::{Str, Ulid, sf};
@@ -221,7 +221,7 @@ impl<H: RemoteBuildHost> RemoteBuildTool<H> {
 		let call_id = call_id(session, call).ok_or(SessionToolError::Rejected {
 			message: Str::new_static("the remote build call has no id"),
 		})?;
-		ask(
+		let approved = ask(
 			&self.approvals,
 			session,
 			control,
@@ -230,6 +230,11 @@ impl<H: RemoteBuildHost> RemoteBuildTool<H> {
 			requirement(&host, &destination, &params),
 		)
 		.await?;
+		// Only this call's own answer authorizes it. An earlier approval journaled
+		// for the same call id, such as a retried call's, never does.
+		if !approved {
+			return Ok(Err(Fault::NotApproved { host }));
+		}
 		let destination_text = Str::new(serde_json::to_string(&destination)?);
 		let Some(authorized) = authorize(session, &call_id, &host, destination_text) else {
 			return Ok(Err(Fault::NotApproved { host }));
@@ -339,8 +344,8 @@ fn requirement(host: &Str, destination: &DestinationIdentity, params: &Params) -
 	}
 }
 
-/// Files `requirement` for the call `call_id` on the session's approval route
-/// and waits for the answer.
+/// Files `requirement` for the call `call_id` on the session's approval route,
+/// waits for the answer, and returns whether it approved.
 ///
 /// The call holds the session while it waits, so it serves the kernel mailbox
 /// itself: that is where the prompt is journaled and answered. Interrupting the
@@ -352,7 +357,7 @@ async fn ask(
 	cancel: &BackgroundToolCancellation,
 	call_id: &Str,
 	requirement: ApprovalSpec,
-) -> Result<(), SessionToolError> {
+) -> Result<bool, SessionToolError> {
 	let answer = approvals.request_cancellable(
 		Some(call_id.clone()),
 		vec![requirement],
@@ -360,14 +365,13 @@ async fn ask(
 		cancel.token(),
 	);
 	let Some(control) = control else {
-		answer.await;
-		return Ok(());
+		return Ok(approves(&answer.await));
 	};
 	tokio::pin!(answer);
 	loop {
 		tokio::select! {
 			biased;
-			_ = &mut answer => return Ok(()),
+			ticket = &mut answer => return Ok(approves(&ticket)),
 			message = control.recv() => match control.handle(session, message)? {
 				Received::Cancelled => cancel.cancel_tool(),
 				Received::ToolScopedAbort(reason) if reason.contains(call_id) => cancel.cancel_tool(),
@@ -375,6 +379,14 @@ async fn ask(
 			},
 		}
 	}
+}
+
+/// Whether the route's answer `ticket` approves the call.
+fn approves(ticket: &ApprovalTicket) -> bool {
+	ticket
+		.decision
+		.as_ref()
+		.is_some_and(|decision| decision.approved)
 }
 
 /// Mints the run's approval proof from the prompt the session journaled for

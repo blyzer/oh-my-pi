@@ -44,12 +44,11 @@ use parking_lot::Mutex;
 use serde_json::{Value as Json, json};
 use tokio_util::sync::CancellationToken;
 
-/// A scripted model: the request that opens a turn calls `remote_build` with
-/// the next scripted arguments, and every other request (after a tool result or
-/// a job's async result) closes the turn.
+/// A scripted model: the request that opens a turn makes the next scripted
+/// `remote_build` call, under its scripted call id, and every other request
+/// (after a tool result or a job's async result) closes the turn.
 struct Script {
-	calls:  VecDeque<Json>,
-	made:   usize,
+	calls:  VecDeque<(&'static str, Json)>,
 	/// Turn inputs seen so far: a request carrying one more opens a turn.
 	opened: usize,
 	seen:   Arc<Mutex<Seen>>,
@@ -85,10 +84,7 @@ impl Inference for Script {
 			None
 		};
 		let events = match call {
-			Some(arguments) => {
-				self.made += 1;
-				tool_call(self.made, &arguments)
-			},
+			Some((id, arguments)) => tool_call(id, &arguments),
 			None => closing_text(),
 		};
 		ready(Ok(ChatStream::ordinary(Box::pin(stream::iter(events.into_iter().map(Ok))))))
@@ -139,10 +135,10 @@ fn meta() -> ResponseMeta {
 	}
 }
 
-/// The model's `n`th call, `call-n`.
-fn tool_call(n: usize, arguments: &Json) -> Vec<ChatEvent> {
+/// One `remote_build` call with the provider call id `id`.
+fn tool_call(id: &str, arguments: &Json) -> Vec<ChatEvent> {
 	let call = ToolCall {
-		id:        ToolCallId::from(format!("call-{n}").as_str()),
+		id:        ToolCallId::from(id),
 		name:      Str::new_static("remote_build"),
 		arguments: omp_ai::OpaqueJson::new(arguments.clone()),
 	};
@@ -376,6 +372,15 @@ fn answer(approved: bool) -> ApprovalDecision {
 	}
 }
 
+/// How the host answers one approval prompt.
+#[derive(Clone, Copy)]
+enum Reply {
+	/// [`answer`]: approve or deny.
+	Answer(bool),
+	/// Interrupt the turn instead of answering.
+	Interrupt,
+}
+
 /// One kernel composed with the capability as `compose_kernel` composes it,
 /// serving a fresh session, and a host that answers every approval prompt.
 struct Fixture {
@@ -390,8 +395,13 @@ struct Fixture {
 }
 
 impl Fixture {
-	/// `approve` answers each prompt from the host its requirements name.
-	fn compose(ctx: Arc<omp_con::Ctx>, calls: Vec<Json>, approve: fn(&str) -> bool) -> Self {
+	/// `reply` answers each prompt from its 1-based number and the host its
+	/// requirement names.
+	fn compose(
+		ctx: Arc<omp_con::Ctx>,
+		calls: Vec<(&'static str, Json)>,
+		reply: fn(usize, &str) -> Reply,
+	) -> Self {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let spill =
 			omp_journal::blob::BlobStore::open(scratch.path().join("artifacts")).expect("spill");
@@ -410,7 +420,7 @@ impl Fixture {
 			None => registry,
 		};
 		let seen = Arc::<Mutex<Seen>>::default();
-		let model = Script { calls: calls.into(), made: 0, opened: 0, seen: Arc::clone(&seen) };
+		let model = Script { calls: calls.into(), opened: 0, seen: Arc::clone(&seen) };
 		let mut kernel = Kernel::new(
 			model,
 			Arc::new(registry),
@@ -436,12 +446,18 @@ impl Fixture {
 			async move {
 				while let Ok(event) = events.recv_async().await {
 					if let KernelEvent::ApprovalRequested(ticket) = event {
-						asked.fetch_add(1, Ordering::SeqCst);
-						let approved = ticket
+						let number = asked.fetch_add(1, Ordering::SeqCst) + 1;
+						let host = ticket
 							.reasons
-							.iter()
-							.all(|reason| approve(reason.subject.as_str()));
-						let _ = mailbox.send(Up::approve_local(ticket.ticket_id, answer(approved)));
+							.first()
+							.map_or("", |reason| reason.subject.as_str());
+						let message = match reply(number, host) {
+							Reply::Answer(approved) => {
+								Up::approve_local(ticket.ticket_id, answer(approved))
+							},
+							Reply::Interrupt => Up::Interrupt,
+						};
+						let _ = mailbox.send(message);
 					}
 				}
 			}
@@ -520,7 +536,7 @@ async fn remote_build_is_off_by_default_and_unavailable() {
 	let ctx = operator("grpcs://build-a.example");
 	assert!(!SV_EXEC_AGENT_RUNS.get(&ctx));
 	assert!(enabled(&ctx).is_none());
-	let mut fixture = Fixture::compose(ctx, Vec::new(), |_| true);
+	let mut fixture = Fixture::compose(ctx, Vec::new(), |_, _| Reply::Answer(true));
 	fixture.turn().await;
 	assert!(!fixture.offered(), "the model was offered remote_build");
 	assert!(matches!(
@@ -532,8 +548,11 @@ async fn remote_build_is_off_by_default_and_unavailable() {
 
 #[tokio::test]
 async fn a_denied_prompt_connects_uploads_and_journals_nothing() {
-	let mut fixture =
-		Fixture::compose(agent_runs("grpcs://build-a.example"), vec![test_pkg()], |_| false);
+	let mut fixture = Fixture::compose(
+		agent_runs("grpcs://build-a.example"),
+		vec![("call-1", test_pkg())],
+		|_, _| Reply::Answer(false),
+	);
 	fixture.turn().await;
 	assert!(fixture.offered(), "the model was not offered remote_build");
 	let prompts = fixture.prompts();
@@ -560,9 +579,9 @@ async fn a_denied_prompt_connects_uploads_and_journals_nothing() {
 #[tokio::test]
 async fn a_grant_for_host_a_does_not_authorize_host_b() {
 	let ctx = agent_runs("grpcs://build-a.example");
-	let mut fixture = Fixture::compose(Arc::clone(&ctx), vec![test_pkg(), test_pkg()], |host| {
-		host == "build-a.example"
-	});
+	let calls = vec![("call-1", test_pkg()), ("call-2", test_pkg())];
+	let mut fixture =
+		Fixture::compose(Arc::clone(&ctx), calls, |_, host| Reply::Answer(host == "build-a.example"));
 	fixture.turn().await;
 	let executions = fixture.jobs();
 	assert_eq!(executions.len(), 1, "{executions:?}");
@@ -623,19 +642,58 @@ async fn a_grant_for_host_a_does_not_authorize_host_b() {
 	assert!(result.contains(r#""kind":"not_approved","host":"build-b.example""#), "{result}");
 }
 
+/// A call whose own prompt goes unanswered is not authorized by an earlier
+/// approval journaled for the same call id, as a retried call's would be: it
+/// connects to nothing.
+#[tokio::test]
+async fn an_earlier_approval_for_the_same_call_authorizes_nothing() {
+	let calls = vec![("call-1", test_pkg()), ("call-1", test_pkg())];
+	let mut fixture = Fixture::compose(agent_runs("grpcs://build-a.example"), calls, |number, _| {
+		if number == 1 {
+			Reply::Answer(true)
+		} else {
+			Reply::Interrupt
+		}
+	});
+	fixture.turn().await;
+	fixture.host.started(1).await;
+	assert_eq!(fixture.jobs().len(), 1);
+
+	fixture.turn().await;
+	let prompts = fixture.prompts();
+	assert_eq!(prompts.len(), 2, "{prompts:?}");
+	assert!(
+		prompts
+			.iter()
+			.all(|prompt| prompt.invocation_id.as_deref() == Some("call-1")),
+		"{prompts:?}"
+	);
+	assert_eq!(
+		prompts[0]
+			.decision
+			.as_ref()
+			.map(|decision| decision.approved),
+		Some(true)
+	);
+	assert_ne!(prompts[1].state, TicketState::Decided, "the second prompt was never answered");
+	assert_eq!(fixture.host.calls(), (2, 1, 1), "the second call captured, then connected nothing");
+	assert_eq!(fixture.jobs().len(), 1);
+}
+
 #[tokio::test]
 async fn only_remote_eligible_cargo_just_recipes_run() {
 	let calls = vec![
-		json!({ "recipe": "fmt", "i": "Formatting remotely" }),
-		json!({ "recipe": "cargo", "i": "Building remotely" }),
-		json!({ "recipe": "test-pkg", "package": "fmt", "i": "Testing remotely" }),
+		("call-1", json!({ "recipe": "fmt", "i": "Formatting remotely" })),
+		("call-2", json!({ "recipe": "cargo", "i": "Building remotely" })),
+		("call-3", json!({ "recipe": "test-pkg", "package": "fmt", "i": "Testing remotely" })),
 	];
 	let refusals = [
 		r#""kind":"ineligible","recipe":"fmt""#,
 		r#""kind":"ineligible","recipe":"cargo""#,
 		r#""kind":"invalid_package","package":"fmt""#,
 	];
-	let mut fixture = Fixture::compose(agent_runs("grpcs://build-a.example"), calls, |_| true);
+	let mut fixture =
+		Fixture::compose(agent_runs("grpcs://build-a.example"), calls, |_, _| Reply::Answer(true));
 	for refusal in refusals {
 		fixture.turn().await;
 		let (result, is_error) = fixture.last_result();
