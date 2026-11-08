@@ -506,6 +506,21 @@ impl ApprovalBook {
 			.find_map(|(_, ticket)| (ticket.ticket_id.as_str() == ticket_id).then_some(ticket))
 	}
 
+	/// Rebuilds the latest decided prompt journaled for `invocation_id`.
+	///
+	/// A route answers with its own ticket id, not the journaled prompt's, so a
+	/// policy that holds only its call id finds the durable answer and its id
+	/// here.
+	pub fn decided_for(&self, session: &Session, invocation_id: &str) -> Option<ApprovalTicket> {
+		tickets(session)
+			.filter(|(_, ticket)| {
+				ticket.state == TicketState::Decided
+					&& ticket.invocation_id.as_deref() == Some(invocation_id)
+			})
+			.last()
+			.map(|(_, ticket)| ticket)
+	}
+
 	/// Rebuilds pending tickets in tree order.
 	pub fn pending(&self, session: &Session) -> Vec<ApprovalTicket> {
 		tickets(session)

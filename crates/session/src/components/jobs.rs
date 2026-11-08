@@ -69,6 +69,12 @@ pub const EXECUTION_SUBMISSION_STARTED: &str = "submission_started";
 pub const EXECUTION_REQUEST: &str = "request";
 /// Requested output mode property for an execution job.
 pub const EXECUTION_OUTPUT_MODE: &str = "output_mode";
+/// Non-secret destination identity property for an execution job.
+pub const EXECUTION_DESTINATION: &str = "destination";
+/// Deadline timestamp property for an execution job.
+pub const EXECUTION_DEADLINE: &str = "deadline";
+/// Approval ticket property for an execution job.
+pub const EXECUTION_APPROVAL: &str = "approval";
 /// Bounded serialized result property for an execution job.
 pub const EXECUTION_RESULT: &str = "execution_result";
 /// Typed failure class property for an execution job.
@@ -145,8 +151,14 @@ pub struct ExecutionSpec {
 	pub backend:     Str,
 	/// Serialized request identity.
 	pub request:     Str,
-	/// Requested output mode.
+	/// The serialized [`omp_exec::OutputSpec`] the request asked for.
 	pub output_mode: Str,
+	/// Non-secret destination identity the approval covered.
+	pub destination: Str,
+	/// Deadline timestamp represented by the caller.
+	pub deadline:    Str,
+	/// Approval ticket that authorized the request.
+	pub approval:    Str,
 }
 
 /// Builds the journalled insertion for one execution job.
@@ -168,6 +180,12 @@ pub fn insert_execution(dom: &Dom, cause: EntryId, spec: ExecutionSpec) -> Optio
 			PropKey::Custom(Str::new_static(EXECUTION_OUTPUT_MODE)),
 			Value::Str(spec.output_mode),
 		)
+		.with_prop(
+			PropKey::Custom(Str::new_static(EXECUTION_DESTINATION)),
+			Value::Str(spec.destination),
+		)
+		.with_prop(PropKey::Custom(Str::new_static(EXECUTION_DEADLINE)), Value::Str(spec.deadline))
+		.with_prop(PropKey::Custom(Str::new_static(EXECUTION_APPROVAL)), Value::Str(spec.approval))
 		.with_prop(PropId::Name, Value::Str(Str::new_static("execution")))
 		.with_prop(PropId::Label, Value::Str(spec.id));
 	Some(Txn {

@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use omp_adw::Requirement;
 use omp_core::Str;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
@@ -128,7 +129,11 @@ pub struct InputSet {
 }
 
 /// Which outputs a run returns.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// Serializable because an execution job journals the complete spec, which a
+/// reattach needs to read the outputs back.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutputSpec {
 	/// Exit code, timing, and digests only.
 	Metadata,
@@ -209,5 +214,41 @@ impl ExecutionPlan {
 	/// A plan of exactly one request and no edges.
 	pub fn single(request: ExecutionRequest) -> Self {
 		Self { requests: Arc::new([request]), edges: Arc::new([]) }
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+
+	use omp_core::Str;
+
+	use super::OutputSpec;
+
+	#[test]
+	fn output_spec_round_trips_through_its_journaled_form() {
+		let cases = [
+			(OutputSpec::Metadata, r#""metadata""#),
+			(OutputSpec::Logs, r#""logs""#),
+			(
+				OutputSpec::Artifacts { paths: Arc::from([Str::new_static("target/report.xml")]) },
+				r#"{"artifacts":{"paths":["target/report.xml"]}}"#,
+			),
+			(OutputSpec::All, r#""all""#),
+		];
+		for (spec, journaled) in cases {
+			// A new variant breaks this match, which points here to add its case.
+			match spec {
+				OutputSpec::Metadata
+				| OutputSpec::Logs
+				| OutputSpec::Artifacts { .. }
+				| OutputSpec::All => {},
+			}
+			assert_eq!(serde_json::to_string(&spec).expect("serialize output spec"), journaled);
+			assert_eq!(
+				serde_json::from_str::<OutputSpec>(journaled).expect("parse output spec"),
+				spec
+			);
+		}
 	}
 }
