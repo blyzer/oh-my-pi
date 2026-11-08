@@ -48,3 +48,16 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 filter = 'package(omp-e2e)'
 threads-required = "num-cpus"
 slow-timeout = { period = "120s", terminate-after = 5 }
+
+# This test drives several real rust-analyzer index builds. On a quiet Mac it
+# finishes in about 50s (run 42443482393). Beside the full workspace suite it
+# has been killed at the 4-minute default (run 42467670569) while still inside
+# those analyzer calls. Eight minutes covers the loaded case without letting a
+# deadlock hold the job.
+[[profile.default.overrides]]
+filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
+slow-timeout = { period = "120s", terminate-after = 4 }
