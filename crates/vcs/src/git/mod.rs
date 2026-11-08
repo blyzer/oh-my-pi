@@ -19,7 +19,10 @@ use std::{
 	sync::OnceLock,
 };
 
-pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
+pub use cli::{
+	COMMAND_TIMEOUT, CREDENTIAL_TIMEOUT, HelperCredential, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES,
+	SYNC_TIMEOUT, clone, credential_fill,
+};
 pub use mutate::detach_git_dir;
 pub use patch::{join_patches, validate_hunk_selections};
 
