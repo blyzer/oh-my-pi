@@ -396,6 +396,12 @@ impl ExecutionSettings {
 		}
 	}
 
+	/// Returns the validated endpoint host: the subject a network approval for
+	/// this destination names.
+	pub fn endpoint_host(&self) -> &str {
+		self.endpoint.host()
+	}
+
 	/// Resolves the configured operator credential without connecting to REAPI.
 	///
 	/// # Errors

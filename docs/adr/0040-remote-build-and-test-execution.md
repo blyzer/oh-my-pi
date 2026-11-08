@@ -797,6 +797,7 @@ redirect uploads (`crates/con/src/spec.rs:29-36`). They live in user cfg (`~/.o2
 | `sv_exec_upload_exclude` | empty | Extra exclusion globs, added to the defaults |
 | `sv_exec_upload_allow` | empty | Paths the operator allows despite a deny rule |
 | `sv_exec_upload_untracked` | `non-ignored` | `non-ignored` or `none` |
+| `sv_exec_agent_runs` | `0` | Whether agents may run remote-eligible `just` recipes through the `remote_build` tool (Part A.3). Read once when a session is composed. While it is off, the session has no such tool. Every run still asks the user to approve the endpoint host, once, and nothing falls back to local. It stays off by default until gates T1 to T12 pass. |
 
 Credential rules:
 - The credential reaches only gRPC metadata at the backend boundary, wrapped in `SecretString`.
@@ -1145,10 +1146,17 @@ Composed into a product path (Part L Slice 1 and the Slice 2 local path):
   `crates/driver/src/cleanse/production.rs:run_checker` compose `LocalBackend`. `run_checker` is
   the one product caller of `place`. It offers no backend, so the call can only refuse an
   unplaceable request, and every admitted checker runs locally.
+- The agent capability, off by default. `crates/driver/src/remote_build.rs:RemoteBuildTool` is the
+  `remote_build` session tool, composed only when `sv_exec_agent_runs` is set. It runs one recipe
+  that `crates/driver/src/adw/remote.rs:eligible` accepts. The endpoint host from operator cfg is
+  the subject of a once-only `network` prompt on the session's approval route, and the destination
+  is fixed before that prompt. Only after an approved answer does the tool connect and start the run
+  through `JobBoard::start_execution`.
 - Operator convars in `crates/driver/src/exec_composer.rs`: `sv_exec_remote_endpoint`,
   `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`,
   `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`. ADW placement
-  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`.
+  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`. The
+  agent capability convar in `crates/driver/src/remote_build.rs`: `sv_exec_agent_runs`.
 - Telemetry. The `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`,
   `omp.exec.run` and `omp.exec.download` spans are emitted. `ExecutedActionMetadata` fields are
   captured in `omp.exec.worker.*` tracing events (PR #351).

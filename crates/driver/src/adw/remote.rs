@@ -279,7 +279,7 @@ impl ProductionAdwHost {
 	}
 }
 
-fn host_platform() -> Platform {
+pub(crate) fn host_platform() -> Platform {
 	#[cfg(target_arch = "aarch64")]
 	let arch = omp_exec::Arch::Aarch64;
 	#[cfg(not(target_arch = "aarch64"))]
