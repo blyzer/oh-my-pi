@@ -1597,7 +1597,7 @@ fn execution_submission_marker_and_reattach_handle_survive_reopen() {
 		started:     Str::new_static("1"),
 		backend:     Str::new_static("fake@build.example:443/test"),
 		request:     Str::new_static(r#"{"recipe":"cargo test"}"#),
-		output_mode: Str::new_static("logs"),
+		output_mode: Str::new_static(r#""logs""#),
 		destination: Str::new_static(r#"{"endpoint":"grpcs://build.example:443"}"#),
 		deadline:    Str::new_static("60001"),
 		approval:    Str::new_static("approval-1"),

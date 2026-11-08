@@ -1110,7 +1110,7 @@ async fn accepted_execution_job_idles_until_settlement_without_a_provider_reques
 			started:     Str::new_static("1"),
 			backend:     Str::new_static("test"),
 			request:     Str::new_static("cargo test"),
-			output_mode: Str::new_static("logs"),
+			output_mode: Str::new_static(r#""logs""#),
 			destination: Str::new_static("test"),
 			deadline:    Str::new_static("60001"),
 			approval:    Str::new_static("approval-1"),

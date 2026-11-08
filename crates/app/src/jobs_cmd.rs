@@ -1,15 +1,28 @@
 //! `omp jobs`: inspect journaled jobs and resume watching accepted executions.
 
-use std::{path::Path, sync::Arc};
+use std::{future::Future, path::Path, sync::Arc};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_agent::{JobBoard, JobRecord};
+use omp_agent::{JobBoard, JobRecord, jobs::ExecutionResume};
 use omp_driver::exec_composer::{ExecutionSettings, ResumeConnection};
 use omp_journal::JournalError;
 use omp_session::{ComponentRegistry, Session, SessionError};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{JobsArgs, JobsCommand};
+
+/// Ctrl-C detached an execution watch.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("execution watch interrupted")]
+pub struct JobsInterrupted;
+
+impl JobsInterrupted {
+	/// Conventional shell status for Ctrl-C.
+	#[must_use]
+	pub const fn exit_code(&self) -> u8 {
+		130
+	}
+}
 
 /// Runs the `omp jobs` command tree.
 pub async fn run(args: JobsArgs) -> miette::Result<()> {
@@ -69,20 +82,25 @@ async fn attach(
 	let root = std::env::current_dir().into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx_with(&root, omp_con::Ctx::builder())?);
 	let settings = ExecutionSettings::generic(&ctx).into_diagnostic()?;
-	let resume = board
-		.prepare_reattach(session, id, &settings.destination_identity())
-		.into_diagnostic()?;
-	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let connection = ResumeConnection::open(
-		&settings,
-		resume.handle(),
-		Arc::clone(&ctx),
-		&root,
-		&data_dir,
-		&CancellationToken::new(),
-	)
-	.await
-	.into_diagnostic()?;
+	let settings_ref = &settings;
+	let ctx_ref = &ctx;
+	let root_ref = &root;
+	let (resume, connection) =
+		connect_after_validation(session, board, id, &settings, |resume| async move {
+			let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+			let connection = ResumeConnection::open(
+				settings_ref,
+				resume.handle(),
+				Arc::clone(ctx_ref),
+				root_ref,
+				&data_dir,
+				&CancellationToken::new(),
+			)
+			.await
+			.into_diagnostic()?;
+			Ok((resume, connection))
+		})
+		.await?;
 	let record = board
 		.reattach_execution(session, resume, connection.backend().clone())
 		.await
@@ -92,42 +110,70 @@ async fn attach(
 	let settled = tokio::select! {
 		settled = board.wait(session, Some(ids.as_slice())) => settled,
 		signal = tokio::signal::ctrl_c() => {
-			// Detach whatever the signal reported: a dropped run would cancel.
-			let detached = board.detach(session, record.handle).await;
+			let detached = board.detach(record.handle);
 			signal.into_diagnostic()?;
-			detached.into_diagnostic()?;
-			println!(
-				"detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`",
-				journal.display()
-			);
-			return Ok(());
+			// Keep the supervisor alive until it has detached and poll has journaled its result.
+			let _ = board.wait(session, Some(ids.as_slice())).await.into_diagnostic()?;
+			if detached {
+				println!("detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`", journal.display());
+			}
+			return Err(JobsInterrupted.into());
 		},
 	};
 	let settled = match settled {
 		Ok(settled) => settled,
 		Err(error) => {
 			// Keep the backend work running while the journal failure surfaces.
-			let _ = board.detach(session, record.handle).await;
+			let _ = board.detach(record.handle);
 			return Err(error).into_diagnostic();
 		},
 	};
 	let Some(settled) = settled else {
 		return Err(miette!("execution job {id} left the session before it settled"));
 	};
-	report(&settled)
+	report(session, &settled)
+}
+
+async fn connect_after_validation<T, F, Fut>(
+	session: &Session,
+	board: &JobBoard,
+	id: &str,
+	settings: &ExecutionSettings,
+	connect: F,
+) -> miette::Result<T>
+where
+	F: FnOnce(ExecutionResume) -> Fut,
+	Fut: Future<Output = miette::Result<T>>,
+{
+	let resume = board
+		.prepare_reattach(session, id, &settings.destination_identity())
+		.into_diagnostic()?;
+	connect(resume).await
+}
+
+fn summary(session: &Session, record: &JobRecord) -> miette::Result<String> {
+	let state: &'static str = record.execution_state.map_or("unknown", Into::into);
+	let mut text = format!("execution job {}: {} ({state})", record.id, record.status);
+	if let Some(raw) = record.execution_result.as_deref() {
+		let result = omp_agent::jobs::resolve_execution_result(session, raw)
+			.into_diagnostic()?
+			.ok_or_else(|| miette!("execution result is unavailable"))?;
+		text.push_str(&format!(", outcome: {:?}", result.outcome));
+	} else if let Some(failure) = record.execution_failure {
+		text.push_str(&format!(", execution failure: {failure}"));
+	}
+	Ok(text)
 }
 
 /// Prints how a resumed execution job settled; anything but `completed` fails.
-fn report(record: &JobRecord) -> miette::Result<()> {
-	let state: &'static str = record.execution_state.map_or("unknown", Into::into);
-	println!("execution job {}: {} ({state})", record.id, record.status);
+fn report(session: &Session, record: &JobRecord) -> miette::Result<()> {
+	let text = summary(session, record)?;
+	println!("{text}");
 	if record.status == "completed" {
 		return Ok(());
 	}
 	Err(miette!(
-		"execution job {} {}: {}",
-		record.id,
-		record.status,
+		"{text}: {}",
 		record
 			.error
 			.as_deref()
@@ -140,7 +186,7 @@ mod tests {
 	use omp_core::Str;
 	use omp_session::{ComponentRegistry, Session};
 
-	use super::run;
+	use super::{JobsInterrupted, connect_after_validation, report, run, summary};
 	use crate::cli::{JobsArgs, JobsCommand};
 
 	#[tokio::test]
@@ -162,5 +208,103 @@ mod tests {
 				path.display()
 			)
 		);
+	}
+
+	#[tokio::test]
+	async fn journal_refusal_never_calls_connector() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		use omp_driver::exec_composer::{
+			ExecutionSettings, SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_IMAGE,
+		};
+
+		let temp = tempfile::tempdir().expect("temporary session directory");
+		let session = Session::create(&temp.path().join("empty.oms"), ComponentRegistry::standard())
+			.expect("create session");
+		let board = omp_agent::JobBoard::new();
+		board.rebuild(&session);
+		let ctx = omp_con::Ctx::new();
+		SV_EXEC_REMOTE_ENDPOINT
+			.set(&ctx, Str::new_static("grpcs://example.com"))
+			.unwrap();
+		SV_EXEC_REMOTE_IMAGE
+			.set(&ctx, Str::new_static("image@sha256:abc"))
+			.unwrap();
+		let settings = ExecutionSettings::generic(&ctx).unwrap();
+		let calls = AtomicUsize::new(0);
+		let head = session.head();
+		let result: miette::Result<()> =
+			connect_after_validation(&session, &board, "missing", &settings, |_| async {
+				calls.fetch_add(1, Ordering::SeqCst);
+				Ok(())
+			})
+			.await;
+		assert!(result.is_err());
+		assert_eq!(calls.load(Ordering::SeqCst), 0);
+		assert_eq!(session.head(), head);
+	}
+
+	#[test]
+	fn report_shows_terminal_outcome_or_execution_failure() {
+		let temp = tempfile::tempdir().expect("temporary session directory");
+		let session = Session::create(&temp.path().join("report.oms"), ComponentRegistry::standard())
+			.expect("create session");
+		let mut record = omp_agent::JobRecord {
+			handle:            omp_dom::Handle::new(1).unwrap(),
+			id:                Str::new_static("exec-42"),
+			kind:              omp_agent::jobs::JobKind::Execution,
+			status:            Str::new_static("failed"),
+			job_type:          Str::new_static("execution"),
+			label:             Str::new_static("test"),
+			owner:             None,
+			factory_lease:     None,
+			started:           None,
+			duration_ms:       None,
+			output:            None,
+			error:             None,
+			call:              None,
+			detached_at:       None,
+			backend:           None,
+			reattach_handle:   None,
+			request:           None,
+			output_mode:       None,
+			fallback:          None,
+			execution_state:   None,
+			execution_result:  None,
+			execution_failure: Some("effects-unknown".parse().unwrap()),
+		};
+		assert_eq!(
+			summary(&session, &record).unwrap(),
+			"execution job exec-42: failed (unknown), execution failure: effects-unknown"
+		);
+		assert!(
+			report(&session, &record)
+				.unwrap_err()
+				.to_string()
+				.contains("effects-unknown")
+		);
+		record.execution_failure = None;
+		record.execution_result = Some(serde_json::value::to_raw_value(&serde_json::json!({
+			"id": "exec-42", "backend": "remote", "outcome": {"Exited": {"code": 42}},
+			"logs": null, "artifacts": [], "output_digests": {},
+			"timing": {"queued": 0, "upload": 0, "execution": 0, "download": 0, "total": 0},
+			"transfer": {"blobs_total": 0, "cache_hits": 0, "cache_misses": 0, "blobs_uploaded": 0, "bytes_uploaded": 0, "bytes_uploaded_compressed": 0, "bytes_downloaded": 0},
+			"cache_hit": false, "fallback": null
+		})).unwrap());
+		assert_eq!(
+			summary(&session, &record).unwrap(),
+			"execution job exec-42: failed (unknown), outcome: Exited { code: 42 }"
+		);
+		assert!(
+			report(&session, &record)
+				.unwrap_err()
+				.to_string()
+				.contains("code: 42")
+		);
+	}
+
+	#[test]
+	fn detached_interrupt_has_sigint_exit_code() {
+		assert_eq!(JobsInterrupted.exit_code(), 130);
 	}
 }
