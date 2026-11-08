@@ -1181,6 +1181,24 @@ async fn execution_failed_cancellation_append_retries_with_one_settlement() {
 	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
 	let handle = insert_test_execution(&mut session);
 	let board = JobBoard::new();
+	let (gate, dispatches) = omp_agent::HookGate::channel();
+	gate
+		.subscribe("test", [omp_agent::hooks::Subscription {
+			host:       Str::new_static("test"),
+			source:     omp_agent::SourceRef {
+				layer:        0,
+				publisher:    Str::new_static("test"),
+				extension_id: Str::new_static("jobs"),
+			},
+			id:         1,
+			event:      omp_proto::toolhost::v1::HookEventId::HookEventJobSettled,
+			phase:      omp_agent::HookPhase::Observe,
+			order:      0,
+			on_failure: omp_agent::OnFailure::Defer,
+			when:       omp_agent::When::default(),
+		}])
+		.expect("subscribe to settlements");
+	board.set_lifecycle_hooks(omp_agent::LifecycleHooks::new(Arc::new(gate)));
 	let (backend, events) = execution_test_backend(false);
 	attach_test_execution(&session, &board, handle, &backend).await;
 	wait_for_test_acceptance(&board, &events).await;
@@ -1231,6 +1249,16 @@ async fn execution_failed_cancellation_append_retries_with_one_settlement() {
 			.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
 			.count(),
 		1
+	);
+	assert_eq!(
+		dispatches
+			.drain()
+			.filter(|dispatch| {
+				dispatch.event == omp_proto::toolhost::v1::HookEventId::HookEventJobSettled
+			})
+			.count(),
+		1,
+		"JobSettled fires once, after the retried append commits"
 	);
 }
 

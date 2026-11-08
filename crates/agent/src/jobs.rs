@@ -499,11 +499,12 @@ impl JobBoard {
 		);
 	}
 
-	fn notify_settled(&self, record: &JobRecord, settlement: &JobSettlement) {
-		let hooks = self.hooks.lock();
-		let Some(hooks) = hooks.as_ref() else {
-			return;
-		};
+	fn settled_event(
+		&self,
+		record: &JobRecord,
+		settlement: &JobSettlement,
+	) -> Option<(crate::LifecycleHooks, serde_json::Value)> {
+		let hooks = self.hooks.lock().clone()?;
 		let artifact = settlement.output.as_deref().and_then(|output| {
 			serde_json::from_str::<serde_json::Value>(output.get())
 				.ok()?
@@ -511,8 +512,8 @@ impl JobBoard {
 				.as_str()
 				.map(str::to_owned)
 		});
-		let _ = hooks.notify(
-			HookEventId::HookEventJobSettled,
+		Some((
+			hooks,
 			serde_json::json!({
 				"job_id": record.id,
 				"owner": record.owner.as_deref().unwrap_or("kernel"),
@@ -520,7 +521,7 @@ impl JobBoard {
 				"failed": settlement.status.as_str() != "completed",
 				"duration": format!("{}s", elapsed_ms(record.started.as_deref(), now_ms()) / 1_000),
 			}),
-		);
+		))
 	}
 
 	/// Attaches the runtime kill boundary for a job already present in the DOM.
@@ -1023,10 +1024,15 @@ impl JobBoard {
 		handle: Handle,
 		settlement: JobSettlement,
 	) -> Result<(), omp_session::SessionError> {
-		if let Some(record) = record(session.dom(), handle) {
-			self.notify_settled(&record, &settlement);
+		let event =
+			record(session.dom(), handle).and_then(|record| self.settled_event(&record, &settlement));
+		commit_settlement(session, handle, settlement, self.output_bound.load(Ordering::Relaxed))?;
+		// JobSettled reports durable settlements only, so a failed append that a
+		// later retry commits fires the hook once.
+		if let Some((hooks, payload)) = event {
+			let _ = hooks.notify(HookEventId::HookEventJobSettled, payload);
 		}
-		commit_settlement(session, handle, settlement, self.output_bound.load(Ordering::Relaxed))
+		Ok(())
 	}
 
 	/// Waits for the first selected job to settle while committing completions.
