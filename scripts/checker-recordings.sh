@@ -21,7 +21,7 @@ project() {
 case $tool in
 rubocop)
 	rubocop --version >"$out/version"
-	project a.rb $'def f( x )\n  y=1\n  return x\nend\n' $'# frozen_string_literal: true\n\n# Doc.\nmodule A\n  def self.f(x)\n    x\n  end\nend\n'
+	project a.rb $'def f( x )\n  y=1\n  return x\nend\n' $'# frozen_string_literal: true\n\n# Doc.\nmodule A\n  def self.f(value)\n    value\n  end\nend\n'
 	for c in fail clean; do record $c rubocop --format json; done
 	;;
 phpstan)
@@ -42,6 +42,7 @@ hlint)
 tflint)
 	tflint --version >"$out/version"
 	project main.tf $'terraform {\n  required_version = ">= 1.0"\n}\nvariable "unused" {}\nlocals {\n  x = "${var.unused}"\n}\n' $'terraform {\n  required_version = ">= 1.0"\n}\n'
+	touch "$work/clean/outputs.tf" "$work/clean/variables.tf"
 	for c in fail clean; do printf 'plugin "terraform" {\n  enabled = true\n  preset  = "all"\n}\n' >"$work/$c/.tflint.hcl"; (cd "$work/$c" && tflint --init >/dev/null 2>&1); record $c tflint --format=json; done
 	;;
 credo)
@@ -68,3 +69,5 @@ swiftlint)
 	;;
 esac
 echo "$tool: fail exit $(cat "$out/fail.exit"), clean exit $(cat "$out/clean.exit")"
+[ "$(cat "$out/fail.exit")" != 0 ] || { echo "$tool: failing input passed" >&2; exit 1; }
+[ "$(cat "$out/clean.exit")" = 0 ] || { echo "$tool: clean input failed" >&2; exit 1; }
