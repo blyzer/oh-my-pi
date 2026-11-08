@@ -146,6 +146,10 @@ pub enum ExecutionState {
 	Settled,
 	/// The backend accepted the request but its effects cannot be confirmed.
 	EffectsUnknown,
+	/// Submission began, but acceptance and any effects are unknown.
+	SubmissionUnknown,
+	/// The request was never submitted to a backend.
+	NotSubmitted,
 }
 
 /// Which stream a live output frame came from.
@@ -194,4 +198,24 @@ pub enum ExecutionEvent {
 	Output(OutputFrame),
 	/// The run finished.
 	Settled(Result<ExecutionResult, ExecutionError>),
+}
+
+#[cfg(test)]
+mod tests {
+	use super::ExecutionState;
+
+	#[test]
+	fn state_names_are_the_spelling_stored_in_session_journals() {
+		for (state, name) in [
+			(ExecutionState::Requested, "requested"),
+			(ExecutionState::Accepted, "accepted"),
+			(ExecutionState::Settled, "settled"),
+			(ExecutionState::EffectsUnknown, "effects-unknown"),
+			(ExecutionState::SubmissionUnknown, "submission-unknown"),
+			(ExecutionState::NotSubmitted, "not-submitted"),
+		] {
+			assert_eq!(<&'static str>::from(state), name);
+			assert_eq!(name.parse::<ExecutionState>(), Ok(state));
+		}
+	}
 }

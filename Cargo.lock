@@ -8969,6 +8969,7 @@ dependencies = [
  "flume",
  "omp-core",
  "omp-dom",
+ "omp-exec",
  "omp-journal",
  "omp-observability",
  "omp-proto",

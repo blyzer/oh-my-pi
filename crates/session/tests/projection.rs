@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 
 use omp_core::{Hash32, Str};
 use omp_dom::{KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
+use omp_exec::{BackendId, ExecutionId, ReattachHandle};
 use omp_journal::blob::{BlobRef, BlobStore};
 use omp_proto::thread::v1::{item, part};
 use omp_session::{
-	ASSISTANT_CONTENT_TAG, ComponentRegistry, PROVIDER_BLOCK_INDEX_PROP, Session, project_thread,
+	ASSISTANT_CONTENT_TAG, ComponentRegistry, PROVIDER_BLOCK_INDEX_PROP, Session,
+	components::jobs::{self, ExecutionSpec},
+	project_thread,
 };
 use serde_json::value::RawValue;
 
@@ -1559,4 +1562,86 @@ fn file_mentions_split_text_and_images_without_losing_order_on_replay() {
 	drop(session);
 	let restored = Session::open(&path, ComponentRegistry::default()).expect("session restores");
 	assert_eq!(project_thread(restored.dom()), live);
+}
+
+fn execution_prop<'a>(
+	session: &'a Session,
+	handle: omp_dom::Handle,
+	key: &'static str,
+) -> Option<&'a Value> {
+	session
+		.dom()
+		.get(handle)?
+		.prop(&PropKey::Custom(Str::new_static(key)))
+}
+
+fn execution_job(session: &Session) -> omp_dom::Handle {
+	session
+		.dom()
+		.select("jobs job[id=exec-1]")
+		.expect("valid selector")
+		.next()
+		.expect("execution job")
+}
+
+#[test]
+fn execution_submission_marker_and_reattach_handle_survive_reopen() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("execution.oms");
+	let mut session =
+		Session::create(&path, ComponentRegistry::standard()).expect("session creates");
+	let head = session.head().expect("genesis head");
+	let insert = jobs::insert_execution(session.dom(), head, ExecutionSpec {
+		id:          Str::new_static("exec-1"),
+		owner:       Str::new_static("Main"),
+		started:     Str::new_static("1"),
+		backend:     Str::new_static("fake@build.example:443/test"),
+		request:     Str::new_static(r#"{"recipe":"cargo test"}"#),
+		output_mode: Str::new_static("logs"),
+	})
+	.expect("jobs root");
+	session.patch(insert).expect("insert execution");
+	let handle = execution_job(&session);
+	assert!(execution_prop(&session, handle, jobs::EXECUTION_SUBMISSION_STARTED).is_none());
+	assert!(execution_prop(&session, handle, jobs::EXECUTION_HANDLE).is_none());
+
+	let head = session.head().expect("insert head");
+	session
+		.patch(jobs::mark_execution_submitting(head, handle))
+		.expect("mark submitting");
+	let accepted = ReattachHandle::new(
+		BackendId::new_static("fake@build.example:443/test"),
+		Str::new_static("operations/42"),
+		ExecutionId::new_static("exec-1"),
+	);
+	let head = session.head().expect("marker head");
+	session
+		.patch(Txn {
+			cause: head,
+			label: None,
+			ops:   jobs::execution_handle_ops(handle, &accepted)
+				.expect("handle encodes")
+				.into(),
+		})
+		.expect("record handle");
+	drop(session);
+
+	let session = Session::open(&path, ComponentRegistry::standard()).expect("session reopens");
+	let handle = execution_job(&session);
+	assert!(matches!(
+		execution_prop(&session, handle, jobs::EXECUTION_SUBMISSION_STARTED),
+		Some(Value::Bool(true))
+	));
+	let stored = execution_prop(&session, handle, jobs::EXECUTION_HANDLE)
+		.and_then(Value::as_str)
+		.expect("stored handle");
+	assert_eq!(serde_json::from_str::<ReattachHandle>(stored).expect("handle decodes"), accepted);
+	assert_eq!(
+		execution_prop(&session, handle, jobs::EXECUTION_SCHEMA).and_then(Value::as_str),
+		Some("v1")
+	);
+	assert_eq!(
+		execution_prop(&session, handle, jobs::EXECUTION_BACKEND).and_then(Value::as_str),
+		Some("fake@build.example:443/test")
+	);
 }
