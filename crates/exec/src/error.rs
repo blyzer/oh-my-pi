@@ -233,6 +233,20 @@ pub enum ExecutionError {
 		/// The accepted operation that must not be started again.
 		handle: ReattachHandle,
 	},
+	/// Submission began, but the backend may not have accepted it.
+	#[error("execution submission is unknown")]
+	SubmissionUnknown,
+	/// The request was never submitted to a backend.
+	#[error("execution was not submitted")]
+	NotSubmitted,
+	/// The stored reattach handle could not be decoded, so the accepted
+	/// operation cannot be named.
+	#[error("stored reattach handle is invalid")]
+	InvalidHandle {
+		/// The decode failure.
+		#[source]
+		source: ForeignError,
+	},
 }
 
 /// When a failure happened relative to the backend accepting the work.
@@ -292,6 +306,9 @@ pub const fn fallback_eligible(error: &ExecutionError, stage: Stage) -> bool {
 			| ExecutionError::OutputRetrieval { .. }
 			| ExecutionError::ResumeUnsupported { .. }
 			| ExecutionError::EffectsUnknown { .. }
+			| ExecutionError::SubmissionUnknown
+			| ExecutionError::NotSubmitted
+			| ExecutionError::InvalidHandle { .. }
 			| ExecutionError::Config { .. },
 			Stage::BeforeAcceptance | Stage::AfterAcceptance,
 		) => false,
@@ -365,6 +382,9 @@ mod tests {
 				false,
 				false,
 			),
+			(ExecutionError::SubmissionUnknown, false, false),
+			(ExecutionError::NotSubmitted, false, false),
+			(ExecutionError::InvalidHandle { source: cause() }, false, false),
 			(ExecutionError::Config { source: cause() }, false, false),
 		]
 	}

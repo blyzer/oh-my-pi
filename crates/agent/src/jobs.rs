@@ -74,7 +74,13 @@ impl From<JobKind> for DeliveryJobType {
 	}
 }
 
-#[derive(Debug, Serialize)]
+/// Journal shape of a settled [`ExecutionResult`]: the value of the
+/// `execution_result` property.
+///
+/// The record is mirrored here so the stored format belongs to this module and
+/// does not move when `omp-exec` changes a field. [`resolve_execution_result`]
+/// reads it back.
+#[derive(Debug, Deserialize, Serialize)]
 struct DurableExecutionResult {
 	id:             omp_exec::ExecutionId,
 	backend:        BackendId,
@@ -101,6 +107,23 @@ impl From<&ExecutionResult> for DurableExecutionResult {
 			transfer:       result.transfer,
 			cache_hit:      result.cache_hit,
 			fallback:       result.fallback,
+		}
+	}
+}
+
+impl From<DurableExecutionResult> for ExecutionResult {
+	fn from(durable: DurableExecutionResult) -> Self {
+		Self {
+			id:             durable.id,
+			backend:        durable.backend,
+			outcome:        durable.outcome,
+			logs:           durable.logs,
+			artifacts:      durable.artifacts,
+			output_digests: durable.output_digests,
+			timing:         durable.timing,
+			transfer:       durable.transfer,
+			cache_hit:      durable.cache_hit,
+			fallback:       durable.fallback,
 		}
 	}
 }
@@ -170,9 +193,10 @@ pub struct JobRecord {
 	pub backend:         Option<Str>,
 	/// Serialized reattach handle for a `JobKind::Execution` job.
 	pub reattach_handle: Option<Str>,
-	/// Serialized request identity and output mode for a `JobKind::Execution`
-	/// job.
+	/// Serialized request identity for a `JobKind::Execution` job.
 	pub request:         Option<Str>,
+	/// Requested output mode for a `JobKind::Execution` job.
+	pub output_mode:     Option<Str>,
 	/// Fallback/error class recorded for a `JobKind::Execution` job.
 	pub fallback:        Option<Str>,
 	/// Explicit execution lifecycle state.
@@ -475,11 +499,12 @@ impl JobBoard {
 		);
 	}
 
-	fn notify_settled(&self, record: &JobRecord, settlement: &JobSettlement) {
-		let hooks = self.hooks.lock();
-		let Some(hooks) = hooks.as_ref() else {
-			return;
-		};
+	fn settled_event(
+		&self,
+		record: &JobRecord,
+		settlement: &JobSettlement,
+	) -> Option<(crate::LifecycleHooks, serde_json::Value)> {
+		let hooks = self.hooks.lock().clone()?;
 		let artifact = settlement.output.as_deref().and_then(|output| {
 			serde_json::from_str::<serde_json::Value>(output.get())
 				.ok()?
@@ -487,8 +512,8 @@ impl JobBoard {
 				.as_str()
 				.map(str::to_owned)
 		});
-		let _ = hooks.notify(
-			HookEventId::HookEventJobSettled,
+		Some((
+			hooks,
 			serde_json::json!({
 				"job_id": record.id,
 				"owner": record.owner.as_deref().unwrap_or("kernel"),
@@ -496,7 +521,7 @@ impl JobBoard {
 				"failed": settlement.status.as_str() != "completed",
 				"duration": format!("{}s", elapsed_ms(record.started.as_deref(), now_ms()) / 1_000),
 			}),
-		);
+		))
 	}
 
 	/// Attaches the runtime kill boundary for a job already present in the DOM.
@@ -779,17 +804,19 @@ impl JobBoard {
 				.collect::<Vec<_>>()
 		};
 		for (handle, kind) in orphaned {
-			let error = match kind {
-				JobKind::Subagent => ORPHANED_SUBAGENT_JOB,
-				JobKind::Tool | JobKind::Process => ORPHANED_TOOL_JOB,
-				JobKind::Execution => ORPHANED_EXECUTION_JOB,
+			let (error, execution) = match kind {
+				JobKind::Subagent => (ORPHANED_SUBAGENT_JOB, None),
+				JobKind::Tool | JobKind::Process => (ORPHANED_TOOL_JOB, None),
+				JobKind::Execution => {
+					(ORPHANED_EXECUTION_JOB, Some(orphaned_execution(session.dom(), handle)))
+				},
 			};
 			self.commit(session, handle, JobSettlement {
-				status:     Str::new_static("failed"),
-				output:     None,
-				error:      Some(Str::new_static(error)),
+				status: Str::new_static("failed"),
+				output: None,
+				error: Some(Str::new_static(error)),
 				completion: None,
-				execution:  None,
+				execution,
 			})?;
 			if let Some(job) = self.jobs.lock().get_mut(&handle) {
 				job.orphaned = false;
@@ -997,10 +1024,15 @@ impl JobBoard {
 		handle: Handle,
 		settlement: JobSettlement,
 	) -> Result<(), omp_session::SessionError> {
-		if let Some(record) = record(session.dom(), handle) {
-			self.notify_settled(&record, &settlement);
+		let event =
+			record(session.dom(), handle).and_then(|record| self.settled_event(&record, &settlement));
+		commit_settlement(session, handle, settlement, self.output_bound.load(Ordering::Relaxed))?;
+		// JobSettled reports durable settlements only, so a failed append that a
+		// later retry commits fires the hook once.
+		if let Some((hooks, payload)) = event {
+			let _ = hooks.notify(HookEventId::HookEventJobSettled, payload);
 		}
-		commit_settlement(session, handle, settlement, self.output_bound.load(Ordering::Relaxed))
+		Ok(())
 	}
 
 	/// Waits for the first selected job to settle while committing completions.
@@ -1398,11 +1430,44 @@ fn restart_orphan(record: &JobRecord, recovered: Option<&RecoveredSettlement>) -
 			// The environment host owns durable process generations and may
 			// reconnect them independently of this disposable board.
 			JobKind::Process => false,
-			// An execution job with a reattach handle can be recovered; treat
-			// the missing execution unit as an orphan so poll settles it with
-			// the diagnostic and the CLI reattach path is the recovery route.
+			// An execution job without a live run is settled from its own journal by
+			// `orphaned_execution`; the board never starts or resumes a backend run.
 			JobKind::Execution => recovered.is_none(),
 		}
+}
+
+/// Settlement for an execution job that restarted without its run.
+///
+/// The journal is the only evidence. A stored handle means the backend accepted
+/// the work, so its effects are unknown. The submission marker without a handle
+/// means `start` may have reached the backend. Neither means `start` never ran.
+/// No branch contacts a backend or starts work.
+fn orphaned_execution(dom: &Dom, handle: Handle) -> ExecutionSettlement {
+	use omp_session::components::jobs::{EXECUTION_HANDLE, EXECUTION_SUBMISSION_STARTED};
+
+	let node = dom.get(handle);
+	let prop =
+		|key: &'static str| node.and_then(|node| node.prop(&PropKey::Custom(Str::new_static(key))));
+	let (state, accepted, error) = match prop(EXECUTION_HANDLE) {
+		Some(stored) => {
+			match serde_json::from_str::<ReattachHandle>(stored.as_str().unwrap_or_default()) {
+				Ok(decoded) => (
+					ExecutionState::EffectsUnknown,
+					Some(decoded.clone()),
+					ExecutionError::EffectsUnknown { handle: decoded },
+				),
+				// A handle was stored, so the work was accepted: never "not started".
+				Err(source) => (ExecutionState::EffectsUnknown, None, ExecutionError::InvalidHandle {
+					source: Arc::new(source),
+				}),
+			}
+		},
+		None if prop(EXECUTION_SUBMISSION_STARTED).is_some() => {
+			(ExecutionState::SubmissionUnknown, None, ExecutionError::SubmissionUnknown)
+		},
+		None => (ExecutionState::NotSubmitted, None, ExecutionError::NotSubmitted),
+	};
+	ExecutionSettlement { state, handle: accepted, result: None, error: Some(error) }
 }
 
 fn recovered_tool_settlement(dom: &Dom, record: &JobRecord) -> Option<RecoveredSettlement> {
@@ -1546,6 +1611,18 @@ pub fn resolve_output(
 	Ok(Some(RawValue::from_string(json.to_owned())?))
 }
 
+/// Reads a job's `execution_result` back as the typed record, following a
+/// spilled stand-in into the session blob store.
+pub fn resolve_execution_result(
+	session: &Session,
+	output: &RawValue,
+) -> Result<Option<ExecutionResult>, omp_session::SessionError> {
+	let Some(raw) = resolve_output(session, output)? else {
+		return Ok(None);
+	};
+	Ok(Some(serde_json::from_str::<DurableExecutionResult>(raw.get())?.into()))
+}
+
 fn commit_settlement(
 	session: &mut Session,
 	handle: Handle,
@@ -1594,22 +1671,7 @@ fn commit_settlement(
 			value: Value::Str(Str::new_static(state)),
 		});
 		if let Some(accepted) = execution.handle {
-			let serialized = serde_json::to_string(&accepted)?;
-			ops.push(Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static("reattach_schema")),
-				value: Value::Str(Str::new(accepted.schema.to_string())),
-			});
-			ops.push(Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static("backend")),
-				value: Value::Str(Str::new(accepted.backend.to_string())),
-			});
-			ops.push(Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static("reattach_handle")),
-				value: Value::Str(Str::new(serialized)),
-			});
+			ops.extend(omp_session::components::jobs::execution_handle_ops(handle, &accepted)?);
 		}
 		if let Some(result) = execution.result {
 			let result = bounded_output(
@@ -1758,6 +1820,7 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 		backend: custom(node, "backend").map(Str::new),
 		reattach_handle: custom(node, "reattach_handle").map(Str::new),
 		request: custom(node, "request").map(Str::new),
+		output_mode: custom(node, omp_session::components::jobs::EXECUTION_OUTPUT_MODE).map(Str::new),
 		execution_state: custom(node, "execution_state").and_then(|value| value.parse().ok()),
 		execution_result: node
 			.prop(&PropKey::Custom(Str::new_static("execution_result")))

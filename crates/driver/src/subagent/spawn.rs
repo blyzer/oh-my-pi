@@ -1493,6 +1493,7 @@ mod tests {
 			backend:           None,
 			reattach_handle:   None,
 			request:           None,
+			output_mode:       None,
 			fallback:          None,
 			execution_state:   None,
 			execution_result:  None,
