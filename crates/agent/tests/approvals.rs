@@ -148,6 +148,34 @@ fn approvals_merge_and_withdraw_round_trip_through_replay() {
 	assert_eq!(book.ticket(&restored, first.ticket_id.as_str()), Some(withdrawn));
 }
 
+#[test]
+fn decided_for_finds_the_latest_journaled_answer_for_a_call() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let path = temp.path().join("decided-for.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("session");
+	let book = ApprovalBook::new();
+	let first = book
+		.open_for(&mut session, Some(sf!("call-1")), vec![spec(0, None)], 7)
+		.expect("first prompt");
+	assert_eq!(book.decided_for(&session, "call-1"), None, "a pending prompt is unanswered");
+	let first = book
+		.decide(&mut session, first.ticket_id.as_str(), decision())
+		.expect("decide first prompt");
+	let second = book
+		.open_for(&mut session, Some(sf!("call-1")), vec![spec(0, None)], 8)
+		.expect("second prompt");
+	assert_ne!(second.ticket_id, first.ticket_id);
+	assert_eq!(book.decided_for(&session, "call-1"), Some(first));
+	let second = book
+		.decide(&mut session, second.ticket_id.as_str(), decision())
+		.expect("decide second prompt");
+	drop(session);
+
+	let restored = Session::open(&path, ComponentRegistry::standard()).expect("replay");
+	assert_eq!(book.decided_for(&restored, "call-1"), Some(second));
+	assert_eq!(book.decided_for(&restored, "call-2"), None);
+}
+
 #[tokio::test]
 async fn cancelled_or_dropped_route_requests_remove_only_their_pending_entry() {
 	let (route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);

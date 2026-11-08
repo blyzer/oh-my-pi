@@ -216,3 +216,39 @@ impl ExecutionPlan {
 		Self { requests: Arc::new([request]), edges: Arc::new([]) }
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+
+	use omp_core::Str;
+
+	use super::OutputSpec;
+
+	#[test]
+	fn output_spec_round_trips_through_its_journaled_form() {
+		let cases = [
+			(OutputSpec::Metadata, r#""metadata""#),
+			(OutputSpec::Logs, r#""logs""#),
+			(
+				OutputSpec::Artifacts { paths: Arc::from([Str::new_static("target/report.xml")]) },
+				r#"{"artifacts":{"paths":["target/report.xml"]}}"#,
+			),
+			(OutputSpec::All, r#""all""#),
+		];
+		for (spec, journaled) in cases {
+			// A new variant breaks this match, which points here to add its case.
+			match spec {
+				OutputSpec::Metadata
+				| OutputSpec::Logs
+				| OutputSpec::Artifacts { .. }
+				| OutputSpec::All => {},
+			}
+			assert_eq!(serde_json::to_string(&spec).expect("serialize output spec"), journaled);
+			assert_eq!(
+				serde_json::from_str::<OutputSpec>(journaled).expect("parse output spec"),
+				spec
+			);
+		}
+	}
+}

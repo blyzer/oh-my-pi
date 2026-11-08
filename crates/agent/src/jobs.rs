@@ -38,7 +38,7 @@ use tokio::{task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	approvals::{ApprovalSource, ApprovalTicket, TicketState},
+	approvals::{ApprovalBook, ApprovalSource, TicketState},
 	dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream},
 };
 
@@ -161,9 +161,10 @@ pub struct JobSettlement {
 
 /// Proof that the host approved one execution for one destination.
 ///
-/// Only [`AuthorizedExecution::from_ticket`] mints it, and
-/// [`JobBoard::start_execution`] consumes it, so one approval starts at most
-/// one backend run.
+/// Only [`AuthorizedExecution::from_session`] mints it, from a prompt the
+/// session journaled, and [`JobBoard::start_execution`] consumes it. The
+/// board refuses a ticket an earlier execution already submitted under, so one
+/// approval starts at most one backend run, across restarts too.
 #[derive(Debug)]
 pub struct AuthorizedExecution {
 	ticket:      Str,
@@ -171,23 +172,77 @@ pub struct AuthorizedExecution {
 }
 
 impl AuthorizedExecution {
-	/// Mints the proof from `ticket`, the answered prompt for `subject`, for the
-	/// non-secret `destination` that subject names.
+	/// Mints the proof from the journaled prompt `ticket_id`, answered for the
+	/// `kind` requirement on `subject`, for the non-secret `destination` that
+	/// subject names.
 	///
-	/// A withdrawn, denied, timed-out, or unreachable prompt authorizes nothing,
-	/// even when its default fails open, and neither does a prompt that never
-	/// named `subject`.
-	pub fn from_ticket(ticket: &ApprovalTicket, subject: &str, destination: Str) -> Option<Self> {
-		let decision = ticket.decision.as_ref()?;
+	/// `ticket_id` is the journaled id, which [`ApprovalBook::decided_for`]
+	/// finds from a call id; a route's own ticket id is not the journaled one.
+	///
+	/// # Errors
+	///
+	/// A prompt the session never journaled, a pending, withdrawn, denied,
+	/// timed-out, or unreachable one (even when its default fails open), and a
+	/// prompt with no `kind` requirement on `subject` authorize nothing.
+	pub fn from_session(
+		session: &Session,
+		ticket_id: &str,
+		kind: &str,
+		subject: &str,
+		destination: Str,
+	) -> Result<Self, ExecutionApprovalError> {
+		let ticket = ApprovalBook::new()
+			.ticket(session, ticket_id)
+			.ok_or_else(|| ExecutionApprovalError::UnknownTicket { ticket: Str::new(ticket_id) })?;
 		let approved = ticket.state == TicketState::Decided
-			&& decision.approved
-			&& !matches!(decision.source, ApprovalSource::Timeout | ApprovalSource::Unavailable)
-			&& ticket
-				.reasons
-				.iter()
-				.any(|reason| reason.subject.as_str() == subject);
-		approved.then(|| Self { ticket: ticket.ticket_id.clone(), destination })
+			&& ticket.decision.as_ref().is_some_and(|decision| {
+				decision.approved
+					&& !matches!(decision.source, ApprovalSource::Timeout | ApprovalSource::Unavailable)
+			});
+		if !approved {
+			return Err(ExecutionApprovalError::NotApproved { ticket: ticket.ticket_id });
+		}
+		let covered = ticket
+			.reasons
+			.iter()
+			.any(|reason| reason.kind.as_str() == kind && reason.subject.as_str() == subject);
+		if !covered {
+			return Err(ExecutionApprovalError::NotCovered {
+				ticket:  ticket.ticket_id,
+				kind:    Str::new(kind),
+				subject: Str::new(subject),
+			});
+		}
+		Ok(Self { ticket: ticket.ticket_id, destination })
 	}
+}
+
+/// Why [`AuthorizedExecution::from_session`] minted nothing.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ExecutionApprovalError {
+	/// The session journals no prompt with this ticket id.
+	#[error("approval ticket {ticket} is not journaled")]
+	UnknownTicket {
+		/// The ticket id the caller named.
+		ticket: Str,
+	},
+	/// The prompt is unanswered, withdrawn, denied, or answered by a timeout or
+	/// an unreachable route.
+	#[error("approval ticket {ticket} did not approve an execution")]
+	NotApproved {
+		/// The unapproved ticket.
+		ticket: Str,
+	},
+	/// The approved prompt names no requirement of this kind on this subject.
+	#[error("approval ticket {ticket} does not cover {kind} access to {subject}")]
+	NotCovered {
+		/// The approved ticket.
+		ticket:  Str,
+		/// The requirement kind the execution needs.
+		kind:    Str,
+		/// The subject the execution reaches.
+		subject: Str,
+	},
 }
 
 /// One approved request for [`JobBoard::start_execution`].
@@ -209,6 +264,12 @@ pub enum ExecutionStartError {
 	Duplicate {
 		/// The execution id already in use.
 		id: Str,
+	},
+	/// An earlier execution already reached the backend under this approval.
+	#[error("approval ticket {ticket} already started an execution")]
+	ApprovalSpent {
+		/// The spent approval ticket.
+		ticket: Str,
 	},
 	/// The session has no jobs subtree to journal the request in.
 	#[error("session has no jobs subtree")]
@@ -458,6 +519,9 @@ pub const EXECUTION_START_FAILED: &str = "execution start failed; its submission
 /// backend returned a handle.
 pub const EXECUTION_CANCELLED_BEFORE_ACCEPTANCE: &str =
 	"execution submission is unknown after cancellation";
+/// Diagnostic journaled when an owned unit panicked or ended without returning
+/// a settlement.
+const UNSETTLED_UNIT: &str = "job execution unit ended without a settlement";
 
 /// Host state outside the job board derived from the live session's journal,
 /// which outlives that session because the kernel and its environment do.
@@ -789,9 +853,11 @@ impl JobBoard {
 	///
 	/// # Errors
 	///
-	/// Refuses a duplicate execution id or a session without a jobs subtree, and
-	/// returns the journal failure when either commit fails. `start` never runs
-	/// in any of these cases.
+	/// Refuses a duplicate execution id, a ticket an earlier execution already
+	/// submitted under, or a session without a jobs subtree, and returns the
+	/// journal failure when either commit fails. `start` never runs in any of
+	/// these cases. When only the marker fails to commit, the `requested` node
+	/// stays indexed, so the next [`Self::poll`] settles it `NotSubmitted`.
 	pub fn start_execution<B: ExecutionBackend>(
 		&self,
 		session: &mut Session,
@@ -805,8 +871,16 @@ impl JobBoard {
 
 		let ExecutionSubmission { owner, identity, request } = submission;
 		let id = request.id.as_inner().clone();
-		if records(session.dom()).iter().any(|record| record.id == id) {
+		let existing = records(session.dom());
+		if existing.iter().any(|record| record.id == id) {
 			return Err(ExecutionStartError::Duplicate { id });
+		}
+		let ticket = authorized.ticket.as_str();
+		if existing
+			.iter()
+			.any(|record| submitted_under(session.dom(), record, ticket))
+		{
+			return Err(ExecutionStartError::ApprovalSpent { ticket: authorized.ticket });
 		}
 		let started = now_ms();
 		let timeout = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
@@ -833,7 +907,12 @@ impl JobBoard {
 			.find(|record| record.id == id)
 			.ok_or(ExecutionStartError::NoJobs)?
 			.handle;
-		session.patch(mark_execution_submitting(inserted, handle))?;
+		if let Err(error) = session.patch(mark_execution_submitting(inserted, handle)) {
+			// The `requested` node landed without its marker: index it so the next
+			// poll settles it `NotSubmitted` instead of leaving it running.
+			self.rebuild(session);
+			return Err(error.into());
+		}
 		let record = submitted_execution(session.dom(), handle).ok_or(ExecutionStartError::NoJobs)?;
 		let cancel = CancellationToken::new();
 		let (accepted_tx, accepted_rx) = flume::bounded(1);
@@ -1025,18 +1104,30 @@ impl JobBoard {
 			jobs
 				.iter_mut()
 				.filter(|(_, job)| job.task.as_ref().is_some_and(JoinHandle::is_finished))
-				.filter_map(|(handle, job)| job.task.take().map(|task| (*handle, task)))
+				.filter_map(|(handle, job)| {
+					let task = job.task.take()?;
+					job.capture_acceptance();
+					let execution =
+						(job.record.kind == JobKind::Execution).then(|| job.accepted_handle.clone());
+					Some((*handle, task, execution))
+				})
 				.collect::<Vec<_>>()
 		};
-		for (handle, mut task) in finished {
+		for (handle, mut task, execution) in finished {
+			// A panicked execution unit may still have reached the backend.
 			let settlement = futures::FutureExt::now_or_never(&mut task)
 				.and_then(Result::ok)
-				.unwrap_or_else(|| JobSettlement {
-					status:     Str::new_static("failed"),
-					output:     None,
-					error:      Some(Str::new_static("job execution unit ended without a settlement")),
-					completion: None,
-					execution:  None,
+				.unwrap_or_else(|| match execution {
+					Some(accepted) => {
+						unsettled_execution("failed", accepted.as_ref(), UNSETTLED_UNIT, UNSETTLED_UNIT)
+					},
+					None => JobSettlement {
+						status:     Str::new_static("failed"),
+						output:     None,
+						error:      Some(Str::new_static(UNSETTLED_UNIT)),
+						completion: None,
+						execution:  None,
+					},
 				});
 			self.commit(session, handle, settlement)?;
 		}
@@ -1371,28 +1462,14 @@ async fn terminate_runtime(job: &mut RuntimeJob) -> JobSettlement {
 		return settlement;
 	}
 	if job.record.kind == JobKind::Execution
-		&& let Some(handle) = &job.accepted_handle
+		&& (job.accepted_handle.is_some() || job.accepted.is_some())
 	{
-		let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
-		return JobSettlement {
-			status:     Str::new_static("cancelled"),
-			output:     None,
-			error:      Some(Str::new_static("execution effects are unknown after cancellation")),
-			completion: None,
-			execution:  Some(ExecutionSettlement {
-				state:  ExecutionState::EffectsUnknown,
-				handle: Some(handle.clone()),
-				result: None,
-				error:  Some(error),
-			}),
-		};
-	}
-	if job.record.kind == JobKind::Execution && job.accepted.is_some() {
 		// A supervised run means `start` ran, so the backend may hold the request.
-		return submission_unknown(
+		return unsettled_execution(
 			"cancelled",
+			job.accepted_handle.as_ref(),
+			"execution effects are unknown after cancellation",
 			EXECUTION_CANCELLED_BEFORE_ACCEPTANCE,
-			ExecutionError::SubmissionUnknown,
 		);
 	}
 	JobSettlement {
@@ -1453,6 +1530,32 @@ const fn submission_unknown(
 	}
 }
 
+/// Settlement of an execution unit that ended without settling itself. An
+/// accepted run keeps its handle as `EffectsUnknown`; without a handle the
+/// backend may still hold the request, so it is `SubmissionUnknown`.
+fn unsettled_execution(
+	status: &'static str,
+	accepted: Option<&ReattachHandle>,
+	effects_unknown: &'static str,
+	submission: &'static str,
+) -> JobSettlement {
+	let Some(handle) = accepted else {
+		return submission_unknown(status, submission, ExecutionError::SubmissionUnknown);
+	};
+	JobSettlement {
+		status:     Str::new_static(status),
+		output:     None,
+		error:      Some(Str::new_static(effects_unknown)),
+		completion: None,
+		execution:  Some(ExecutionSettlement {
+			state:  ExecutionState::EffectsUnknown,
+			handle: Some(handle.clone()),
+			result: None,
+			error:  Some(ExecutionError::EffectsUnknown { handle: handle.clone() }),
+		}),
+	}
+}
+
 /// The record of an execution job whose submission marker is journaled. Only
 /// such a job may own a live unit.
 fn submitted_execution(dom: &Dom, handle: Handle) -> Option<JobRecord> {
@@ -1460,6 +1563,21 @@ fn submitted_execution(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 		PropKey::Custom(Str::new_static(omp_session::components::jobs::EXECUTION_SUBMISSION_STARTED));
 	dom.get(handle)?.prop(&marker)?;
 	record(dom, handle)
+}
+
+/// Whether `record` is an execution that already reached the backend under
+/// `ticket`. Only the submission marker spends an approval: a `requested`
+/// node whose marker never landed started nothing.
+fn submitted_under(dom: &Dom, record: &JobRecord, ticket: &str) -> bool {
+	use omp_session::components::jobs::{EXECUTION_APPROVAL, EXECUTION_SUBMISSION_STARTED};
+
+	record.kind == JobKind::Execution
+		&& dom.get(record.handle).is_some_and(|node| {
+			custom(node, EXECUTION_APPROVAL) == Some(ticket)
+				&& node
+					.prop(&PropKey::Custom(Str::new_static(EXECUTION_SUBMISSION_STARTED)))
+					.is_some()
+		})
 }
 
 async fn supervise_execution<R: ExecutionRun>(
@@ -2244,7 +2362,7 @@ mod tests {
 			started:     Str::new_static("1"),
 			backend:     Str::new_static("test"),
 			request:     Str::new_static("cargo test"),
-			output_mode: Str::new_static("logs"),
+			output_mode: Str::new_static(r#""logs""#),
 			destination: Str::new_static("test"),
 			deadline:    Str::new_static("2"),
 			approval:    Str::new_static("approval-1"),
