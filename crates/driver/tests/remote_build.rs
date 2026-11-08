@@ -18,7 +18,8 @@ use std::{
 use futures::stream;
 use omp_agent::{
 	ApprovalDecision, ApprovalScope, ApprovalSource, ApprovalTicket, DispatchPolicy, Inference,
-	JobBoard, JobRecord, Kernel, KernelEvent, RunControl, StaticPrompt, TicketState, TurnInput, Up,
+	JobBoard, JobRecord, Kernel, KernelEvent, RunControl, SessionMutation, StaticPrompt,
+	TicketState, TurnInput, Up,
 };
 use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ContentPart, ExecutionReceipt,
@@ -32,6 +33,7 @@ use omp_driver::{
 		ExecutionSettings, PreparedExecution, REMOTE_POSTURE, RemoteError, SV_EXEC_REMOTE_ENDPOINT,
 		SV_EXEC_REMOTE_IMAGE,
 	},
+	headless::kernel::{EnvToolExecutor, SettingsAdmission, install_tool_authority},
 	remote_build::{RemoteBuildHost, RemoteBuildTool, SV_EXEC_AGENT_RUNS, enabled},
 };
 use omp_exec::{
@@ -379,6 +381,10 @@ enum Reply {
 	Answer(bool),
 	/// Interrupt the turn instead of answering.
 	Interrupt,
+	/// Approve using a non-human source.
+	NonHuman(ApprovalSource),
+	/// Record a prior submission under this ticket, then approve it.
+	Spent,
 }
 
 /// One kernel composed with the capability as `compose_kernel` composes it,
@@ -400,7 +406,16 @@ impl Fixture {
 	fn compose(
 		ctx: Arc<omp_con::Ctx>,
 		calls: Vec<(&'static str, Json)>,
-		reply: fn(usize, &str) -> Reply,
+		reply: impl Fn(usize, &str) -> Reply + Send + 'static,
+	) -> Self {
+		Self::compose_with_authority(ctx, calls, reply, true)
+	}
+
+	fn compose_with_authority(
+		ctx: Arc<omp_con::Ctx>,
+		calls: Vec<(&'static str, Json)>,
+		reply: impl Fn(usize, &str) -> Reply + Send + 'static,
+		install_authority: bool,
 	) -> Self {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let spill =
@@ -421,12 +436,25 @@ impl Fixture {
 		};
 		let seen = Arc::<Mutex<Seen>>::default();
 		let model = Script { calls: calls.into(), opened: 0, seen: Arc::clone(&seen) };
-		let mut kernel = Kernel::new(
+		let kernel = Kernel::new(
 			model,
 			Arc::new(registry),
 			DispatchPolicy::new(spill),
 			StaticPrompt(Str::new_static("test")),
 		);
+		let mut kernel = if install_authority {
+			let (environment, _transport) = omp_env::EnvClient::in_process(0);
+			let approvals = kernel.approval_route();
+			let admission = SettingsAdmission::new(&ctx, None, scratch.path());
+			install_tool_authority(
+				kernel,
+				&session,
+				EnvToolExecutor::new(environment, approvals),
+				admission,
+			)
+		} else {
+			kernel
+		};
 		let host = FakeHost::default();
 		if let Some(remote_build) = remote_build {
 			let approvals = kernel.approval_route();
@@ -454,6 +482,49 @@ impl Fixture {
 						let message = match reply(number, host) {
 							Reply::Answer(approved) => {
 								Up::approve_local(ticket.ticket_id, answer(approved))
+							},
+							Reply::NonHuman(source) => {
+								let mut decision = answer(true);
+								decision.source = source;
+								Up::approve_local(ticket.ticket_id, decision)
+							},
+							Reply::Spent => {
+								let approval = ticket.ticket_id.clone();
+								let mutation = SessionMutation::new(move |session| {
+									let cause = session.head().expect("active turn");
+									let insert =
+										jobs::insert_execution(session.dom(), cause, jobs::ExecutionSpec {
+											id: Str::new_static("already-submitted"),
+											owner: Str::new_static("Main"),
+											started: Str::new_static("0"),
+											backend: Str::new_static("remote"),
+											request: Str::new_static("{}"),
+											output_mode: Str::new_static("{}"),
+											destination: Str::new_static("{}"),
+											deadline: Str::new_static("9999999999999"),
+											approval,
+										})
+										.expect("jobs subtree");
+									let cause = session.patch(insert).expect("insert prior job");
+									let board = JobBoard::new();
+									board.rebuild(session);
+									let handle = board
+										.list()
+										.into_iter()
+										.find(|job| job.id.as_str() == "already-submitted")
+										.expect("prior job")
+										.handle;
+									session
+										.patch(jobs::mark_execution_submitting(cause, handle))
+										.expect("mark prior submission");
+									// A prior submission has no live owner in this fixture. Reconcile it
+									// so the kernel does not wait forever for an owner that cannot wake it.
+									board.poll(session).expect("settle prior submitted job");
+								});
+								mailbox
+									.send(Up::SessionMutation(mutation))
+									.expect("record prior submission");
+								Up::approve_local(ticket.ticket_id, answer(true))
 							},
 							Reply::Interrupt => Up::Interrupt,
 						};
@@ -577,6 +648,160 @@ async fn a_denied_prompt_connects_uploads_and_journals_nothing() {
 }
 
 #[tokio::test]
+async fn a_tool_policy_denial_prevents_prompts_connections_and_jobs() {
+	let ctx = agent_runs("grpcs://build-a.example");
+	omp_envd::tool_settings::SV_TOOLS_APPROVAL
+		.set(
+			&ctx,
+			omp_con::Kv(vec![(
+				Str::new_static("remote_build"),
+				omp_con::Value::Str(Str::new_static("deny")),
+			)]),
+		)
+		.expect("deny remote_build");
+	let mut fixture =
+		Fixture::compose(ctx, vec![("call-1", test_pkg())], |_, _| Reply::Answer(true));
+	fixture.turn().await;
+	assert!(fixture.offered());
+	let (result, is_error) = fixture.last_result();
+	assert!(is_error, "{result}");
+	assert!(result.contains("denied by approval policy"), "{result}");
+	assert!(fixture.prompts().is_empty());
+	assert_eq!(fixture.asked.load(Ordering::SeqCst), 0);
+	assert_eq!(fixture.host.calls(), (0, 0, 0));
+	assert!(fixture.jobs().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_tool_admission_authority_fails_closed() {
+	let mut fixture = Fixture::compose_with_authority(
+		agent_runs("grpcs://build-a.example"),
+		vec![("call-1", test_pkg())],
+		|_, _| Reply::Answer(true),
+		false,
+	);
+	fixture.turn().await;
+	let (result, is_error) = fixture.last_result();
+	assert!(is_error, "{result}");
+	assert!(result.contains("tool admission is not configured"), "{result}");
+	assert!(fixture.prompts().is_empty());
+	assert_eq!(fixture.asked.load(Ordering::SeqCst), 0);
+	assert_eq!(fixture.host.calls(), (0, 0, 0));
+	assert!(fixture.jobs().is_empty());
+}
+
+#[tokio::test]
+async fn non_deny_tool_policies_still_require_one_human_network_approval() {
+	for policy in ["allow", "prompt"] {
+		let ctx = agent_runs("grpcs://build-a.example");
+		omp_envd::tool_settings::SV_TOOLS_APPROVAL
+			.set(
+				&ctx,
+				omp_con::Kv(vec![(
+					Str::new_static("remote_build"),
+					omp_con::Value::Str(Str::new(policy)),
+				)]),
+			)
+			.expect("set tool policy");
+		let mut fixture =
+			Fixture::compose(ctx, vec![("call-1", test_pkg())], |_, _| Reply::Answer(true));
+		fixture.turn().await;
+		let prompts = fixture.prompts();
+		assert_eq!(prompts.len(), 1, "{policy}: {prompts:?}");
+		assert_eq!(fixture.asked.load(Ordering::SeqCst), 1);
+		assert_eq!(prompts[0].reasons.len(), 1);
+		let reason = &prompts[0].reasons[0];
+		assert_eq!(reason.kind.as_str(), "network");
+		assert_eq!(reason.scopes, [Str::new_static("once")]);
+		assert!(reason.require_human);
+		assert_eq!(reason.subject.as_str(), "build-a.example");
+		fixture.host.started(1).await;
+		assert_eq!(fixture.host.calls(), (1, 1, 1));
+		assert_eq!(fixture.jobs().len(), 1);
+	}
+}
+
+#[tokio::test]
+async fn nonhuman_approval_does_not_authorize_a_remote_build() {
+	for source in [ApprovalSource::Forwarded, ApprovalSource::Config, ApprovalSource::Extension] {
+		let mut fixture = Fixture::compose(
+			agent_runs("grpcs://build-a.example"),
+			vec![("call-1", test_pkg())],
+			move |_, _| Reply::NonHuman(source),
+		);
+		fixture.turn().await;
+		let (result, is_error) = fixture.last_result();
+		assert!(is_error, "{source:?}: {result}");
+		assert!(result.contains(r#""kind":"not_approved""#), "{result}");
+		assert_eq!(fixture.prompts().len(), 1);
+		assert_eq!(fixture.host.calls(), (1, 0, 0));
+		assert!(fixture.jobs().is_empty());
+	}
+}
+
+#[tokio::test]
+async fn a_spent_approval_maps_to_a_fault_without_starting_another_job() {
+	let mut fixture = Fixture::compose(
+		agent_runs("grpcs://build-a.example"),
+		vec![("call-1", test_pkg())],
+		|_, _| Reply::Spent,
+	);
+	fixture.turn().await;
+	let prompts = fixture.prompts();
+	assert_eq!(prompts.len(), 1, "{prompts:?}");
+	let (result, is_error) = fixture.last_result();
+	assert!(is_error, "{result}");
+	assert!(result.contains(r#""kind":"approval_spent""#), "{result}");
+	assert!(result.contains(prompts[0].ticket_id.as_str()), "{result}");
+	assert_eq!(fixture.host.calls(), (1, 1, 0));
+	let jobs = fixture.jobs();
+	assert_eq!(jobs.len(), 1, "{jobs:?}");
+	assert_eq!(jobs[0].id.as_str(), "already-submitted");
+	assert_eq!(jobs[0].status.as_str(), "failed");
+}
+
+#[tokio::test]
+async fn endpoint_change_during_approval_keeps_the_approved_destination() {
+	let ctx = agent_runs("grpcs://build-a.example");
+	let destination = serde_json::to_string(
+		&ExecutionSettings::generic(&ctx)
+			.expect("settings A")
+			.destination_identity(),
+	)
+	.expect("destination A");
+	let changed_ctx = Arc::clone(&ctx);
+	let mut fixture =
+		Fixture::compose(Arc::clone(&ctx), vec![("call-1", test_pkg())], move |_, host| {
+			assert_eq!(host, "build-a.example");
+			SV_EXEC_REMOTE_ENDPOINT
+				.set(&changed_ctx, Str::new_static("grpcs://build-b.example"))
+				.expect("endpoint B");
+			Reply::Answer(true)
+		});
+	fixture.turn().await;
+	assert_eq!(
+		ExecutionSettings::generic(&ctx)
+			.expect("settings B")
+			.endpoint_host(),
+		"build-b.example"
+	);
+	fixture.host.started(1).await;
+	assert_eq!(fixture.host.connected(), ["https://build-a.example:443"]);
+	let jobs = fixture.jobs();
+	assert_eq!(jobs.len(), 1, "{jobs:?}");
+	let node = fixture.session.dom().get(jobs[0].handle).expect("job node");
+	assert_eq!(
+		node
+			.prop(&PropKey::Custom(Str::new_static(jobs::EXECUTION_DESTINATION)))
+			.and_then(Value::as_str),
+		Some(destination.as_str())
+	);
+	let (result, is_error) = fixture.last_result();
+	assert!(!is_error, "{result}");
+	assert!(result.contains("https://build-a.example:443"), "{result}");
+}
+
+#[tokio::test]
 async fn a_grant_for_host_a_does_not_authorize_host_b() {
 	let ctx = agent_runs("grpcs://build-a.example");
 	let calls = vec![("call-1", test_pkg()), ("call-2", test_pkg())];
@@ -678,6 +903,67 @@ async fn an_earlier_approval_for_the_same_call_authorizes_nothing() {
 	assert_ne!(prompts[1].state, TicketState::Decided, "the second prompt was never answered");
 	assert_eq!(fixture.host.calls(), (2, 1, 1), "the second call captured, then connected nothing");
 	assert_eq!(fixture.jobs().len(), 1);
+}
+
+#[tokio::test]
+async fn remote_recipe_package_arity_is_checked_before_approval() {
+	let recipes: Vec<_> = omp_exec::CARGO_JUST_RECIPES
+		.iter()
+		.filter(|class| {
+			matches!(
+				class.eligibility,
+				omp_exec::Eligibility::RemotePreferred | omp_exec::Eligibility::RemoteRequired
+			)
+		})
+		.map(|class| class.recipe)
+		.collect();
+	assert!(recipes.contains(&"test-pkg"));
+	assert!(recipes.contains(&"check-pkg"));
+	assert!(recipes.contains(&"clippy"));
+	let calls = recipes
+		.iter()
+		.map(|&recipe| {
+			let args = if matches!(recipe, "test-pkg" | "check-pkg") {
+				json!({ "recipe": recipe, "i": "Testing remotely" })
+			} else {
+				json!({ "recipe": recipe, "package": "omp-exec", "i": "Testing remotely" })
+			};
+			(recipe, args)
+		})
+		.collect();
+	let mut fixture =
+		Fixture::compose(agent_runs("grpcs://build-a.example"), calls, |_, _| Reply::Answer(true));
+	for recipe in recipes {
+		fixture.turn().await;
+		let (result, is_error) = fixture.last_result();
+		assert!(is_error, "{recipe}: {result}");
+		assert!(
+			result.contains(&format!(r#""kind":"invalid_arity","recipe":"{recipe}""#)),
+			"{result}"
+		);
+	}
+	assert!(fixture.prompts().is_empty());
+	assert_eq!(fixture.asked.load(Ordering::SeqCst), 0);
+	assert_eq!(fixture.host.calls(), (0, 0, 0));
+	assert!(fixture.jobs().is_empty());
+}
+
+#[tokio::test]
+async fn valid_package_and_zero_argument_recipes_run() {
+	let calls = vec![
+		("call-1", json!({ "recipe": "check-pkg", "package": "omp-exec", "i": "Check" })),
+		("call-2", json!({ "recipe": "clippy", "i": "Lint" })),
+	];
+	let mut fixture =
+		Fixture::compose(agent_runs("grpcs://build-a.example"), calls, |_, _| Reply::Answer(true));
+	for count in 1..=2 {
+		fixture.turn().await;
+		let (result, is_error) = fixture.last_result();
+		assert!(!is_error, "{result}");
+		fixture.host.started(count).await;
+		assert_eq!(fixture.prompts().len(), count);
+		assert_eq!(fixture.jobs().len(), count);
+	}
 }
 
 #[tokio::test]

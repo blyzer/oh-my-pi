@@ -29,8 +29,8 @@ pub struct Params {
 	/// The `just` recipe to run remotely, such as `test-pkg`, `check-pkg`,
 	/// `clippy` or `e2e-core`.
 	pub recipe:  Str,
-	/// The workspace package `test-pkg` and `check-pkg` take, such as
-	/// `omp-driver`.
+	/// Required for `test-pkg` and `check-pkg`, such as `omp-driver`.
+	/// All other remote-eligible recipes take no package.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub package: Option<Str>,
 }
@@ -58,6 +58,14 @@ pub enum Fault {
 	/// The recipe is not one the remote executor runs.
 	#[error("`{recipe}` is not a remote-eligible just recipe")]
 	Ineligible {
+		/// The refused recipe.
+		recipe: Str,
+	},
+	/// The recipe has the wrong number of package arguments.
+	#[error(
+		"invalid package arguments for `{recipe}`; only test-pkg and check-pkg require a package"
+	)]
+	InvalidArity {
 		/// The refused recipe.
 		recipe: Str,
 	},
@@ -183,10 +191,15 @@ impl Tool for Declaration {
 			Ok(payload) => {
 				sf!("Remote build job {} started on {}.", payload.job, payload.destination)
 			},
-			Err(fault) => sf!("{fault}"),
+			Err(fault) => fault_text(fault),
 		};
 		vec![Part::Text { text }]
 	}
+}
+
+/// Renders a remote build fault once at the model-facing prompt boundary.
+fn fault_text(fault: &Fault) -> Str {
+	sf!("{fault}")
 }
 
 fn param_event(error: ParamError) -> Ev<Update, Payload, Fault> {

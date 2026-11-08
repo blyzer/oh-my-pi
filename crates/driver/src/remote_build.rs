@@ -15,7 +15,7 @@ use std::{
 };
 
 use omp_agent::{
-	ApprovalBook, ApprovalRoute, ApprovalSpec, ApprovalTicket, AuthorizedExecution,
+	ApprovalBook, ApprovalRoute, ApprovalSource, ApprovalSpec, ApprovalTicket, AuthorizedExecution,
 	BackgroundToolCancellation, CallControl, ExecutionStartError, ExecutionSubmission, Received,
 	SessionTool, SessionToolCx, SessionToolError, SessionToolFuture,
 };
@@ -272,6 +272,10 @@ impl<H: RemoteBuildHost> SessionTool for RemoteBuildTool<H> {
 		&self.spec
 	}
 
+	fn requires_admission_deny_check(&self) -> bool {
+		true
+	}
+
 	fn call<'a>(&'a self, cx: SessionToolCx<'a>, args: Box<RawValue>) -> SessionToolFuture<'a> {
 		Box::pin(async move {
 			let params: Params = omp_tool::decode_params(args.get())?;
@@ -288,6 +292,9 @@ impl<H: RemoteBuildHost> SessionTool for RemoteBuildTool<H> {
 fn argv(params: &Params) -> Result<Arc<[Str]>, Fault> {
 	if !crate::adw::remote::eligible(JUST, std::slice::from_ref(&params.recipe)) {
 		return Err(Fault::Ineligible { recipe: params.recipe.clone() });
+	}
+	if matches!(params.recipe.as_str(), "test-pkg" | "check-pkg") != params.package.is_some() {
+		return Err(Fault::InvalidArity { recipe: params.recipe.clone() });
 	}
 	if let Some(package) = params
 		.package
@@ -383,10 +390,10 @@ async fn ask(
 
 /// Whether the route's answer `ticket` approves the call.
 fn approves(ticket: &ApprovalTicket) -> bool {
-	ticket
-		.decision
-		.as_ref()
-		.is_some_and(|decision| decision.approved)
+	ticket.decision.as_ref().is_some_and(|decision| {
+		decision.approved
+			&& matches!(decision.source, ApprovalSource::User | ApprovalSource::External)
+	})
 }
 
 /// Mints the run's approval proof from the prompt the session journaled for
