@@ -271,6 +271,7 @@ impl<S: RunInputSource> ExecutionBackend for BuildBuddyBackend<S> {
 	fn reattach(
 		&self,
 		_handle: ReattachHandle,
+		_context: omp_exec::ReattachContext,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		async move { Err(ExecutionError::ResumeUnsupported { backend: self.config.id.clone() }) }
 	}

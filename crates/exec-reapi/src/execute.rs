@@ -343,6 +343,7 @@ where
 	fn reattach(
 		&self,
 		handle: ReattachHandle,
+		_context: omp_exec::ReattachContext,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		let this = self.clone();
 		async move { this.reattach_request(handle).await }

@@ -59,7 +59,7 @@ mod result;
 pub use adapter::{BuildSystemAdapter, PlanError, RepoPins};
 pub use backend::{
 	BackendCapabilities, CachePolicy, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
-	ExecutionPolicy, ExecutionRun, FallbackPolicy,
+	ExecutionPolicy, ExecutionRun, FallbackPolicy, ReattachContext,
 };
 pub use cargo_just::{
 	CARGO_JUST_RECIPES, CARGO_TARGET_CACHE, CargoJust, DEFAULT_TIMEOUT, JUST, RecipeClass,
