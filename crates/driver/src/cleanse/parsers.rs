@@ -366,6 +366,7 @@ fn parse_json_value(
 				"errors",
 				"issues",
 				"files",
+				"offenses",
 				"results",
 				"runs",
 				"Issues",
@@ -373,6 +374,14 @@ fn parse_json_value(
 			] {
 				if let Some(value) = object.get(key) {
 					parse_json_value(kind, value, file, input, output);
+				}
+			}
+			// PHPStan keys each file's report by its path.
+			if kind == ParserKind::Phpstan
+				&& let Some(files) = object.get("files").and_then(serde_json::Value::as_object)
+			{
+				for (path, value) in files {
+					parse_json_value(kind, value, Some(path), input, output);
 				}
 			}
 			if let Some(value) = object.get("message")
@@ -385,7 +394,7 @@ fn parse_json_value(
 	}
 }
 
-const FILE_KEYS: &[&str] = &["filePath", "filename", "file", "path", "uri"];
+const FILE_KEYS: &[&str] = &["filePath", "filename", "file", "path", "uri", "file_name"];
 
 fn object_diagnostic(
 	kind: ParserKind,
@@ -393,7 +402,8 @@ fn object_diagnostic(
 	inherited_file: Option<&str>,
 	input: &ParserInput<'_>,
 ) -> Option<Diagnostic> {
-	let message = string_at(object, &["message", "description", "reason", "text", "title", "Text"])?;
+	let message = string_at(object, &["message", "description", "reason", "text", "title", "Text"])
+		.or_else(|| string_at(object, &["hint"]).filter(|_| kind == ParserKind::Hlint))?;
 	let file = string_at(object, FILE_KEYS)
 		.or_else(|| {
 			object
@@ -406,18 +416,24 @@ fn object_diagnostic(
 				.and_then(|pos| string_value(pos, &["Filename"]))
 		})
 		.or_else(|| {
+			object
+				.get("range")
+				.and_then(|range| string_value(range, &["filename"]))
+		})
+		.or_else(|| {
 			first_span(object).and_then(|span| string_at(span, &["file_name", "file", "path"]))
 		})
 		.or(inherited_file)
 		.and_then(|path| relative_path(path, input));
-	let line = number_at(object, &["line", "lineNumber", "startLine"])
+	let line = number_at(object, &["line", "lineNumber", "startLine", "line_from", "line_no"])
 		.or_else(|| position_number(object, "range", "start", "line"))
 		.or_else(|| position_number(object, "location", "start", "line"))
 		.or_else(|| field_number(object, "location", "row"))
+		.or_else(|| field_number(object, "location", "line"))
 		.or_else(|| field_number(object, "Pos", "Line"))
 		.or_else(|| first_span(object).and_then(|span| number_at(span, &["line_start", "line"])))
 		.and_then(one_based(kind, Axis::Line));
-	let column = number_at(object, &["column", "columnNumber", "startColumn"])
+	let column = number_at(object, &["column", "columnNumber", "startColumn", "column_from"])
 		.or_else(|| position_number(object, "range", "start", "character"))
 		.or_else(|| position_number(object, "range", "start", "col"))
 		.or_else(|| position_number(object, "location", "start", "column"))
@@ -1292,6 +1308,100 @@ mod tests {
 			read(ParserKind::Swiftlint, "[1]    4242 killed     swiftlint\n", ""),
 			Err(ParseError::NoJson(_))
 		));
+	}
+
+	/// Failing runs recorded on GitHub-hosted runners by
+	/// `scripts/checker-recordings.sh`. Each kind's report shape once read as
+	/// zero diagnostics, or lost the file or line.
+	#[test]
+	fn recorded_failing_runs_name_every_diagnostic() {
+		let root = Path::new("/private/tmp/checker-recordings");
+		let failing = [
+			(
+				ParserKind::Rubocop,
+				include_str!("../../../../fixtures/rubocop/fail.stdout"),
+				include_str!("../../../../fixtures/rubocop/fail.stderr"),
+				&[
+					("a.rb", 1),
+					("a.rb", 1),
+					("a.rb", 1),
+					("a.rb", 1),
+					("a.rb", 2),
+					("a.rb", 2),
+					("a.rb", 3),
+				][..],
+			),
+			(
+				ParserKind::Phpstan,
+				include_str!("../../../../fixtures/phpstan/fail.stdout"),
+				include_str!("../../../../fixtures/phpstan/fail.stderr"),
+				&[("a.php", 2), ("a.php", 3)],
+			),
+			(
+				ParserKind::Psalm,
+				include_str!("../../../../fixtures/psalm/fail.stdout"),
+				include_str!("../../../../fixtures/psalm/fail.stderr"),
+				&[("a.php", 2), ("a.php", 2), ("a.php", 3)],
+			),
+			(
+				ParserKind::Hlint,
+				include_str!("../../../../fixtures/hlint/fail.stdout"),
+				include_str!("../../../../fixtures/hlint/fail.stderr"),
+				&[("A.hs", 2), ("A.hs", 2)],
+			),
+			(
+				ParserKind::Tflint,
+				include_str!("../../../../fixtures/tflint/fail.stdout"),
+				include_str!("../../../../fixtures/tflint/fail.stderr"),
+				&[
+					("main.tf", 4),
+					("main.tf", 4),
+					("main.tf", 4),
+					("main.tf", 6),
+					("main.tf", 6),
+					("outputs.tf", 1),
+				],
+			),
+			(
+				ParserKind::Credo,
+				include_str!("../../../../fixtures/credo/fail.stdout"),
+				include_str!("../../../../fixtures/credo/fail.stderr"),
+				&[("fail.ex", 1), ("fail.ex", 3), ("fail.ex", 4)],
+			),
+			(
+				ParserKind::Swiftlint,
+				include_str!("../../../../fixtures/swiftlint/fail.stdout"),
+				include_str!("../../../../fixtures/swiftlint/fail.stderr"),
+				&[("a.swift", 1), ("a.swift", 1), ("a.swift", 1), ("a.swift", 2)],
+			),
+		];
+		for (kind, stdout, stderr, expected) in failing {
+			let diagnostics = parse(kind, &ParserInput {
+				checker: "checker",
+				checker_root: root,
+				project_root: root,
+				stdout,
+				stderr,
+			})
+			.unwrap();
+			let mut found = diagnostics
+				.iter()
+				.map(|diagnostic| {
+					let file = diagnostic
+						.file
+						.as_deref()
+						.map(Path::new)
+						.and_then(Path::file_name);
+					(file.and_then(|name| name.to_str()), diagnostic.line)
+				})
+				.collect::<Vec<_>>();
+			found.sort();
+			let expected = expected
+				.iter()
+				.map(|&(file, line)| (Some(file), Some(line)))
+				.collect::<Vec<_>>();
+			assert_eq!(found, expected, "{kind:?}");
+		}
 	}
 
 	#[test]

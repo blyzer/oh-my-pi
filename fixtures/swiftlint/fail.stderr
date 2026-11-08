@@ -1,0 +1,3 @@
+Linting Swift files in current working directory
+Linting 'a.swift' (1/1)
+Done linting! Found 4 violations, 2 serious in 1 file.

@@ -17,3 +17,9 @@ clean.stdout, clean.stderr
         </projectFiles>
     </psalm>
   src/Greeter.php: the same file as fixtures/phpstan/PROVENANCE.txt names.
+
+fail.stdout, fail.stderr
+  command: psalm --output-format=json --no-cache   (psalm.xml: errorLevel 1, projectFiles .)
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh psalm) on GitHub-hosted ubuntu-latest
+  versions: Psalm 7.0.5@e3586fb9542ad66e37122f7c7ddf6b9a9ea7eaec
+  exit 2; stdout 1569 bytes, stderr 6541 bytes; inputs are the failing sources in scripts/checker-recordings.sh

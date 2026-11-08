@@ -26,3 +26,9 @@ clean.stdout, clean.stderr
             return 'hello ' . $name;
         }
     }
+
+fail.stdout, fail.stderr
+  command: phpstan analyse --error-format=json --no-progress   (phpstan.neon: level 9, paths [.])
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh phpstan) on GitHub-hosted ubuntu-latest
+  versions: PHPStan - PHP Static Analysis Tool 2.3.5
+  exit 1; stdout 417 bytes, stderr 70 bytes; inputs are the failing sources in scripts/checker-recordings.sh

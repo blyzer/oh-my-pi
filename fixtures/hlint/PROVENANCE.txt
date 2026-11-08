@@ -13,3 +13,9 @@ clean.stdout, clean.stderr
 
     greet :: String -> String
     greet name = "hello " ++ name
+
+fail.stdout, fail.stderr
+  command: hlint . --json
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh hlint) on GitHub-hosted ubuntu-latest
+  versions: HLint v3.10, (C) Neil Mitchell 2006-2025
+  exit 1; stdout 826 bytes, stderr 0 bytes; inputs are the failing sources in scripts/checker-recordings.sh

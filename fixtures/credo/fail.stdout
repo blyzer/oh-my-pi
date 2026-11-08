@@ -1,0 +1,52 @@
+==> file_system
+Compiling 7 files (.ex)
+Generated file_system app
+==> bunt
+Compiling 2 files (.ex)
+Generated bunt app
+==> jason
+Compiling 10 files (.ex)
+Generated jason app
+==> credo
+Compiling 257 files (.ex)
+Generated credo app
+{
+  "issues": [
+    {
+      "category": "readability",
+      "check": "Credo.Check.Readability.ModuleDoc",
+      "column": 11,
+      "column_end": 15,
+      "filename": "lib/fail.ex",
+      "line_no": 1,
+      "message": "Modules should have a @moduledoc tag.",
+      "priority": 1,
+      "scope": "Fail",
+      "trigger": "Fail"
+    },
+    {
+      "category": "refactor",
+      "check": "Credo.Check.Refactor.NegatedConditionsWithElse",
+      "column": 8,
+      "column_end": 9,
+      "filename": "lib/fail.ex",
+      "line_no": 4,
+      "message": "Avoid negated conditions in if-else blocks.",
+      "priority": 12,
+      "scope": "Fail.f",
+      "trigger": "!"
+    },
+    {
+      "category": "warning",
+      "check": "Credo.Check.Warning.IoInspect",
+      "column": 5,
+      "column_end": 15,
+      "filename": "lib/fail.ex",
+      "line_no": 3,
+      "message": "There should be no calls to `IO.inspect/1`.",
+      "priority": 12,
+      "scope": "Fail.f",
+      "trigger": "IO.inspect"
+    }
+  ]
+}

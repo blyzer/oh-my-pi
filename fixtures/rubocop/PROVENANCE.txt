@@ -25,3 +25,9 @@ clean.stdout, clean.stderr
         "hello #{name}"
       end
     end
+
+fail.stdout, fail.stderr
+  command: rubocop --format json
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh rubocop) on GitHub-hosted ubuntu-latest
+  versions: 1.92.2
+  exit 1; stdout 2974 bytes, stderr 9567 bytes; inputs are the failing sources in scripts/checker-recordings.sh
