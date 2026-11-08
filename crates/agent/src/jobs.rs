@@ -106,7 +106,7 @@ impl From<&ExecutionResult> for DurableExecutionResult {
 }
 
 /// Typed execution state carried through the durable job settlement.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ExecutionSettlement {
 	/// Journal-derived execution state.
 	pub state:  ExecutionState,
@@ -119,7 +119,7 @@ pub struct ExecutionSettlement {
 }
 
 /// Terminal result produced by one owned execution unit.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct JobSettlement {
 	/// Durable terminal status (`completed`, `cancelled`, or `failed`).
 	pub status:     Str,
@@ -1084,18 +1084,27 @@ impl JobBoard {
 			});
 		}
 		async move {
-			for job in terminated {
-				let _ = terminate_runtime(job).await;
+			for mut job in terminated {
+				let _ = terminate_runtime(&mut job).await;
 			}
 		}
 	}
 
 	/// Terminates one execution unit and journals `cancelled` on its DOM node.
+	///
+	/// A settled execution keeps its committed result and returns `false`.
+	/// When the journal append fails, the computed settlement stays on the
+	/// board as a finished unit, so a later poll or terminate commits it.
 	pub async fn terminate(
 		&self,
 		session: &mut Session,
 		handle: Handle,
 	) -> Result<bool, omp_session::SessionError> {
+		if record(session.dom(), handle).is_some_and(|record| {
+			record.kind == JobKind::Execution && !is_live_status(record.status.as_str())
+		}) {
+			return Ok(false);
+		}
 		let recovered = self
 			.jobs
 			.lock()
@@ -1114,11 +1123,17 @@ impl JobBoard {
 			}
 			jobs.remove(&handle)
 		};
-		let Some(job) = job else {
+		let Some(mut job) = job else {
 			return Ok(false);
 		};
-		let settlement = terminate_runtime(job).await;
-		self.commit(session, handle, settlement)?;
+		let settlement = terminate_runtime(&mut job).await;
+		if let Err(error) = self.commit(session, handle, settlement.clone()) {
+			job.task = Some(tokio::spawn(std::future::ready(settlement)));
+			// The re-armed settlement is the one terminal commit left for this job.
+			job.orphaned = false;
+			self.jobs.lock().insert(handle, job);
+			return Err(error);
+		}
 		self.rebuild(session);
 		Ok(true)
 	}
@@ -1137,7 +1152,7 @@ impl JobBoard {
 	}
 }
 
-async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
+async fn terminate_runtime(job: &mut RuntimeJob) -> JobSettlement {
 	job.capture_acceptance();
 	job.cancel.cancel();
 	let mut settlement = None;
@@ -1152,7 +1167,7 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 		}
 	}
 	job.capture_acceptance();
-	if let Some(detached) = &mut job._detached {
+	if let Some(mut detached) = job._detached.take() {
 		if let Some(feed) = &detached.feed {
 			let _ = feed.interrupt(omp_tool::Interrupt {
 				class:  Str::new_static(omp_tool::Interrupt::ESCAPE),
@@ -1172,7 +1187,7 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 		return settlement;
 	}
 	if job.record.kind == JobKind::Execution
-		&& let Some(handle) = job.accepted_handle
+		&& let Some(handle) = &job.accepted_handle
 	{
 		let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
 		return JobSettlement {
@@ -1182,7 +1197,7 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 			completion: None,
 			execution:  Some(ExecutionSettlement {
 				state:  ExecutionState::EffectsUnknown,
-				handle: Some(handle),
+				handle: Some(handle.clone()),
 				result: None,
 				error:  Some(error),
 			}),

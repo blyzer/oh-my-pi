@@ -2162,7 +2162,17 @@ impl<C: Inference> Kernel<C> {
 					turn_cancel.cancel_turn();
 					return Ok(Awaited::Cancelled);
 				},
-				AwaitSignal::Finished => return Ok(Awaited::Settled),
+				AwaitSignal::Finished => {
+					// An acceptance also wakes the board: journal it, but keep idling
+					// until a settlement awaits delivery or no job is left running.
+					jobs.poll(session)?;
+					self.apply_live_components(session)?;
+					if !crate::jobs::undelivered(session.dom()).is_empty()
+						|| !crate::jobs::pending_wake(session.dom())
+					{
+						return Ok(Awaited::Settled);
+					}
+				},
 				AwaitSignal::Control(message) => match call_control.handle(session, message)? {
 					Received::ToolScopedAbort(_) => {},
 					Received::Cancelled => return Ok(Awaited::Cancelled),

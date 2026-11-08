@@ -1062,6 +1062,96 @@ async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() 
 	);
 }
 
+struct ExecutionEvents(flume::Receiver<omp_exec::ExecutionEvent>);
+
+impl omp_exec::ExecutionRun for ExecutionEvents {
+	async fn next_event(&mut self) -> Option<omp_exec::ExecutionEvent> {
+		self.0.recv_async().await.ok()
+	}
+
+	async fn cancel(&self) -> omp_exec::CancelOutcome {
+		omp_exec::CancelOutcome::Requested
+	}
+
+	fn detach(self) -> omp_exec::ReattachHandle {
+		execution_handle()
+	}
+}
+
+fn execution_handle() -> omp_exec::ReattachHandle {
+	omp_exec::ReattachHandle::new(
+		omp_exec::BackendId::new_static("test"),
+		Str::new_static("operations/1"),
+		omp_exec::ExecutionId::new_static("exec-1"),
+	)
+}
+
+/// An execution job accepted while the parent idles journals its acceptance
+/// without a provider request; only its settlement re-wakes the model.
+#[tokio::test]
+async fn accepted_execution_job_idles_until_settlement_without_a_provider_request() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let (inference, requests) =
+		ScriptedInference::new([text_script("started; waiting"), text_script("tests finished")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&directory.path().join("accepted.oms"));
+	let before = session.head().expect("genesis head");
+	let txn = omp_session::components::jobs::insert_execution(
+		session.dom(),
+		before,
+		omp_session::components::jobs::ExecutionSpec {
+			id:          Str::new_static("exec-1"),
+			owner:       Str::new_static("Main"),
+			started:     Str::new_static("1"),
+			backend:     Str::new_static("test"),
+			request:     Str::new_static("cargo test"),
+			output_mode: Str::new_static("logs"),
+		},
+	)
+	.expect("jobs root");
+	session.patch(txn).expect("insert execution");
+	let handle = session
+		.dom()
+		.select("jobs job[id=exec-1]")
+		.expect("valid selector")
+		.into_iter()
+		.next()
+		.expect("execution element");
+	let (events_tx, events) = flume::unbounded();
+	assert!(kernel.jobs().attach_execution_run(
+		session.dom(),
+		handle,
+		tokio_util::sync::CancellationToken::new(),
+		ExecutionEvents(events),
+	));
+	// Acceptance lands while the parent idles; dropping the sender later ends the
+	// run.
+	tokio::spawn(async move {
+		tokio::time::sleep(Duration::from_millis(60)).await;
+		let _ = events_tx.send(omp_exec::ExecutionEvent::Accepted { handle: execution_handle() });
+		tokio::time::sleep(Duration::from_millis(200)).await;
+	});
+	let outcome = kernel
+		.run_turn(&mut session, input("run the tests"), RunControl::default())
+		.await
+		.expect("turn completes after delivery");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 2, "only the settlement re-woke the model");
+	assert_eq!(
+		session
+			.entries()
+			.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+			.count(),
+		2,
+		"acceptance and settlement are journaled separately"
+	);
+}
+
 /// R2 (Fx2Transcript): an interrupted tool tail is re-executable without a
 /// model round trip: the journal rewinds past the aborted result, the same
 /// call id runs again, and the live chain ends with exactly one

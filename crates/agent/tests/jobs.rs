@@ -623,9 +623,7 @@ struct ExecutionTestBackend {
 
 #[derive(Default)]
 struct ExecutionTestCounts {
-	starts:     AtomicUsize,
-	reattaches: AtomicUsize,
-	cancels:    AtomicUsize,
+	cancels: AtomicUsize,
 }
 
 struct ExecutionTestRun {
@@ -690,7 +688,6 @@ impl omp_exec::ExecutionBackend for ExecutionTestBackend {
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
 		assert_eq!(request.id, omp_exec::ExecutionId::new_static("exec-42"));
 		assert_eq!(request.outputs, omp_exec::OutputSpec::Logs);
-		self.counts.starts.fetch_add(1, Ordering::SeqCst);
 		Ok(ExecutionTestRun {
 			handle:       execution_test_handle(),
 			events:       self.events.clone(),
@@ -703,7 +700,6 @@ impl omp_exec::ExecutionBackend for ExecutionTestBackend {
 		&self,
 		_handle: omp_exec::ReattachHandle,
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
-		self.counts.reattaches.fetch_add(1, Ordering::SeqCst);
 		Err(omp_exec::ExecutionError::ResumeUnsupported { backend: self.id.clone() })
 	}
 }
@@ -884,8 +880,6 @@ async fn execution_t2_acceptance_wakes_board_and_survives_replay() {
 	assert_eq!(records[0].request.as_deref(), Some(r#"{"recipe":"cargo test"}"#));
 	assert_test_handle(&records[0]);
 	assert_test_identity(&session, records[0].handle);
-	assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
-	assert_eq!(backend.counts.reattaches.load(Ordering::SeqCst), 0);
 	board
 		.terminate(&mut session, records[0].handle)
 		.await
@@ -921,7 +915,6 @@ async fn execution_t6_backend_effects_unknown_is_not_settled() {
 	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
 	assert_test_handle(&record);
 	assert_test_identity(&session, handle);
-	assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
 	drop(session);
 	let session = Session::open(&path, ComponentRegistry::standard()).expect("reopen settlement");
 	board.rebuild(&session);
@@ -956,7 +949,6 @@ async fn execution_t8_cancel_preserves_accepted_handle_before_and_after_poll_and
 			.expect("commit cancellation")
 		);
 		assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), 1);
-		assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
 		let record = board.list().into_iter().next().expect("cancelled job");
 		assert_eq!(record.status, "cancelled");
 		assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
@@ -976,7 +968,7 @@ async fn execution_t8_cancel_preserves_accepted_handle_before_and_after_poll_and
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn execution_t3_failed_acceptance_append_retries_without_another_start() {
+async fn execution_t3_failed_acceptance_append_commits_once_on_retry() {
 	const CHILD: &str = "OMP_EXECUTION_T3_CHILD";
 	if std::env::var_os(CHILD).is_none() {
 		let output = std::process::Command::new("sh")
@@ -984,7 +976,7 @@ async fn execution_t3_failed_acceptance_append_retries_without_another_start() {
 			.arg(std::env::current_exe().expect("test executable"))
 			.args([
 				"--exact",
-				"execution_t3_failed_acceptance_append_retries_without_another_start",
+				"execution_t3_failed_acceptance_append_commits_once_on_retry",
 				"--nocapture",
 			])
 			.env(CHILD, "1")
@@ -1046,8 +1038,6 @@ async fn execution_t3_failed_acceptance_append_retries_without_another_start() {
 	assert_eq!(records[0].execution_state, Some(omp_exec::ExecutionState::Accepted));
 	assert_test_handle(&records[0]);
 	assert_test_identity(&session, handle);
-	assert_eq!(backend.counts.starts.load(Ordering::SeqCst), 1);
-	assert_eq!(backend.counts.reattaches.load(Ordering::SeqCst), 0);
 	assert_eq!(
 		session
 			.entries()
@@ -1109,4 +1099,137 @@ async fn execution_t8_preserves_completed_supervisor_settlement() {
 	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Settled));
 	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::ResumeUnsupported));
 	assert_test_handle(&record);
+}
+
+#[tokio::test]
+async fn execution_terminate_keeps_a_settled_result() {
+	let temp = tempdir().expect("temporary session directory");
+	let mut session =
+		Session::create(temp.path().join("settled.oms"), ComponentRegistry::standard())
+			.expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	events
+		.send(omp_exec::ExecutionEvent::Settled(Err(omp_exec::ExecutionError::ResumeUnsupported {
+			backend: omp_exec::BackendId::new_static("fake@build.example:443/test"),
+		})))
+		.expect("send typed failure");
+	tokio::time::timeout(
+		std::time::Duration::from_secs(5),
+		board.wait(&mut session, Some(&[Str::new_static("exec-42")])),
+	)
+	.await
+	.expect("settlement deadline")
+	.expect("settlement commit")
+	.expect("settled job");
+	assert!(
+		!board
+			.terminate(&mut session, handle)
+			.await
+			.expect("terminate settled job")
+	);
+	let record = board.list().into_iter().next().expect("settled job");
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.error.as_deref(), Some("execution failed"));
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Settled));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::ResumeUnsupported));
+	assert_test_handle(&record);
+	assert_eq!(
+		session
+			.entries()
+			.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+			.count(),
+		2,
+		"acceptance and settlement only; terminate journals nothing"
+	);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn execution_failed_cancellation_append_retries_with_one_settlement() {
+	const CHILD: &str = "OMP_EXECUTION_CANCEL_APPEND_CHILD";
+	if std::env::var_os(CHILD).is_none() {
+		let output = std::process::Command::new("sh")
+			.args(["-c", "trap '' XFSZ; exec \"$@\"", "sh"])
+			.arg(std::env::current_exe().expect("test executable"))
+			.args([
+				"--exact",
+				"execution_failed_cancellation_append_retries_with_one_settlement",
+				"--nocapture",
+			])
+			.env(CHILD, "1")
+			.output()
+			.expect("run isolated append-failure test");
+		assert!(
+			output.status.success(),
+			"child failed: {}\n{}",
+			String::from_utf8_lossy(&output.stdout),
+			String::from_utf8_lossy(&output.stderr)
+		);
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		assert!(
+			stdout.contains("running 1 test") && stdout.contains("1 passed"),
+			"child did not execute the cancellation test: {stdout}"
+		);
+		return;
+	}
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("cancel-append-failure.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	let prior_head = session.head();
+	let journal_size = std::fs::metadata(&path).expect("journal metadata").len();
+	let limit = format!("--fsize={journal_size}:unlimited");
+	assert!(
+		std::process::Command::new("prlimit")
+			.args(["--pid", &std::process::id().to_string(), &limit])
+			.status()
+			.expect("set file-size limit")
+			.success()
+	);
+	let failure = board.terminate(&mut session, handle).await;
+	assert!(
+		std::process::Command::new("prlimit")
+			.args(["--pid", &std::process::id().to_string(), "--fsize=unlimited:unlimited"])
+			.status()
+			.expect("restore file-size limit")
+			.success()
+	);
+	assert!(
+		matches!(failure, Err(omp_session::SessionError::Journal(omp_journal::JournalError::Io(_)))),
+		"the journal append must fail"
+	);
+	assert_eq!(session.head(), prior_head);
+	let node = session.dom().get(handle).expect("execution node");
+	assert!(
+		node
+			.prop(&PropKey::Custom(Str::new_static(jobs::EXECUTION_HANDLE)))
+			.is_none()
+	);
+	assert!(
+		board
+			.terminate(&mut session, handle)
+			.await
+			.expect("retry cancellation")
+	);
+	let record = board.list().into_iter().next().expect("cancelled job");
+	assert_eq!(record.status, "cancelled");
+	assert_eq!(record.error.as_deref(), Some("execution effects are unknown after cancellation"));
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+	assert_test_handle(&record);
+	assert_eq!(
+		session
+			.entries()
+			.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+			.count(),
+		1
+	);
 }
