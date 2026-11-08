@@ -113,11 +113,11 @@ async fn attach(
 			let detached = board.detach(record.handle);
 			signal.into_diagnostic()?;
 			// Keep the supervisor alive until it has detached and poll has journaled its result.
-			let _ = board.wait(session, Some(ids.as_slice())).await.into_diagnostic()?;
-			if detached {
-				println!("detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`", journal.display());
-			}
-			return Err(JobsInterrupted.into());
+			let settled = board.wait(session, Some(ids.as_slice())).await.into_diagnostic()?;
+			let Some(settled) = settled else {
+				return Err(miette!("execution job {id} left the session before it settled"));
+			};
+			return report_interrupted(session, &settled, detached, journal);
 		},
 	};
 	let settled = match settled {
@@ -134,6 +134,24 @@ async fn attach(
 	report(session, &settled)
 }
 
+
+fn report_interrupted(
+	session: &Session,
+	record: &JobRecord,
+	detached: bool,
+	journal: &Path,
+) -> miette::Result<()> {
+	let state: Option<&'static str> = record.execution_state.map(Into::into);
+	if detached
+		&& state == Some("effects-unknown")
+		&& !matches!(record.status.as_str(), "completed" | "cancelled")
+	{
+		let id = &record.id;
+		println!("detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`", journal.display());
+		return Err(JobsInterrupted.into());
+	}
+	report(session, record)
+}
 async fn connect_after_validation<T, F, Fut>(
 	session: &Session,
 	board: &JobBoard,
@@ -172,13 +190,13 @@ fn report(session: &Session, record: &JobRecord) -> miette::Result<()> {
 	if record.status == "completed" {
 		return Ok(());
 	}
-	Err(miette!(
-		"{text}: {}",
-		record
-			.error
-			.as_deref()
-			.unwrap_or("no diagnostic was journaled")
-	))
+	if let Some(error) = record.error.as_deref() {
+		Err(miette!("{text}: {error}"))
+	} else if record.execution_result.is_some() || record.execution_failure.is_some() {
+		Err(miette!("{text}"))
+	} else {
+		Err(miette!("{text}: no diagnostic was journaled"))
+	}
 }
 
 #[cfg(test)]
@@ -186,7 +204,7 @@ mod tests {
 	use omp_core::Str;
 	use omp_session::{ComponentRegistry, Session};
 
-	use super::{JobsInterrupted, connect_after_validation, report, run, summary};
+	use super::{JobsInterrupted, connect_after_validation, report, report_interrupted, run, summary};
 	use crate::cli::{JobsArgs, JobsCommand};
 
 	#[tokio::test]
@@ -277,11 +295,9 @@ mod tests {
 			summary(&session, &record).unwrap(),
 			"execution job exec-42: failed (unknown), execution failure: effects-unknown"
 		);
-		assert!(
-			report(&session, &record)
-				.unwrap_err()
-				.to_string()
-				.contains("effects-unknown")
+		assert_eq!(
+			report(&session, &record).unwrap_err().to_string(),
+			"execution job exec-42: failed (unknown), execution failure: effects-unknown"
 		);
 		record.execution_failure = None;
 		record.execution_result = Some(serde_json::value::to_raw_value(&serde_json::json!({
@@ -295,11 +311,33 @@ mod tests {
 			summary(&session, &record).unwrap(),
 			"execution job exec-42: failed (unknown), outcome: Exited { code: 42 }"
 		);
-		assert!(
-			report(&session, &record)
-				.unwrap_err()
-				.to_string()
-				.contains("code: 42")
+		assert_eq!(
+			report(&session, &record).unwrap_err().to_string(),
+			"execution job exec-42: failed (unknown), outcome: Exited { code: 42 }"
+		);
+		let journal = temp.path().join("report.oms");
+		record.execution_state = Some("settled".parse().unwrap());
+		for detached in [false, true] {
+			assert_eq!(
+				report_interrupted(&session, &record, detached, &journal).unwrap_err().to_string(),
+				"execution job exec-42: failed (settled), outcome: Exited { code: 42 }"
+			);
+		}
+		record.status = Str::new_static("completed");
+		assert!(report_interrupted(&session, &record, true, &journal).is_ok());
+		record.status = Str::new_static("failed");
+		record.execution_result = None;
+		record.execution_state = Some("effects-unknown".parse().unwrap());
+		let error = report_interrupted(&session, &record, true, &journal).unwrap_err();
+		assert!(error.downcast_ref::<JobsInterrupted>().is_some());
+		assert_eq!(
+			report_interrupted(&session, &record, false, &journal).unwrap_err().to_string(),
+			"execution job exec-42: failed (effects-unknown): no diagnostic was journaled"
+		);
+		record.error = Some(Str::new_static("backend failed"));
+		assert_eq!(
+			report(&session, &record).unwrap_err().to_string(),
+			"execution job exec-42: failed (effects-unknown): backend failed"
 		);
 	}
 
