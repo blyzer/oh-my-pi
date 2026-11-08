@@ -450,5 +450,13 @@ mod tests {
 			"input-refused".parse::<ExecutionErrorKind>(),
 			Ok(ExecutionErrorKind::InputRefused)
 		);
+		for (kind, name) in [
+			(ExecutionErrorKind::SubmissionUnknown, "submission-unknown"),
+			(ExecutionErrorKind::NotSubmitted, "not-submitted"),
+			(ExecutionErrorKind::InvalidHandle, "invalid-handle"),
+		] {
+			assert_eq!(<&'static str>::from(kind), name);
+			assert_eq!(name.parse::<ExecutionErrorKind>(), Ok(kind));
+		}
 	}
 }

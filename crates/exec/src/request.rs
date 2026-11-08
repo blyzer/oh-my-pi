@@ -4,6 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use omp_adw::Requirement;
 use omp_core::Str;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
@@ -128,7 +129,11 @@ pub struct InputSet {
 }
 
 /// Which outputs a run returns.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// Serializable because an execution job journals the complete spec, which a
+/// reattach needs to read the outputs back.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutputSpec {
 	/// Exit code, timing, and digests only.
 	Metadata,

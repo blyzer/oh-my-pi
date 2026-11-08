@@ -1111,6 +1111,9 @@ async fn accepted_execution_job_idles_until_settlement_without_a_provider_reques
 			backend:     Str::new_static("test"),
 			request:     Str::new_static("cargo test"),
 			output_mode: Str::new_static("logs"),
+			destination: Str::new_static("test"),
+			deadline:    Str::new_static("60001"),
+			approval:    Str::new_static("approval-1"),
 		},
 	)
 	.expect("jobs root");
@@ -1122,6 +1125,10 @@ async fn accepted_execution_job_idles_until_settlement_without_a_provider_reques
 		.into_iter()
 		.next()
 		.expect("execution element");
+	let marked = session.head().expect("insert head");
+	session
+		.patch(omp_session::components::jobs::mark_execution_submitting(marked, handle))
+		.expect("mark submission");
 	let (events_tx, events) = flume::unbounded();
 	assert!(kernel.jobs().attach_execution_run(
 		session.dom(),

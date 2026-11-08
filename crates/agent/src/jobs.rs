@@ -18,9 +18,9 @@ use flume::Receiver;
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_exec::{
-	Artifact, BackendId, Digest, ExecutionError, ExecutionErrorKind, ExecutionEvent,
-	ExecutionResult, ExecutionRun, ExecutionState, FallbackCause, Logs, Outcome, ReattachHandle,
-	Timing, TransferCounts,
+	Artifact, BackendId, Digest, ExecutionBackend, ExecutionError, ExecutionErrorKind,
+	ExecutionEvent, ExecutionRequest, ExecutionResult, ExecutionRun, ExecutionState, FallbackCause,
+	Logs, Outcome, ReattachHandle, Timing, TransferCounts,
 };
 use omp_journal::{
 	EntryId,
@@ -37,7 +37,10 @@ use strum::{Display, EnumString, IntoStaticStr};
 use tokio::{task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream};
+use crate::{
+	approvals::{ApprovalSource, ApprovalTicket, TicketState},
+	dispatch::{Committer, DispatchEvent, DispatchOptions, OutputStream},
+};
 
 /// The four execution shapes represented by the one job primitive.
 #[derive(Clone, Copy, Debug, Deserialize, Display, EnumString, Eq, PartialEq, Serialize)]
@@ -154,6 +157,65 @@ pub struct JobSettlement {
 	pub completion: Option<LaunchDaemonCompletion>,
 	/// Execution-specific accepted handle, result, and typed error.
 	pub execution:  Option<ExecutionSettlement>,
+}
+
+/// Proof that the host approved one execution for one destination.
+///
+/// Only [`AuthorizedExecution::from_ticket`] mints it, and
+/// [`JobBoard::start_execution`] consumes it, so one approval starts at most
+/// one backend run.
+#[derive(Debug)]
+pub struct AuthorizedExecution {
+	ticket:      Str,
+	destination: Str,
+}
+
+impl AuthorizedExecution {
+	/// Mints the proof from `ticket`, the answered prompt for `subject`, for the
+	/// non-secret `destination` that subject names.
+	///
+	/// A withdrawn, denied, timed-out, or unreachable prompt authorizes nothing,
+	/// even when its default fails open, and neither does a prompt that never
+	/// named `subject`.
+	pub fn from_ticket(ticket: &ApprovalTicket, subject: &str, destination: Str) -> Option<Self> {
+		let decision = ticket.decision.as_ref()?;
+		let approved = ticket.state == TicketState::Decided
+			&& decision.approved
+			&& !matches!(decision.source, ApprovalSource::Timeout | ApprovalSource::Unavailable)
+			&& ticket
+				.reasons
+				.iter()
+				.any(|reason| reason.subject.as_str() == subject);
+		approved.then(|| Self { ticket: ticket.ticket_id.clone(), destination })
+	}
+}
+
+/// One approved request for [`JobBoard::start_execution`].
+#[derive(Debug)]
+pub struct ExecutionSubmission {
+	/// Runtime owner journaled on the job.
+	pub owner:    Str,
+	/// Serialized non-secret request identity journaled on the job.
+	pub identity: Str,
+	/// The request `start` receives. Its id becomes the job id.
+	pub request:  ExecutionRequest,
+}
+
+/// Why [`JobBoard::start_execution`] started nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionStartError {
+	/// The session already holds a job with this execution id.
+	#[error("execution job {id} already exists")]
+	Duplicate {
+		/// The execution id already in use.
+		id: Str,
+	},
+	/// The session has no jobs subtree to journal the request in.
+	#[error("session has no jobs subtree")]
+	NoJobs,
+	/// Journaling the request or its submission marker failed.
+	#[error(transparent)]
+	Session(#[from] omp_session::SessionError),
 }
 
 /// Durable fields projected from one `<job>` or `<subagent>` element.
@@ -389,6 +451,13 @@ pub const ORPHANED_SUBAGENT_JOB: &str =
 /// lost.
 pub const ORPHANED_EXECUTION_JOB: &str =
 	"execution job was lost across a rewind or restart; reattach if a handle is available";
+/// Stable diagnostic journaled when `start` fails before the backend returned
+/// a handle. The backend may hold the request, so it is never started again.
+pub const EXECUTION_START_FAILED: &str = "execution start failed; its submission is unknown";
+/// Stable diagnostic journaled when an execution is cancelled before the
+/// backend returned a handle.
+pub const EXECUTION_CANCELLED_BEFORE_ACCEPTANCE: &str =
+	"execution submission is unknown after cancellation";
 
 /// Host state outside the job board derived from the live session's journal,
 /// which outlives that session because the kernel and its environment do.
@@ -629,11 +698,14 @@ impl JobBoard {
 		true
 	}
 
-	/// Attaches a backend-owned execution task to a journalled
+	/// Attaches a backend-owned execution task to a journaled
 	/// `JobKind::Execution` node.
 	///
 	/// The caller must append the node through
-	/// `omp_session::components::jobs::insert_execution` first. This method
+	/// `omp_session::components::jobs::insert_execution` and commit
+	/// `mark_execution_submitting` first. Without that marker this refuses and
+	/// returns false: a unit lost before acceptance would otherwise restart as
+	/// never submitted, although it may have reached the backend. This method
 	/// only installs the disposable cancellation and settlement boundary.
 	pub fn attach_execution_task(
 		&self,
@@ -653,11 +725,22 @@ impl JobBoard {
 		task: JoinHandle<JobSettlement>,
 		accepted: Option<Receiver<ReattachHandle>>,
 	) -> bool {
-		let Some(record) = record(dom, handle) else {
+		let Some(record) = submitted_execution(dom, handle) else {
 			return false;
 		};
+		self.install_execution(record, cancel, task, accepted);
+		true
+	}
+
+	fn install_execution(
+		&self,
+		record: JobRecord,
+		cancel: CancellationToken,
+		task: JoinHandle<JobSettlement>,
+		accepted: Option<Receiver<ReattachHandle>>,
+	) {
 		self.notify_registered(&record);
-		self.jobs.lock().insert(handle, RuntimeJob {
+		self.jobs.lock().insert(record.handle, RuntimeJob {
 			record,
 			cancel,
 			task: Some(task),
@@ -668,13 +751,14 @@ impl JobBoard {
 			recovered: None,
 			orphaned: false,
 		});
-		true
 	}
 
 	/// Attaches a live backend run, supervising it until settlement.
 	///
 	/// Maps terminal [`omp_exec::ExecutionEvent`]s to one durable
-	/// `jobs.settle` patch through [`Self::poll`].
+	/// `jobs.settle` patch through [`Self::poll`]. Like
+	/// [`Self::attach_execution_task`] it refuses a node without the submission
+	/// marker; the refused `run` is dropped, which cancels it.
 	pub fn attach_execution_run<R>(
 		&self,
 		dom: &Dom,
@@ -685,9 +769,77 @@ impl JobBoard {
 	where
 		R: ExecutionRun + 'static,
 	{
+		let Some(record) = submitted_execution(dom, handle) else {
+			return false;
+		};
 		let (accepted_tx, accepted_rx) = flume::bounded(1);
 		let task = tokio::spawn(supervise_execution(run, cancel.clone(), Some(accepted_tx), None));
-		self.attach_execution_task_with_acceptance(dom, handle, cancel, task, Some(accepted_rx))
+		self.install_execution(record, cancel, task, Some(accepted_rx));
+		true
+	}
+
+	/// Journals one approved execution and starts it on `backend`: the producer
+	/// for agent-initiated runs.
+	///
+	/// The `requested` node and then its submission marker are committed before
+	/// anything reaches the backend. A spawned starting owner then calls `start`
+	/// exactly once and supervises the run, so acceptance and settlement reach
+	/// the journal through [`Self::poll`]. Nothing is retried, and nothing falls
+	/// back to another backend.
+	///
+	/// # Errors
+	///
+	/// Refuses a duplicate execution id or a session without a jobs subtree, and
+	/// returns the journal failure when either commit fails. `start` never runs
+	/// in any of these cases.
+	pub fn start_execution<B: ExecutionBackend>(
+		&self,
+		session: &mut Session,
+		authorized: AuthorizedExecution,
+		backend: B,
+		submission: ExecutionSubmission,
+	) -> Result<JobRecord, ExecutionStartError> {
+		use omp_session::components::jobs::{
+			ExecutionSpec, insert_execution, mark_execution_submitting,
+		};
+
+		let ExecutionSubmission { owner, identity, request } = submission;
+		let id = request.id.as_inner().clone();
+		if records(session.dom()).iter().any(|record| record.id == id) {
+			return Err(ExecutionStartError::Duplicate { id });
+		}
+		let started = now_ms();
+		let timeout = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
+		let output_mode =
+			serde_json::to_string(&request.outputs).map_err(omp_session::SessionError::from)?;
+		let cause = session
+			.head()
+			.ok_or(omp_session::SessionError::NoActiveTurn)?;
+		let insert = insert_execution(session.dom(), cause, ExecutionSpec {
+			id: id.clone(),
+			owner,
+			started: Str::new(started.to_string()),
+			backend: Str::new(backend.id().as_str()),
+			request: identity,
+			output_mode: Str::new(output_mode),
+			destination: authorized.destination,
+			deadline: Str::new(started.saturating_add(timeout).to_string()),
+			approval: authorized.ticket,
+		})
+		.ok_or(ExecutionStartError::NoJobs)?;
+		let inserted = session.patch(insert)?;
+		let handle = records(session.dom())
+			.into_iter()
+			.find(|record| record.id == id)
+			.ok_or(ExecutionStartError::NoJobs)?
+			.handle;
+		session.patch(mark_execution_submitting(inserted, handle))?;
+		let record = submitted_execution(session.dom(), handle).ok_or(ExecutionStartError::NoJobs)?;
+		let cancel = CancellationToken::new();
+		let (accepted_tx, accepted_rx) = flume::bounded(1);
+		let task = tokio::spawn(start_execution_run(backend, request, cancel.clone(), accepted_tx));
+		self.install_execution(record.clone(), cancel, task, Some(accepted_rx));
+		Ok(record)
 	}
 
 	/// Rebuilds the index after open or rewind. The DOM is the source of truth.
@@ -1235,6 +1387,14 @@ async fn terminate_runtime(job: &mut RuntimeJob) -> JobSettlement {
 			}),
 		};
 	}
+	if job.record.kind == JobKind::Execution && job.accepted.is_some() {
+		// A supervised run means `start` ran, so the backend may hold the request.
+		return submission_unknown(
+			"cancelled",
+			EXECUTION_CANCELLED_BEFORE_ACCEPTANCE,
+			ExecutionError::SubmissionUnknown,
+		);
+	}
 	JobSettlement {
 		status:     Str::new_static("cancelled"),
 		output:     None,
@@ -1242,6 +1402,64 @@ async fn terminate_runtime(job: &mut RuntimeJob) -> JobSettlement {
 		completion: None,
 		execution:  None,
 	}
+}
+
+/// Starting owner of a produced execution: calls `start` exactly once, then
+/// supervises the run it returns.
+///
+/// Nothing before a handle is retried. The backend may hold the request, so a
+/// failed or cancelled start settles `SubmissionUnknown` and never invents a
+/// handle.
+async fn start_execution_run<B: ExecutionBackend>(
+	backend: B,
+	request: ExecutionRequest,
+	cancel: CancellationToken,
+	accepted_tx: flume::Sender<ReattachHandle>,
+) -> JobSettlement {
+	let started = tokio::select! {
+		started = backend.start(request) => started,
+		() = cancel.cancelled() => {
+			return submission_unknown(
+				"cancelled",
+				EXECUTION_CANCELLED_BEFORE_ACCEPTANCE,
+				ExecutionError::SubmissionUnknown,
+			);
+		},
+	};
+	match started {
+		Ok(run) => supervise_execution(run, cancel, Some(accepted_tx), None).await,
+		Err(error) => submission_unknown("failed", EXECUTION_START_FAILED, error),
+	}
+}
+
+/// Settlement of an execution that may have reached the backend before any
+/// handle existed: never retried, and never given an invented handle.
+const fn submission_unknown(
+	status: &'static str,
+	message: &'static str,
+	error: ExecutionError,
+) -> JobSettlement {
+	JobSettlement {
+		status:     Str::new_static(status),
+		output:     None,
+		error:      Some(Str::new_static(message)),
+		completion: None,
+		execution:  Some(ExecutionSettlement {
+			state:  ExecutionState::SubmissionUnknown,
+			handle: None,
+			result: None,
+			error:  Some(error),
+		}),
+	}
+}
+
+/// The record of an execution job whose submission marker is journaled. Only
+/// such a job may own a live unit.
+fn submitted_execution(dom: &Dom, handle: Handle) -> Option<JobRecord> {
+	let marker =
+		PropKey::Custom(Str::new_static(omp_session::components::jobs::EXECUTION_SUBMISSION_STARTED));
+	dom.get(handle)?.prop(&marker)?;
+	record(dom, handle)
 }
 
 async fn supervise_execution<R: ExecutionRun>(
@@ -1284,7 +1502,9 @@ async fn supervise_execution<R: ExecutionRun>(
 							 ExecutionError::EffectsUnknown { handle } => {
 								 (ExecutionState::EffectsUnknown, Some(handle.clone()))
 							 },
-							 _ => (ExecutionState::Settled, accepted),
+							 _ if accepted.is_some() => (ExecutionState::Settled, accepted),
+							 // No handle yet: the backend may hold the request.
+							 _ => (ExecutionState::SubmissionUnknown, None),
 						 };
 							 return JobSettlement {
 								  status: Str::new_static("failed"),
@@ -1312,9 +1532,9 @@ async fn supervise_execution<R: ExecutionRun>(
 										)
 								  },
 								  None => (
-										ExecutionState::Settled,
+										ExecutionState::SubmissionUnknown,
 										None,
-										None,
+										Some(ExecutionError::SubmissionUnknown),
 										Str::new_static("execution run ended without a result"),
 								  ),
 							 };
@@ -1336,13 +1556,11 @@ async fn supervise_execution<R: ExecutionRun>(
 			 _ = cancel.cancelled() => {
 				  let _ = run.cancel().await;
 				  let Some(handle) = accepted else {
-						return JobSettlement {
-							 status: Str::new_static("cancelled"),
-							 output: None,
-							 error: None,
-							 completion: None,
-							 execution: None,
-						};
+						return submission_unknown(
+							 "cancelled",
+							 EXECUTION_CANCELLED_BEFORE_ACCEPTANCE,
+							 ExecutionError::SubmissionUnknown,
+						);
 				  };
 				  let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
 				  return JobSettlement {
@@ -1955,6 +2173,33 @@ mod tests {
 		assert!(matches!(execution.error, Some(ExecutionError::ResumeUnsupported { .. })));
 	}
 
+	#[tokio::test]
+	async fn outcomes_before_acceptance_are_submission_unknown() {
+		let lost = TestRun { events: VecDeque::from([None]) };
+		let failed = TestRun {
+			events: VecDeque::from([Some(ExecutionEvent::Settled(Err(ExecutionError::Capacity {
+				backend: BackendId::new_static("test"),
+			})))]),
+		};
+		for (run, kind) in [
+			(lost, omp_exec::ExecutionErrorKind::SubmissionUnknown),
+			(failed, omp_exec::ExecutionErrorKind::Capacity),
+		] {
+			let settlement = supervise_execution(run, CancellationToken::new(), None, None).await;
+			assert_eq!(settlement.status, "failed");
+			let execution = settlement.execution.expect("execution settlement");
+			assert_eq!(execution.state, ExecutionState::SubmissionUnknown);
+			assert_eq!(execution.handle, None);
+			assert_eq!(
+				execution
+					.error
+					.as_ref()
+					.map(omp_exec::ExecutionErrorKind::from),
+				Some(kind)
+			);
+		}
+	}
+
 	#[cfg(target_os = "linux")]
 	#[tokio::test]
 	async fn failed_acceptance_commit_retains_private_state_until_retry() {
@@ -2000,10 +2245,12 @@ mod tests {
 			backend:     Str::new_static("test"),
 			request:     Str::new_static("cargo test"),
 			output_mode: Str::new_static("logs"),
+			destination: Str::new_static("test"),
+			deadline:    Str::new_static("2"),
+			approval:    Str::new_static("approval-1"),
 		})
 		.expect("jobs root");
 		session.patch(txn).expect("insert execution");
-		let inserted = session.head().expect("insert head");
 		let handle = session
 			.dom()
 			.select("jobs job[id=execution]")
@@ -2011,6 +2258,11 @@ mod tests {
 			.into_iter()
 			.next()
 			.expect("execution node");
+		let cause = session.head().expect("insert head");
+		session
+			.patch(jobs::mark_execution_submitting(cause, handle))
+			.expect("mark submission");
+		let inserted = session.head().expect("marker head");
 		let accepted = ReattachHandle::new(
 			BackendId::new_static("test"),
 			Str::new_static("operation"),

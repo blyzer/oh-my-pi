@@ -619,11 +619,25 @@ struct ExecutionTestBackend {
 	events:       flume::Receiver<omp_exec::ExecutionEvent>,
 	counts:       Arc<ExecutionTestCounts>,
 	stall_cancel: bool,
+	start:        TestStart,
+}
+
+/// What the fake `start` does after counting the call.
+#[derive(Clone)]
+enum TestStart {
+	/// Returns a run that streams the scripted events.
+	Run,
+	/// Never returns, as if the process died while `start` ran.
+	Stall,
+	/// Fails before the backend returned a handle.
+	Fail(omp_exec::ExecutionError),
 }
 
 #[derive(Default)]
 struct ExecutionTestCounts {
-	cancels: AtomicUsize,
+	starts:     AtomicUsize,
+	reattaches: AtomicUsize,
+	cancels:    AtomicUsize,
 }
 
 struct ExecutionTestRun {
@@ -666,6 +680,7 @@ fn execution_test_backend(
 			events,
 			counts: Arc::default(),
 			stall_cancel,
+			start: TestStart::Run,
 		},
 		sender,
 	)
@@ -686,20 +701,27 @@ impl omp_exec::ExecutionBackend for ExecutionTestBackend {
 		&self,
 		request: omp_exec::ExecutionRequest,
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
+		self.counts.starts.fetch_add(1, Ordering::SeqCst);
 		assert_eq!(request.id, omp_exec::ExecutionId::new_static("exec-42"));
 		assert_eq!(request.outputs, omp_exec::OutputSpec::Logs);
-		Ok(ExecutionTestRun {
-			handle:       execution_test_handle(),
-			events:       self.events.clone(),
-			counts:       Arc::clone(&self.counts),
-			stall_cancel: self.stall_cancel,
-		})
+		match &self.start {
+			TestStart::Run => Ok(ExecutionTestRun {
+				handle:       execution_test_handle(),
+				events:       self.events.clone(),
+				counts:       Arc::clone(&self.counts),
+				stall_cancel: self.stall_cancel,
+			}),
+			TestStart::Stall => std::future::pending().await,
+			TestStart::Fail(error) => Err(error.clone()),
+		}
 	}
 
 	async fn reattach(
 		&self,
 		_handle: omp_exec::ReattachHandle,
+		_context: omp_exec::ReattachContext,
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
+		self.counts.reattaches.fetch_add(1, Ordering::SeqCst);
 		Err(omp_exec::ExecutionError::ResumeUnsupported { backend: self.id.clone() })
 	}
 }
@@ -746,7 +768,16 @@ fn execution_test_request() -> omp_exec::ExecutionRequest {
 	}
 }
 
+/// Inserts the execution job and commits its submission marker: the shape the
+/// producer leaves just before `start`.
 fn insert_test_execution(session: &mut Session) -> omp_dom::Handle {
+	let handle = insert_requested_test_execution(session);
+	mark_test_submission(session, handle);
+	handle
+}
+
+/// Inserts the execution job as `requested`, before any submission marker.
+fn insert_requested_test_execution(session: &mut Session) -> omp_dom::Handle {
 	let head = session.head().expect("genesis head");
 	let txn = jobs::insert_execution(session.dom(), head, jobs::ExecutionSpec {
 		id:          Str::new_static("exec-42"),
@@ -755,6 +786,9 @@ fn insert_test_execution(session: &mut Session) -> omp_dom::Handle {
 		backend:     Str::new_static("fake@build.example:443/test"),
 		request:     Str::new_static(r#"{"recipe":"cargo test"}"#),
 		output_mode: Str::new_static("logs"),
+		destination: Str::new_static(TEST_DESTINATION),
+		deadline:    Str::new_static("60001"),
+		approval:    Str::new_static("approval-1"),
 	})
 	.expect("jobs root");
 	session.patch(txn).expect("insert execution");
@@ -1274,7 +1308,7 @@ async fn execution_t4_restart_after_acceptance_settles_effects_unknown_once() {
 	let temp = tempdir().expect("temporary session directory");
 	let path = temp.path().join("accepted-restart.oms");
 	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
-	let handle = insert_test_execution(&mut session);
+	let handle = insert_requested_test_execution(&mut session);
 	mark_test_submission(&mut session, handle);
 	let board = JobBoard::new();
 	let (backend, events) = execution_test_backend(false);
@@ -1331,7 +1365,7 @@ async fn execution_t5_restart_distinguishes_submitting_from_never_submitted() {
 		let path = temp.path().join("submission-restart.oms");
 		let mut session =
 			Session::create(&path, ComponentRegistry::standard()).expect("create session");
-		let handle = insert_test_execution(&mut session);
+		let handle = insert_requested_test_execution(&mut session);
 		let board = JobBoard::new();
 		let (backend, _events) = execution_test_backend(false);
 		if submitted {
@@ -1557,5 +1591,412 @@ async fn execution_t9_spilled_typed_result_resolves_after_reopen() {
 	assert_eq!(
 		omp_agent::resolve_execution_result(&session, raw).expect("decode result"),
 		Some(expected)
+	);
+}
+
+const TEST_SUBJECT: &str = "build.example";
+const TEST_DESTINATION: &str = r#"{"backend":"fake@build.example:443/test","endpoint":"grpcs://build.example:443","instance":"test"}"#;
+
+fn test_ticket(decision: Option<omp_agent::ApprovalDecision>) -> omp_agent::ApprovalTicket {
+	omp_agent::ApprovalTicket {
+		ticket_id: Str::new_static("approval-1"),
+		invocation_id: None,
+		reasons: vec![omp_agent::ApprovalSpec {
+			title:         Str::new_static("Run cargo test remotely"),
+			body:          Str::new_static("cargo test uploads the working tree to build.example."),
+			subject:       Str::new_static(TEST_SUBJECT),
+			kind:          Str::new_static("network"),
+			scopes:        vec![Str::new_static("once")],
+			default:       None,
+			route:         Str::new_static("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   Str::new_static("deny"),
+			require_human: false,
+			pattern:       None,
+			evidence:      Vec::new(),
+		}],
+		state: if decision.is_some() {
+			omp_agent::TicketState::Decided
+		} else {
+			omp_agent::TicketState::Withdrawn
+		},
+		decision,
+		created_at_ms: 1,
+	}
+}
+
+fn test_decision(
+	approved: bool,
+	source: omp_agent::ApprovalSource,
+) -> Option<omp_agent::ApprovalDecision> {
+	Some(omp_agent::ApprovalDecision {
+		approved,
+		scope: omp_agent::ApprovalScope::Once,
+		source,
+		decided_by: None,
+		reason: None,
+		audited: approved,
+	})
+}
+
+fn authorized_test_execution() -> omp_agent::AuthorizedExecution {
+	omp_agent::AuthorizedExecution::from_ticket(
+		&test_ticket(test_decision(true, omp_agent::ApprovalSource::User)),
+		TEST_SUBJECT,
+		Str::new_static(TEST_DESTINATION),
+	)
+	.expect("approved ticket")
+}
+
+fn test_submission() -> omp_agent::ExecutionSubmission {
+	omp_agent::ExecutionSubmission {
+		owner:    Str::new_static("Main"),
+		identity: Str::new_static(r#"{"recipe":"cargo test"}"#),
+		request:  execution_test_request(),
+	}
+}
+
+fn start_test_execution(
+	session: &mut Session,
+	board: &JobBoard,
+	backend: &ExecutionTestBackend,
+) -> omp_agent::JobRecord {
+	board
+		.start_execution(session, authorized_test_execution(), backend.clone(), test_submission())
+		.expect("start execution")
+}
+
+async fn wait_for_test_start(backend: &ExecutionTestBackend) {
+	tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		while backend.counts.starts.load(Ordering::SeqCst) == 0 {
+			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		}
+	})
+	.await
+	.expect("the starting owner calls start");
+}
+
+/// Backend calls so far: (start, reattach).
+fn test_calls(backend: &ExecutionTestBackend) -> (usize, usize) {
+	(backend.counts.starts.load(Ordering::SeqCst), backend.counts.reattaches.load(Ordering::SeqCst))
+}
+
+fn settle_entries(session: &Session) -> usize {
+	session
+		.entries()
+		.filter(|entry| entry.label.as_deref() == Some("jobs.settle"))
+		.count()
+}
+
+/// T1 approval stub: only an approved answer naming the destination's subject
+/// mints the proof the producer requires, and that proof starts one run.
+#[tokio::test]
+async fn execution_t1_only_an_approved_ticket_starts_one_run() {
+	use omp_agent::{ApprovalSource, AuthorizedExecution};
+
+	let refused = [
+		("withdrawn", test_ticket(None), TEST_SUBJECT),
+		("denied", test_ticket(test_decision(false, ApprovalSource::User)), TEST_SUBJECT),
+		("timed out", test_ticket(test_decision(true, ApprovalSource::Timeout)), TEST_SUBJECT),
+		("unreachable", test_ticket(test_decision(true, ApprovalSource::Unavailable)), TEST_SUBJECT),
+		("other host", test_ticket(test_decision(true, ApprovalSource::User)), "other.example"),
+	];
+	for (case, ticket, subject) in &refused {
+		assert!(
+			AuthorizedExecution::from_ticket(ticket, subject, Str::new_static(TEST_DESTINATION))
+				.is_none(),
+			"{case} must not authorize a run"
+		);
+	}
+
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("approved.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let board = JobBoard::new();
+	let (backend, _events) = execution_test_backend(false);
+	assert_eq!(test_calls(&backend), (0, 0));
+	let record = start_test_execution(&mut session, &board, &backend);
+	wait_for_test_start(&backend).await;
+	assert_eq!(record.id, "exec-42");
+	assert_eq!(record.status, "running");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Requested));
+	let node = session.dom().get(record.handle).expect("execution node");
+	let custom = |key: &'static str| {
+		node
+			.prop(&PropKey::Custom(Str::new_static(key)))
+			.and_then(Value::as_str)
+	};
+	assert!(matches!(
+		node.prop(&PropKey::Custom(Str::new_static(jobs::EXECUTION_SUBMISSION_STARTED))),
+		Some(Value::Bool(true))
+	));
+	assert_eq!(custom("owner"), Some("Main"));
+	assert_eq!(custom(jobs::EXECUTION_BACKEND), Some("fake@build.example:443/test"));
+	assert_eq!(custom(jobs::EXECUTION_REQUEST), Some(r#"{"recipe":"cargo test"}"#));
+	assert_eq!(custom(jobs::EXECUTION_OUTPUT_MODE), Some(r#""logs""#));
+	assert_eq!(custom(jobs::EXECUTION_DESTINATION), Some(TEST_DESTINATION));
+	assert_eq!(custom(jobs::EXECUTION_APPROVAL), Some("approval-1"));
+	let millis = |key| {
+		custom(key)
+			.and_then(|value| value.parse::<u64>().ok())
+			.expect("timestamp")
+	};
+	assert_eq!(millis(jobs::EXECUTION_DEADLINE) - millis("started"), 60_000);
+
+	let duplicate = board.start_execution(
+		&mut session,
+		authorized_test_execution(),
+		backend.clone(),
+		test_submission(),
+	);
+	assert!(matches!(
+		duplicate,
+		Err(omp_agent::ExecutionStartError::Duplicate { id }) if id == "exec-42"
+	));
+	tokio::task::yield_now().await;
+	assert_eq!(test_calls(&backend), (1, 0));
+	assert!(
+		board
+			.terminate(&mut session, record.handle)
+			.await
+			.expect("stop test run")
+	);
+}
+
+/// T5: a crash after the submission marker and before any handle settles
+/// `SubmissionUnknown` from the journal alone, and a restart never starts the
+/// request again.
+#[tokio::test]
+async fn execution_t5_crash_after_the_marker_is_submission_unknown_without_retry() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("submitting.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let board = JobBoard::new();
+	let (mut backend, _events) = execution_test_backend(false);
+	backend.start = TestStart::Stall;
+	start_test_execution(&mut session, &board, &backend);
+	wait_for_test_start(&backend).await;
+	drop(board);
+	drop(session);
+
+	let mut session =
+		Session::open(&path, ComponentRegistry::standard()).expect("reopen submitting job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.poll(&mut session).expect("settle orphan").remove(0);
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::SubmissionUnknown));
+	assert_eq!(record.reattach_handle, None);
+	let settled = session.head();
+	board.poll(&mut session).expect("poll settled job");
+	assert_eq!(session.head(), settled);
+	assert_eq!(test_calls(&backend), (1, 0));
+}
+
+/// T5: `start` failing before any handle settles `SubmissionUnknown` with the
+/// typed failure, and neither the live board nor a restart retries it.
+#[tokio::test]
+async fn execution_t5_start_failure_is_submission_unknown_without_retry() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("start-failure.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let board = JobBoard::new();
+	let (mut backend, _events) = execution_test_backend(false);
+	backend.start =
+		TestStart::Fail(omp_exec::ExecutionError::Capacity { backend: backend.id.clone() });
+	start_test_execution(&mut session, &board, &backend);
+	let record = tokio::time::timeout(
+		std::time::Duration::from_secs(5),
+		board.wait(&mut session, Some(&[Str::new_static("exec-42")])),
+	)
+	.await
+	.expect("settlement deadline")
+	.expect("settlement commit")
+	.expect("settled job");
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.error.as_deref(), Some(omp_agent::EXECUTION_START_FAILED));
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::Capacity));
+	assert_eq!(record.reattach_handle, None);
+	let settled = session.head();
+	drop(board);
+	drop(session);
+
+	let mut session =
+		Session::open(&path, ComponentRegistry::standard()).expect("reopen failed job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board
+		.poll(&mut session)
+		.expect("poll settled job")
+		.remove(0);
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
+	assert_eq!(session.head(), settled);
+	assert_eq!(test_calls(&backend), (1, 0));
+}
+
+/// Terminating before any handle settles `SubmissionUnknown`: during `start`,
+/// after `start` with a prompt cancel, and after `start` with a cancel that
+/// stalls past the grace period.
+#[tokio::test]
+async fn execution_terminate_before_acceptance_never_invents_a_handle() {
+	for (start, stall_cancel, cancels) in
+		[(TestStart::Stall, false, 0), (TestStart::Run, false, 1), (TestStart::Run, true, 1)]
+	{
+		let temp = tempdir().expect("temporary session directory");
+		let path = temp.path().join("cancelled-before-acceptance.oms");
+		let mut session =
+			Session::create(&path, ComponentRegistry::standard()).expect("create session");
+		let board = JobBoard::new();
+		let (mut backend, _events) = execution_test_backend(stall_cancel);
+		backend.start = start;
+		let record = start_test_execution(&mut session, &board, &backend);
+		wait_for_test_start(&backend).await;
+		assert!(
+			tokio::time::timeout(
+				std::time::Duration::from_secs(5),
+				board.terminate(&mut session, record.handle),
+			)
+			.await
+			.expect("termination deadline")
+			.expect("commit cancellation")
+		);
+		let record = board.list().into_iter().next().expect("cancelled job");
+		assert_eq!(record.status, "cancelled");
+		assert_eq!(record.error.as_deref(), Some(omp_agent::EXECUTION_CANCELLED_BEFORE_ACCEPTANCE));
+		assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::SubmissionUnknown));
+		assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::SubmissionUnknown));
+		assert_eq!(record.reattach_handle, None);
+		assert_eq!(test_calls(&backend), (1, 0));
+		assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), cancels);
+	}
+}
+
+/// T7 through the producer: a literal success and a typed failure each settle
+/// once and read back typed after reopen, with one `start` per job.
+#[tokio::test]
+async fn execution_t7_produced_results_and_failures_survive_reopen() {
+	for failure in [None, Some(omp_exec::ExecutionErrorKind::Capacity)] {
+		let temp = tempdir().expect("temporary session directory");
+		let path = temp.path().join("produced.oms");
+		let mut session =
+			Session::create(&path, ComponentRegistry::standard()).expect("create session");
+		let board = JobBoard::new();
+		let (backend, events) = execution_test_backend(false);
+		start_test_execution(&mut session, &board, &backend);
+		wait_for_test_acceptance(&board, &events).await;
+		board.poll(&mut session).expect("commit acceptance");
+		let expected = execution_test_result(0);
+		let settled = match failure {
+			None => Ok(expected.clone()),
+			Some(_) => Err(omp_exec::ExecutionError::Capacity { backend: backend.id.clone() }),
+		};
+		events
+			.send(omp_exec::ExecutionEvent::Settled(settled))
+			.expect("send settlement");
+		tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			board.wait(&mut session, Some(&[Str::new_static("exec-42")])),
+		)
+		.await
+		.expect("settlement deadline")
+		.expect("settlement commit")
+		.expect("settled job");
+		drop(board);
+		drop(session);
+
+		let mut session =
+			Session::open(&path, ComponentRegistry::standard()).expect("reopen settled job");
+		let board = JobBoard::new();
+		board.rebuild(&session);
+		let settled_head = session.head();
+		let record = board
+			.poll(&mut session)
+			.expect("poll settled job")
+			.remove(0);
+		assert_eq!(session.head(), settled_head);
+		assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Settled));
+		assert_eq!(record.execution_failure, failure);
+		assert_test_handle(&record);
+		if failure.is_none() {
+			assert_eq!(record.status, "completed");
+			let raw = record.execution_result.as_deref().expect("durable result");
+			assert_eq!(
+				omp_agent::resolve_execution_result(&session, raw).expect("decode result"),
+				Some(expected)
+			);
+		} else {
+			assert_eq!(record.status, "failed");
+			assert!(record.execution_result.is_none());
+		}
+		assert_eq!(test_calls(&backend), (1, 0));
+	}
+}
+
+/// A restart after acceptance never calls `start` again: the journal alone
+/// settles the job `EffectsUnknown` with the accepted handle, once.
+#[tokio::test]
+async fn execution_produced_restart_after_acceptance_never_starts_again() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("produced-accepted.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	start_test_execution(&mut session, &board, &backend);
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	assert_eq!(settle_entries(&session), 1);
+	drop(board);
+	drop(session);
+
+	for _ in 0..2 {
+		let mut session =
+			Session::open(&path, ComponentRegistry::standard()).expect("reopen accepted job");
+		let board = JobBoard::new();
+		board.rebuild(&session);
+		let record = board.poll(&mut session).expect("settle orphan").remove(0);
+		assert_eq!(record.status, "failed");
+		assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+		assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+		assert_test_handle(&record);
+		assert_eq!(settle_entries(&session), 2, "acceptance and one orphan settlement");
+	}
+	assert_eq!(test_calls(&backend), (1, 0));
+}
+
+/// A run attaches only after its submission marker is journaled: a run lost
+/// before acceptance would otherwise restart as never submitted.
+#[tokio::test]
+async fn execution_attach_without_submission_marker_is_refused() {
+	use omp_exec::ExecutionBackend;
+
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("unmarked.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_requested_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, _events) = execution_test_backend(false);
+	let run = backend
+		.start(execution_test_request())
+		.await
+		.expect("start execution");
+	assert!(!board.attach_execution_run(
+		session.dom(),
+		handle,
+		tokio_util::sync::CancellationToken::new(),
+		run
+	));
+	assert!(board.list().is_empty());
+	mark_test_submission(&mut session, handle);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	assert_eq!(board.list().len(), 1);
+	assert!(
+		board
+			.terminate(&mut session, handle)
+			.await
+			.expect("stop test run")
 	);
 }

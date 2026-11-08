@@ -1598,6 +1598,9 @@ fn execution_submission_marker_and_reattach_handle_survive_reopen() {
 		backend:     Str::new_static("fake@build.example:443/test"),
 		request:     Str::new_static(r#"{"recipe":"cargo test"}"#),
 		output_mode: Str::new_static("logs"),
+		destination: Str::new_static(r#"{"endpoint":"grpcs://build.example:443"}"#),
+		deadline:    Str::new_static("60001"),
+		approval:    Str::new_static("approval-1"),
 	})
 	.expect("jobs root");
 	session.patch(insert).expect("insert execution");
@@ -1644,4 +1647,15 @@ fn execution_submission_marker_and_reattach_handle_survive_reopen() {
 		execution_prop(&session, handle, jobs::EXECUTION_BACKEND).and_then(Value::as_str),
 		Some("fake@build.example:443/test")
 	);
+	for (key, value) in [
+		(jobs::EXECUTION_DESTINATION, r#"{"endpoint":"grpcs://build.example:443"}"#),
+		(jobs::EXECUTION_DEADLINE, "60001"),
+		(jobs::EXECUTION_APPROVAL, "approval-1"),
+	] {
+		assert_eq!(
+			execution_prop(&session, handle, key).and_then(Value::as_str),
+			Some(value),
+			"{key}"
+		);
+	}
 }
