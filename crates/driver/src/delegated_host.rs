@@ -7,7 +7,7 @@
 //! It carries only `flags: archive` — **no** `PROJECT` flag — so a project cfg
 //! overlay cannot change it. The con engine rejects any attempt with
 //! [`omp_con::ConError::ProjectVarDenied`], the same enforcement that protects
-//! every `sv_exec_remote_*` variable in `adw/remote.rs`.
+//! every `sv_exec_remote_*` variable in `exec_composer.rs`.
 //!
 //! There is deliberately no operator-supplied argument list: each executor
 //! passes exactly the arguments its protocol needs, so an operator cannot add a

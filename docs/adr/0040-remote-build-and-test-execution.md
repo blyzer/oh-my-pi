@@ -1145,10 +1145,10 @@ Composed into a product path (Part L Slice 1 and the Slice 2 local path):
   `crates/driver/src/cleanse/production.rs:run_checker` compose `LocalBackend`. `run_checker` is
   the one product caller of `place`. It offers no backend, so the call can only refuse an
   unplaceable request, and every admitted checker runs locally.
-- Operator convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`,
-  `sv_exec_remote_endpoint`, `sv_exec_remote_cache`, `sv_exec_remote_profile`,
-  `sv_exec_remote_credential`, `sv_exec_remote_image`, `sv_exec_upload_exclude`,
-  `sv_exec_upload_allow`, `sv_exec_fallback_local`.
+- Operator convars in `crates/driver/src/exec_composer.rs`: `sv_exec_remote_endpoint`,
+  `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`,
+  `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`. ADW placement
+  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`.
 - Telemetry. The `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`,
   `omp.exec.run` and `omp.exec.download` spans are emitted. `ExecutedActionMetadata` fields are
   captured in `omp.exec.worker.*` tracing events (PR #351).
