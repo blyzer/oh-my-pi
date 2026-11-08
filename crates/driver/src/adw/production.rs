@@ -37,13 +37,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	AdwHost, PhaseResult, PhaseSpec,
-	remote::{
-		AdwExecPolicy, REMOTE_POSTURE, RemoteError, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY, eligible,
-	},
+	remote::{AdwExecPolicy, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY, eligible},
 };
 use crate::{
 	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
+	exec_composer::{REMOTE_POSTURE, RemoteError},
 	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
 	workspace_trust::WorkspaceTrustSource,
 };

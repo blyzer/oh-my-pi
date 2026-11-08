@@ -14,6 +14,7 @@ pub mod compress;
 pub mod control_visibility;
 pub mod delegated_prompt;
 pub mod discovery;
+pub mod exec_composer;
 pub mod ext_updates;
 pub mod headless;
 pub mod keybindings;
