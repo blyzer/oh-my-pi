@@ -476,10 +476,11 @@ where
 		.map_err(|_| unknown())?;
 		let mut execution = self.inner.clients.execution.clone();
 		let remaining = context.remaining_deadline.saturating_sub(started.elapsed());
-		let stream = tokio::time::timeout(remaining, execution.wait_execution(request))
-			.await
-			.map_err(|_| unknown())?
-			.map_err(|_| unknown())?;
+		let stream =
+			tokio::time::timeout(remaining.max(REATTACH_RPC_FLOOR), execution.wait_execution(request))
+				.await
+				.map_err(|_| unknown())?
+				.map_err(|_| unknown())?;
 		let mut run = ReapiRun::new(
 			self.clone(),
 			stream.into_inner(),
@@ -810,6 +811,26 @@ fn emit_action_metadata(meta: &wire::ExecutedActionMetadata) {
 	);
 }
 
+/// Floor for the initial `WaitExecution` RPC on reattach.
+///
+/// A caller may reattach with a zero or already-expired deadline, for example
+/// after the process was down past the action timeout. The server may still
+/// hold a finished operation, so one bounded attempt to reach it beats
+/// declaring the effects unknown without asking.
+const REATTACH_RPC_FLOOR: Duration = Duration::from_secs(1);
+
+/// Extra time to keep watching past the action timeout.
+///
+/// The server applies the action timeout to execution only. Queueing before
+/// it and teardown and output upload after it delay the terminal
+/// `DEADLINE_EXCEEDED` operation. Watching for the timeout plus this grace
+/// lets that operation settle as a typed `TimedOut` instead of
+/// `EffectsUnknown`. The first read after reattach is bounded by the deadline
+/// plus this grace, so it also serves as the first-read floor.
+const WATCH_GRACE: Duration = Duration::from_secs(30);
+
+const _: () = assert!(WATCH_GRACE.as_nanos() >= REATTACH_RPC_FLOOR.as_nanos());
+
 enum RunState {
 	Waiting,
 	Accepted { handle: ReattachHandle },
@@ -827,6 +848,7 @@ pub struct ReapiRun<S> {
 	state:            RunState,
 	pending_terminal: Option<longrunning::Operation>,
 	timeout:          Duration,
+	watch_grace:      Duration,
 	started:          tokio::time::Instant,
 }
 
@@ -852,6 +874,7 @@ where
 			state: RunState::Waiting,
 			pending_terminal: None,
 			timeout,
+			watch_grace: WATCH_GRACE,
 			started,
 		}
 	}
@@ -975,7 +998,7 @@ where
 					wire_status(error, self.backend.inner.credential.as_ref()),
 					Phase::Execute,
 					&self.backend.inner.id,
-					Duration::from_secs(30),
+					self.timeout,
 					None,
 				)));
 			},
@@ -994,7 +1017,7 @@ where
 				wire_status(status, self.backend.inner.credential.as_ref()),
 				Phase::Execute,
 				&self.backend.inner.id,
-				Duration::from_secs(30),
+				self.timeout,
 				None,
 			)));
 		}
@@ -1077,7 +1100,8 @@ where
 			let event = if let Some(operation) = self.pending_terminal.take() {
 				Some(self.settle(operation).await)
 			} else {
-				let remaining = self.timeout.saturating_sub(self.started.elapsed());
+				let remaining =
+					(self.timeout + self.watch_grace).saturating_sub(self.started.elapsed());
 				match tokio::time::timeout(remaining, self.next()).await {
 					Ok(event) => event,
 					Err(_) => {
@@ -1237,6 +1261,7 @@ mod tests {
 		nonzero:       bool,
 		fault:         Option<Code>,
 		hold_execute:  bool,
+		execute_tail:  Option<Tail>,
 		wait_behavior: WaitBehavior,
 		wait_calls:    Arc<AtomicUsize>,
 	}
@@ -1250,6 +1275,15 @@ mod tests {
 		RpcPending,
 		Malformed,
 		BackendFailure,
+		StreamError(Code),
+	}
+
+	/// What the fake `Execute` stream yields after its first operation.
+	#[derive(Clone, Copy)]
+	enum Tail {
+		Renamed,
+		Error(Code),
+		DeadlineAfter(Duration),
 	}
 
 	/// The wire stream the fake `Execution` service yields.
@@ -1264,12 +1298,37 @@ mod tests {
 			if let Some(code) = self.fault {
 				return Err(Status::new(code, "injected REAPI fault"));
 			}
-			let operation = operation(self.reconnect.then_some(false), self.nonzero);
-			let stream = futures::stream::iter([Ok(operation)]);
+			let first =
+				futures::stream::iter([Ok(operation(self.reconnect.then_some(false), self.nonzero))]);
+			let stream: ExecStream = match self.execute_tail {
+				None => Box::pin(first),
+				Some(Tail::Renamed) => {
+					let mut renamed = operation(Some(true), self.nonzero);
+					renamed.name = "operations/other".to_owned();
+					Box::pin(first.chain(futures::stream::iter([Ok(renamed)])))
+				},
+				Some(Tail::Error(code)) => Box::pin(
+					first
+						.chain(futures::stream::iter([Err(Status::new(code, "injected stream fault"))])),
+				),
+				Some(Tail::DeadlineAfter(delay)) => {
+					let mut expired = operation(Some(true), false);
+					expired.result =
+						Some(longrunning::operation::Result::Error(crate::proto::google::rpc::Status {
+							code:    Code::DeadlineExceeded as i32,
+							message: "action timed out".to_owned(),
+							details: Vec::new(),
+						}));
+					Box::pin(first.chain(futures::stream::once(async move {
+						tokio::time::sleep(delay).await;
+						Ok(expired)
+					})))
+				},
+			};
 			if self.hold_execute {
 				Ok(Response::new(Box::pin(stream.chain(futures::stream::pending()))))
 			} else {
-				Ok(Response::new(Box::pin(stream)))
+				Ok(Response::new(stream))
 			}
 		}
 
@@ -1282,6 +1341,9 @@ mod tests {
 				WaitBehavior::Empty => Ok(Response::new(Box::pin(futures::stream::empty()))),
 				WaitBehavior::Pending => Ok(Response::new(Box::pin(futures::stream::pending()))),
 				WaitBehavior::RpcPending => std::future::pending().await,
+				WaitBehavior::StreamError(code) => Ok(Response::new(Box::pin(futures::stream::iter(
+					[Err(Status::new(code, "injected stream fault"))],
+				)))),
 				behavior => {
 					let mut operation = operation(Some(true), self.nonzero);
 					match behavior {
@@ -1596,12 +1658,80 @@ mod tests {
 		let mut request = request(file, "deadline");
 		request.timeout = Duration::from_millis(900);
 		let mut run = backend(fake, source).await.start(request).await.unwrap();
+		run.watch_grace = Duration::from_millis(100);
 		let handle = accepted(run.next_event().await);
 		tokio::time::sleep(Duration::from_millis(600)).await;
 		let event = tokio::time::timeout(Duration::from_millis(650), run.next_event())
 			.await
 			.expect("deadline restarted after acceptance");
 		assert_effects_unknown(event, &handle);
+	}
+
+	#[tokio::test]
+	async fn server_timeout_inside_grace_is_typed_timeout() {
+		let (source, file) = source();
+		let fake = Fake {
+			reconnect: true,
+			execute_tail: Some(Tail::DeadlineAfter(Duration::from_millis(300))),
+			..Default::default()
+		};
+		let mut request = request(file, "grace");
+		request.timeout = Duration::from_millis(100);
+		let mut run = backend(fake, source).await.start(request).await.unwrap();
+		accepted(run.next_event().await);
+		let event = tokio::time::timeout(Duration::from_secs(5), run.next_event())
+			.await
+			.expect("server timeout was not delivered");
+		assert!(
+			matches!(
+				event,
+				Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit })))
+					if limit == Duration::from_millis(100)
+			),
+			"got {event:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn operation_name_gate_preserves_the_accepted_handle() {
+		let cases = [
+			(Tail::Renamed, WaitBehavior::Complete, 0),
+			(Tail::Error(Code::Internal), WaitBehavior::Complete, 0),
+			(Tail::Error(Code::Unavailable), WaitBehavior::StreamError(Code::Unavailable), 1),
+		];
+		for (tail, wait_behavior, waits) in cases {
+			let (source, file) = source();
+			let fake =
+				Fake { reconnect: true, execute_tail: Some(tail), wait_behavior, ..Default::default() };
+			let wait_calls = fake.wait_calls.clone();
+			let mut run = backend(fake, source)
+				.await
+				.start(request(file, "gate"))
+				.await
+				.unwrap();
+			let handle = accepted(run.next_event().await);
+			assert_eq!(handle, test_handle("gate"));
+			assert_effects_unknown(run.next_event().await, &handle);
+			assert_eq!(wait_calls.load(Ordering::SeqCst), waits);
+		}
+	}
+
+	#[tokio::test]
+	async fn reattach_with_zero_deadline_settles_done_operation() {
+		let (source, _) = source();
+		let context = omp_exec::ReattachContext {
+			outputs:            OutputSpec::Metadata,
+			remaining_deadline: Duration::ZERO,
+		};
+		let mut run = backend(Fake::default(), source)
+			.await
+			.reattach(test_handle("expired"), context)
+			.await
+			.unwrap();
+		let Some(ExecutionEvent::Settled(Ok(result))) = run.next_event().await else {
+			panic!("a done operation must settle despite an expired deadline");
+		};
+		assert_eq!(result.outcome, Outcome::Exited { code: 0 });
 	}
 
 	#[tokio::test]
@@ -1653,7 +1783,10 @@ mod tests {
 					.expect("reattach RPC ignored its deadline");
 			match response {
 				Err(ExecutionError::EffectsUnknown { handle: actual }) => assert_eq!(actual, handle),
-				Ok(mut run) => assert_effects_unknown(run.next_event().await, &handle),
+				Ok(mut run) => {
+					run.watch_grace = Duration::ZERO;
+					assert_effects_unknown(run.next_event().await, &handle);
+				},
 				Err(error) => panic!("unexpected reattach error: {error:?}"),
 			}
 		}
