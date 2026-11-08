@@ -38,7 +38,7 @@ pub fn filter<'a>(ctx: &MinimizerCtx<'_>, input: &'a str, exit_code: i32) -> Min
 		Some("pr") if primitives::command_has_ordered_tokens(ctx.command, "pr", "checks") => {
 			match filter_pr_checks(&cleaned) {
 				Some(summary) => summary,
-				None => markdown_view(&cleaned, exit_code),
+				None => return MinimizerOutput::passthrough(input),
 			}
 		},
 		Some("pr" | "issue") => markdown_view(&cleaned, exit_code),
@@ -94,11 +94,9 @@ fn preserves_raw_mode(ctx: &MinimizerCtx<'_>) -> bool {
 
 /// Summarize the DEFAULT (non-JSON) `gh pr checks` table.
 ///
-/// Default human output is a tab-separated table:
-/// `<symbol>\t<name>\t<duration>\t<url>` where the leading status glyph is
-/// `✓`/`X`/`*`/`-` (pass/fail/pending/skipping). We re-derive against this real
-/// layout — NOT rtk's `[ok]`/`[x]` strings, which only appear on the injected
-/// `-F json` path. Failed rows stay verbatim (they carry the actionable URL);
+/// Interactive output uses `<symbol>\t<name>\t<duration>\t<url>`. Captured
+/// non-interactive output uses `<name>\t<status>\t<duration>\t<url>`.
+/// Failed rows stay verbatim (they carry the actionable URL);
 /// passed/pending/skipping collapse to counts. Returns `None` when no
 /// recognizable check rows are found so the caller can fall back to the generic
 /// path.
@@ -111,18 +109,26 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 
 	for line in input.lines() {
 		let trimmed = line.trim_start();
-		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status
-		// glyph followed by at least one TAB-delimited field. Requiring the tab
-		// shape keyed off the row's first glyph — NOT the leading char alone —
-		// rejects separators (`---`), blank-glyph lines, and bulleted
-		// annotation detail (`- ...`, `* ...`) that gh/CI tools emit, any of
-		// which would otherwise be miscounted as a phantom skipping/pending
-		// check and inflate the summary.
 		if !trimmed.contains('\t') {
 			continue;
 		}
-		let Some(symbol) = trimmed.chars().next() else {
-			continue;
+		let mut fields = trimmed.split('\t');
+		let first = fields.next().unwrap_or_default();
+		let second = fields.next().unwrap_or_default();
+		// A recognized status in field two wins, so a check named like a glyph is not
+		// miscounted.
+		let status = (fields.clone().count() >= 2).then_some(second);
+		let symbol = match (status, first) {
+			(Some("pass"), _) => '✓',
+			(Some("fail" | "cancel"), _) => 'X',
+			(Some("pending"), _) => '*',
+			(Some("skipping"), _) => '-',
+			(_, "✓") => '✓',
+			(_, "X" | "✗" | "×") => 'X',
+			(_, "*") => '*',
+			(_, "-") => '-',
+			(Some(_), _) => return None,
+			(None, _) => continue,
 		};
 		match symbol {
 			'✓' => {
@@ -312,6 +318,49 @@ mod tests {
 		// Passed/pending/skipping rows collapse to counts only.
 		assert!(!out.text.contains("https://ci.test/build"));
 		assert!(!out.text.contains("https://ci.test/lint"));
+	}
+
+	#[test]
+	fn pr_checks_summarizes_non_tty_table_and_keeps_failures() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let input = "Lint workspace (Linux)\tpass\t1m25s\thttps://ci.test/lint\t\n\
+		             Test suite\tfail\t2m\thttps://ci.test/test\t\n\
+		             Deploy\tpending\t0\thttps://ci.test/deploy\t\n\
+		             Optional check\tskipping\t0\thttps://ci.test/optional\t\n";
+
+		let out = filter(&ctx, input, 1);
+
+		assert_eq!(out.text, "checks: 1 passed, 1 failed, 1 pending, 1 skipping\nTest suite\tfail\t2m\thttps://ci.test/test");
+	}
+
+	#[test]
+	fn pr_checks_status_column_wins_over_glyph_named_check() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let input = "build\tpass\t1s\thttps://ci.test/build\n✓\tfail\t1s\thttps://ci.test/check\n";
+
+		let out = filter(&ctx, input, 1);
+
+		assert_eq!(out.text, "checks: 1 passed, 1 failed\n✓\tfail\t1s\thttps://ci.test/check");
+	}
+
+	#[test]
+	fn pr_checks_preserves_unknown_non_tty_status() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("pr"), "gh pr checks 515", &cfg);
+		let mut input = String::new();
+		for i in 0..150 {
+			input.push_str(&format!("build {i}\tpass\t1s\thttps://ci.test/build/{i}\n"));
+		}
+		input.push_str("new check\tunknown\t0\thttps://ci.test/new\n");
+		for i in 0..150 {
+			input.push_str(&format!("lint {i}\tpass\t1s\thttps://ci.test/lint/{i}\n"));
+		}
+
+		let out = filter(&ctx, &input, 0);
+
+		assert_eq!(out.text, input);
 	}
 
 	#[test]

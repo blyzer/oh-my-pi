@@ -45,7 +45,7 @@ rewrite of `pi`: port observable behavior, not TS shape.
   `crates/edit|ast|walker`: multi-paradigm edit engine, syntax, fs discovery.
   `crates/shell|shell-builtins`: in-process Bash parser/runtime, built-ins.
   `crates/minimizer`: shell-output minimizer (command plans, filters,
-  declarative defs); not yet called by any output path.
+  declarative defs); envd uses only its cargo filter for model-facing shell output.
 - `crates/tui`+`crates/macros`: retained declarative UI and its proc macros
   (`omp-macros`: `dom!`, `view!`, `cached`); `crates/chat`: terminal
   and native chat actor/projections; `crates/gui`: native window host.
