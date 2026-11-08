@@ -49,13 +49,23 @@ fn repo(name: &str, lib: &str, worker: Option<&str>) -> TempDir {
 	dir
 }
 
-fn command(root: &Path, args: &[&str]) -> Output {
-	Command::new(env!("CARGO_BIN_EXE_omp-kb"))
+/// Every spawn gets a private, offline `CARGO_HOME`. rust-analyzer's `cargo
+/// metadata` and build-script check otherwise queue on the host-global
+/// `~/.cargo` package-cache lock behind every other cargo on a shared
+/// self-hosted Mac: one SCIP run measured 58s blocked in metadata and 84s in
+/// build scripts for about 3s of analysis.
+fn kb(root: &Path) -> Command {
+	let mut command = Command::new(env!("CARGO_BIN_EXE_omp-kb"));
+	command
 		.arg("--repo")
 		.arg(root)
-		.args(args)
-		.output()
-		.unwrap()
+		.env("CARGO_HOME", root.join(".git/cargo-home"))
+		.env("CARGO_NET_OFFLINE", "true");
+	command
+}
+
+fn command(root: &Path, args: &[&str]) -> Output {
+	kb(root).args(args).output().unwrap()
 }
 
 fn success(output: Output) -> Value {
@@ -166,12 +176,26 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 			.any(|v| v["name"] == "helper" && v["line"] == 10)
 	);
 	assert_eq!(query(root, "no_such_symbol")["miss"], true);
+	let digest: Value = serde_json::from_slice(&first).unwrap();
+	fs::write(
+		root
+			.join(".git/omp-kb/objects")
+			.join(format!("{}.json", digest["digest"].as_str().unwrap())),
+		b"corrupt",
+	)
+	.unwrap();
+	assert!(
+		!command(root, &["query", "helper"]).status.success(),
+		"a corrupt object must not be served"
+	);
 	success(command(root, &["update"]));
 	assert_eq!(first, fs::read(&index).unwrap(), "index must be byte-stable");
-	assert_eq!(first_object, object(root, &fs::read(&index).unwrap()));
-	let failed = Command::new(env!("CARGO_BIN_EXE_omp-kb"))
-		.arg("--repo")
-		.arg(root)
+	assert_eq!(
+		first_object,
+		object(root, &fs::read(&index).unwrap()),
+		"an update must repair a corrupt cache object"
+	);
+	let failed = kb(root)
 		.arg("update")
 		.env("RUST_ANALYZER", "/usr/bin/false")
 		.output()
@@ -179,9 +203,7 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 	assert!(!failed.status.success());
 	assert_eq!(first, fs::read(&index).unwrap(), "failed analyzer must not publish");
 	assert_eq!(first_object, object(root, &fs::read(&index).unwrap()));
-	let empty = Command::new(env!("CARGO_BIN_EXE_omp-kb"))
-		.arg("--repo")
-		.arg(root)
+	let empty = kb(root)
 		.arg("update")
 		.env("RUST_ANALYZER", "/usr/bin/true")
 		.output()
@@ -192,9 +214,7 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 	fs::write(&killed_analyzer, "#!/bin/sh\nkill -TERM $$\n").unwrap();
 	use std::os::unix::fs::PermissionsExt;
 	fs::set_permissions(&killed_analyzer, fs::Permissions::from_mode(0o755)).unwrap();
-	let killed = Command::new(env!("CARGO_BIN_EXE_omp-kb"))
-		.arg("--repo")
-		.arg(root)
+	let killed = kb(root)
 		.arg("update")
 		.env("RUST_ANALYZER", &killed_analyzer)
 		.output()
@@ -225,9 +245,7 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 	)
 	.unwrap();
 	fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
-	let refresh = Command::new(env!("CARGO_BIN_EXE_omp-kb"))
-		.arg("--repo")
-		.arg(root)
+	let refresh = kb(root)
 		.args(["refresh", "src/worker.rs"])
 		.env("RUST_ANALYZER", &slow)
 		.output()
@@ -273,21 +291,6 @@ fn indexes_calls_implementations_and_preserves_last_good_snapshot() {
 	assert_eq!(query(root, "helper")["stale"], true, "an untracked file must mark the index stale");
 	fs::remove_file(root.join("new-file.rs")).unwrap();
 	assert_eq!(query(root, "helper")["stale"], false);
-	let head: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
-	let object = root
-		.join(".git/omp-kb/objects")
-		.join(format!("{}.json", head["digest"].as_str().unwrap()));
-	fs::write(object, b"corrupt").unwrap();
-	assert!(
-		!command(root, &["query", "helper"]).status.success(),
-		"a corrupt object must not be served"
-	);
-	success(command(root, &["update"]));
-	assert_eq!(
-		query(root, "helper")["stale"],
-		false,
-		"an update must repair a corrupt cache object"
-	);
 	git(root, &[
 		"-c",
 		"user.name=Fixture",
