@@ -134,7 +134,6 @@ async fn attach(
 	report(session, &settled)
 }
 
-
 fn report_interrupted(
 	session: &Session,
 	record: &JobRecord,
@@ -147,7 +146,10 @@ fn report_interrupted(
 		&& !matches!(record.status.as_str(), "completed" | "cancelled")
 	{
 		let id = &record.id;
-		println!("detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`", journal.display());
+		println!(
+			"detached from execution job {id}; resume with `omp jobs --journal {} attach {id}`",
+			journal.display()
+		);
 		return Err(JobsInterrupted.into());
 	}
 	report(session, record)
@@ -204,7 +206,9 @@ mod tests {
 	use omp_core::Str;
 	use omp_session::{ComponentRegistry, Session};
 
-	use super::{JobsInterrupted, connect_after_validation, report, report_interrupted, run, summary};
+	use super::{
+		JobsInterrupted, connect_after_validation, report, report_interrupted, run, summary,
+	};
 	use crate::cli::{JobsArgs, JobsCommand};
 
 	#[tokio::test]
@@ -319,7 +323,9 @@ mod tests {
 		record.execution_state = Some("settled".parse().unwrap());
 		for detached in [false, true] {
 			assert_eq!(
-				report_interrupted(&session, &record, detached, &journal).unwrap_err().to_string(),
+				report_interrupted(&session, &record, detached, &journal)
+					.unwrap_err()
+					.to_string(),
 				"execution job exec-42: failed (settled), outcome: Exited { code: 42 }"
 			);
 		}
@@ -331,7 +337,9 @@ mod tests {
 		let error = report_interrupted(&session, &record, true, &journal).unwrap_err();
 		assert!(error.downcast_ref::<JobsInterrupted>().is_some());
 		assert_eq!(
-			report_interrupted(&session, &record, false, &journal).unwrap_err().to_string(),
+			report_interrupted(&session, &record, false, &journal)
+				.unwrap_err()
+				.to_string(),
 			"execution job exec-42: failed (effects-unknown): no diagnostic was journaled"
 		);
 		record.error = Some(Str::new_static("backend failed"));
