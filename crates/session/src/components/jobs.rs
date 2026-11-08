@@ -1,5 +1,6 @@
 use omp_core::Str;
 use omp_dom::{Dom, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
+use omp_exec::ReattachHandle;
 use omp_journal::{Entry, EntryId, Kind, data::ToolResult, kind};
 use strum::{EnumString, IntoStaticStr};
 
@@ -62,6 +63,8 @@ pub const EXECUTION_BACKEND: &str = "backend";
 pub const EXECUTION_SCHEMA: &str = "reattach_schema";
 /// Serialized reattach handle property for an execution job.
 pub const EXECUTION_HANDLE: &str = "reattach_handle";
+/// Submission-started marker property for an execution job.
+pub const EXECUTION_SUBMISSION_STARTED: &str = "submission_started";
 /// Serialized request identity property for an execution job.
 pub const EXECUTION_REQUEST: &str = "request";
 /// Requested output mode property for an execution job.
@@ -174,40 +177,53 @@ pub fn insert_execution(dom: &Dom, cause: EntryId, spec: ExecutionSpec) -> Optio
 	})
 }
 
-/// Builds the journalled accepted transition for one execution job.
-pub fn accept_execution(
-	cause: EntryId,
-	handle: Handle,
-	schema: impl Into<Str>,
-	backend: impl Into<Str>,
-	operation: impl Into<Str>,
-) -> Txn {
+/// Builds the journaled marker that `start` is about to be called.
+///
+/// Commit it before the backend call. A restart that finds the marker and no
+/// stored handle cannot rule out that the backend accepted the work, so it must
+/// never start the request again.
+#[must_use]
+pub fn mark_execution_submitting(cause: EntryId, handle: Handle) -> Txn {
 	Txn {
 		cause,
-		label: Some(Str::new_static("jobs.accept")),
-		ops: vec![
-			Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static(EXECUTION_STATE)),
-				value: Value::Str(Str::new_static("accepted")),
-			},
-			Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static(EXECUTION_SCHEMA)),
-				value: Value::Str(schema.into()),
-			},
-			Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static(EXECUTION_BACKEND)),
-				value: Value::Str(backend.into()),
-			},
-			Op::Set {
-				h:     handle,
-				prop:  PropKey::Custom(Str::new_static(EXECUTION_HANDLE)),
-				value: Value::Str(operation.into()),
-			},
-		],
+		label: Some(Str::new_static("jobs.submitting")),
+		ops: vec![Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static(EXECUTION_SUBMISSION_STARTED)),
+			value: Value::Bool(true),
+		}],
 	}
+}
+
+/// Builds the properties that record an accepted backend handle on an execution
+/// job.
+///
+/// This is the only writer of the handle properties. The stored value is the
+/// serialized [`ReattachHandle`], so restart reconciliation decodes exactly the
+/// identity the backend returned.
+pub fn execution_handle_ops(
+	handle: Handle,
+	accepted: &ReattachHandle,
+) -> Result<[Op; 3], serde_json::Error> {
+	let schema: &'static str = accepted.schema.into();
+	let serialized = serde_json::to_string(accepted)?;
+	Ok([
+		Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static(EXECUTION_SCHEMA)),
+			value: Value::Str(Str::new_static(schema)),
+		},
+		Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static(EXECUTION_BACKEND)),
+			value: Value::Str(Str::new(&accepted.backend)),
+		},
+		Op::Set {
+			h:     handle,
+			prop:  PropKey::Custom(Str::new_static(EXECUTION_HANDLE)),
+			value: Value::Str(Str::new(serialized)),
+		},
+	])
 }
 
 /// Builds a status update for one DOM job handle.
