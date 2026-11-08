@@ -119,6 +119,20 @@ pub enum CancelOutcome {
 	Failed,
 }
 
+/// Parameters needed to resume observing an accepted execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReattachContext {
+	/// Outputs requested for the execution.
+	pub outputs:            crate::request::OutputSpec,
+	/// Time remaining before the execution deadline.
+	///
+	/// Zero, or a budget that expired while the caller was down, is valid.
+	/// The backend still makes one bounded attempt to read the operation and
+	/// settles a finished one with its real result; otherwise the run settles
+	/// as `EffectsUnknown`.
+	pub remaining_deadline: Duration,
+}
+
 /// One execution backend: local, remote, or over SSH.
 ///
 /// Cheap to clone (a handle); every async method returns an unboxed future.
@@ -142,6 +156,7 @@ pub trait ExecutionBackend: Clone + Send + Sync + 'static {
 	fn reattach(
 		&self,
 		handle: ReattachHandle,
+		context: ReattachContext,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_;
 }
 

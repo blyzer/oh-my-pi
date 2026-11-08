@@ -135,6 +135,7 @@ impl ExecutionBackend for LocalBackend {
 	fn reattach(
 		&self,
 		handle: ReattachHandle,
+		_context: omp_exec::ReattachContext,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		async move {
 			let _ = handle;

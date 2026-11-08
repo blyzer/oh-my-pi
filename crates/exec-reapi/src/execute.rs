@@ -343,9 +343,10 @@ where
 	fn reattach(
 		&self,
 		handle: ReattachHandle,
+		context: omp_exec::ReattachContext,
 	) -> impl Future<Output = Result<Self::Run, ExecutionError>> + Send + '_ {
 		let this = self.clone();
-		async move { this.reattach_request(handle).await }
+		async move { this.reattach_request(handle, context).await }
 	}
 }
 
@@ -439,6 +440,7 @@ where
 		let mut request = request;
 		add_request_metadata(&mut request, &request_id);
 		let mut execution = self.inner.clients.execution.clone();
+		let started = tokio::time::Instant::now();
 		let stream = execution.execute(request).await.map_err(|error| {
 			status::classify(
 				error,
@@ -448,28 +450,48 @@ where
 				Some(action.digest),
 			)
 		})?;
-		Ok(ReapiRun::new(self.clone(), stream.into_inner(), request_id, outputs, action_timeout))
+		Ok(ReapiRun::new(
+			self.clone(),
+			stream.into_inner(),
+			request_id,
+			outputs,
+			action_timeout,
+			started,
+		))
 	}
 
-	async fn reattach_request(&self, handle: ReattachHandle) -> Result<ReapiRun<S>, ExecutionError> {
+	async fn reattach_request(
+		&self,
+		handle: ReattachHandle,
+		context: omp_exec::ReattachContext,
+	) -> Result<ReapiRun<S>, ExecutionError> {
+		let started = tokio::time::Instant::now();
+		let unknown = || ExecutionError::EffectsUnknown { handle: handle.clone() };
 		let request_wire = wire::WaitExecutionRequest { name: handle.operation.to_string() };
-
 		let request = with_metadata(
 			Request::new(request_wire),
 			&self.inner.profile,
 			self.inner.credential.as_ref(),
-		)?;
+		)
+		.map_err(|_| unknown())?;
 		let mut execution = self.inner.clients.execution.clone();
-		let stream = execution.wait_execution(request).await.map_err(|error| {
-			status::classify(error, Phase::Execute, &self.inner.id, Duration::from_secs(30), None)
-		})?;
-		Ok(ReapiRun::new(
+		let remaining = context.remaining_deadline.saturating_sub(started.elapsed());
+		let stream =
+			tokio::time::timeout(remaining.max(REATTACH_RPC_FLOOR), execution.wait_execution(request))
+				.await
+				.map_err(|_| unknown())?
+				.map_err(|_| unknown())?;
+		let mut run = ReapiRun::new(
 			self.clone(),
 			stream.into_inner(),
-			handle.id,
-			OutputSpec::Logs,
-			Duration::from_secs(30 * 60),
-		))
+			handle.id.clone(),
+			context.outputs,
+			context.remaining_deadline,
+			started,
+		);
+		*run.operation.lock() = Some(handle.operation.clone());
+		run.state = RunState::Accepted { handle };
+		Ok(run)
 	}
 
 	async fn prepare_action(
@@ -789,16 +811,45 @@ fn emit_action_metadata(meta: &wire::ExecutedActionMetadata) {
 	);
 }
 
+/// Floor for the initial `WaitExecution` RPC on reattach.
+///
+/// A caller may reattach with a zero or already-expired deadline, for example
+/// after the process was down past the action timeout. The server may still
+/// hold a finished operation, so one bounded attempt to reach it beats
+/// declaring the effects unknown without asking.
+const REATTACH_RPC_FLOOR: Duration = Duration::from_secs(1);
+
+/// Extra time to keep watching past the action timeout.
+///
+/// The server applies the action timeout to execution only. Queueing before
+/// it and teardown and output upload after it delay the terminal
+/// `DEADLINE_EXCEEDED` operation. Watching for the timeout plus this grace
+/// lets that operation settle as a typed `TimedOut` instead of
+/// `EffectsUnknown`. The first read after reattach is bounded by the deadline
+/// plus this grace, so it also serves as the first-read floor.
+const WATCH_GRACE: Duration = Duration::from_secs(30);
+
+const _: () = assert!(WATCH_GRACE.as_nanos() >= REATTACH_RPC_FLOOR.as_nanos());
+
+enum RunState {
+	Waiting,
+	Accepted { handle: ReattachHandle },
+	Settled,
+}
+
 /// A live REAPI execution stream.
 pub struct ReapiRun<S> {
-	backend:     ReapiBackend<S>,
-	stream:      tonic::Streaming<longrunning::Operation>,
-	id:          omp_exec::ExecutionId,
-	outputs:     OutputSpec,
-	operation:   Arc<Mutex<Option<Str>>>,
-	reconnected: bool,
-	accepted:    bool,
-	timeout:     Duration,
+	backend:          ReapiBackend<S>,
+	stream:           tonic::Streaming<longrunning::Operation>,
+	id:               omp_exec::ExecutionId,
+	outputs:          OutputSpec,
+	operation:        Arc<Mutex<Option<Str>>>,
+	reconnected:      bool,
+	state:            RunState,
+	pending_terminal: Option<longrunning::Operation>,
+	timeout:          Duration,
+	watch_grace:      Duration,
+	started:          tokio::time::Instant,
 }
 
 impl<S> ReapiRun<S>
@@ -811,6 +862,7 @@ where
 		id: omp_exec::ExecutionId,
 		outputs: OutputSpec,
 		timeout: Duration,
+		started: tokio::time::Instant,
 	) -> Self {
 		Self {
 			backend,
@@ -819,8 +871,20 @@ where
 			outputs,
 			operation: Arc::new(Mutex::new(None)),
 			reconnected: false,
-			accepted: false,
+			state: RunState::Waiting,
+			pending_terminal: None,
 			timeout,
+			watch_grace: WATCH_GRACE,
+			started,
+		}
+	}
+
+	fn observation_error(&self, error: impl FnOnce() -> ExecutionError) -> ExecutionError {
+		match &self.state {
+			RunState::Accepted { handle, .. } => {
+				ExecutionError::EffectsUnknown { handle: handle.clone() }
+			},
+			RunState::Waiting | RunState::Settled => error(),
 		}
 	}
 
@@ -830,14 +894,15 @@ where
 				Ok(Some(operation)) => operation,
 				Ok(None) if !self.reconnected && self.operation.lock().is_some() => {
 					if let Err(error) = self.wait_again().await {
-						return Some(ExecutionEvent::Settled(Err(error)));
+						return Some(ExecutionEvent::Settled(Err(self.observation_error(|| error))));
 					}
 					continue;
 				},
 				Ok(None) => {
-					return Some(ExecutionEvent::Settled(Err(transport(Status::unavailable(
-						"REAPI execution stream ended",
-					)))));
+					let error = self.observation_error(|| {
+						transport(Status::unavailable("REAPI execution stream ended"))
+					});
+					return Some(ExecutionEvent::Settled(Err(error)));
 				},
 				Err(error)
 					if !self.reconnected
@@ -845,33 +910,47 @@ where
 						&& error.code() == Code::Unavailable =>
 				{
 					if let Err(error) = self.wait_again().await {
-						return Some(ExecutionEvent::Settled(Err(error)));
+						return Some(ExecutionEvent::Settled(Err(self.observation_error(|| error))));
 					}
 					continue;
 				},
 				Err(error) => {
-					return Some(ExecutionEvent::Settled(Err(status::classify(
-						error,
-						Phase::Execute,
-						&self.backend.inner.id,
-						Duration::from_secs(30),
-						None,
-					))));
+					let error = self.observation_error(|| {
+						status::classify(
+							error,
+							Phase::Execute,
+							&self.backend.inner.id,
+							self.timeout,
+							None,
+						)
+					});
+					return Some(ExecutionEvent::Settled(Err(error)));
 				},
 			};
 			if operation.name.is_empty() {
-				return Some(ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult))));
+				let error = self.observation_error(|| config_error(DecodeError::MissingResult));
+				return Some(ExecutionEvent::Settled(Err(error)));
 			}
-			*self.operation.lock() = Some(Str::new(&operation.name));
-			if !self.accepted {
-				self.accepted = true;
-				return Some(ExecutionEvent::Accepted {
-					handle: ReattachHandle::new(
-						self.backend.inner.id.clone(),
-						Str::new(&operation.name),
-						self.id.clone(),
-					),
-				});
+			if matches!(&self.state, RunState::Waiting) {
+				let handle = ReattachHandle::new(
+					self.backend.inner.id.clone(),
+					Str::new(&operation.name),
+					self.id.clone(),
+				);
+				*self.operation.lock() = Some(handle.operation.clone());
+				self.pending_terminal = if operation.done {
+					Some(operation)
+				} else {
+					None
+				};
+				self.state = RunState::Accepted { handle: handle.clone() };
+				return Some(ExecutionEvent::Accepted { handle });
+			}
+			if let RunState::Accepted { handle, .. } = &self.state {
+				if operation.name != handle.operation.as_str() {
+					let error = self.observation_error(|| config_error(DecodeError::MissingResult));
+					return Some(ExecutionEvent::Settled(Err(error)));
+				}
 			}
 			if !operation.done {
 				return Some(stage_event(&operation));
@@ -909,7 +988,9 @@ where
 
 	async fn settle(&self, operation: longrunning::Operation) -> ExecutionEvent {
 		let Some(result_wire) = operation.result else {
-			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
+			return ExecutionEvent::Settled(Err(
+				self.observation_error(|| config_error(DecodeError::MissingResult)),
+			));
 		};
 		let response = match result_wire {
 			longrunning::operation::Result::Error(error) => {
@@ -917,7 +998,7 @@ where
 					wire_status(error, self.backend.inner.credential.as_ref()),
 					Phase::Execute,
 					&self.backend.inner.id,
-					Duration::from_secs(30),
+					self.timeout,
 					None,
 				)));
 			},
@@ -926,7 +1007,9 @@ where
 		let result = match wire::ExecuteResponse::decode(response.value.as_ref()) {
 			Ok(result) => result,
 			Err(error) => {
-				return ExecutionEvent::Settled(Err(config_error(DecodeError::Proto(error))));
+				return ExecutionEvent::Settled(Err(
+					self.observation_error(|| config_error(DecodeError::Proto(error))),
+				));
 			},
 		};
 		if let Some(status) = result.status.filter(|status| status.code != 0) {
@@ -934,12 +1017,14 @@ where
 				wire_status(status, self.backend.inner.credential.as_ref()),
 				Phase::Execute,
 				&self.backend.inner.id,
-				Duration::from_secs(30),
+				self.timeout,
 				None,
 			)));
 		}
 		let Some(action) = result.result else {
-			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
+			return ExecutionEvent::Settled(Err(
+				self.observation_error(|| config_error(DecodeError::MissingResult)),
+			));
 		};
 		if let Some(meta) = action.execution_metadata.as_ref() {
 			emit_action_metadata(meta);
@@ -950,7 +1035,9 @@ where
 					match (digest::from_wire(stdout), digest::from_wire(stderr)) {
 						(Ok(stdout), Ok(stderr)) => Some(Logs { stdout, stderr }),
 						(Err(error), _) | (_, Err(error)) => {
-							return ExecutionEvent::Settled(Err(config_error(error)));
+							return ExecutionEvent::Settled(Err(
+								self.observation_error(|| config_error(error)),
+							));
 						},
 					}
 				},
@@ -1006,14 +1093,27 @@ where
 	S: InputSource,
 {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
-		let timeout = self.timeout;
 		async move {
-			match tokio::time::timeout(timeout, self.next()).await {
-				Ok(event) => event,
-				Err(_) => {
-					Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit: timeout })))
-				},
+			if matches!(&self.state, RunState::Settled) {
+				return None;
 			}
+			let event = if let Some(operation) = self.pending_terminal.take() {
+				Some(self.settle(operation).await)
+			} else {
+				let remaining =
+					(self.timeout + self.watch_grace).saturating_sub(self.started.elapsed());
+				match tokio::time::timeout(remaining, self.next()).await {
+					Ok(event) => event,
+					Err(_) => {
+						let error = ExecutionError::TimedOut { limit: self.timeout };
+						Some(ExecutionEvent::Settled(Err(self.observation_error(|| error))))
+					},
+				}
+			};
+			if matches!(&event, Some(ExecutionEvent::Settled(_))) {
+				self.state = RunState::Settled;
+			}
+			event
 		}
 	}
 
@@ -1091,10 +1191,14 @@ fn wire_status(
 mod tests {
 	use std::{
 		collections::{BTreeMap, HashMap},
-		sync::Arc,
+		sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		},
 	};
 
 	use bytes::Bytes;
+	use futures::StreamExt;
 	use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 	use omp_core::{Hash32, SecretString, Str};
 	use omp_exec::{
@@ -1149,13 +1253,37 @@ mod tests {
 		}
 	}
 
-	#[derive(Clone)]
+	#[derive(Clone, Default)]
 	struct Fake {
-		uploaded:  Arc<AsyncMutex<Vec<omp_exec::Digest>>>,
-		cancelled: Arc<AsyncMutex<bool>>,
-		reconnect: bool,
-		nonzero:   bool,
-		fault:     Option<Code>,
+		uploaded:      Arc<AsyncMutex<Vec<omp_exec::Digest>>>,
+		cancelled:     Arc<AsyncMutex<bool>>,
+		reconnect:     bool,
+		nonzero:       bool,
+		fault:         Option<Code>,
+		hold_execute:  bool,
+		execute_tail:  Option<Tail>,
+		wait_behavior: WaitBehavior,
+		wait_calls:    Arc<AtomicUsize>,
+	}
+
+	#[derive(Clone, Copy, Default)]
+	enum WaitBehavior {
+		#[default]
+		Complete,
+		Empty,
+		Pending,
+		RpcPending,
+		Malformed,
+		BackendFailure,
+		StreamError(Code),
+	}
+
+	/// What the fake `Execute` stream yields after its first operation.
+	#[derive(Clone, Copy)]
+	enum Tail {
+		Renamed,
+		Error(Code),
+		DeadlineAfter(Duration),
 	}
 
 	/// The wire stream the fake `Execution` service yields.
@@ -1170,16 +1298,76 @@ mod tests {
 			if let Some(code) = self.fault {
 				return Err(Status::new(code, "injected REAPI fault"));
 			}
-			let operation = operation(self.reconnect.then_some(false), self.nonzero);
-			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+			let first =
+				futures::stream::iter([Ok(operation(self.reconnect.then_some(false), self.nonzero))]);
+			let stream: ExecStream = match self.execute_tail {
+				None => Box::pin(first),
+				Some(Tail::Renamed) => {
+					let mut renamed = operation(Some(true), self.nonzero);
+					renamed.name = "operations/other".to_owned();
+					Box::pin(first.chain(futures::stream::iter([Ok(renamed)])))
+				},
+				Some(Tail::Error(code)) => Box::pin(
+					first
+						.chain(futures::stream::iter([Err(Status::new(code, "injected stream fault"))])),
+				),
+				Some(Tail::DeadlineAfter(delay)) => {
+					let mut expired = operation(Some(true), false);
+					expired.result =
+						Some(longrunning::operation::Result::Error(crate::proto::google::rpc::Status {
+							code:    Code::DeadlineExceeded as i32,
+							message: "action timed out".to_owned(),
+							details: Vec::new(),
+						}));
+					Box::pin(first.chain(futures::stream::once(async move {
+						tokio::time::sleep(delay).await;
+						Ok(expired)
+					})))
+				},
+			};
+			if self.hold_execute {
+				Ok(Response::new(Box::pin(stream.chain(futures::stream::pending()))))
+			} else {
+				Ok(Response::new(stream))
+			}
 		}
 
 		async fn wait_execution(
 			&self,
 			_request: Request<wire::WaitExecutionRequest>,
 		) -> Result<Response<ExecStream>, Status> {
-			let operation = operation(Some(true), self.nonzero);
-			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+			self.wait_calls.fetch_add(1, Ordering::SeqCst);
+			match self.wait_behavior {
+				WaitBehavior::Empty => Ok(Response::new(Box::pin(futures::stream::empty()))),
+				WaitBehavior::Pending => Ok(Response::new(Box::pin(futures::stream::pending()))),
+				WaitBehavior::RpcPending => std::future::pending().await,
+				WaitBehavior::StreamError(code) => Ok(Response::new(Box::pin(futures::stream::iter(
+					[Err(Status::new(code, "injected stream fault"))],
+				)))),
+				behavior => {
+					let mut operation = operation(Some(true), self.nonzero);
+					match behavior {
+						WaitBehavior::Malformed => {
+							operation.result =
+								Some(longrunning::operation::Result::Response(prost_types::Any {
+									type_url: String::new(),
+									value:    vec![0xff],
+								}));
+						},
+						WaitBehavior::BackendFailure => {
+							operation.result = Some(longrunning::operation::Result::Error(
+								crate::proto::google::rpc::Status {
+									code:    Code::ResourceExhausted as i32,
+									message: "no capacity".to_owned(),
+									details: Vec::new(),
+								},
+							));
+						},
+						_ => {},
+					}
+					Ok(Response::new(Box::pin(futures::stream::iter([Ok(operation)]))))
+				},
+			}
 		}
 	}
 
@@ -1256,6 +1444,18 @@ mod tests {
 				exit_code: if nonzero { 7 } else { 0 },
 				stdout_digest: Some(digest::to_wire(blob_digest(b"out"))),
 				stderr_digest: Some(digest::to_wire(blob_digest(b"err"))),
+				output_files: vec![
+					wire::OutputFile {
+						path: "out/result.txt".to_owned(),
+						digest: Some(digest::to_wire(blob_digest(b"artifact"))),
+						..Default::default()
+					},
+					wire::OutputFile {
+						path: "out/unrequested.txt".to_owned(),
+						digest: Some(digest::to_wire(blob_digest(b"other"))),
+						..Default::default()
+					},
+				],
 				..Default::default()
 			}),
 			..Default::default()
@@ -1392,16 +1592,243 @@ mod tests {
 		panic!("run ended without settlement")
 	}
 
+	fn test_handle(id: &'static str) -> ReattachHandle {
+		ReattachHandle::new(
+			BackendId::new_static("reapi"),
+			Str::new_static("operations/test"),
+			ExecutionId::new_static(id),
+		)
+	}
+
+	fn accepted(event: Option<ExecutionEvent>) -> ReattachHandle {
+		match event {
+			Some(ExecutionEvent::Accepted { handle }) => handle,
+			other => panic!("expected acceptance, got {other:?}"),
+		}
+	}
+
+	fn assert_effects_unknown(event: Option<ExecutionEvent>, expected: &ReattachHandle) {
+		assert!(matches!(event, Some(ExecutionEvent::Settled(Err(
+			ExecutionError::EffectsUnknown { handle }
+		))) if &handle == expected));
+	}
+
+	#[tokio::test]
+	async fn first_done_operation_settles_without_wait_execution() {
+		let (source, file) = source();
+		let fake = Fake { hold_execute: true, ..Default::default() };
+		let wait_calls = fake.wait_calls.clone();
+		let mut run = backend(fake, source)
+			.await
+			.start(request(file, "first-done"))
+			.await
+			.unwrap();
+		assert_eq!(accepted(run.next_event().await), test_handle("first-done"));
+		let event = tokio::time::timeout(Duration::from_secs(2), run.next_event())
+			.await
+			.expect("terminal operation was not delivered");
+		let Some(ExecutionEvent::Settled(Ok(result))) = event else {
+			panic!("expected terminal success")
+		};
+		assert_eq!(result.outcome, Outcome::Exited { code: 0 });
+		assert!(run.next_event().await.is_none());
+		assert_eq!(wait_calls.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test]
+	async fn lost_stream_after_acceptance_preserves_handle() {
+		let (source, file) = source();
+		let fake = Fake { reconnect: true, wait_behavior: WaitBehavior::Empty, ..Default::default() };
+		let wait_calls = fake.wait_calls.clone();
+		let mut run = backend(fake, source)
+			.await
+			.start(request(file, "lost"))
+			.await
+			.unwrap();
+		let handle = accepted(run.next_event().await);
+		assert_eq!(handle, test_handle("lost"));
+		assert_effects_unknown(run.next_event().await, &handle);
+		assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test]
+	async fn accepted_read_uses_remaining_deadline() {
+		let (source, file) = source();
+		let fake = Fake { reconnect: true, hold_execute: true, ..Default::default() };
+		let mut request = request(file, "deadline");
+		request.timeout = Duration::from_millis(900);
+		let mut run = backend(fake, source).await.start(request).await.unwrap();
+		run.watch_grace = Duration::from_millis(100);
+		let handle = accepted(run.next_event().await);
+		tokio::time::sleep(Duration::from_millis(600)).await;
+		let event = tokio::time::timeout(Duration::from_millis(650), run.next_event())
+			.await
+			.expect("deadline restarted after acceptance");
+		assert_effects_unknown(event, &handle);
+	}
+
+	#[tokio::test]
+	async fn server_timeout_inside_grace_is_typed_timeout() {
+		let (source, file) = source();
+		let fake = Fake {
+			reconnect: true,
+			execute_tail: Some(Tail::DeadlineAfter(Duration::from_millis(300))),
+			..Default::default()
+		};
+		let mut request = request(file, "grace");
+		request.timeout = Duration::from_millis(100);
+		let mut run = backend(fake, source).await.start(request).await.unwrap();
+		accepted(run.next_event().await);
+		let event = tokio::time::timeout(Duration::from_secs(5), run.next_event())
+			.await
+			.expect("server timeout was not delivered");
+		assert!(
+			matches!(
+				event,
+				Some(ExecutionEvent::Settled(Err(ExecutionError::TimedOut { limit })))
+					if limit == Duration::from_millis(100)
+			),
+			"got {event:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn operation_name_gate_preserves_the_accepted_handle() {
+		let cases = [
+			(Tail::Renamed, WaitBehavior::Complete, 0),
+			(Tail::Error(Code::Internal), WaitBehavior::Complete, 0),
+			(Tail::Error(Code::Unavailable), WaitBehavior::StreamError(Code::Unavailable), 1),
+		];
+		for (tail, wait_behavior, waits) in cases {
+			let (source, file) = source();
+			let fake =
+				Fake { reconnect: true, execute_tail: Some(tail), wait_behavior, ..Default::default() };
+			let wait_calls = fake.wait_calls.clone();
+			let mut run = backend(fake, source)
+				.await
+				.start(request(file, "gate"))
+				.await
+				.unwrap();
+			let handle = accepted(run.next_event().await);
+			assert_eq!(handle, test_handle("gate"));
+			assert_effects_unknown(run.next_event().await, &handle);
+			assert_eq!(wait_calls.load(Ordering::SeqCst), waits);
+		}
+	}
+
+	#[tokio::test]
+	async fn reattach_with_zero_deadline_settles_done_operation() {
+		let (source, _) = source();
+		let context = omp_exec::ReattachContext {
+			outputs:            OutputSpec::Metadata,
+			remaining_deadline: Duration::ZERO,
+		};
+		let mut run = backend(Fake::default(), source)
+			.await
+			.reattach(test_handle("expired"), context)
+			.await
+			.unwrap();
+		let Some(ExecutionEvent::Settled(Ok(result))) = run.next_event().await else {
+			panic!("a done operation must settle despite an expired deadline");
+		};
+		assert_eq!(result.outcome, Outcome::Exited { code: 0 });
+	}
+
+	#[tokio::test]
+	async fn reattach_preserves_requested_artifact_paths() {
+		let (source, _) = source();
+		let fake = Fake::default();
+		let wait_calls = fake.wait_calls.clone();
+		let handle = test_handle("artifact");
+		let context = omp_exec::ReattachContext {
+			outputs:            OutputSpec::Artifacts {
+				paths: Arc::from([Str::new_static("out/result.txt")]),
+			},
+			remaining_deadline: Duration::from_secs(2),
+		};
+		let mut run = backend(fake, source)
+			.await
+			.reattach(handle, context)
+			.await
+			.unwrap();
+		let Some(ExecutionEvent::Settled(Ok(result))) = run.next_event().await else {
+			panic!("reattachment must settle without another acceptance");
+		};
+		assert!(result.logs.is_none());
+		assert_eq!(result.artifacts.len(), 1);
+		assert_eq!(result.artifacts[0].path.as_str(), "out/result.txt");
+		assert_eq!(result.artifacts[0].blob, blob_digest(b"artifact"));
+		assert_eq!(
+			result
+				.output_digests
+				.get(&Str::new_static("out/result.txt")),
+			Some(&blob_digest(b"artifact"))
+		);
+		assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test]
+	async fn reattach_deadline_bounds_stream_and_initial_wait_rpc() {
+		for wait_behavior in [WaitBehavior::Pending, WaitBehavior::RpcPending] {
+			let (source, _) = source();
+			let handle = test_handle("reattach-deadline");
+			let context = omp_exec::ReattachContext {
+				outputs:            OutputSpec::Metadata,
+				remaining_deadline: Duration::from_millis(200),
+			};
+			let backend = backend(Fake { wait_behavior, ..Default::default() }, source).await;
+			let response =
+				tokio::time::timeout(Duration::from_secs(2), backend.reattach(handle.clone(), context))
+					.await
+					.expect("reattach RPC ignored its deadline");
+			match response {
+				Err(ExecutionError::EffectsUnknown { handle: actual }) => assert_eq!(actual, handle),
+				Ok(mut run) => {
+					run.watch_grace = Duration::ZERO;
+					assert_effects_unknown(run.next_event().await, &handle);
+				},
+				Err(error) => panic!("unexpected reattach error: {error:?}"),
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn malformed_terminal_is_unknown_but_backend_failure_is_typed() {
+		for wait_behavior in [WaitBehavior::Malformed, WaitBehavior::BackendFailure] {
+			let (source, _) = source();
+			let handle = test_handle("typed-result");
+			let context = omp_exec::ReattachContext {
+				outputs:            OutputSpec::Metadata,
+				remaining_deadline: Duration::from_secs(2),
+			};
+			let mut run = backend(Fake { wait_behavior, ..Default::default() }, source)
+				.await
+				.reattach(handle.clone(), context)
+				.await
+				.unwrap();
+			let event = run.next_event().await;
+			match wait_behavior {
+				WaitBehavior::Malformed => assert_effects_unknown(event, &handle),
+				WaitBehavior::BackendFailure => assert!(matches!(
+					event,
+					Some(ExecutionEvent::Settled(Err(ExecutionError::Capacity { .. })))
+				)),
+				_ => unreachable!(),
+			}
+		}
+	}
+
 	#[tokio::test]
 	async fn success_and_nonzero_exit_are_domain_outcomes() {
 		let (source, file) = source();
 		let run = backend(
 			Fake {
-				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
-				nonzero:   false,
-				fault:     None,
+				nonzero: false,
+				fault: None,
+				..Default::default()
 			},
 			source.clone(),
 		)
@@ -1412,11 +1839,12 @@ mod tests {
 		assert_eq!(settle(run).await.outcome, Outcome::Exited { code: 0 });
 		let run = backend(
 			Fake {
-				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
-				nonzero:   true,
-				fault:     None,
+				nonzero: true,
+				fault: None,
+				..Default::default()
 			},
 			source,
 		)
@@ -1433,11 +1861,12 @@ mod tests {
 		let uploaded = Arc::new(AsyncMutex::new(Vec::new()));
 		let run = backend(
 			Fake {
-				uploaded:  uploaded.clone(),
+				uploaded: uploaded.clone(),
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
-				nonzero:   false,
-				fault:     None,
+				nonzero: false,
+				fault: None,
+				..Default::default()
 			},
 			source,
 		)
@@ -1454,11 +1883,12 @@ mod tests {
 		let (source, file) = source();
 		let run = backend(
 			Fake {
-				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: true,
-				nonzero:   false,
-				fault:     None,
+				nonzero: false,
+				fault: None,
+				..Default::default()
 			},
 			source,
 		)
@@ -1475,11 +1905,12 @@ mod tests {
 		let cancelled = Arc::new(AsyncMutex::new(false));
 		let mut run = backend(
 			Fake {
-				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 				cancelled: cancelled.clone(),
 				reconnect: true,
-				nonzero:   false,
-				fault:     None,
+				nonzero: false,
+				fault: None,
+				..Default::default()
 			},
 			source,
 		)
@@ -1512,11 +1943,12 @@ mod tests {
 		let (source, file) = source();
 		let result = backend(
 			Fake {
-				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				uploaded: Arc::new(AsyncMutex::new(Vec::new())),
 				cancelled: Arc::new(AsyncMutex::new(false)),
 				reconnect: false,
-				nonzero:   false,
-				fault:     Some(Code::ResourceExhausted),
+				nonzero: false,
+				fault: Some(Code::ResourceExhausted),
+				..Default::default()
 			},
 			source,
 		)

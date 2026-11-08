@@ -1434,10 +1434,10 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							return;
 						}
 						let hash: [u8; 32] = if let Ok(hash) = details.hash.as_ref().try_into() { hash } else {
-										tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
-										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-										return;
-									};
+							tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
+							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+							return;
+						};
 						let expected_hash = Hash32::new(hash);
 						let max_bytes = u64::try_from(omp_proto::bounds::FRAME_MAX_BYTES)
 							.expect("protocol frame limit fits u64");
@@ -1540,10 +1540,10 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							return;
 						}
 						let visibility = if let Ok(visibility) = tool_visibility_spans(verdict.visibility, &verdict.parts) { visibility } else {
-										tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
-										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-										return;
-									};
+							tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
+							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+							return;
+						};
 						let mut parts = match replicate_verdict_parts(
 							&client,
 							&outcome_store,

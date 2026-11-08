@@ -6,7 +6,7 @@ Remote execution image for `omp adw` (ADR 0040, Part G).
 
 The image carries every dependency that `just test-pkg omp-envd` needs, because
 remote actions run with networking disabled (`REMOTE_POSTURE.network = Disabled`
-in `crates/driver/src/adw/remote.rs`).
+in `crates/driver/src/exec_composer.rs`).
 
 | Layer | Contents |
 |-------|----------|
