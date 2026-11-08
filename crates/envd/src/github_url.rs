@@ -1,11 +1,12 @@
 //! Direct GitHub REST resolver for issue:// and pr:// resources.
 
 use std::{
+	collections::BTreeMap,
 	fmt::{self, Display},
 	path::{Path, PathBuf},
 	str,
 	sync::{Arc, OnceLock},
-	time::{SystemTime, UNIX_EPOCH},
+	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::BytesMut;
@@ -15,12 +16,15 @@ use http::{
 	header::{ACCEPT, ETAG, IF_NONE_MATCH, USER_AGENT},
 };
 use omp_ai::{
-	auth::{CredentialError, CredentialFuture, CredentialLease, CredentialNeed, HeaderPlacement},
+	auth::{
+		CredentialError, CredentialFuture, CredentialLease, CredentialNeed, HeaderPlacement,
+		LeaseMeta,
+	},
 	id::{AccountId, PrincipalId},
 };
 use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
 use omp_catalog::AuthSpecId;
-use omp_core::{CowBytes, Str, sf};
+use omp_core::{CowBytes, SecretString, Str, sf};
 use omp_tool::{Diag, DiagKind};
 use omp_tools::read::{
 	Fault,
@@ -28,6 +32,7 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 use omp_vcs::git::GitRepo;
+use parking_lot::{Mutex, MutexGuard};
 use serde_json::Value;
 use smallvec::smallvec;
 
@@ -124,15 +129,102 @@ pub trait CredentialAuthority: Send + Sync + 'static {
 	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>>;
 }
 
-/// Late-bound projection of the one combined daemon credential authority.
+/// How long a host with no ambient GitHub credential is remembered as a miss
+/// before the environment and credential helpers are consulted again.
+const AMBIENT_MISS_TTL: Duration = Duration::from_secs(60);
+
+/// Environment variables consulted for `github.com`, in precedence order
+/// (the `gh` CLI convention).
+const GITHUB_COM_TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+/// Environment variables consulted for GitHub Enterprise hosts, in
+/// precedence order (the `gh` CLI convention).
+const GITHUB_ENTERPRISE_TOKEN_VARS: [&str; 2] = ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+/// One host's ambient-credential lookup outcome.
+#[derive(Clone)]
+enum AmbientEntry {
+	Found(CredentialLease),
+	Missing(Instant),
+}
+
+/// Late-bound projection of the one combined daemon credential authority,
+/// with a host-scoped ambient fallback for the GitHub REST API.
 pub struct GithubCredentialBridge {
 	authority: OnceLock<Arc<dyn CredentialAuthority>>,
+	ambient:   Mutex<BTreeMap<String, AmbientEntry>>,
 }
 
 impl GithubCredentialBridge {
 	/// Creates an unbound credential projection.
 	pub const fn new() -> Self {
-		Self { authority: OnceLock::new() }
+		Self { authority: OnceLock::new(), ambient: Mutex::new(BTreeMap::new()) }
+	}
+
+	/// Leases the credential for one GitHub host's REST API.
+	///
+	/// Resolution order, first hit wins:
+	/// 1. the stored `github` provider credential, for `github.com` only, so a
+	///    github.com token is never projected onto an Enterprise host;
+	/// 2. the daemon's environment: `GH_TOKEN`/`GITHUB_TOKEN` for `github.com`,
+	///    `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` for any other host;
+	/// 3. the user's git credential helpers for `https://<host>`, the same
+	///    source push and fetch already authenticate with.
+	///
+	/// Ambient results are cached per host (misses for [`AMBIENT_MISS_TTL`]);
+	/// [`Self::reject_host`] drops a cached token the host refused. `Ok(None)`
+	/// means requests to this host go out anonymously.
+	pub async fn lease_for_host(
+		&self,
+		host: &str,
+		cwd: &Path,
+	) -> Result<Option<CredentialLease>, Fault> {
+		let host = host.to_ascii_lowercase();
+		if host == GITHUB_HOST
+			&& let Some(lease) = self.lease().await?
+		{
+			return Ok(Some(lease));
+		}
+		if let Some(entry) = self.cached(&host) {
+			return Ok(match entry {
+				AmbientEntry::Found(lease) => Some(lease),
+				AmbientEntry::Missing(_) => None,
+			});
+		}
+		let lease = match ambient_token(&host, |name| std::env::var(name).ok()) {
+			Some((variable, token)) => Some(ambient_lease(&host, variable, token)),
+			None => omp_vcs::git::credential_fill(cwd, &host, None)
+				.await
+				.ok()
+				.flatten()
+				.map(|filled| ambient_lease(&host, "git-credential", filled.password)),
+		};
+		let entry = lease
+			.clone()
+			.map_or_else(|| AmbientEntry::Missing(Instant::now()), AmbientEntry::Found);
+		self.ambient_map().insert(host, entry);
+		Ok(lease)
+	}
+
+	/// Forgets the cached ambient credential for `host` after the host rejected
+	/// it (HTTP 401), so the next request re-reads the environment and helpers.
+	/// The user's credential helpers are never told to erase anything.
+	pub fn reject_host(&self, host: &str) {
+		self.ambient_map().remove(&host.to_ascii_lowercase());
+	}
+
+	fn cached(&self, host: &str) -> Option<AmbientEntry> {
+		let mut map = self.ambient_map();
+		match map.get(host)? {
+			AmbientEntry::Missing(at) if at.elapsed() >= AMBIENT_MISS_TTL => {
+				map.remove(host);
+				None
+			},
+			entry => Some(entry.clone()),
+		}
+	}
+
+	fn ambient_map(&self) -> MutexGuard<'_, BTreeMap<String, AmbientEntry>> {
+		self.ambient.lock()
 	}
 
 	/// Installs the sole combined credential authority for this environment.
@@ -189,6 +281,40 @@ impl fmt::Debug for GithubCredentialBridge {
 			.field("bound", &self.authority.get().is_some())
 			.finish()
 	}
+}
+
+/// Picks the host-appropriate token from an environment lookup.
+///
+/// github.com and Enterprise hosts read disjoint variables, so a token minted
+/// for one is never sent to the other.
+fn ambient_token(
+	host: &str,
+	env: impl Fn(&str) -> Option<String>,
+) -> Option<(&'static str, SecretString)> {
+	let names: &[&'static str] = if host.eq_ignore_ascii_case(GITHUB_HOST) {
+		&GITHUB_COM_TOKEN_VARS
+	} else {
+		&GITHUB_ENTERPRISE_TOKEN_VARS
+	};
+	names.iter().find_map(|name| {
+		env(name)
+			.map(|value| value.trim().to_owned())
+			.filter(|value| !value.is_empty())
+			.map(|value| (*name, SecretString::from(value)))
+	})
+}
+
+/// Wraps an ambient token as a bearer lease attributed to its source.
+fn ambient_lease(host: &str, source: &str, token: SecretString) -> CredentialLease {
+	CredentialLease::bearer(
+		LeaseMeta {
+			account:    AccountId::from(sf!("github:{host}")),
+			principal:  PrincipalId::from(source),
+			generation: 0,
+			expires_at: None,
+		},
+		token,
+	)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,7 +434,11 @@ impl GithubResolver {
 		headers.insert(USER_AGENT, HeaderValue::from_static("omp/issue-pr-resolver"));
 		headers.insert("x-github-api-version", HeaderValue::from_static("2022-11-28"));
 		headers.insert(ACCEPT, HeaderValue::from_static(target.accept()));
-		if let Some(lease) = self.credentials.lease().await? {
+		if let Some(lease) = self
+			.credentials
+			.lease_for_host(target.repo.host(), &self.root)
+			.await?
+		{
 			lease
 				.apply_header(&HeaderPlacement::bearer(), &mut headers)
 				.map_err(|_| Fault::Source { message: sf!("GitHub credential projection failed.") })?;
@@ -345,6 +475,9 @@ impl GithubResolver {
 			bytes.extend_from_slice(&chunk);
 		}
 		if !(200..300).contains(&status) {
+			if status == 401 {
+				self.credentials.reject_host(target.repo.host());
+			}
 			return Err(Fault::Source {
 				message: Str::new(format!("GitHub API returned HTTP {status}.")),
 			});
@@ -361,7 +494,10 @@ impl GithubResolver {
 	async fn fetch_comments(&self, target: &Target) -> Result<Vec<Value>, Fault> {
 		let mut comments = Vec::new();
 		let mut retained_bytes = 0usize;
-		let lease = self.credentials.lease().await?;
+		let lease = self
+			.credentials
+			.lease_for_host(target.repo.host(), &self.root)
+			.await?;
 		for page in 1..=100u32 {
 			let mut headers = HeaderMap::new();
 			headers.insert(USER_AGENT, HeaderValue::from_static("omp/issue-pr-resolver"));
@@ -821,7 +957,7 @@ pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
 	repo_from_remote(remote)
 }
 
-fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
+pub(super) fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
 	let remote = remote.trim();
 	if remote.contains("://") {
 		let parsed =
@@ -883,7 +1019,102 @@ fn http_fault(error: impl Display) -> Fault {
 }
 #[cfg(test)]
 mod tests {
+	use omp_core::ExposeSecret as _;
+
 	use super::*;
+
+	fn bearer_of(lease: &CredentialLease) -> String {
+		let mut headers = HeaderMap::new();
+		lease
+			.apply_header(&HeaderPlacement::bearer(), &mut headers)
+			.expect("bearer header");
+		headers["authorization"].to_str().unwrap().to_owned()
+	}
+
+	#[test]
+	fn ambient_tokens_are_scoped_to_their_host_family() {
+		let env = |name: &str| match name {
+			"GH_TOKEN" => Some("  ".to_owned()),
+			"GITHUB_TOKEN" => Some("dotcom".to_owned()),
+			"GITHUB_ENTERPRISE_TOKEN" => Some("ghe".to_owned()),
+			_ => None,
+		};
+		let (variable, token) = ambient_token("github.com", env).expect("github.com token");
+		assert_eq!((variable, token.expose_secret()), ("GITHUB_TOKEN", "dotcom"));
+		let (variable, token) = ambient_token("ghe.example.com", env).expect("enterprise token");
+		assert_eq!((variable, token.expose_secret()), ("GITHUB_ENTERPRISE_TOKEN", "ghe"));
+		assert!(
+			ambient_token("ghe.example.com", |name| (name == "GH_TOKEN").then(String::new)).is_none()
+		);
+	}
+
+	/// Authority that would hand every caller the same stored token.
+	struct AlwaysStored;
+
+	impl CredentialAuthority for AlwaysStored {
+		fn provider_lease(
+			&self,
+			need: CredentialNeed,
+		) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
+			omp_ai::auth::credential_ready(Ok(CredentialLease::bearer(
+				LeaseMeta {
+					account:    need.account.unwrap(),
+					principal:  PrincipalId::from("environment"),
+					generation: 1,
+					expires_at: None,
+				},
+				SecretString::from("stored-dotcom".to_owned()),
+			)))
+		}
+	}
+
+	#[tokio::test]
+	async fn enterprise_hosts_never_receive_the_stored_dotcom_credential() {
+		if GITHUB_ENTERPRISE_TOKEN_VARS
+			.iter()
+			.any(|name| std::env::var_os(name).is_some())
+		{
+			return;
+		}
+		let repo = tempfile::tempdir().unwrap();
+		let git = |args: &[&str]| {
+			assert!(
+				std::process::Command::new("git")
+					.args(args)
+					.current_dir(repo.path())
+					.status()
+					.unwrap()
+					.success()
+			);
+		};
+		git(&["init", "-q"]);
+		git(&["config", "--add", "credential.helper", ""]);
+		git(&[
+			"config",
+			"--add",
+			"credential.helper",
+			"!f() { test \"$1\" = get && echo username=x && echo password=helper-ghe; }; f",
+		]);
+		let bridge = GithubCredentialBridge::new();
+		assert!(bridge.bind(Arc::new(AlwaysStored)).is_ok());
+
+		let dotcom = bridge
+			.lease_for_host("GitHub.com", repo.path())
+			.await
+			.unwrap()
+			.expect("stored lease");
+		assert_eq!(bearer_of(&dotcom), "Bearer stored-dotcom");
+
+		let ghe = bridge
+			.lease_for_host("ghe.example.com", repo.path())
+			.await
+			.unwrap()
+			.expect("helper lease");
+		assert_eq!(bearer_of(&ghe), "Bearer helper-ghe");
+
+		bridge.reject_host("GHE.example.com");
+		assert!(bridge.cached("ghe.example.com").is_none());
+	}
 
 	#[test]
 	fn stale_cache_is_reported_out_of_band_without_changing_document_bytes() {

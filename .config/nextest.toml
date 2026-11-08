@@ -48,3 +48,21 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 filter = 'package(omp-e2e)'
 threads-required = "num-cpus"
 slow-timeout = { period = "120s", terminate-after = 5 }
+
+# This test drives four blocking `rust-analyzer scip` runs (two updates, a
+# live rebuild, and a corrupt-cache repair) plus one detached refresh. On a
+# quiet Mac the whole test finishes in about 50s (run 42443482393). On the
+# loaded self-hosted Mac a single-index sibling takes about two minutes
+# (121–128s in run 42489068470), so four of them exceed both the 4-minute
+# default and the 8-minute override; the test was killed at 480s still inside
+# an analyzer call, while 11,793 other tests had passed. Run it alone and
+# allow 15 minutes.
+[[profile.default.overrides]]
+filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
+threads-required = "num-cpus"
+slow-timeout = { period = "180s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
+threads-required = "num-cpus"
+slow-timeout = { period = "180s", terminate-after = 5 }

@@ -1,9 +1,11 @@
 //! The deliberately small git-CLI escape hatch.
 //!
-//! Two categories are allowed to spawn `git`, per the hybrid policy:
+//! Three categories are allowed to spawn `git`, per the hybrid policy:
 //! - **Credential-bound network transfers** — clone/fetch/push must reuse the
 //!   user's ssh config and credential helpers, which are subprocess-based by
 //!   design; no library reaches auth parity (and gitoxide has no send-pack).
+//! - **Credential-helper lookups** — [`credential_fill`] lets HTTPS API clients
+//!   authenticate with the same helper-held token push/fetch already use.
 //! - **Reftable ref access** — no in-process reftable implementation exists.
 //!
 //! The runner keeps a hardened subprocess contract:
@@ -14,6 +16,7 @@
 
 use std::{path::Path, process::Stdio, time::Duration};
 
+use omp_core::SecretString;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +31,8 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_mins(5);
 /// Default deadline for network transfers (`clone`/`fetch`/`push`); large-repo
 /// transfers legitimately outlive [`COMMAND_TIMEOUT`].
 pub const NETWORK_TIMEOUT: Duration = Duration::from_mins(30);
+/// Deadline for one non-interactive `git credential fill` lookup.
+pub const CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Deadline for synchronous plumbing on render paths (reftable HEAD reads):
 /// a stalled invocation degrades instead of freezing the UI.
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -368,6 +373,78 @@ impl GitRepo {
 	}
 }
 
+/// Secret returned by the user's git credential helpers for one HTTPS host.
+pub struct HelperCredential {
+	/// Helper-reported username; informational only.
+	pub username: String,
+	/// Helper-held password or token.
+	pub password: SecretString,
+}
+
+impl std::fmt::Debug for HelperCredential {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter
+			.debug_struct("HelperCredential")
+			.field("username", &self.username)
+			.finish_non_exhaustive()
+	}
+}
+
+/// Asks the configured git credential helpers for `https://<host>`.
+///
+/// The lookup is strictly non-interactive: the hardened environment rejects
+/// terminal and askpass prompts and `credential.interactive=false` keeps GUI
+/// helpers (Git Credential Manager) from opening a window. A miss, a refused
+/// prompt, an empty secret, or a host that could inject credential-protocol
+/// fields all resolve to `Ok(None)`. Nothing is ever approved or rejected
+/// back to the helpers, so a lookup never mutates the user's credential store.
+pub async fn credential_fill(
+	cwd: &Path,
+	host: &str,
+	cancel: Option<CancellationToken>,
+) -> Result<Option<HelperCredential>> {
+	if host.is_empty()
+		|| host
+			.bytes()
+			.any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == b'=')
+	{
+		return Ok(None);
+	}
+	let args = [
+		"-c".to_owned(),
+		"credential.interactive=false".to_owned(),
+		"credential".to_owned(),
+		"fill".to_owned(),
+	];
+	let output = run(cwd, &args, &RunOptions {
+		read_only: true,
+		timeout: Some(CREDENTIAL_TIMEOUT),
+		stdin: Some(format!("protocol=https\nhost={host}\n\n").into_bytes()),
+		cancel,
+	})
+	.await?;
+	if output.exit_code != 0 {
+		return Ok(None);
+	}
+	Ok(parse_credential_fill(&output.stdout))
+}
+
+/// Parses `git credential fill` output, discarding empty secrets.
+fn parse_credential_fill(stdout: &str) -> Option<HelperCredential> {
+	let mut username = String::new();
+	let mut password = None;
+	for line in stdout.lines() {
+		if let Some(value) = line.strip_prefix("username=") {
+			value.clone_into(&mut username);
+		} else if let Some(value) = line.strip_prefix("password=")
+			&& !value.is_empty()
+		{
+			password = Some(SecretString::from(value.to_owned()));
+		}
+	}
+	password.map(|password| HelperCredential { username, password })
+}
+
 /// Clone `url` into `target_dir`, removing the partial clone on any failure.
 ///
 /// Shallow (`--depth 1 --single-branch`) unless a specific SHA is pinned:
@@ -427,4 +504,87 @@ pub async fn clone(
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use omp_core::ExposeSecret as _;
+
+	use super::*;
+
+	#[test]
+	fn credential_fill_output_keeps_only_non_empty_secrets() {
+		let filled =
+			parse_credential_fill("protocol=https\nhost=github.com\nusername=x\npassword=tok\n")
+				.expect("password present");
+		assert_eq!(filled.username, "x");
+		assert_eq!(filled.password.expose_secret(), "tok");
+		assert!(
+			parse_credential_fill("protocol=https\nhost=github.com\nusername=\npassword=\n").is_none()
+		);
+		assert!(parse_credential_fill("").is_none());
+	}
+
+	#[tokio::test]
+	async fn credential_fill_rejects_protocol_injection_without_spawning() {
+		let dir = tempfile::tempdir().unwrap();
+		for host in ["", "github.com\npassword=x", "a b", "host=evil", "x\0y"] {
+			assert!(
+				credential_fill(dir.path(), host, None)
+					.await
+					.unwrap()
+					.is_none(),
+				"{host:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn credential_fill_reads_a_configured_helper_and_misses_without_one() {
+		let dir = tempfile::tempdir().unwrap();
+		run_checked(dir.path(), &["init".to_owned(), "-q".to_owned()], &RunOptions::default())
+			.await
+			.unwrap();
+		// An empty entry resets helpers inherited from global config.
+		for helper in
+			["", "!f() { test \"$1\" = get && echo username=bot && echo password=s3cret; }; f"]
+		{
+			run_checked(
+				dir.path(),
+				&[
+					"config".to_owned(),
+					"--add".to_owned(),
+					"credential.helper".to_owned(),
+					helper.to_owned(),
+				],
+				&RunOptions::default(),
+			)
+			.await
+			.unwrap();
+		}
+		let filled = credential_fill(dir.path(), "github.example.com", None)
+			.await
+			.unwrap()
+			.expect("helper answered");
+		assert_eq!(filled.username, "bot");
+		assert_eq!(filled.password.expose_secret(), "s3cret");
+
+		let empty = tempfile::tempdir().unwrap();
+		run_checked(empty.path(), &["init".to_owned(), "-q".to_owned()], &RunOptions::default())
+			.await
+			.unwrap();
+		run_checked(
+			empty.path(),
+			&["config".to_owned(), "credential.helper".to_owned(), String::new()],
+			&RunOptions::default(),
+		)
+		.await
+		.unwrap();
+		assert!(
+			credential_fill(empty.path(), "github.example.com", None)
+				.await
+				.unwrap()
+				.is_none()
+		);
+	}
 }
