@@ -638,6 +638,8 @@ struct ExecutionTestCounts {
 	starts:     AtomicUsize,
 	reattaches: AtomicUsize,
 	cancels:    AtomicUsize,
+	/// Every `reattach` call's handle and context, in order.
+	reattached: parking_lot::Mutex<Vec<(omp_exec::ReattachHandle, omp_exec::ReattachContext)>>,
 }
 
 struct ExecutionTestRun {
@@ -718,11 +720,21 @@ impl omp_exec::ExecutionBackend for ExecutionTestBackend {
 
 	async fn reattach(
 		&self,
-		_handle: omp_exec::ReattachHandle,
-		_context: omp_exec::ReattachContext,
+		handle: omp_exec::ReattachHandle,
+		context: omp_exec::ReattachContext,
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
 		self.counts.reattaches.fetch_add(1, Ordering::SeqCst);
-		Err(omp_exec::ExecutionError::ResumeUnsupported { backend: self.id.clone() })
+		self
+			.counts
+			.reattached
+			.lock()
+			.push((handle.clone(), context));
+		Ok(ExecutionTestRun {
+			handle,
+			events: self.events.clone(),
+			counts: Arc::clone(&self.counts),
+			stall_cancel: self.stall_cancel,
+		})
 	}
 }
 
@@ -1999,4 +2011,400 @@ async fn execution_attach_without_submission_marker_is_refused() {
 			.await
 			.expect("stop test run")
 	);
+}
+
+/// The destination identity the operator's configuration reports for the fake
+/// backend: the one every test job journals.
+fn test_destination() -> serde_json::Value {
+	serde_json::from_str(TEST_DESTINATION).expect("destination identity")
+}
+
+/// A backend for a resumed run. It shares `backend`'s call counts and streams
+/// its own events, so the orphaned first run cannot take them.
+fn resume_test_backend(
+	backend: &ExecutionTestBackend,
+) -> (ExecutionTestBackend, flume::Sender<omp_exec::ExecutionEvent>) {
+	let (mut resumer, events) = execution_test_backend(false);
+	resumer.counts = Arc::clone(&backend.counts);
+	(resumer, events)
+}
+
+fn set_test_prop(
+	session: &mut Session,
+	handle: omp_dom::Handle,
+	prop: PropKey,
+	value: &'static str,
+) {
+	let cause = session.head().expect("journal head");
+	session
+		.patch(Txn {
+			cause,
+			label: Some(Str::new_static("test.prop")),
+			ops: vec![Op::Set { h: handle, prop, value: Value::Str(Str::new_static(value)) }],
+		})
+		.expect("rewrite job property");
+}
+
+fn mark_test_delivered(session: &mut Session, handle: omp_dom::Handle) {
+	let cause = session.head().expect("journal head");
+	session
+		.patch(Txn {
+			cause,
+			label: Some(Str::new_static("test.delivered")),
+			ops: vec![Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(omp_agent::jobs::DELIVERED)),
+				value: Value::Bool(true),
+			}],
+		})
+		.expect("delivery marker");
+}
+
+/// Produces exec-42, accepts it, and restarts without its watcher, then marks
+/// the orphan failure delivered: the state a reattach resumes. Returns the
+/// producer's backend.
+async fn effects_unknown_test_job(path: &std::path::Path) -> ExecutionTestBackend {
+	let mut session = Session::create(path, ComponentRegistry::standard()).expect("create session");
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	start_test_execution(&mut session, &board, &backend);
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	drop(board);
+	drop(session);
+
+	let mut session =
+		Session::open(path, ComponentRegistry::standard()).expect("reopen accepted job");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	let record = board.poll(&mut session).expect("settle orphan").remove(0);
+	assert_eq!(record.status, "failed");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(record.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+	assert_eq!(record.error.as_deref(), Some(omp_agent::ORPHANED_EXECUTION_JOB));
+	mark_test_delivered(&mut session, record.handle);
+	backend
+}
+
+/// Opens `path` as the one writer a reattach needs, with its board rebuilt and
+/// reconciled.
+fn open_for_reattach(path: &std::path::Path) -> (Session, JobBoard) {
+	let mut session =
+		Session::open(path, ComponentRegistry::standard()).expect("reopen for reattach");
+	let board = JobBoard::new();
+	board.rebuild(&session);
+	board.poll(&mut session).expect("reconcile");
+	(session, board)
+}
+
+async fn settle_resumed_test_run(
+	session: &mut Session,
+	board: &JobBoard,
+	events: &flume::Sender<omp_exec::ExecutionEvent>,
+) -> omp_agent::JobRecord {
+	events
+		.send(omp_exec::ExecutionEvent::Settled(Ok(execution_test_result(0))))
+		.expect("send result");
+	tokio::time::timeout(
+		std::time::Duration::from_secs(5),
+		board.wait(session, Some(&[Str::new_static("exec-42")])),
+	)
+	.await
+	.expect("resumed run settles")
+	.expect("journal settlement")
+	.expect("selected job")
+}
+
+/// T10: an orphaned accepted job resumes through the reattach entry. The
+/// backend sees one `reattach` with the stored handle and output spec and no
+/// second `start`, the result is journaled once, and the orphan's failure
+/// presentation is gone.
+#[tokio::test]
+async fn execution_t10_reattach_resumes_and_settles_once() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("resumed.oms");
+	let backend = effects_unknown_test_job(&path).await;
+	let (mut session, board) = open_for_reattach(&path);
+	let settled_before = settle_entries(&session);
+
+	let resume = board
+		.prepare_reattach(&session, "exec-42", &test_destination())
+		.expect("the job can resume");
+	assert_eq!(resume.handle(), &execution_test_handle());
+	assert_eq!(resume.context().outputs, omp_exec::OutputSpec::Logs);
+	assert!(resume.context().remaining_deadline <= std::time::Duration::from_secs(60));
+	let (resumer, events) = resume_test_backend(&backend);
+	let record = board
+		.reattach_execution(&mut session, resume, resumer)
+		.await
+		.expect("reattach");
+	assert_eq!(record.status, "running");
+	assert_eq!(record.execution_state, Some(omp_exec::ExecutionState::Accepted));
+	assert_eq!(record.error, None);
+	assert_eq!(record.execution_failure, None);
+	assert_eq!(test_calls(&backend), (1, 1));
+	{
+		let reattached = backend.counts.reattached.lock();
+		assert_eq!(reattached.len(), 1);
+		assert_eq!(reattached[0].0, execution_test_handle());
+		assert_eq!(reattached[0].1.outputs, omp_exec::OutputSpec::Logs);
+	}
+	assert!(matches!(
+		board.prepare_reattach(&session, "exec-42", &test_destination()),
+		Err(omp_agent::ExecutionReattachError::Watched { .. })
+	));
+
+	let settled = settle_resumed_test_run(&mut session, &board, &events).await;
+	assert_eq!(settled.status, "completed");
+	assert_eq!(settled.execution_state, Some(omp_exec::ExecutionState::Settled));
+	assert_eq!(settled.error, None);
+	assert_eq!(settled.execution_failure, None);
+	assert_test_handle(&settled);
+	let raw = settled.execution_result.as_deref().expect("durable result");
+	assert_eq!(
+		omp_agent::resolve_execution_result(&session, raw).expect("decode result"),
+		Some(execution_test_result(0))
+	);
+	assert_eq!(settle_entries(&session), settled_before + 1);
+	assert_eq!(test_calls(&backend), (1, 1));
+	assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), 0);
+	drop(board);
+	drop(session);
+
+	let (session, board) = open_for_reattach(&path);
+	let record = board.list().remove(0);
+	assert_eq!(record.status, "completed");
+	assert_eq!(record.error, None);
+	assert_eq!(record.execution_failure, None);
+	assert_eq!(settle_entries(&session), settled_before + 1);
+}
+
+/// T11: every refusal precedes the backend's `reattach`, calls nothing on the
+/// backend, and leaves the journal unchanged.
+#[tokio::test]
+async fn execution_t11_refusals_make_no_backend_call_and_no_write() {
+	use omp_agent::ExecutionReattachError as Refusal;
+
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("refused.oms");
+	let backend = effects_unknown_test_job(&path).await;
+	let (mut session, board) = open_for_reattach(&path);
+	let handle = board.list().remove(0).handle;
+
+	let unsupported = |resume| {
+		let (mut resumer, _events) = resume_test_backend(&backend);
+		resumer.capabilities.resume = resume;
+		resumer
+	};
+	let mut renamed = resume_test_backend(&backend).0;
+	renamed.id = omp_exec::BackendId::new_static("other@build.example:443/test");
+	for (resumer, expected) in [
+		(unsupported(omp_exec::ResumeSupport::Unsupported), "unsupported"),
+		(unsupported(omp_exec::ResumeSupport::Snapshot), "snapshot"),
+		(renamed, "backend"),
+	] {
+		let head = session.head();
+		let resume = board
+			.prepare_reattach(&session, "exec-42", &test_destination())
+			.expect("the journal allows the resume");
+		let refusal = board
+			.reattach_execution(&mut session, resume, resumer)
+			.await
+			.expect_err("the backend is refused");
+		assert!(
+			match expected {
+				"unsupported" => matches!(refusal, Refusal::Unsupported { .. }),
+				"snapshot" => matches!(refusal, Refusal::SnapshotOnly { .. }),
+				_ => matches!(refusal, Refusal::BackendMismatch { .. }),
+			},
+			"{expected}: {refusal:?}"
+		);
+		assert_eq!(session.head(), head, "{expected} journals nothing");
+	}
+
+	let head = session.head();
+	let elsewhere: serde_json::Value = serde_json::from_str(
+		r#"{"backend":"fake@build.example:443/test","endpoint":"grpcs://other.example:443","instance":"test"}"#,
+	)
+	.expect("destination identity");
+	assert!(matches!(
+		board.prepare_reattach(&session, "exec-42", &elsewhere),
+		Err(Refusal::DestinationMismatch { .. })
+	));
+	assert!(matches!(
+		board.prepare_reattach(&session, "missing", &test_destination()),
+		Err(Refusal::NotFound { .. })
+	));
+	assert_eq!(session.head(), head);
+
+	let handle_prop = PropKey::Custom(Str::new_static(jobs::EXECUTION_HANDLE));
+	for (stored, label) in [
+		("invalid handle", "malformed handle"),
+		(
+			r#"{"schema":"V2","backend":"fake@build.example:443/test","operation":"operations/42","id":"exec-42"}"#,
+			"unknown schema",
+		),
+	] {
+		set_test_prop(&mut session, handle, handle_prop.clone(), stored);
+		let head = session.head();
+		assert!(
+			matches!(
+				board.prepare_reattach(&session, "exec-42", &test_destination()),
+				Err(Refusal::InvalidHandle { .. })
+			),
+			"{label}"
+		);
+		assert_eq!(session.head(), head, "{label} journals nothing");
+	}
+
+	set_test_prop(&mut session, handle, omp_dom::PropId::Status.into(), "completed");
+	set_test_prop(
+		&mut session,
+		handle,
+		PropKey::Custom(Str::new_static(jobs::EXECUTION_STATE)),
+		"settled",
+	);
+	let head = session.head();
+	assert!(matches!(
+		board.prepare_reattach(&session, "exec-42", &test_destination()),
+		Err(Refusal::Finished { .. })
+	));
+
+	let cause = session.head().expect("journal head");
+	let txn = jobs::insert(session.dom(), cause, JobSpec {
+		id:      Str::new_static("tool-1"),
+		kind:    Str::new_static("tool"),
+		owner:   Str::new_static("Main"),
+		started: Str::new_static("1"),
+		agent:   None,
+		lease:   None,
+	})
+	.expect("jobs root");
+	session.patch(txn).expect("insert tool job");
+	let head_with_tool = session.head();
+	assert_ne!(head_with_tool, head);
+	assert!(matches!(
+		board.prepare_reattach(&session, "tool-1", &test_destination()),
+		Err(Refusal::NotExecution { .. })
+	));
+	assert_eq!(session.head(), head_with_tool);
+	assert_eq!(test_calls(&backend), (1, 0));
+	assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), 0);
+}
+
+/// T12: the resumed result is delivered once, and only the session that
+/// resumed it writes the journal.
+#[tokio::test]
+async fn execution_t12_resumed_result_is_delivered_once_by_one_writer() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("delivered.oms");
+	let backend = effects_unknown_test_job(&path).await;
+	let (mut session, board) = open_for_reattach(&path);
+	assert!(
+		omp_agent::jobs::undelivered(session.dom()).is_empty(),
+		"the orphan failure was delivered"
+	);
+	let resume = board
+		.prepare_reattach(&session, "exec-42", &test_destination())
+		.expect("the job can resume");
+	let (resumer, events) = resume_test_backend(&backend);
+	board
+		.reattach_execution(&mut session, resume, resumer)
+		.await
+		.expect("reattach");
+	assert!(matches!(
+		Session::open(&path, ComponentRegistry::standard()),
+		Err(omp_session::SessionError::Journal(omp_journal::JournalError::Locked { .. }))
+	));
+	assert!(omp_agent::jobs::undelivered(session.dom()).is_empty(), "a live job is not delivered");
+
+	settle_resumed_test_run(&mut session, &board, &events).await;
+	let pending = omp_agent::jobs::undelivered(session.dom());
+	assert_eq!(
+		pending
+			.iter()
+			.map(|record| record.id.as_str())
+			.collect::<Vec<_>>(),
+		["exec-42"]
+	);
+	mark_test_delivered(&mut session, pending[0].handle);
+	let delivered_head = session.head();
+	board.poll(&mut session).expect("poll after delivery");
+	assert!(omp_agent::jobs::undelivered(session.dom()).is_empty());
+	assert_eq!(session.head(), delivered_head, "a settled resume journals nothing more");
+	drop(board);
+	drop(session);
+
+	let (session, _board) = open_for_reattach(&path);
+	assert!(omp_agent::jobs::undelivered(session.dom()).is_empty());
+	assert_eq!(session.head(), delivered_head);
+	assert_eq!(test_calls(&backend), (1, 1));
+}
+
+/// Ctrl-C on `omp jobs attach` detaches: nothing is cancelled, and the job
+/// settles `EffectsUnknown` with its handle, ready to reattach again.
+#[tokio::test]
+async fn execution_detach_keeps_resumed_work_running_and_reattachable() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("detached.oms");
+	let backend = effects_unknown_test_job(&path).await;
+	let (mut session, board) = open_for_reattach(&path);
+	let resume = board
+		.prepare_reattach(&session, "exec-42", &test_destination())
+		.expect("the job can resume");
+	let (resumer, _events) = resume_test_backend(&backend);
+	let record = board
+		.reattach_execution(&mut session, resume, resumer)
+		.await
+		.expect("reattach");
+
+	assert!(
+		board
+			.detach(&mut session, record.handle)
+			.await
+			.expect("detach")
+	);
+	let detached = board.list().remove(0);
+	assert_eq!(detached.status, "failed");
+	assert_eq!(detached.execution_state, Some(omp_exec::ExecutionState::EffectsUnknown));
+	assert_eq!(detached.execution_failure, Some(omp_exec::ExecutionErrorKind::EffectsUnknown));
+	assert_eq!(detached.error.as_deref(), Some(omp_agent::EXECUTION_DETACHED));
+	assert_test_handle(&detached);
+	assert_eq!(backend.counts.cancels.load(Ordering::SeqCst), 0);
+	assert!(
+		!board
+			.detach(&mut session, record.handle)
+			.await
+			.expect("nothing left to detach")
+	);
+	board
+		.prepare_reattach(&session, "exec-42", &test_destination())
+		.expect("a detached job can resume again");
+	assert_eq!(test_calls(&backend), (1, 1));
+}
+
+/// A record journaled before the producer stored the complete output spec
+/// holds its bare variant name, and a deadline long past leaves no time.
+#[tokio::test]
+async fn execution_reattach_reads_a_legacy_output_mode_and_a_past_deadline() {
+	let temp = tempdir().expect("temporary session directory");
+	let path = temp.path().join("legacy.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create session");
+	let handle = insert_test_execution(&mut session);
+	let board = JobBoard::new();
+	let (backend, events) = execution_test_backend(false);
+	attach_test_execution(&session, &board, handle, &backend).await;
+	wait_for_test_acceptance(&board, &events).await;
+	board.poll(&mut session).expect("commit acceptance");
+	drop(board);
+	drop(session);
+
+	let (session, board) = open_for_reattach(&path);
+	let record = board.list().remove(0);
+	assert_eq!(record.output_mode.as_deref(), Some("logs"));
+	let resume = board
+		.prepare_reattach(&session, "exec-42", &test_destination())
+		.expect("the job can resume");
+	assert_eq!(resume.context().outputs, omp_exec::OutputSpec::Logs);
+	assert_eq!(resume.context().remaining_deadline, std::time::Duration::ZERO);
 }

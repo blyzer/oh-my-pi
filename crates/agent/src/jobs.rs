@@ -11,7 +11,7 @@ use std::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
 	},
-	time::{SystemTime, UNIX_EPOCH},
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use flume::Receiver;
@@ -20,7 +20,8 @@ use omp_dom::{Dom, Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_exec::{
 	Artifact, BackendId, Digest, ExecutionBackend, ExecutionError, ExecutionErrorKind,
 	ExecutionEvent, ExecutionRequest, ExecutionResult, ExecutionRun, ExecutionState, FallbackCause,
-	Logs, Outcome, ReattachHandle, Timing, TransferCounts,
+	Logs, Outcome, OutputSpec, ReattachContext, ReattachHandle, ResumeSupport, Timing,
+	TransferCounts,
 };
 use omp_journal::{
 	EntryId,
@@ -31,7 +32,7 @@ use omp_proto::toolhost::v1::HookEventId;
 use omp_session::{LifecycleWork, Session};
 use omp_tool::{CallOutcomeDetails, InvocationFeed, RegistryError, ToolIdentity};
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 use strum::{Display, EnumString, IntoStaticStr};
 use tokio::{task::JoinHandle, time};
@@ -218,6 +219,142 @@ pub enum ExecutionStartError {
 	Session(#[from] omp_session::SessionError),
 }
 
+/// Why [`JobBoard::prepare_reattach`] or [`JobBoard::reattach_execution`]
+/// resumed nothing.
+///
+/// Every refusal comes before the backend's `reattach` and leaves the journal
+/// unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionReattachError {
+	/// The session holds no job with this id.
+	#[error("job {id} not found")]
+	NotFound {
+		/// The requested job id.
+		id: Str,
+	},
+	/// Only execution jobs carry backend work to resume.
+	#[error("job {id} is a {kind} job; only execution jobs can be reattached")]
+	NotExecution {
+		/// The job id.
+		id:   Str,
+		/// The job's kind.
+		kind: JobKind,
+	},
+	/// A live run already watches the job.
+	#[error("execution job {id} is already being watched")]
+	Watched {
+		/// The job id.
+		id: Str,
+	},
+	/// The job has a known terminal outcome or was cancelled.
+	#[error(
+		"execution job {id} is {status}; only accepted work with unknown effects can be reattached"
+	)]
+	Finished {
+		/// The job id.
+		id:     Str,
+		/// The job's terminal status.
+		status: Str,
+	},
+	/// No backend accepted the job, so no handle names its work.
+	#[error("execution job {id} was never accepted by a backend")]
+	NotAccepted {
+		/// The job id.
+		id: Str,
+	},
+	/// The stored handle cannot be decoded, or names an unknown schema.
+	#[error("execution job {id} has an unreadable reattach handle")]
+	InvalidHandle {
+		/// The job id.
+		id:     Str,
+		/// The decode failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// The job was accepted by another destination than the configured one.
+	#[error("execution job {id} was accepted by {stored}, not the configured destination")]
+	DestinationMismatch {
+		/// The job id.
+		id:     Str,
+		/// The journaled destination identity.
+		stored: Str,
+	},
+	/// The stored output spec cannot be decoded.
+	#[error("execution job {id} has an unreadable output spec")]
+	InvalidOutputs {
+		/// The job id.
+		id:     Str,
+		/// The decode failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// The stored deadline is missing or not a millisecond timestamp.
+	#[error("execution job {id} has no readable deadline")]
+	InvalidDeadline {
+		/// The job id.
+		id: Str,
+	},
+	/// The job changed after [`JobBoard::prepare_reattach`] validated it.
+	#[error("execution job {id} changed before it was reattached")]
+	Changed {
+		/// The job id.
+		id: Str,
+	},
+	/// The backend is not the one the stored handle names.
+	#[error("execution job {id} was accepted by backend {expected}")]
+	BackendMismatch {
+		/// The job id.
+		id:       Str,
+		/// The backend the stored handle names.
+		expected: BackendId,
+	},
+	/// The backend cannot resume accepted work.
+	#[error("backend {backend} cannot resume accepted executions")]
+	Unsupported {
+		/// The refusing backend.
+		backend: BackendId,
+	},
+	/// The backend resumes only from snapshots, which reattach does not read.
+	#[error("backend {backend} resumes only from execution snapshots")]
+	SnapshotOnly {
+		/// The refusing backend.
+		backend: BackendId,
+	},
+	/// The backend's `reattach` failed; the job keeps its journaled state.
+	#[error("backend reattach failed")]
+	Backend(#[source] ExecutionError),
+	/// Journaling the resumed watch failed.
+	#[error(transparent)]
+	Session(#[from] omp_session::SessionError),
+}
+
+/// One execution job [`JobBoard::prepare_reattach`] validated for a resume.
+///
+/// Only `prepare_reattach` mints it, after every journal-only check passed,
+/// and [`JobBoard::reattach_execution`] consumes it, so the backend is composed
+/// and contacted only for a job that can resume.
+#[derive(Debug)]
+pub struct ExecutionResume {
+	node:    Handle,
+	id:      Str,
+	handle:  ReattachHandle,
+	context: ReattachContext,
+}
+
+impl ExecutionResume {
+	/// The accepted handle; its backend id names the backend to compose.
+	#[must_use]
+	pub const fn handle(&self) -> &ReattachHandle {
+		&self.handle
+	}
+
+	/// The journaled outputs and the deadline time that remains.
+	#[must_use]
+	pub const fn context(&self) -> &ReattachContext {
+		&self.context
+	}
+}
+
 /// Durable fields projected from one `<job>` or `<subagent>` element.
 #[derive(Clone, Debug)]
 pub struct JobRecord {
@@ -393,6 +530,8 @@ struct RuntimeJob {
 	accepted_handle:    Option<ReattachHandle>,
 	accepted_committed: bool,
 	_detached:          Option<DetachedCall>,
+	/// Stops a supervised execution run without cancelling its backend work.
+	detach:             Option<CancellationToken>,
 	/// A terminal call outcome recovered before its job settlement patch
 	/// landed.
 	recovered:          Option<RecoveredSettlement>,
@@ -458,6 +597,14 @@ pub const EXECUTION_START_FAILED: &str = "execution start failed; its submission
 /// backend returned a handle.
 pub const EXECUTION_CANCELLED_BEFORE_ACCEPTANCE: &str =
 	"execution submission is unknown after cancellation";
+/// Stable diagnostic journaled when the watcher of accepted work detaches. The
+/// work keeps running on the backend, and a reattach resumes watching it.
+pub const EXECUTION_DETACHED: &str =
+	"execution watcher detached; its effects are unknown until it is reattached";
+/// Stable diagnostic journaled when a watcher detaches before the backend
+/// returned a handle, so nothing can name the work to resume.
+pub const EXECUTION_DETACHED_BEFORE_ACCEPTANCE: &str =
+	"execution submission is unknown after its watcher detached";
 
 /// Host state outside the job board derived from the live session's journal,
 /// which outlives that session because the kernel and its environment do.
@@ -608,6 +755,7 @@ impl JobBoard {
 			accepted_handle: None,
 			accepted_committed: false,
 			_detached: None,
+			detach: None,
 			recovered: None,
 			orphaned: false,
 		});
@@ -639,6 +787,7 @@ impl JobBoard {
 			accepted_handle: None,
 			accepted_committed: false,
 			_detached: Some(detached),
+			detach: None,
 			recovered: None,
 			orphaned: false,
 		});
@@ -665,6 +814,7 @@ impl JobBoard {
 			accepted_handle: None,
 			accepted_committed: false,
 			_detached: None,
+			detach: None,
 			recovered: None,
 			orphaned: false,
 		});
@@ -692,6 +842,7 @@ impl JobBoard {
 			accepted_handle: None,
 			accepted_committed: false,
 			_detached: None,
+			detach: None,
 			recovered: None,
 			orphaned: false,
 		});
@@ -728,7 +879,7 @@ impl JobBoard {
 		let Some(record) = submitted_execution(dom, handle) else {
 			return false;
 		};
-		self.install_execution(record, cancel, task, accepted);
+		self.install_execution(record, cancel, task, accepted, None, None);
 		true
 	}
 
@@ -738,16 +889,21 @@ impl JobBoard {
 		cancel: CancellationToken,
 		task: JoinHandle<JobSettlement>,
 		accepted: Option<Receiver<ReattachHandle>>,
+		detach: Option<CancellationToken>,
+		resumed: Option<ReattachHandle>,
 	) {
 		self.notify_registered(&record);
+		// A resumed run's handle is already journaled.
+		let accepted_committed = resumed.is_some();
 		self.jobs.lock().insert(record.handle, RuntimeJob {
 			record,
 			cancel,
 			task: Some(task),
 			accepted,
-			accepted_handle: None,
-			accepted_committed: false,
+			accepted_handle: resumed,
+			accepted_committed,
 			_detached: None,
+			detach,
 			recovered: None,
 			orphaned: false,
 		});
@@ -773,8 +929,15 @@ impl JobBoard {
 			return false;
 		};
 		let (accepted_tx, accepted_rx) = flume::bounded(1);
-		let task = tokio::spawn(supervise_execution(run, cancel.clone(), Some(accepted_tx), None));
-		self.install_execution(record, cancel, task, Some(accepted_rx));
+		let detach = CancellationToken::new();
+		let task = tokio::spawn(supervise_execution(
+			run,
+			cancel.clone(),
+			detach.clone(),
+			Some(accepted_tx),
+			None,
+		));
+		self.install_execution(record, cancel, task, Some(accepted_rx), Some(detach), None);
 		true
 	}
 
@@ -836,9 +999,16 @@ impl JobBoard {
 		session.patch(mark_execution_submitting(inserted, handle))?;
 		let record = submitted_execution(session.dom(), handle).ok_or(ExecutionStartError::NoJobs)?;
 		let cancel = CancellationToken::new();
+		let detach = CancellationToken::new();
 		let (accepted_tx, accepted_rx) = flume::bounded(1);
-		let task = tokio::spawn(start_execution_run(backend, request, cancel.clone(), accepted_tx));
-		self.install_execution(record.clone(), cancel, task, Some(accepted_rx));
+		let task = tokio::spawn(start_execution_run(
+			backend,
+			request,
+			cancel.clone(),
+			detach.clone(),
+			accepted_tx,
+		));
+		self.install_execution(record.clone(), cancel, task, Some(accepted_rx), Some(detach), None);
 		Ok(record)
 	}
 
@@ -867,6 +1037,7 @@ impl JobBoard {
 					accepted_handle: None,
 					accepted_committed: false,
 					_detached: None,
+					detach: None,
 				}
 			});
 			let retained_live_owner =
@@ -1031,13 +1202,7 @@ impl JobBoard {
 		for (handle, mut task) in finished {
 			let settlement = futures::FutureExt::now_or_never(&mut task)
 				.and_then(Result::ok)
-				.unwrap_or_else(|| JobSettlement {
-					status:     Str::new_static("failed"),
-					output:     None,
-					error:      Some(Str::new_static("job execution unit ended without a settlement")),
-					completion: None,
-					execution:  None,
-				});
+				.unwrap_or_else(lost_unit);
 			self.commit(session, handle, settlement)?;
 		}
 		self.rebuild(session);
@@ -1263,6 +1428,7 @@ impl JobBoard {
 				accepted_handle: None,
 				accepted_committed: false,
 				_detached: None,
+				detach: None,
 				recovered: None,
 				orphaned: false,
 			});
@@ -1316,6 +1482,186 @@ impl JobBoard {
 			// The re-armed settlement is the one terminal commit left for this job.
 			job.orphaned = false;
 			self.jobs.lock().insert(handle, job);
+			return Err(error);
+		}
+		self.rebuild(session);
+		Ok(true)
+	}
+
+	/// Validates that job `id` can resume watching its accepted backend work.
+	///
+	/// Every check reads only the journal, so a refusal contacts no backend.
+	/// The job must be an execution job no run watches, accepted with unknown
+	/// effects, with a decodable handle, and accepted by `destination`: the
+	/// stored non-secret destination identity, decoded as `D`, must equal the
+	/// operator's current one. The resume carries the journaled [`OutputSpec`]
+	/// and the time left before the stored deadline, zero once it passed.
+	///
+	/// # Errors
+	///
+	/// Returns the typed refusal. Nothing is journaled.
+	pub fn prepare_reattach<D>(
+		&self,
+		session: &Session,
+		id: &str,
+		destination: &D,
+	) -> Result<ExecutionResume, ExecutionReattachError>
+	where
+		D: DeserializeOwned + PartialEq,
+	{
+		use omp_session::components::jobs::{EXECUTION_DEADLINE, EXECUTION_DESTINATION};
+
+		let dom = session.dom();
+		let record = records(dom)
+			.into_iter()
+			.find(|record| record.id == id)
+			.ok_or_else(|| ExecutionReattachError::NotFound { id: Str::new(id) })?;
+		let handle = resumable(&record)?;
+		if self
+			.jobs
+			.lock()
+			.get(&record.handle)
+			.is_some_and(|job| job.task.is_some())
+		{
+			return Err(ExecutionReattachError::Watched { id: record.id });
+		}
+		let node = dom.get(record.handle);
+		let stored = node
+			.and_then(|node| custom(node, EXECUTION_DESTINATION))
+			.unwrap_or_default();
+		if serde_json::from_str::<D>(stored).ok().as_ref() != Some(destination) {
+			return Err(ExecutionReattachError::DestinationMismatch {
+				id:     record.id,
+				stored: Str::new(stored),
+			});
+		}
+		let outputs = journaled_outputs(record.output_mode.as_deref().unwrap_or_default()).map_err(
+			|source| ExecutionReattachError::InvalidOutputs { id: record.id.clone(), source },
+		)?;
+		let deadline = node
+			.and_then(|node| custom(node, EXECUTION_DEADLINE))
+			.and_then(|deadline| deadline.parse::<u64>().ok())
+			.ok_or_else(|| ExecutionReattachError::InvalidDeadline { id: record.id.clone() })?;
+		Ok(ExecutionResume {
+			node: record.handle,
+			id: record.id,
+			handle,
+			context: ReattachContext {
+				outputs,
+				remaining_deadline: Duration::from_millis(deadline.saturating_sub(now_ms())),
+			},
+		})
+	}
+
+	/// Resumes watching the job `resume` validated on `backend`, then
+	/// supervises the resumed run until it settles or detaches.
+	///
+	/// The job is checked against the journal again. `backend` must be the one
+	/// the stored handle names, and it must resume by reattaching. Its
+	/// `reattach` runs exactly once, and `start` never runs. Only a returned
+	/// run commits the `jobs.resume` patch, which marks the job `running` and
+	/// `accepted` and clears the presentation of its earlier settlement. The
+	/// supervisor is seeded with the stored handle, and the run's settlement
+	/// reaches the journal through [`Self::poll`] like any execution job's.
+	///
+	/// # Errors
+	///
+	/// Returns a typed refusal, or the backend's `reattach` failure, with the
+	/// journal unchanged. When the resume patch fails, the run is detached, not
+	/// cancelled, and the journal failure is returned.
+	pub async fn reattach_execution<B: ExecutionBackend>(
+		&self,
+		session: &mut Session,
+		resume: ExecutionResume,
+		backend: B,
+	) -> Result<JobRecord, ExecutionReattachError> {
+		let ExecutionResume { node, id, handle, context } = resume;
+		let Some(current) = record(session.dom(), node).filter(|current| current.id == id) else {
+			return Err(ExecutionReattachError::Changed { id });
+		};
+		if resumable(&current)? != handle
+			|| self
+				.jobs
+				.lock()
+				.get(&node)
+				.is_some_and(|job| job.task.is_some())
+		{
+			return Err(ExecutionReattachError::Changed { id });
+		}
+		if handle.backend != *backend.id() {
+			return Err(ExecutionReattachError::BackendMismatch { id, expected: handle.backend });
+		}
+		match backend.capabilities().resume {
+			ResumeSupport::Reattach => {},
+			ResumeSupport::Unsupported => {
+				return Err(ExecutionReattachError::Unsupported { backend: handle.backend });
+			},
+			ResumeSupport::Snapshot => {
+				return Err(ExecutionReattachError::SnapshotOnly { backend: handle.backend });
+			},
+		}
+		let cause = session
+			.head()
+			.ok_or(omp_session::SessionError::NoActiveTurn)?;
+		let run = backend
+			.reattach(handle.clone(), context)
+			.await
+			.map_err(ExecutionReattachError::Backend)?;
+		if let Err(error) = session.patch(resume_txn(cause, node)) {
+			let _ = run.detach();
+			return Err(error.into());
+		}
+		let cancel = CancellationToken::new();
+		let detach = CancellationToken::new();
+		let task = tokio::spawn(supervise_execution(
+			run,
+			cancel.clone(),
+			detach.clone(),
+			None,
+			Some(handle.clone()),
+		));
+		let record = record(session.dom(), node).unwrap_or(current);
+		self.install_execution(record.clone(), cancel, task, None, Some(detach), Some(handle));
+		Ok(record)
+	}
+
+	/// Stops watching a supervised execution run without cancelling its work.
+	///
+	/// The supervisor detaches its run instead of cancelling it, so work the
+	/// backend accepted keeps running, and the job settles `EffectsUnknown`
+	/// with its stored handle, ready to reattach. A run no backend accepted
+	/// settles `SubmissionUnknown`. Returns false when `handle` has no
+	/// supervised execution run.
+	///
+	/// # Errors
+	///
+	/// Returns the journal failure. The run is detached by then, and its
+	/// settlement stays on the board for the next [`Self::poll`].
+	pub async fn detach(
+		&self,
+		session: &mut Session,
+		handle: Handle,
+	) -> Result<bool, omp_session::SessionError> {
+		let task = {
+			let mut jobs = self.jobs.lock();
+			let Some(job) = jobs.get_mut(&handle) else {
+				return Ok(false);
+			};
+			let Some(detach) = job.detach.clone() else {
+				return Ok(false);
+			};
+			let Some(task) = job.task.take() else {
+				return Ok(false);
+			};
+			detach.cancel();
+			task
+		};
+		let settlement = task.await.unwrap_or_else(|_| lost_unit());
+		if let Err(error) = self.commit(session, handle, settlement.clone()) {
+			// The settlement is the one terminal commit left for this job.
+			if let Some(job) = self.jobs.lock().get_mut(&handle) {
+				job.task = Some(tokio::spawn(std::future::ready(settlement)));
+			}
 			return Err(error);
 		}
 		self.rebuild(session);
@@ -1414,6 +1760,7 @@ async fn start_execution_run<B: ExecutionBackend>(
 	backend: B,
 	request: ExecutionRequest,
 	cancel: CancellationToken,
+	detach: CancellationToken,
 	accepted_tx: flume::Sender<ReattachHandle>,
 ) -> JobSettlement {
 	let started = tokio::select! {
@@ -1427,7 +1774,7 @@ async fn start_execution_run<B: ExecutionBackend>(
 		},
 	};
 	match started {
-		Ok(run) => supervise_execution(run, cancel, Some(accepted_tx), None).await,
+		Ok(run) => supervise_execution(run, cancel, detach, Some(accepted_tx), None).await,
 		Err(error) => submission_unknown("failed", EXECUTION_START_FAILED, error),
 	}
 }
@@ -1465,6 +1812,7 @@ fn submitted_execution(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 async fn supervise_execution<R: ExecutionRun>(
 	mut run: R,
 	cancel: CancellationToken,
+	detach: CancellationToken,
 	accepted_tx: Option<flume::Sender<ReattachHandle>>,
 	mut accepted: Option<ReattachHandle>,
 ) -> JobSettlement {
@@ -1576,30 +1924,116 @@ async fn supervise_execution<R: ExecutionRun>(
 						}),
 				  };
 			 },
+			 () = detach.cancelled() => {
+				  // Stop watching without cancelling: the backend keeps accepted work.
+				  let _ = run.detach();
+				  let Some(handle) = accepted else {
+						return submission_unknown(
+							 "failed",
+							 EXECUTION_DETACHED_BEFORE_ACCEPTANCE,
+							 ExecutionError::SubmissionUnknown,
+						);
+				  };
+				  let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
+				  return JobSettlement {
+						status: Str::new_static("failed"),
+						output: None,
+						error: Some(Str::new_static(EXECUTION_DETACHED)),
+						completion: None,
+						execution: Some(ExecutionSettlement {
+							 state: ExecutionState::EffectsUnknown,
+							 handle: Some(handle),
+							 result: None,
+							 error: Some(error),
+						}),
+				  };
+			 },
 		}
 	}
 }
 
-/// Returns a cloned [`JobRecord`] and its opaque reattach handle for the given
-/// execution job id, or `None` if the job does not exist, is not of kind
-/// `Execution`, or has no reattach handle recorded.
-///
-/// The reattach handle is the raw serialized string the backend wrote when it
-/// accepted the job. Pass it to the backend's reattach API to reconnect.
-///
-/// # TODO
-/// Wire a backend registry here and call `backend.reattach(handle)` once the
-/// `ExecutionBackend` trait objects land.
-#[must_use]
-pub fn reattach_execution(board: &JobBoard, id: &str) -> Option<(JobRecord, Str)> {
-	let records = board.list();
-	let record = records.into_iter().find(|r| r.id.as_str() == id)?;
+/// Journal-only eligibility for a resumed watch: an execution job no run
+/// watches, accepted with unknown effects, whose stored handle decodes.
+fn resumable(record: &JobRecord) -> Result<ReattachHandle, ExecutionReattachError> {
+	let id = || record.id.clone();
 	if record.kind != JobKind::Execution {
-		return None;
+		return Err(ExecutionReattachError::NotExecution { id: id(), kind: record.kind });
 	}
-	let handle = record.reattach_handle.clone()?;
-	// TODO: call backend.reattach(&handle) to reconnect the live run.
-	Some((record, handle))
+	if is_live_status(record.status.as_str()) {
+		return Err(ExecutionReattachError::Watched { id: id() });
+	}
+	let accepted = matches!(
+		record.execution_state,
+		Some(ExecutionState::Accepted | ExecutionState::EffectsUnknown)
+	);
+	if record.execution_state == Some(ExecutionState::Settled)
+		|| (accepted && matches!(record.status.as_str(), "completed" | "cancelled"))
+	{
+		return Err(ExecutionReattachError::Finished { id: id(), status: record.status.clone() });
+	}
+	let stored = record
+		.reattach_handle
+		.as_deref()
+		.filter(|_| accepted)
+		.ok_or_else(|| ExecutionReattachError::NotAccepted { id: id() })?;
+	serde_json::from_str(stored)
+		.map_err(|source| ExecutionReattachError::InvalidHandle { id: id(), source })
+}
+
+/// Decodes a journaled [`OutputSpec`]: the complete JSON spec, or the bare
+/// variant name records hold from before the producer stored the spec.
+fn journaled_outputs(raw: &str) -> Result<OutputSpec, serde_json::Error> {
+	serde_json::from_str(raw).or_else(|error| {
+		serde_json::from_value(serde_json::Value::String(raw.to_owned())).map_err(|_| error)
+	})
+}
+
+/// Re-arms an execution job for a resumed watch in one patch with the new
+/// observation: the job is `running` and `accepted` again, and the `error`,
+/// `execution_failure`, and `delivered` presentation of its earlier settlement
+/// is cleared, so its next settlement shows only what the resumed run observed
+/// and is delivered once.
+fn resume_txn(cause: EntryId, node: Handle) -> Txn {
+	let accepted: &'static str = ExecutionState::Accepted.into();
+	let clear = |key: &'static str| Op::Set {
+		h:     node,
+		prop:  PropKey::Custom(Str::new_static(key)),
+		value: Value::Null,
+	};
+	Txn {
+		cause,
+		label: Some(Str::new_static("jobs.resume")),
+		ops: vec![
+			Op::Set {
+				h:     node,
+				prop:  PropId::Status.into(),
+				value: Value::Str(Str::new_static("running")),
+			},
+			Op::Set {
+				h:     node,
+				prop:  PropKey::Custom(Str::new_static("execution_state")),
+				value: Value::Str(Str::new_static(accepted)),
+			},
+			clear("error"),
+			clear("execution_failure"),
+			Op::Set {
+				h:     node,
+				prop:  PropKey::Custom(Str::new_static(DELIVERED)),
+				value: Value::Bool(false),
+			},
+		],
+	}
+}
+
+/// Settlement of a unit whose task ended without returning one.
+const fn lost_unit() -> JobSettlement {
+	JobSettlement {
+		status:     Str::new_static("failed"),
+		output:     None,
+		error:      Some(Str::new_static("job execution unit ended without a settlement")),
+		completion: None,
+		execution:  None,
+	}
 }
 
 fn recovered_settlement(dom: &Dom, record: &JobRecord) -> Option<RecoveredSettlement> {
@@ -2129,7 +2563,9 @@ mod tests {
 		let run = TestRun {
 			events: VecDeque::from([Some(ExecutionEvent::Accepted { handle: handle.clone() }), None]),
 		};
-		let settlement = supervise_execution(run, CancellationToken::new(), None, None).await;
+		let settlement =
+			supervise_execution(run, CancellationToken::new(), CancellationToken::new(), None, None)
+				.await;
 		let execution = settlement.execution.expect("execution settlement");
 		assert_eq!(execution.state, ExecutionState::EffectsUnknown);
 		assert_eq!(execution.handle, Some(handle.clone()));
@@ -2146,8 +2582,14 @@ mod tests {
 			ExecutionId::new_static("execution"),
 		);
 		let run = TestRun { events: VecDeque::from([None]) };
-		let settlement =
-			supervise_execution(run, CancellationToken::new(), None, Some(handle.clone())).await;
+		let settlement = supervise_execution(
+			run,
+			CancellationToken::new(),
+			CancellationToken::new(),
+			None,
+			Some(handle.clone()),
+		)
+		.await;
 		let execution = settlement.execution.expect("execution settlement");
 		assert_eq!(execution.state, ExecutionState::EffectsUnknown);
 		assert_eq!(execution.handle, Some(handle.clone()));
@@ -2165,8 +2607,14 @@ mod tests {
 		);
 		let error = ExecutionError::ResumeUnsupported { backend: BackendId::new_static("test") };
 		let run = TestRun { events: VecDeque::from([Some(ExecutionEvent::Settled(Err(error)))]) };
-		let settlement =
-			supervise_execution(run, CancellationToken::new(), None, Some(handle.clone())).await;
+		let settlement = supervise_execution(
+			run,
+			CancellationToken::new(),
+			CancellationToken::new(),
+			None,
+			Some(handle.clone()),
+		)
+		.await;
 		let execution = settlement.execution.expect("execution settlement");
 		assert_eq!(execution.state, ExecutionState::Settled);
 		assert_eq!(execution.handle, Some(handle));
@@ -2185,7 +2633,14 @@ mod tests {
 			(lost, omp_exec::ExecutionErrorKind::SubmissionUnknown),
 			(failed, omp_exec::ExecutionErrorKind::Capacity),
 		] {
-			let settlement = supervise_execution(run, CancellationToken::new(), None, None).await;
+			let settlement = supervise_execution(
+				run,
+				CancellationToken::new(),
+				CancellationToken::new(),
+				None,
+				None,
+			)
+			.await;
 			assert_eq!(settlement.status, "failed");
 			let execution = settlement.execution.expect("execution settlement");
 			assert_eq!(execution.state, ExecutionState::SubmissionUnknown);

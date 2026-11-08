@@ -16,7 +16,7 @@ use omp_env::{BlobDownloadEvent, EnvClient};
 use omp_envd::CommandCredentialExecutorFactory as _;
 use omp_exec::{
 	BackendId, BuildCommand, BuildSystemAdapter, CachePolicy, CargoJust, Digest, EnvEntry,
-	ExecutionError, ExecutionRequest, InputSet, Platform, RepoPins,
+	ExecutionError, ExecutionRequest, InputSet, Platform, ReattachHandle, RepoPins,
 };
 use omp_exec_reapi::{
 	ExecuteConfig, ReapiBackend, Toolchain,
@@ -33,7 +33,7 @@ use omp_proto::{
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::bridges::CommandCredentials;
+use crate::{bridges::CommandCredentials, cfg::CfgFiles, workspace_trust::evaluate_workspace};
 
 omp_con::var! {
 	/// Remote REAPI address. Empty disables remote execution.
@@ -124,6 +124,18 @@ pub enum RemoteError {
 	/// The selected profile is not on the generic execution allowlist.
 	#[error("the selected remote profile is not available to generic execution")]
 	UnsupportedProfile,
+	/// A reattach handle names a backend generic execution does not compose.
+	#[error("the reattach handle names backend {backend}, which generic execution does not compose")]
+	UnknownBackend {
+		/// The backend the handle names.
+		backend: BackendId,
+	},
+	/// The project state directory could not be prepared.
+	#[error("project state directory could not be prepared")]
+	StateDirectory(#[source] io::Error),
+	/// The project Environment could not be opened.
+	#[error("project Environment could not be opened")]
+	Environment(#[source] omp_envd::EnvdError),
 }
 
 pub(crate) fn config_list(value: impl AsRef<str>) -> Vec<String> {
@@ -500,24 +512,16 @@ impl ExecutionSettings {
 		cache: CachePolicy,
 		credential: Credential,
 	) -> ExecuteConfig {
-		ExecuteConfig {
-			id: BackendId::new_static(BACKEND_NAME),
-			instance: Str::new_static(INSTANCE),
-			profile,
-			credential: Some(credential),
-			platform: Platform::LINUX_X86_64,
-			enforced: REMOTE_POSTURE,
-			cache,
-			platform_properties: BTreeMap::new(),
-			toolchains: BTreeMap::from([(CargoJust::toolchain(pins).to_string().into(), Toolchain {
+		let mut config = resume_config(profile, cache, credential);
+		config.toolchains =
+			BTreeMap::from([(CargoJust::toolchain(pins).to_string().into(), Toolchain {
 				image: Some(self.image.clone()),
 				env:   Arc::from([EnvEntry {
 					name:  Str::new_static("PATH"),
 					value: Str::new_static("/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"),
 				}]),
-			})]),
-			buildbuddy_canceller: None,
-		}
+			})]);
+		config
 	}
 
 	/// Connects the generic backend after the caller authorizes the destination.
@@ -545,6 +549,99 @@ impl ExecutionSettings {
 		ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
 			.await
 			.map_err(RemoteError::Execute)
+	}
+}
+
+/// The configuration of a backend that only resumes accepted work.
+///
+/// A resume plans and uploads nothing, so it maps no toolchain to an image.
+fn resume_config(profile: Profile, cache: CachePolicy, credential: Credential) -> ExecuteConfig {
+	ExecuteConfig {
+		id: BackendId::new_static(BACKEND_NAME),
+		instance: Str::new_static(INSTANCE),
+		profile,
+		credential: Some(credential),
+		platform: Platform::LINUX_X86_64,
+		enforced: REMOTE_POSTURE,
+		cache,
+		platform_properties: BTreeMap::new(),
+		toolchains: BTreeMap::new(),
+		buildbuddy_canceller: None,
+	}
+}
+
+/// A backend connected to resume work the operator's destination accepted.
+///
+/// It owns the project Environment that resolved the operator credential, so
+/// drop it only after the resumed run settles or detaches.
+pub struct ResumeConnection {
+	backend:      ReapiBackend<EnvironmentInputs>,
+	_environment: omp_envd::ProjectEnvironment,
+}
+
+impl ResumeConnection {
+	/// Connects the backend `handle` names at the configured destination.
+	///
+	/// Call it only after the job's journaled destination matched
+	/// [`ExecutionSettings::destination_identity`]: this is the first contact
+	/// with the destination. The credential resolves in the project
+	/// Environment at `root`, under the workspace trust stored in `data_dir`.
+	///
+	/// # Errors
+	///
+	/// Refuses a handle that names another backend before anything starts, and
+	/// returns the profile, Environment, credential, or connection failure.
+	pub async fn open(
+		settings: &ExecutionSettings,
+		handle: &ReattachHandle,
+		ctx: Arc<Ctx>,
+		root: &Path,
+		data_dir: &Path,
+		cancel: &CancellationToken,
+	) -> Result<Self, RemoteError> {
+		if handle.backend.as_str() != BACKEND_NAME {
+			return Err(RemoteError::UnknownBackend { backend: handle.backend.clone() });
+		}
+		let (profile, cache) = settings.generic_profile()?;
+		let state_dir =
+			omp_env::project_state::directory(data_dir, root).map_err(RemoteError::StateDirectory)?;
+		fs::create_dir_all(&state_dir).map_err(RemoteError::StateDirectory)?;
+		// No kernel is composed here, so the workspace's own stored decision
+		// applies, failing closed when none was made.
+		let workspace_trust = evaluate_workspace(data_dir, root).trust();
+		let environment =
+			omp_envd::ProjectEnvironment::attach(root, &state_dir, omp_envd::AttachOptions {
+				py_eval:            false,
+				approval_mode:      None,
+				trusted_extensions: Vec::new(),
+				contributed_values: Vec::new(),
+				con:                ctx,
+				bridges:            omp_envd::RegistryBridges {
+					content: omp_envd::ActiveContentInputs {
+						workspace_trust,
+						..omp_envd::ActiveContentInputs::default()
+					},
+					..omp_envd::RegistryBridges::default()
+				},
+				spawn_idle_timeout: None,
+				spawn_policy:       CfgFiles::new(Some(root))
+					.ok()
+					.and_then(|files| files.daemon_policy(workspace_trust).ok()),
+			})
+			.await
+			.map_err(RemoteError::Environment)?;
+		let client = environment.client().clone();
+		let credential = settings.credential(&client, root, cancel).await?;
+		let backend = settings
+			.connect_config(client, resume_config(profile, cache, credential))
+			.await?;
+		Ok(Self { backend, _environment: environment })
+	}
+
+	/// The connected backend.
+	#[must_use]
+	pub const fn backend(&self) -> &ReapiBackend<EnvironmentInputs> {
+		&self.backend
 	}
 }
 
@@ -645,5 +742,44 @@ mod tests {
 		assert_eq!(first.instance.as_str(), "");
 		let json = serde_json::to_string(&first).unwrap();
 		assert_eq!(serde_json::from_str::<DestinationIdentity>(&json).unwrap(), first);
+	}
+
+	#[test]
+	fn resume_config_names_the_destination_and_pins_no_toolchain() {
+		let settings = ExecutionSettings::generic(&context("grpcs://example.com")).unwrap();
+		let config = resume_config(Profile::reapi(), CachePolicy::Read, Credential::new("token"));
+		assert_eq!(config.id, settings.destination_identity().backend);
+		assert_eq!(config.instance, settings.destination_identity().instance);
+		assert_eq!(config.profile, Profile::reapi());
+		assert_eq!(config.credential.as_ref().map(Credential::expose), Some("token"));
+		assert_eq!(config.platform, Platform::LINUX_X86_64);
+		assert_eq!(config.enforced, REMOTE_POSTURE);
+		assert_eq!(config.cache, CachePolicy::Read);
+		assert!(config.platform_properties.is_empty());
+		assert!(config.toolchains.is_empty());
+		assert!(config.buildbuddy_canceller.is_none());
+	}
+
+	#[tokio::test]
+	async fn resume_refuses_a_handle_for_another_backend_before_opening_anything() {
+		let settings = ExecutionSettings::generic(&context("grpcs://example.com")).unwrap();
+		let handle = ReattachHandle::new(
+			BackendId::new_static("other"),
+			Str::new_static("operations/1"),
+			omp_exec::ExecutionId::new_static("exec-1"),
+		);
+		let missing = Path::new("/nonexistent/omp-resume");
+		let opened = ResumeConnection::open(
+			&settings,
+			&handle,
+			Arc::new(Ctx::new()),
+			missing,
+			missing,
+			&CancellationToken::new(),
+		)
+		.await;
+		assert!(
+			matches!(&opened, Err(RemoteError::UnknownBackend { backend }) if backend.as_str() == "other")
+		);
 	}
 }
