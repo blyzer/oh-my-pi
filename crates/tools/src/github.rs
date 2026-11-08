@@ -41,7 +41,8 @@ pub enum Operation {
 	/// Read a repository file.
 	#[strum(message = "File")]
 	FileRead,
-	/// Create a pull request.
+	/// Create a pull request, first pushing a local head branch that the
+	/// remote lacks or trails (fast-forward only).
 	#[strum(message = "PR Create")]
 	PrCreate,
 	/// Check out pull request heads into isolated worktrees.
@@ -267,8 +268,9 @@ pub fn tool(host: Arc<dyn GithubHost>) -> Github {
 				"Uses GitHub's direct API for repository, file, search, pull-request worktree, push, \
 				 and Actions operations. Repository identities are [host/]owner/repo; name the host \
 				 for GitHub Enterprise. `pr_create` accepts `fill`, `reviewer`, `assignee`, and \
-				 `label`; `run_watch` returns the last `tail` log lines of each failed job. No gh \
-				 process or commit automation is used."
+				 `label`, and first pushes an unpublished or behind local head branch (never forced); \
+				 `run_watch` returns the last `tail` log lines of each failed job. No gh process or \
+				 commit automation is used."
 			),
 			schema:          omp_tool::schema::<Params>(),
 			constraint:      Constraint::Schema {

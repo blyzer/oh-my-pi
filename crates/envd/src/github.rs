@@ -88,7 +88,7 @@ impl GithubService {
 		body: Option<&Value>,
 		cancellation: &CancellationToken,
 	) -> Result<ApiResponse, Fault> {
-		let mut headers = self.api_headers(cancellation).await?;
+		let mut headers = self.api_headers(host, cancellation).await?;
 		if method == Method::GetTextMatch {
 			headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github.text-match+json"));
 		}
@@ -144,6 +144,9 @@ impl GithubService {
 					sf!("GitHub rate limit was reached; retry after the reported reset"),
 				)
 			} else if matches!(status, 401 | 403) {
+				if status == 401 {
+					self.credentials.reject_host(host);
+				}
 				(
 					sf!("github_authentication_failed"),
 					sf!("GitHub authentication or authorization failed"),
@@ -174,14 +177,20 @@ impl GithubService {
 		Ok(ApiResponse { value, remaining, reset, artifact: None })
 	}
 
-	/// Builds the authenticated GitHub API header set for one request.
-	async fn api_headers(&self, cancellation: &CancellationToken) -> Result<HeaderMap, Fault> {
+	/// Builds the authenticated GitHub API header set for one request to
+	/// `host`; the credential is host-scoped (see
+	/// [`GithubCredentialBridge::lease_for_host`]).
+	async fn api_headers(
+		&self,
+		host: &str,
+		cancellation: &CancellationToken,
+	) -> Result<HeaderMap, Fault> {
 		let mut headers = HeaderMap::new();
 		headers.insert(USER_AGENT, HeaderValue::from_static("omp-github-device"));
 		headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
 		headers.insert("x-github-api-version", HeaderValue::from_static("2022-11-28"));
 		if let Some(lease) = tokio::select! {
-			result = self.credentials.lease() => result,
+			result = self.credentials.lease_for_host(host, &self.root) => result,
 			() = cancellation.cancelled() => return Err(cancelled_fault()),
 		}
 		.map_err(|_| fault("github_credentials_failed", "GitHub credential lease failed"))?
@@ -206,7 +215,7 @@ impl GithubService {
 		job_id: u64,
 		cancellation: &CancellationToken,
 	) -> Result<Option<String>, Fault> {
-		let headers = self.api_headers(cancellation).await?;
+		let headers = self.api_headers(repo.host(), cancellation).await?;
 		let url = github_url::api_url_for_host(
 			repo.host(),
 			&format!("/repos/{}/actions/jobs/{job_id}/logs", repo.slug()),
@@ -427,6 +436,7 @@ impl GithubService {
 				.to_owned();
 			&default_base
 		};
+		let pushed = self.ensure_head_pushed(&repo, head, cancellation).await?;
 		let title = params
 			.title
 			.as_deref()
@@ -482,6 +492,7 @@ impl GithubService {
 		self.invalidate_repo(&repo)?;
 		let metadata = PrMetadata::from_params(params);
 		if metadata.is_empty() {
+			attach_push_receipt(&mut created.value, pushed);
 			return Ok(created);
 		}
 		let number = created
@@ -506,7 +517,100 @@ impl GithubService {
 		created.value = refreshed.value;
 		created.remaining = refreshed.remaining;
 		created.reset = refreshed.reset;
+		attach_push_receipt(&mut created.value, pushed);
 		Ok(created)
+	}
+
+	/// Publishes a local head branch before a pull request is opened from it.
+	///
+	/// Applies only when `head` is an unqualified branch that exists locally;
+	/// `owner:branch` heads and branches that exist only remotely are left as
+	/// they are. When the remote branch is missing or points elsewhere, the
+	/// local branch is pushed **without force** to the remote that maps to
+	/// `repo` (or its HTTPS URL), so a remote that has diverged is rejected by
+	/// Git rather than overwritten. Returns the push receipt, if one happened.
+	async fn ensure_head_pushed(
+		&self,
+		repo: &GithubRepo,
+		head: &str,
+		cancellation: &CancellationToken,
+	) -> Result<Option<PushReceipt>, Fault> {
+		if head.contains(':') {
+			return Ok(None);
+		}
+		let root = self.root.clone();
+		let branch = head.to_owned();
+		let worker = task::spawn_blocking(move || local_branch_target(&root, &branch));
+		let local = tokio::select! {
+			result = worker => result
+				.map_err(|_| fault("github_git_failed", "GitHub Git lookup worker failed"))??,
+			() = cancellation.cancelled() => return Err(cancelled_fault()),
+		};
+		let Some((local_sha, remote_name)) = local else {
+			return Ok(None);
+		};
+		let remote_sha = match self
+			.request(repo.host(), Method::Get, &branch_endpoint(repo.slug(), head), None, cancellation)
+			.await
+		{
+			Ok(branch) => branch
+				.value
+				.pointer("/commit/sha")
+				.and_then(Value::as_str)
+				.map(str::to_owned),
+			Err(error) if error.status == Some(404) => None,
+			Err(error) => return Err(error),
+		};
+		if remote_sha.as_deref() == Some(local_sha.as_str()) {
+			return Ok(None);
+		}
+		let metadata = self
+			.request(repo.host(), Method::Get, &format!("/repos/{}", repo.slug()), None, cancellation)
+			.await?;
+		if metadata.value.pointer("/permissions/push") == Some(&Value::Bool(false)) {
+			return Err(fault(
+				"github_push_forbidden",
+				"no push access to the target repository; push the branch to a fork and pass head as \
+				 owner:branch",
+			));
+		}
+		let root = self.root.clone();
+		let target_repo = repo.clone();
+		let (repository, target) = task::spawn_blocking(move || {
+			let local = GitRepo::require(&root).map(Arc::new)?;
+			let target = push_target(&local, remote_name, &target_repo);
+			Ok::<_, omp_vcs::Error>((local, target))
+		})
+		.await
+		.map_err(|_| fault("github_git_failed", "GitHub push worker failed"))?
+		.map_err(git_fault)?;
+		let lockable = crate::vcs::git::repo::Repository::from_handle(Arc::clone(&repository));
+		let _guard = crate::vcs::git::lock::write(&lockable, cancellation)
+			.await
+			.map_err(|_| fault("github_git_failed", "Git repository mutation lock failed"))?;
+		repository
+			.push(
+				&PushOptions {
+					remote:           Some(target.clone()),
+					refspec:          Some(format!("refs/heads/{head}:refs/heads/{head}")),
+					force_with_lease: None,
+				},
+				Some(cancellation.clone()),
+			)
+			.await
+			.map_err(|_| {
+				fault(
+					"github_push_rejected",
+					"pushing the head branch failed; the remote branch may have commits the local \
+					 branch lacks, or Git credentials for the remote are missing",
+				)
+			})?;
+		Ok(Some(PushReceipt {
+			branch:   head.to_owned(),
+			remote:   target,
+			sha:      local_sha,
+			replaced: remote_sha,
+		}))
 	}
 
 	async fn search(
@@ -1387,6 +1491,82 @@ async fn push_git(
 		.await
 		.map_err(git_fault)?;
 	Ok(Str::new(pushed_head))
+}
+
+/// Evidence that `pr_create` published its head branch first.
+#[derive(Debug)]
+struct PushReceipt {
+	/// Pushed branch name.
+	branch:   String,
+	/// Remote name or URL that received the push.
+	remote:   String,
+	/// Commit now at the remote branch head.
+	sha:      String,
+	/// Remote head the push fast-forwarded from; `None` when it was created.
+	replaced: Option<String>,
+}
+
+/// Records a head-branch push on the created pull request's result so both
+/// the transcript card and the model see that `pr_create` pushed.
+fn attach_push_receipt(value: &mut Value, receipt: Option<PushReceipt>) {
+	let (Some(receipt), Some(object)) = (receipt, value.as_object_mut()) else {
+		return;
+	};
+	object.insert(
+		"omp_pushed_head".to_owned(),
+		json!({
+			"branch": receipt.branch,
+			"remote": receipt.remote,
+			"sha": receipt.sha,
+			"replaced": receipt.replaced,
+		}),
+	);
+}
+
+/// Resolves a local branch's commit and configured upstream remote name.
+///
+/// `Ok(None)` when the branch does not exist locally, which leaves `pr_create`
+/// to open the pull request from a remote-only branch as before.
+fn local_branch_target(
+	root: &Path,
+	branch: &str,
+) -> Result<Option<(String, Option<String>)>, Fault> {
+	let repo = GitRepo::require(root).map_err(git_fault)?;
+	let Some(sha) = repo
+		.resolve_ref(&format!("refs/heads/{branch}"))
+		.map_err(git_fault)?
+	else {
+		return Ok(None);
+	};
+	let upstream = repo
+		.config_get(&format!("branch.{branch}.remote"))
+		.map_err(git_fault)?
+		.filter(|remote| remote != ".");
+	Ok(Some((sha, upstream)))
+}
+
+/// Picks where a head branch is pushed: the branch's upstream remote when it
+/// points at `repo`, else the first configured remote that does, else the
+/// repository's HTTPS URL (authenticated by the user's credential helpers).
+fn push_target(local: &GitRepo, upstream: Option<String>, repo: &GithubRepo) -> String {
+	let maps_to_repo = |name: &str| {
+		local
+			.remote_url(name)
+			.ok()
+			.flatten()
+			.and_then(|url| github_url::repo_from_remote(&url).ok())
+			.is_some_and(|remote| remote.identity().eq_ignore_ascii_case(repo.identity()))
+	};
+	upstream
+		.filter(|name| maps_to_repo(name))
+		.or_else(|| {
+			local
+				.remote_list()
+				.ok()?
+				.into_iter()
+				.find(|name| maps_to_repo(name))
+		})
+		.unwrap_or_else(|| format!("https://{}/{}.git", repo.host(), repo.slug()))
 }
 
 fn current_git_snapshot(root: &Path) -> Result<(Str, Str), Fault> {
@@ -2328,6 +2508,27 @@ fn render_created_pr(value: &Value) -> String {
 	) {
 		let _ = write!(output, "\nBranch: {head} -> {base}");
 	}
+	if let Some(pushed) = value.get("omp_pushed_head") {
+		let branch = pushed
+			.get("branch")
+			.and_then(Value::as_str)
+			.unwrap_or("head");
+		let remote = pushed
+			.get("remote")
+			.and_then(Value::as_str)
+			.unwrap_or("remote");
+		let sha = pushed
+			.get("sha")
+			.and_then(Value::as_str)
+			.unwrap_or_default();
+		let short = sha.get(..12).unwrap_or(sha);
+		let verb = if pushed.get("replaced").is_some_and(|v| !v.is_null()) {
+			"Fast-forwarded"
+		} else {
+			"Published"
+		};
+		let _ = write!(output, "\n{verb} {branch} at {short} to {remote} before opening");
+	}
 	output
 }
 
@@ -2591,11 +2792,12 @@ mod tests {
 	use tokio_util::sync::CancellationToken;
 
 	use super::{
-		ActionsState, DateField, Operation, Params, PrMetadata, UNIX_EPOCH, actions_runs_endpoint,
-		actions_state, branch_endpoint, compare_endpoint, date_qualifier, days_from_civil,
-		decode_file_response, failed_jobs, file_endpoint, fill_from_commits, has_scope,
-		normalize_date_bound, parse_pr_number, parse_run_reference, poll_sleep, pr_branch_endpoint,
-		render_output, run_jobs_endpoint, tail_limit, tail_lines,
+		ActionsState, DateField, Operation, Params, PrMetadata, PushReceipt, UNIX_EPOCH,
+		actions_runs_endpoint, actions_state, attach_push_receipt, branch_endpoint, compare_endpoint,
+		date_qualifier, days_from_civil, decode_file_response, failed_jobs, file_endpoint,
+		fill_from_commits, has_scope, local_branch_target, normalize_date_bound, parse_pr_number,
+		parse_run_reference, poll_sleep, pr_branch_endpoint, push_target, render_output,
+		run_jobs_endpoint, tail_limit, tail_lines,
 	};
 	use crate::github_url::GithubRepo;
 
@@ -2896,5 +3098,72 @@ mod tests {
 		.await
 		.expect("cancelled wait must not sleep")
 		.expect_err("cancelled wait must fail");
+	}
+
+	fn git(root: &std::path::Path, args: &[&str]) {
+		assert!(
+			std::process::Command::new("git")
+				.args(args)
+				.current_dir(root)
+				.env("GIT_AUTHOR_NAME", "t")
+				.env("GIT_AUTHOR_EMAIL", "t@example.com")
+				.env("GIT_COMMITTER_NAME", "t")
+				.env("GIT_COMMITTER_EMAIL", "t@example.com")
+				.status()
+				.unwrap()
+				.success(),
+			"git {args:?}"
+		);
+	}
+
+	#[test]
+	fn local_head_resolution_reads_sha_and_upstream_remote() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path();
+		git(root, &["init", "-q", "-b", "main"]);
+		git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+		git(root, &["remote", "add", "fork", "git@github.com:me/repo.git"]);
+		git(root, &["remote", "add", "origin", "https://github.com/Owner/Repo.git"]);
+		git(root, &["config", "branch.main.remote", "fork"]);
+
+		let (sha, upstream) = local_branch_target(root, "main")
+			.unwrap()
+			.expect("local branch");
+		assert_eq!(sha.len(), 40);
+		assert_eq!(upstream.as_deref(), Some("fork"));
+		assert!(local_branch_target(root, "missing").unwrap().is_none());
+
+		let local = omp_vcs::git::GitRepo::require(root).unwrap();
+		let target = GithubRepo::parse("owner/repo").unwrap();
+		assert_eq!(push_target(&local, upstream, &target), "origin", "upstream points at a fork");
+		assert_eq!(push_target(&local, Some("origin".to_owned()), &target), "origin");
+		let unrelated = GithubRepo::parse("ghe.example.com/team/svc").unwrap();
+		assert_eq!(push_target(&local, None, &unrelated), "https://ghe.example.com/team/svc.git");
+	}
+
+	#[test]
+	fn created_pr_reports_the_head_push() {
+		let mut value = json!({
+			"number": 9,
+			"title": "Ship it",
+			"head": { "ref": "feature" },
+			"base": { "ref": "main" },
+		});
+		attach_push_receipt(&mut value, None);
+		assert!(value.get("omp_pushed_head").is_none());
+		attach_push_receipt(
+			&mut value,
+			Some(PushReceipt {
+				branch:   "feature".to_owned(),
+				remote:   "origin".to_owned(),
+				sha:      "0123456789abcdef0123456789abcdef01234567".to_owned(),
+				replaced: None,
+			}),
+		);
+		let rendered = render_output(Operation::PrCreate, &value, None);
+		assert!(
+			rendered.ends_with("Published feature at 0123456789ab to origin before opening"),
+			"{rendered}"
+		);
 	}
 }
