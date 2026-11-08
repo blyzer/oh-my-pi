@@ -300,18 +300,41 @@ pub(crate) struct DetachedCall {
 type JobFactory = dyn Fn(CancellationToken) -> JoinHandle<JobSettlement> + Send + Sync + 'static;
 
 struct RuntimeJob {
-	record:    JobRecord,
-	cancel:    CancellationToken,
-	task:      Option<JoinHandle<JobSettlement>>,
-	accepted:  Option<Receiver<ReattachHandle>>,
-	_detached: Option<DetachedCall>,
+	record:             JobRecord,
+	cancel:             CancellationToken,
+	task:               Option<JoinHandle<JobSettlement>>,
+	accepted:           Option<Receiver<ReattachHandle>>,
+	accepted_handle:    Option<ReattachHandle>,
+	accepted_committed: bool,
+	_detached:          Option<DetachedCall>,
 	/// A terminal call outcome recovered before its job settlement patch
 	/// landed.
-	recovered: Option<RecoveredSettlement>,
+	recovered:          Option<RecoveredSettlement>,
 	/// A running tool or subagent whose execution unit no longer exists
 	/// (re-derived by a forward rewind or process restart): nothing can ever
 	/// settle it, so [`JobBoard::poll`] journals it `failed`.
-	orphaned:  bool,
+	orphaned:           bool,
+}
+
+impl RuntimeJob {
+	fn capture_acceptance(&mut self) {
+		if let Some(handle) = self
+			.accepted
+			.as_ref()
+			.and_then(|receiver| receiver.try_recv().ok())
+		{
+			self.accepted_handle = Some(handle);
+			self.accepted_committed = false;
+		}
+	}
+
+	fn acceptance_pending(&self) -> bool {
+		(!self.accepted_committed && self.accepted_handle.is_some())
+			|| self
+				.accepted
+				.as_ref()
+				.is_some_and(|receiver| !receiver.is_empty())
+	}
 }
 
 #[derive(Clone)]
@@ -488,7 +511,8 @@ impl JobBoard {
 			cancel,
 			task: None,
 			accepted: None,
-
+			accepted_handle: None,
+			accepted_committed: false,
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -518,7 +542,8 @@ impl JobBoard {
 			cancel,
 			task: None,
 			accepted: None,
-
+			accepted_handle: None,
+			accepted_committed: false,
 			_detached: Some(detached),
 			recovered: None,
 			orphaned: false,
@@ -543,7 +568,8 @@ impl JobBoard {
 			cancel,
 			task: Some(task),
 			accepted: None,
-
+			accepted_handle: None,
+			accepted_committed: false,
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -569,7 +595,8 @@ impl JobBoard {
 			cancel,
 			task: Some(task),
 			accepted: None,
-
+			accepted_handle: None,
+			accepted_committed: false,
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -610,6 +637,8 @@ impl JobBoard {
 			cancel,
 			task: Some(task),
 			accepted,
+			accepted_handle: None,
+			accepted_committed: false,
 			_detached: None,
 			recovered: None,
 			orphaned: false,
@@ -632,7 +661,7 @@ impl JobBoard {
 		R: ExecutionRun + 'static,
 	{
 		let (accepted_tx, accepted_rx) = flume::bounded(1);
-		let task = tokio::spawn(supervise_execution(run, cancel.clone(), Some(accepted_tx)));
+		let task = tokio::spawn(supervise_execution(run, cancel.clone(), Some(accepted_tx), None));
 		self.attach_execution_task_with_acceptance(dom, handle, cancel, task, Some(accepted_rx))
 	}
 
@@ -658,7 +687,8 @@ impl JobBoard {
 					cancel: CancellationToken::new(),
 					task: None,
 					accepted: None,
-
+					accepted_handle: None,
+					accepted_committed: false,
 					_detached: None,
 				}
 			});
@@ -682,15 +712,18 @@ impl JobBoard {
 	/// Commits every already-settled owned task to the authoritative job node.
 	pub fn poll(&self, session: &mut Session) -> Result<Vec<JobRecord>, omp_session::SessionError> {
 		let accepted = {
-			let jobs = self.jobs.lock();
+			let mut jobs = self.jobs.lock();
 			jobs
-				.iter()
+				.iter_mut()
 				.filter_map(|(handle, job)| {
-					job.accepted
-						.as_ref()?
-						.try_recv()
-						.ok()
-						.map(|accepted| (*handle, accepted))
+					job.capture_acceptance();
+					if job.accepted_committed {
+						None
+					} else {
+						job.accepted_handle
+							.clone()
+							.map(|accepted| (*handle, accepted))
+					}
 				})
 				.collect::<Vec<_>>()
 		};
@@ -705,13 +738,18 @@ impl JobBoard {
 					completion: None,
 					execution:  Some(ExecutionSettlement {
 						state:  ExecutionState::Accepted,
-						handle: Some(accepted),
+						handle: Some(accepted.clone()),
 						result: None,
 						error:  None,
 					}),
 				},
 				self.output_bound.load(Ordering::Relaxed),
 			)?;
+			if let Some(job) = self.jobs.lock().get_mut(&handle)
+				&& job.accepted_handle.as_ref() == Some(&accepted)
+			{
+				job.accepted_committed = true;
+			}
 		}
 
 		let recovered = {
@@ -835,6 +873,7 @@ impl JobBoard {
 			job.record.id == id
 				&& (job.orphaned
 					|| job.recovered.is_some()
+					|| job.acceptance_pending()
 					|| job.task.as_ref().is_some_and(JoinHandle::is_finished)
 					|| job._detached.as_ref().is_some_and(|detached| {
 						detached.closed
@@ -852,6 +891,7 @@ impl JobBoard {
 		self.jobs.lock().values().any(|job| {
 			job.orphaned
 				|| job.recovered.is_some()
+				|| job.acceptance_pending()
 				|| job.task.as_ref().is_some_and(JoinHandle::is_finished)
 				|| job._detached.as_ref().is_some_and(|detached| {
 					detached.closed
@@ -1036,7 +1076,8 @@ impl JobBoard {
 				cancel,
 				task: Some(task),
 				accepted: None,
-
+				accepted_handle: None,
+				accepted_committed: false,
 				_detached: None,
 				recovered: None,
 				orphaned: false,
@@ -1066,7 +1107,14 @@ impl JobBoard {
 			self.rebuild(session);
 			return Ok(true);
 		}
-		let Some(job) = self.jobs.lock().remove(&handle) else {
+		let job = {
+			let mut jobs = self.jobs.lock();
+			if let Some(job) = jobs.get_mut(&handle) {
+				job.capture_acceptance();
+			}
+			jobs.remove(&handle)
+		};
+		let Some(job) = job else {
 			return Ok(false);
 		};
 		let settlement = terminate_runtime(job).await;
@@ -1090,15 +1138,20 @@ impl JobBoard {
 }
 
 async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
+	job.capture_acceptance();
 	job.cancel.cancel();
-	if let Some(mut task) = job.task.take()
-		&& time::timeout(std::time::Duration::from_secs(1), &mut task)
-			.await
-			.is_err()
-	{
-		task.abort();
-		let _ = task.await;
+	let mut settlement = None;
+	if let Some(mut task) = job.task.take() {
+		match time::timeout(std::time::Duration::from_secs(1), &mut task).await {
+			Ok(Ok(result)) if job.record.kind == JobKind::Execution => settlement = Some(result),
+			Ok(_) => {},
+			Err(_) => {
+				task.abort();
+				let _ = task.await;
+			},
+		}
 	}
+	job.capture_acceptance();
 	if let Some(detached) = &mut job._detached {
 		if let Some(feed) = &detached.feed {
 			let _ = feed.interrupt(omp_tool::Interrupt {
@@ -1115,6 +1168,26 @@ async fn terminate_runtime(mut job: RuntimeJob) -> JobSettlement {
 			let _ = task.await;
 		}
 	}
+	if let Some(settlement) = settlement {
+		return settlement;
+	}
+	if job.record.kind == JobKind::Execution
+		&& let Some(handle) = job.accepted_handle
+	{
+		let error = ExecutionError::EffectsUnknown { handle: handle.clone() };
+		return JobSettlement {
+			status:     Str::new_static("cancelled"),
+			output:     None,
+			error:      Some(Str::new_static("execution effects are unknown after cancellation")),
+			completion: None,
+			execution:  Some(ExecutionSettlement {
+				state:  ExecutionState::EffectsUnknown,
+				handle: Some(handle),
+				result: None,
+				error:  Some(error),
+			}),
+		};
+	}
 	JobSettlement {
 		status:     Str::new_static("cancelled"),
 		output:     None,
@@ -1128,8 +1201,8 @@ async fn supervise_execution<R: ExecutionRun>(
 	mut run: R,
 	cancel: CancellationToken,
 	accepted_tx: Option<flume::Sender<ReattachHandle>>,
+	mut accepted: Option<ReattachHandle>,
 ) -> JobSettlement {
-	let mut accepted = None;
 	loop {
 		tokio::select! {
 			 event = run.next_event() => {
@@ -1160,14 +1233,20 @@ async fn supervise_execution<R: ExecutionRun>(
 							 };
 						},
 						Some(ExecutionEvent::Settled(Err(error))) => {
+						 let (state, handle) = match &error {
+							 ExecutionError::EffectsUnknown { handle } => {
+								 (ExecutionState::EffectsUnknown, Some(handle.clone()))
+							 },
+							 _ => (ExecutionState::Settled, accepted),
+						 };
 							 return JobSettlement {
 								  status: Str::new_static("failed"),
 								  output: None,
 								  error: Some(Str::new_static("execution failed")),
 								  completion: None,
 								  execution: Some(ExecutionSettlement {
-										state: ExecutionState::Settled,
-										handle: accepted,
+										state,
+										handle,
 										result: None,
 										error: Some(error),
 								  }),
@@ -1754,7 +1833,7 @@ mod tests {
 		let run = TestRun {
 			events: VecDeque::from([Some(ExecutionEvent::Accepted { handle: handle.clone() }), None]),
 		};
-		let settlement = supervise_execution(run, CancellationToken::new(), None).await;
+		let settlement = supervise_execution(run, CancellationToken::new(), None, None).await;
 		let execution = settlement.execution.expect("execution settlement");
 		assert_eq!(execution.state, ExecutionState::EffectsUnknown);
 		assert_eq!(execution.handle, Some(handle.clone()));
@@ -1762,6 +1841,167 @@ mod tests {
 			matches!(execution.error, Some(ExecutionError::EffectsUnknown { handle: actual }) if actual == handle)
 		);
 	}
+
+	#[tokio::test]
+	async fn seeded_execution_without_terminal_event_is_effects_unknown() {
+		let handle = ReattachHandle::new(
+			BackendId::new_static("test"),
+			Str::new_static("operation"),
+			ExecutionId::new_static("execution"),
+		);
+		let run = TestRun { events: VecDeque::from([None]) };
+		let settlement =
+			supervise_execution(run, CancellationToken::new(), None, Some(handle.clone())).await;
+		let execution = settlement.execution.expect("execution settlement");
+		assert_eq!(execution.state, ExecutionState::EffectsUnknown);
+		assert_eq!(execution.handle, Some(handle.clone()));
+		assert!(
+			matches!(execution.error, Some(ExecutionError::EffectsUnknown { handle: actual }) if actual == handle)
+		);
+	}
+
+	#[tokio::test]
+	async fn accepted_typed_backend_failure_stays_settled() {
+		let handle = ReattachHandle::new(
+			BackendId::new_static("test"),
+			Str::new_static("operation"),
+			ExecutionId::new_static("execution"),
+		);
+		let error = ExecutionError::ResumeUnsupported { backend: BackendId::new_static("test") };
+		let run = TestRun { events: VecDeque::from([Some(ExecutionEvent::Settled(Err(error)))]) };
+		let settlement =
+			supervise_execution(run, CancellationToken::new(), None, Some(handle.clone())).await;
+		let execution = settlement.execution.expect("execution settlement");
+		assert_eq!(execution.state, ExecutionState::Settled);
+		assert_eq!(execution.handle, Some(handle));
+		assert!(matches!(execution.error, Some(ExecutionError::ResumeUnsupported { .. })));
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn failed_acceptance_commit_retains_private_state_until_retry() {
+		const CHILD: &str = "OMP_EXECUTION_T3_UNIT_CHILD";
+		if std::env::var_os(CHILD).is_none() {
+			let output = std::process::Command::new("sh")
+				.args(["-c", "trap '' XFSZ; exec \"$@\"", "sh"])
+				.arg(std::env::current_exe().expect("test executable"))
+				.args([
+					"--exact",
+					"jobs::tests::failed_acceptance_commit_retains_private_state_until_retry",
+					"--nocapture",
+				])
+				.env(CHILD, "1")
+				.output()
+				.expect("run isolated append-failure test");
+			assert!(
+				output.status.success(),
+				"child failed: {}\n{}",
+				String::from_utf8_lossy(&output.stdout),
+				String::from_utf8_lossy(&output.stderr)
+			);
+			let stdout = String::from_utf8_lossy(&output.stdout);
+			assert!(
+				stdout.contains("running 1 test") && stdout.contains("1 passed"),
+				"child did not execute test: {stdout}"
+			);
+			return;
+		}
+		use omp_session::{
+			ComponentRegistry, Session,
+			components::jobs::{self, ExecutionSpec},
+		};
+		let temp = tempfile::tempdir().expect("temporary session directory");
+		let path = temp.path().join("accept.oms");
+		let mut session =
+			Session::create(&path, ComponentRegistry::standard()).expect("create session");
+		let before = session.head().expect("genesis head");
+		let txn = jobs::insert_execution(session.dom(), before, ExecutionSpec {
+			id:          Str::new_static("execution"),
+			owner:       Str::new_static("Main"),
+			started:     Str::new_static("1"),
+			backend:     Str::new_static("test"),
+			request:     Str::new_static("cargo test"),
+			output_mode: Str::new_static("logs"),
+		})
+		.expect("jobs root");
+		session.patch(txn).expect("insert execution");
+		let inserted = session.head().expect("insert head");
+		let handle = session
+			.dom()
+			.select("jobs job[id=execution]")
+			.expect("selector")
+			.into_iter()
+			.next()
+			.expect("execution node");
+		let accepted = ReattachHandle::new(
+			BackendId::new_static("test"),
+			Str::new_static("operation"),
+			ExecutionId::new_static("execution"),
+		);
+		let (sender, receiver) = flume::bounded(1);
+		let task = tokio::spawn(std::future::pending::<super::JobSettlement>());
+		let board = super::JobBoard::new();
+		assert!(board.attach_execution_task_with_acceptance(
+			session.dom(),
+			handle,
+			CancellationToken::new(),
+			task,
+			Some(receiver)
+		));
+		sender.send(accepted.clone()).expect("send acceptance");
+		let journal_size = std::fs::metadata(&path).expect("journal metadata").len();
+		let limit = format!("--fsize={journal_size}:unlimited");
+		assert!(
+			std::process::Command::new("prlimit")
+				.args(["--pid", &std::process::id().to_string(), &limit])
+				.status()
+				.expect("set file-size limit")
+				.success()
+		);
+		let failure = board.poll(&mut session);
+		assert!(
+			std::process::Command::new("prlimit")
+				.args(["--pid", &std::process::id().to_string(), "--fsize=unlimited:unlimited"])
+				.status()
+				.expect("restore file-size limit")
+				.success()
+		);
+		assert!(matches!(
+			failure,
+			Err(omp_session::SessionError::Journal(omp_journal::JournalError::Io(_)))
+		));
+		assert_eq!(session.head(), Some(inserted));
+		{
+			let jobs = board.jobs.lock();
+			let job = jobs.get(&handle).expect("runtime job retained");
+			assert_eq!(job.accepted_handle.as_ref(), Some(&accepted));
+			assert!(!job.accepted_committed);
+		}
+		assert!(board.has_finished_units());
+		board.poll(&mut session).expect("retry acceptance");
+		{
+			let jobs = board.jobs.lock();
+			let job = jobs.get(&handle).expect("runtime job retained");
+			assert_eq!(job.accepted_handle.as_ref(), Some(&accepted));
+			assert!(job.accepted_committed);
+		}
+		let records = board.list();
+		assert_eq!(records[0].execution_state, Some(ExecutionState::Accepted));
+		assert_eq!(
+			records[0]
+				.reattach_handle
+				.as_deref()
+				.map(serde_json::from_str::<ReattachHandle>)
+				.transpose()
+				.expect("decode handle"),
+			Some(accepted)
+		);
+		board
+			.terminate(&mut session, handle)
+			.await
+			.expect("stop test task");
+	}
+
 	#[test]
 	fn a_subagent_lease_folds_or_stays_absent() {
 		use omp_dom::{Dom, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Txn, Value};
