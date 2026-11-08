@@ -699,6 +699,7 @@ impl omp_exec::ExecutionBackend for ExecutionTestBackend {
 	async fn reattach(
 		&self,
 		_handle: omp_exec::ReattachHandle,
+		_context: omp_exec::ReattachContext,
 	) -> Result<Self::Run, omp_exec::ExecutionError> {
 		Err(omp_exec::ExecutionError::ResumeUnsupported { backend: self.id.clone() })
 	}
