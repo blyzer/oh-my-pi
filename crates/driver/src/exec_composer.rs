@@ -118,22 +118,12 @@ pub enum RemoteError {
 	/// fallback (ADR 0040 Part C.3).
 	#[error("remote action failed before acceptance: {0}")]
 	PreAcceptanceFailed(#[source] ExecutionError),
-	/// The ADW cancellation client could not connect.
-	#[error("BuildBuddy cancellation client could not connect")]
-	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
 	/// The environment could not materialize an artifact.
 	#[error("remote artifact could not be materialized into the Environment blob store")]
 	Materialize(#[source] omp_env::ClientError),
-	/// Action-cache mode `read` or `read-write` is incompatible with the
-	/// BuildBuddy profile while runner recycling is active.
-	#[error(
-		"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
-		 recycling makes AC hits unsafe as execution substitutes)"
-	)]
-	CachePolicyConflict,
-	/// A vendor-specific profile cannot be used by generic execution.
-	#[error("the selected vendor profile is not available to generic execution")]
-	VendorProfileUnsupported,
+	/// The selected profile is not on the generic execution allowlist.
+	#[error("the selected remote profile is not available to generic execution")]
+	UnsupportedProfile,
 }
 
 pub(crate) fn config_list(value: impl AsRef<str>) -> Vec<String> {
@@ -337,20 +327,12 @@ pub struct PreparedExecution {
 }
 
 const BACKEND_NAME: &str = "remote";
+const INSTANCE: &str = "";
 
 fn generic_profile(name: &str) -> Result<Profile, RemoteError> {
 	match name {
 		"reapi" => Ok(Profile::reapi()),
-		"buildbuddy" => Err(RemoteError::VendorProfileUnsupported),
-		_ => Err(RemoteError::MissingConfiguration),
-	}
-}
-
-pub(crate) fn cache_policy(value: &str) -> CachePolicy {
-	match value {
-		"read" => CachePolicy::Read,
-		"read-write" => CachePolicy::ReadWrite,
-		_ => CachePolicy::Off,
+		_ => Err(RemoteError::UnsupportedProfile),
 	}
 }
 
@@ -390,7 +372,7 @@ impl ExecutionSettings {
 	}
 
 	fn generic_profile(&self) -> Result<(Profile, CachePolicy), RemoteError> {
-		Ok((generic_profile(&self.profile)?, cache_policy(&self.cache)))
+		Ok((generic_profile(&self.profile)?, self.cache.parse().unwrap_or_default()))
 	}
 
 	pub(crate) fn profile_name(&self) -> &str {
@@ -410,7 +392,7 @@ impl ExecutionSettings {
 		DestinationIdentity {
 			backend:  BackendId::new_static(BACKEND_NAME),
 			endpoint: Str::from(self.endpoint.transport_url()),
-			instance: Str::empty(),
+			instance: Str::new_static(INSTANCE),
 		}
 	}
 
@@ -505,6 +487,12 @@ impl ExecutionSettings {
 		Ok(PreparedExecution { request, pins })
 	}
 
+	/// Builds the backend configuration for the validated destination.
+	///
+	/// This is the single vendor seam: generic callers pass the allowlisted
+	/// profile to [`Self::connect`], while ADW passes its operator-selected
+	/// profile here and attaches vendor-only fields before
+	/// [`Self::connect_config`].
 	pub(crate) fn config(
 		&self,
 		pins: &RepoPins,
@@ -514,7 +502,7 @@ impl ExecutionSettings {
 	) -> ExecuteConfig {
 		ExecuteConfig {
 			id: BackendId::new_static(BACKEND_NAME),
-			instance: Str::empty(),
+			instance: Str::new_static(INSTANCE),
 			profile,
 			credential: Some(credential),
 			platform: Platform::LINUX_X86_64,
@@ -575,34 +563,87 @@ mod tests {
 		ctx
 	}
 
+	fn identity(endpoint: &str) -> DestinationIdentity {
+		ExecutionSettings::generic(&context(endpoint))
+			.unwrap()
+			.destination_identity()
+	}
+
+	fn pins() -> RepoPins {
+		RepoPins {
+			rust_toolchain: Str::new_static("1.90.0"),
+			nextest:        Str::new_static("0.9.100"),
+			cpython_tag:    Str::new_static("20250101"),
+			cpython:        Str::new_static("3.13.1"),
+		}
+	}
+
 	#[test]
-	fn generic_composer_refuses_vendor_profile() {
-		let ctx = Ctx::new();
+	fn generic_composer_allowlists_only_reapi() {
+		for profile in ["buildbuddy", "other", ""] {
+			let ctx = context("grpcs://example.com");
+			SV_EXEC_REMOTE_PROFILE
+				.set(&ctx, Str::new_static(profile))
+				.unwrap();
+			assert!(
+				matches!(ExecutionSettings::generic(&ctx), Err(RemoteError::UnsupportedProfile)),
+				"{profile} was not refused",
+			);
+		}
+		let ctx = context("grpcs://example.com");
 		SV_EXEC_REMOTE_PROFILE
-			.set(&ctx, Str::new_static("buildbuddy"))
+			.set(&ctx, Str::new_static("reapi"))
 			.unwrap();
-		assert!(matches!(
-			ExecutionSettings::generic(&ctx),
-			Err(RemoteError::VendorProfileUnsupported)
-		));
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("READ"))
+			.unwrap();
+		let (profile, cache) = ExecutionSettings::generic(&ctx)
+			.unwrap()
+			.generic_profile()
+			.unwrap();
+		assert_eq!(profile, Profile::reapi());
+		assert_eq!(cache, CachePolicy::Read);
+	}
+
+	#[test]
+	fn config_carries_the_validated_destination_and_pinned_toolchain() {
+		let settings = ExecutionSettings::generic(&context("grpcs://example.com")).unwrap();
+		let pins = pins();
+		let config =
+			settings.config(&pins, Profile::reapi(), CachePolicy::ReadWrite, Credential::new("token"));
+		assert_eq!(config.id.as_str(), "remote");
+		assert_eq!(config.instance.as_str(), "");
+		assert_eq!(config.instance, settings.destination_identity().instance);
+		assert_eq!(config.profile, Profile::reapi());
+		assert_eq!(config.credential.as_ref().map(Credential::expose), Some("token"));
+		assert_eq!(config.platform, Platform::LINUX_X86_64);
+		assert_eq!(config.enforced, REMOTE_POSTURE);
+		assert_eq!(config.cache, CachePolicy::ReadWrite);
+		assert!(config.platform_properties.is_empty());
+		assert_eq!(config.toolchains.len(), 1);
+		let toolchain = &config.toolchains[CargoJust::toolchain(&pins).to_string().as_str()];
+		assert_eq!(toolchain.image.as_deref(), Some("image@sha256:abc"));
+		assert_eq!(&*toolchain.env, [EnvEntry {
+			name:  Str::new_static("PATH"),
+			value: Str::new_static("/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"),
+		}]);
+		assert!(config.buildbuddy_canceller.is_none());
 	}
 
 	#[test]
 	fn destination_identity_is_stable_and_distinguishes_endpoints() {
-		let first = ExecutionSettings::generic(&context("grpcs://example.com"))
-			.unwrap()
-			.destination_identity();
-		let same = ExecutionSettings::generic(&context("grpcs://example.com"))
-			.unwrap()
-			.destination_identity();
-		let equivalent = ExecutionSettings::generic(&context("grpcs://example.com:443"))
-			.unwrap()
-			.destination_identity();
-		let other = ExecutionSettings::generic(&context("grpcs://other.example.com"))
-			.unwrap()
-			.destination_identity();
+		let first = identity("grpcs://example.com");
+		let same = identity("grpcs://example.com");
+		let equivalent = identity("grpcs://example.com:443");
+		let other = identity("grpcs://other.example.com");
 		assert_eq!(first, same);
 		assert_eq!(first, equivalent);
 		assert_ne!(first, other);
+		assert_ne!(identity("grpcs://example.com:8443"), identity("grpcs://example.com"));
+		assert_ne!(identity("grpc://127.0.0.1:8980"), identity("grpcs://127.0.0.1:8980"));
+		assert_eq!(first.backend.as_str(), "remote");
+		assert_eq!(first.instance.as_str(), "");
+		let json = serde_json::to_string(&first).unwrap();
+		assert_eq!(serde_json::from_str::<DestinationIdentity>(&json).unwrap(), first);
 	}
 }

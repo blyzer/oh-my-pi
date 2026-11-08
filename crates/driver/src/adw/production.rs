@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	AdwHost, PhaseResult, PhaseSpec,
-	remote::{AdwExecPolicy, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY, eligible},
+	remote::{AdwExecPolicy, AdwRemoteError, SV_EXEC_FALLBACK_LOCAL, SV_EXEC_POLICY, eligible},
 };
 use crate::{
 	cfg::CfgFiles,
@@ -89,10 +89,16 @@ pub enum ProductionError {
 	UntrustedWorkspace,
 	/// The remote-only backend or input capture failed.
 	#[error("remote workflow code phase failed")]
-	Remote(#[from] RemoteError),
+	Remote(#[from] AdwRemoteError),
 	/// A remote phase was interrupted and its best-effort cancel was requested.
 	#[error("remote workflow code phase was cancelled")]
 	Cancelled,
+}
+
+impl From<RemoteError> for ProductionError {
+	fn from(error: RemoteError) -> Self {
+		Self::Remote(error.into())
+	}
 }
 
 /// Production owner for one workflow run.
@@ -243,9 +249,10 @@ impl ProductionAdwHost {
 			let result = self.run_remote(phase, args, cwd, cancel).await;
 			match result {
 				Ok(result) => return Ok(result),
-				Err(ProductionError::Remote(RemoteError::PreAcceptanceFailed(_)))
-					if policy == AdwExecPolicy::RemotePreferred
-						&& SV_EXEC_FALLBACK_LOCAL.get(&self.ctx) =>
+				Err(ProductionError::Remote(AdwRemoteError::Remote(
+					RemoteError::PreAcceptanceFailed(_),
+				))) if policy == AdwExecPolicy::RemotePreferred
+					&& SV_EXEC_FALLBACK_LOCAL.get(&self.ctx) =>
 				{
 					// Fall through to local execution.
 				},

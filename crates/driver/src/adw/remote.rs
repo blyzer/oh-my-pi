@@ -22,11 +22,30 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use super::production::{ProductionAdwHost, ProductionError};
-use crate::exec_composer::{
-	EnvironmentInputs, ExecutionSettings, PreparedExecution, RemoteError, cache_policy,
-};
+use crate::exec_composer::{EnvironmentInputs, ExecutionSettings, PreparedExecution, RemoteError};
 #[cfg(test)]
-use crate::exec_composer::{SV_EXEC_REMOTE_CACHE, SV_EXEC_REMOTE_PROFILE, config_list};
+use crate::exec_composer::{
+	SV_EXEC_REMOTE_CACHE, SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_IMAGE, SV_EXEC_REMOTE_PROFILE,
+	config_list,
+};
+
+/// An ADW remote phase error: a shared composer error or a vendor-only failure.
+#[derive(Debug, thiserror::Error)]
+pub enum AdwRemoteError {
+	/// The shared composer failed.
+	#[error(transparent)]
+	Remote(#[from] RemoteError),
+	/// The ADW cancellation client could not connect.
+	#[error("BuildBuddy cancellation client could not connect")]
+	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
+	/// Action-cache mode `read` or `read-write` is incompatible with the
+	/// BuildBuddy profile while runner recycling is active.
+	#[error(
+		"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
+		 recycling makes AC hits unsafe as execution substitutes)"
+	)]
+	CachePolicyConflict,
+}
 
 /// Execution placement policy; mirrors ADR 0040 Part C.3.
 #[derive(
@@ -80,26 +99,19 @@ pub fn eligible(binary: &str, args: &[Str]) -> bool {
 			})
 }
 
-/// The operator's REAPI profile and action-cache policy, each read from `ctx`
-/// exactly once. The policy is validated against the profile it is returned
-/// with, so a cfg write during the run cannot swap in an unvalidated value.
-#[cfg(test)]
-fn remote_profile(ctx: &Ctx) -> Result<(Profile, omp_exec::CachePolicy), RemoteError> {
-	let profile = SV_EXEC_REMOTE_PROFILE.get(ctx);
-	let cache = SV_EXEC_REMOTE_CACHE.get(ctx);
-	profile_from_values(&profile, &cache)
-}
-
+/// The operator's REAPI profile and action-cache policy from one settings
+/// snapshot. The policy is validated against the profile it is returned with,
+/// so a cfg write during the run cannot swap in an unvalidated value.
 fn profile_from_values(
 	profile_name: &str,
 	cache_name: &str,
-) -> Result<(Profile, omp_exec::CachePolicy), RemoteError> {
+) -> Result<(Profile, omp_exec::CachePolicy), AdwRemoteError> {
 	let profile = match profile_name {
 		"buildbuddy" => Profile::buildbuddy(),
 		"reapi" => Profile::reapi(),
-		_ => return Err(RemoteError::MissingConfiguration),
+		_ => return Err(RemoteError::MissingConfiguration.into()),
 	};
-	let cache = cache_policy(cache_name);
+	let cache = cache_name.parse().unwrap_or_default();
 	validate_cache_policy(cache, profile.name.as_str())?;
 	Ok((profile, cache))
 }
@@ -107,9 +119,12 @@ fn profile_from_values(
 /// Returns `Err` when `policy` is non-off and `profile` uses runner recycling
 /// (BuildBuddy). An action-cache hit would substitute for the full execution
 /// result, which must not happen under worker-recycling profiles.
-fn validate_cache_policy(policy: omp_exec::CachePolicy, profile: &str) -> Result<(), RemoteError> {
+fn validate_cache_policy(
+	policy: omp_exec::CachePolicy,
+	profile: &str,
+) -> Result<(), AdwRemoteError> {
 	if policy != omp_exec::CachePolicy::Off && profile == "buildbuddy" {
-		return Err(RemoteError::CachePolicyConflict);
+		return Err(AdwRemoteError::CachePolicyConflict);
 	}
 	Ok(())
 }
@@ -175,7 +190,7 @@ impl ProductionAdwHost {
 					credential.clone(),
 				)
 				.await
-				.map_err(RemoteError::CancelConnect)?,
+				.map_err(AdwRemoteError::CancelConnect)?,
 			)
 		} else {
 			None
@@ -320,11 +335,11 @@ mod tests {
 	fn cache_policy_refused_for_buildbuddy_runner_recycling() {
 		let err = validate_cache_policy(omp_exec::CachePolicy::Read, "buildbuddy").unwrap_err();
 		assert!(
-			matches!(err, RemoteError::CachePolicyConflict),
+			matches!(err, AdwRemoteError::CachePolicyConflict),
 			"expected CachePolicyConflict, got {err:?}",
 		);
 		let err = validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "buildbuddy").unwrap_err();
-		assert!(matches!(err, RemoteError::CachePolicyConflict));
+		assert!(matches!(err, AdwRemoteError::CachePolicyConflict));
 	}
 
 	#[test]
@@ -334,9 +349,20 @@ mod tests {
 		validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "reapi").unwrap();
 	}
 
+	fn remote_profile(ctx: &Ctx) -> Result<(Profile, omp_exec::CachePolicy), AdwRemoteError> {
+		let settings = ExecutionSettings::for_adw(ctx)?;
+		profile_from_values(settings.profile_name(), settings.cache_name())
+	}
+
 	#[test]
 	fn remote_profile_returns_the_cache_policy_it_validated() {
 		let ctx = Ctx::new();
+		SV_EXEC_REMOTE_ENDPOINT
+			.set(&ctx, Str::new_static("grpcs://example.com"))
+			.unwrap();
+		SV_EXEC_REMOTE_IMAGE
+			.set(&ctx, Str::new_static("image@sha256:abc"))
+			.unwrap();
 		SV_EXEC_REMOTE_PROFILE
 			.set(&ctx, Str::new_static("reapi"))
 			.unwrap();
@@ -352,7 +378,7 @@ mod tests {
 			.set(&ctx, Str::new_static("buildbuddy"))
 			.unwrap();
 		let err = remote_profile(&ctx).unwrap_err();
-		assert!(matches!(err, RemoteError::CachePolicyConflict), "got {err:?}");
+		assert!(matches!(err, AdwRemoteError::CachePolicyConflict), "got {err:?}");
 
 		SV_EXEC_REMOTE_CACHE
 			.set(&ctx, Str::new_static("off"))
@@ -366,6 +392,13 @@ mod tests {
 			.set(&ctx, Str::new_static("other"))
 			.unwrap();
 		let err = remote_profile(&ctx).unwrap_err();
-		assert!(matches!(err, RemoteError::MissingConfiguration), "got {err:?}");
+		assert!(
+			matches!(err, AdwRemoteError::Remote(RemoteError::MissingConfiguration)),
+			"got {err:?}"
+		);
+		assert_eq!(
+			profile_from_values("reapi", "READ").unwrap(),
+			(Profile::reapi(), omp_exec::CachePolicy::Read)
+		);
 	}
 }
