@@ -49,15 +49,20 @@ filter = 'package(omp-e2e)'
 threads-required = "num-cpus"
 slow-timeout = { period = "120s", terminate-after = 5 }
 
-# This test drives several real rust-analyzer index builds. On a quiet Mac it
-# finishes in about 50s (run 42443482393). Beside the full workspace suite it
-# has been killed at the 4-minute default (run 42467670569) while still inside
-# those analyzer calls. Eight minutes covers the loaded case without letting a
-# deadlock hold the job.
+# This test drives four blocking `rust-analyzer scip` runs (two updates, a
+# live rebuild, and a corrupt-cache repair) plus one detached refresh. On a
+# quiet Mac the whole test finishes in about 50s (run 42443482393). On the
+# loaded self-hosted Mac a single-index sibling takes about two minutes
+# (121–128s in run 42489068470), so four of them exceed both the 4-minute
+# default and the 8-minute override; the test was killed at 480s still inside
+# an analyzer call, while 11,793 other tests had passed. Run it alone and
+# allow 15 minutes.
 [[profile.default.overrides]]
 filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
-slow-timeout = { period = "120s", terminate-after = 4 }
+threads-required = "num-cpus"
+slow-timeout = { period = "180s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
 filter = 'test(indexes_calls_implementations_and_preserves_last_good_snapshot)'
-slow-timeout = { period = "120s", terminate-after = 4 }
+threads-required = "num-cpus"
+slow-timeout = { period = "180s", terminate-after = 5 }
