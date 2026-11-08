@@ -17,3 +17,9 @@ clean.stdout, clean.stderr
     public func greet(_ name: String) -> String {
         "hello " + name
     }
+
+fail.stdout, fail.stderr
+  command: swiftlint lint --reporter json
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh swiftlint) on GitHub-hosted macos-latest
+  versions: 0.65.1
+  exit 2; stdout 1269 bytes, stderr 128 bytes; inputs are the failing sources in scripts/checker-recordings.sh

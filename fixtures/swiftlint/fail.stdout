@@ -1,0 +1,38 @@
+[
+  {
+    "character" : 6,
+    "file" : "/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/tmp.qstPkQ47p4/fail/a.swift",
+    "line" : 1,
+    "reason" : "Colons should be next to the identifier when specifying a type and next to the key in dictionary literals",
+    "rule_id" : "colon",
+    "severity" : "Warning",
+    "type" : "Colon Spacing"
+  },
+  {
+    "character" : 5,
+    "file" : "/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/tmp.qstPkQ47p4/fail/a.swift",
+    "line" : 1,
+    "reason" : "Variable name 'x' should be between 3 and 40 characters long",
+    "rule_id" : "identifier_name",
+    "severity" : "Error",
+    "type" : "Identifier Name"
+  },
+  {
+    "character" : 16,
+    "file" : "/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/tmp.qstPkQ47p4/fail/a.swift",
+    "line" : 2,
+    "reason" : "Variable name 'y' should be between 3 and 40 characters long",
+    "rule_id" : "identifier_name",
+    "severity" : "Error",
+    "type" : "Identifier Name"
+  },
+  {
+    "character" : 16,
+    "file" : "/var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/tmp.qstPkQ47p4/fail/a.swift",
+    "line" : 1,
+    "reason" : "Lines should not have trailing semicolons",
+    "rule_id" : "trailing_semicolon",
+    "severity" : "Warning",
+    "type" : "Trailing Semicolon"
+  }
+]

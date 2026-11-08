@@ -32,3 +32,9 @@ clean-cold.stdout, clean-cold.stderr
 
 clean.stdout, clean.stderr
   the next run, dependencies already compiled; exit 0; stdout 19 bytes, stderr 0 bytes
+
+fail.stdout, fail.stderr
+  command: mix credo --format json   (fresh mix project, credo ~> 1.7 dep, warm deps, first compile)
+  recorded by .github/workflows run 42428696108 (scripts/checker-recordings.sh credo) on GitHub-hosted ubuntu-latest
+  versions: ==> file_system; Compiling 7 files (.ex); Generated file_system app; ==> bunt; Compiling 2 files (.ex); Generated bunt app; ==> jason; Compiling 10 files (.ex); Generated jason app; ==> credo; Compiling 257 files (.ex); Generated credo app; 1.7.19
+  exit 28; stdout 1233 bytes, stderr 0 bytes; inputs are the failing sources in scripts/checker-recordings.sh
