@@ -1,4 +1,18 @@
 //! Common cancellation-aware MCP transport contract.
+//!
+//! Wire modules live beside this contract. The parent re-exports the public
+//! modules at their previous paths.
+
+pub mod client;
+pub(crate) mod header_policy;
+pub(crate) mod http;
+pub(crate) mod invoke;
+pub mod json_rpc;
+pub(crate) mod legacy_sse;
+pub(crate) mod prompts;
+pub(crate) mod resources;
+pub(crate) mod stdio;
+pub(crate) mod timeout;
 
 use std::{future::Future, io, pin::Pin};
 
@@ -6,7 +20,7 @@ use omp_core::Str;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{header_policy::HeaderPolicyError, json_rpc::RequestId};
+use self::{header_policy::HeaderPolicyError, json_rpc::RequestId};
 
 /// Boxed future at the cold dynamic transport boundary.
 pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

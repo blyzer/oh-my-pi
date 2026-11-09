@@ -28,11 +28,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
+	DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
+	TransportFailure, TransportFuture, TransportResponse,
 	json_rpc::{RequestId, RequestIdAllocator, RequestIdFormat},
-	transport::{
-		DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
-		TransportFailure, TransportFuture, TransportResponse,
-	},
 };
 use crate::child_tree;
 
@@ -851,7 +849,7 @@ mod tests {
 			command:           executable,
 			args:              vec![
 				Str::from("--exact"),
-				Str::from("mcp::stdio::tests::stdio_fixture_child"),
+				Str::from("mcp::transport::stdio::tests::stdio_fixture_child"),
 				Str::from("--nocapture"),
 				Str::from("-Z"),
 				Str::from("unstable-options"),
@@ -885,7 +883,7 @@ mod tests {
 			command:           executable,
 			args:              vec![
 				Str::from("--exact"),
-				Str::from("mcp::stdio::tests::stdio_fixture_child"),
+				Str::from("mcp::transport::stdio::tests::stdio_fixture_child"),
 				Str::from("--nocapture"),
 				Str::from("-Z"),
 				Str::from("unstable-options"),

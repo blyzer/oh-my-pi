@@ -11,7 +11,7 @@ use omp_core::{ExposeSecret as _, SecretString, Str};
 use strum::IntoStaticStr;
 use tokio_util::sync::CancellationToken;
 
-use super::config::{ConfigSourceKind, HeaderPolicy, McpServerConfig};
+use super::{ConfigSourceKind, HeaderPolicy, McpServerConfig};
 
 /// How the dynamic value forms of one declaration are interpreted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

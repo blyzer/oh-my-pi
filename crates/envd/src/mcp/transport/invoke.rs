@@ -14,10 +14,12 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	McpServiceError,
-	manager::{LiveConnection, ManagerError, McpManager},
+	super::{
+		McpServiceError,
+		manager::{LiveConnection, ManagerError, McpManager},
+	},
+	DispatchState, TransportError, TransportFailure, TransportResponse,
 	timeout::{McpDeadlineError, McpTimeout},
-	transport::{DispatchState, TransportError, TransportFailure, TransportResponse},
 };
 
 /// Invokes a live or cached/deferred MCP leaf through its Environment manager.

@@ -11,7 +11,7 @@ use std::{
 
 use omp_core::Str;
 
-use super::config::{self, MCP_CONFIG_SCHEMA_URL, McpConfigFile, McpServerConfig};
+use super::{MCP_CONFIG_SCHEMA_URL, McpConfigFile, McpServerConfig};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
@@ -174,7 +174,7 @@ impl McpConfigStore {
 /// denylist/allowlist cleanup.
 ///
 /// Native project, user, and root fallback documents are checked in the same
-/// order as [`config::resolve_sources`].
+/// order as [`super::resolve_sources`].
 pub fn set_server_enabled(
 	user: &McpConfigStore,
 	project: &McpConfigStore,
@@ -211,7 +211,7 @@ fn update_enabled_if_present(
 }
 
 fn validate_name(path: &Path, name: &str) -> Result<(), ConfigStoreError> {
-	config::validate_server_name(name).map_err(|issue| ConfigStoreError::Validation {
+	super::validate_server_name(name).map_err(|issue| ConfigStoreError::Validation {
 		path:   path.to_path_buf(),
 		issues: Box::new([issue]),
 	})
@@ -222,7 +222,7 @@ fn validate_server(
 	name: &str,
 	server: &McpServerConfig,
 ) -> Result<(), ConfigStoreError> {
-	let issues = config::validate_server(name, server);
+	let issues = super::validate_server(name, server);
 	if issues.is_empty() {
 		Ok(())
 	} else {
@@ -234,7 +234,7 @@ fn validate_server(
 }
 
 fn validate_file(path: &Path, file: &McpConfigFile) -> Result<(), ConfigStoreError> {
-	let issues = config::validate_file(file);
+	let issues = super::validate_file(file);
 	if issues.is_empty() {
 		Ok(())
 	} else {
@@ -415,7 +415,7 @@ pub enum ConfigStoreError {
 		/// Exact scoped configuration path containing invalid declarations.
 		path:   PathBuf,
 		/// Every independently actionable schema issue in the document.
-		issues: Box<[config::ConfigValidationError]>,
+		issues: Box<[super::ConfigValidationError]>,
 	},
 	/// Path has no owning directory.
 	#[error("MCP configuration path `{path}` has no parent directory")]
