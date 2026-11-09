@@ -113,7 +113,7 @@ The owner accepted Alternative F on 2026-10-28. Implementation is authorized und
 ## Amendment (2026-11-09): placement and backlog under ADR 0049
 
 [ADR 0049](0049-tiered-integration-architecture.md) sets the placement rule for the periphery that this record extracts. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors.
-- **ENVD-07 widened.** Moving `ssh` to its own crate also removes `omp-exec-ssh`'s dependency on `omp-envd`.
+- **ENVD-07 widened (landed).** `ssh` is `omp-ssh`. `omp-exec-ssh` does not depend on `omp-envd`. envd's `ssh://` reads stay behind `cap-ssh` (default-on in `omp-app`, off when that feature is absent). `russh` and `russh-sftp` are not dependencies of `omp-envd`.
 - **ENVD-16 (landed).** The `ExecHost` contract (`ExecError`, `ExecEvent`, and the `ExecHost` / `ExecRun` traits) is in `omp-exec`. envd implements the traits; the concrete session host stays in `crates/envd/src/exec.rs`. `omp-exec-local` does not depend on `omp-envd`.
 - **ENVD-08/09 realized as generic capability crates behind `cap-*` features.** The `github`/`github_url` item is not moved as a crate. It is replaced by the neutral `omp-forge`/`omp-ci` contracts and a `Delegated` adapter, with the GitHub adapter outside core (ADR 0049 Phase 4).
 - Alternative F, the item-7 rulings and the evidence gates are unchanged.

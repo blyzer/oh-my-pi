@@ -12,6 +12,7 @@ readme = "README.md"
 [features]
 default = []
 local-tts = ["omp-ai/local-tts"]
+cap-ssh = ["dep:omp-ssh"]
 
 [dependencies]
 async-stream.workspace = true
@@ -90,9 +91,7 @@ zstd.workspace = true
 
 tracing.workspace = true
 
-russh.workspace = true
-
-russh-sftp.workspace = true
+omp-ssh = { workspace = true, optional = true }
 
 encoding_rs.workspace = true
 

@@ -7,6 +7,7 @@ pub mod host;
 pub(super) mod local;
 pub(crate) mod mcp;
 mod memory;
+#[cfg(feature = "cap-ssh")]
 pub(super) mod ssh;
 pub(super) mod vault;
 
@@ -17,6 +18,8 @@ use omp_cache::github_cache::GithubCache;
 use omp_core::{CowBytes, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 use omp_journal::blob::{BlobRef, BlobStore};
+#[cfg(feature = "cap-ssh")]
+use omp_ssh::SshService;
 use omp_tool::FetchEffects;
 use omp_tools::read::{
 	Fault,
@@ -33,7 +36,6 @@ use super::{
 	github_url::{GithubCredentialBridge, GithubResolver, GithubScheme},
 	mcp::McpService,
 	security_scan::SecurityScanService,
-	ssh::SshService,
 	vault::VaultService,
 };
 use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
@@ -217,7 +219,8 @@ pub(super) enum UrlResolver {
 	Local(local::LocalResolver),
 	/// Active-session bounded memory projections.
 	Memory(memory::MemoryUrlResolver),
-	/// Configured native SSH hosts.
+	/// Configured native SSH hosts. Absent when `cap-ssh` is compiled out.
+	#[cfg(feature = "cap-ssh")]
 	Ssh(ssh::SshResolver),
 	/// Project-owned security scan reports and advisories.
 	Security(SecurityScanService),
@@ -247,6 +250,7 @@ impl Resolve for UrlResolver {
 			Self::Issue(resolver) | Self::Pr(resolver) => resolver.read(resource, selector).await,
 			Self::Local(resolver) => resolver.read(resource, selector).await,
 			Self::Memory(resolver) => resolver.read(resource, selector).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.read(resource, selector).await,
 			Self::Security(resolver) => resolver.read(resource, selector).await,
 			Self::Vault(resolver) => resolver.read(resource, selector).await,
@@ -287,6 +291,7 @@ impl Resolve for UrlResolver {
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.read_query(resource, query, selector).await
 			},
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.read_query(resource, query, selector).await,
 			Self::Security(resolver) if query.is_some() => {
 				resolver.read_query(resource, query, selector).await
@@ -337,6 +342,7 @@ impl Resolve for UrlResolver {
 			},
 			Self::Local(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Memory(resolver) => resolver.list(resource, max_entries, max_bytes).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Security(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Vault(resolver) => resolver.list(resource, max_entries, max_bytes).await,
@@ -364,10 +370,12 @@ impl Resolve for UrlResolver {
 			Self::Agent(resolver) => resolver.path(resource).await,
 			Self::Local(resolver) => resolver.path(resource).await,
 			Self::Content(resolver) => resolver.path(resource).await,
-			Self::Ssh(_) | Self::Vault(_) => Err(Fault::Invalid {
-				message: Str::new_static(
-					"Remote and vault resources have no local materializable path.",
-				),
+			#[cfg(feature = "cap-ssh")]
+			Self::Ssh(_) => Err(Fault::Invalid {
+				message: Str::new_static("Remote resources have no local materializable path."),
+			}),
+			Self::Vault(_) => Err(Fault::Invalid {
+				message: Str::new_static("Vault resources have no local materializable path."),
 			}),
 			Self::Mcp(_) => Err(Fault::Invalid {
 				message: Str::new_static("MCP resources have no local materializable path."),
@@ -391,6 +399,7 @@ impl Resolve for UrlResolver {
 			},
 			Self::Local(resolver) => resolver.complete(query, max_results).await,
 			Self::Memory(resolver) => resolver.complete(query, max_results).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.complete(query, max_results).await,
 			Self::Security(resolver) => resolver.complete(query, max_results).await,
 			Self::Vault(resolver) => resolver.complete(query, max_results).await,
@@ -419,6 +428,7 @@ impl Resolve for UrlResolver {
 	/// environment fetches nothing for it.
 	fn read_fetch(&self, resource: &str, query: Option<&str>) -> Option<FetchEffects> {
 		match self {
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => ssh::parse_resource(resource)
 				.is_ok()
 				.then_some(FetchEffects { credentials: true }),
@@ -450,6 +460,7 @@ impl Resolve for UrlResolver {
 	/// [`Self::read_fetch`] describes.
 	fn walk_fetch(&self, _resource: &str) -> Option<FetchEffects> {
 		match self {
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => Some(FetchEffects { credentials: true }),
 			Self::Host(_)
 			| Self::Artifact(_)
@@ -481,6 +492,7 @@ impl UrlResolver {
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.fetch_host(resource, query).map(FetchHost::github)
 			},
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => ssh::parse_resource(resource)
 				.ok()
 				.map(|(alias, _)| FetchHost::ssh(alias)),
@@ -521,7 +533,7 @@ pub(super) fn production_url_resolvers(
 	host_resources: Option<Arc<dyn HostResources>>,
 	session_authority: Option<Arc<dyn SessionAuthority>>,
 	mcp: Arc<McpService>,
-	ssh: SshService,
+	#[cfg(feature = "cap-ssh")] ssh: SshService,
 	security: SecurityScanService,
 	vault: VaultService,
 ) -> Arc<ResolverTable<UrlResolver>> {
@@ -543,6 +555,7 @@ pub(super) fn production_url_resolvers(
 			)
 			.expect("memory URL resolver is unique");
 	}
+	#[cfg(feature = "cap-ssh")]
 	builder
 		.register(
 			SchemeEntry::new(Scheme::Ssh, true, false, "configured native SSH/SFTP hosts")

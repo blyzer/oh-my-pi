@@ -118,7 +118,6 @@ use super::{
 	report_issue,
 	search_backend::SearchBridgeHost,
 	security_scan::SecurityScanService,
-	ssh::{HostPaths, HostStore, SshService},
 	tool_ast_grep::AstSearchAuthority,
 	tool_debug::DocumentDebugControl,
 	tool_document::SessionReadBlobs,
@@ -4540,9 +4539,10 @@ pub(crate) fn production_registry<
 		}
 	}
 	let user_config_root = omp_core::dirs::user_config_root()?;
-	let ssh = SshService::new(
-		HostStore::load_layered(
-			&HostPaths::new(&user_config_root, workspace.root()),
+	#[cfg(feature = "cap-ssh")]
+	let ssh = omp_ssh::SshService::new(
+		omp_ssh::HostStore::load_layered(
+			&omp_ssh::HostPaths::new(&user_config_root, workspace.root()),
 			content.workspace_trust,
 		)
 		.map_err(state_error)?,
@@ -4554,8 +4554,9 @@ pub(crate) fn production_registry<
 	.map_err(state_error)?
 	.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
 	documents.set_resource_mutations(ResourceMutationServices {
-		ssh:            ssh.clone(),
-		vault:          vault.clone(),
+		#[cfg(feature = "cap-ssh")]
+		ssh: ssh.clone(),
+		vault: vault.clone(),
 		local_sessions: state_dir.join("sessions"),
 	});
 	let read_sources = ReadSourceAdapter::new(
@@ -4578,6 +4579,7 @@ pub(crate) fn production_registry<
 		host_resources,
 		session_authority,
 		Arc::clone(mcp),
+		#[cfg(feature = "cap-ssh")]
 		ssh,
 		security,
 		vault,

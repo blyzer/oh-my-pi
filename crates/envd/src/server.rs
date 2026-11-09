@@ -17633,6 +17633,7 @@ mod tests {
 				vec![FetchHost::http("docs.rs", 443), FetchHost::http("localhost", 8080)],
 				false,
 			),
+			#[cfg(feature = "cap-ssh")]
 			("ssh", vec!["ssh://prod/etc/hosts"], vec![FetchHost::ssh("prod")], false),
 			("remote-issue", vec!["issue://5"], vec![FetchHost::github("ghe.example.com")], false),
 			(
@@ -17865,6 +17866,7 @@ mod tests {
 		.expect("git config");
 		for (invocation_id, path, fetch, named) in [
 			("url", "https://docs.rs/serde", anonymous, vec![FetchHost::http("docs.rs", 443)]),
+			#[cfg(feature = "cap-ssh")]
 			("ssh", "ssh://prod/etc/hosts", credentialed, vec![FetchHost::ssh("prod")]),
 			("issue", "issue://5", credentialed, vec![FetchHost::github("ghe.example.com")]),
 			("listed", r#"["https://docs.rs/a","notes.txt","https://crates.io/b"]"#, anonymous, vec![

@@ -2,12 +2,17 @@
 
 use std::{
 	collections::BTreeMap,
-	fs,
+	fs::{self, OpenOptions},
 	future::Future,
 	io,
+	io::Write as _,
 	net::SocketAddr,
 	path::{Path, PathBuf},
-	sync::Arc,
+	process::id,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	time::Duration,
 };
 
@@ -260,14 +265,17 @@ fn load_effective_hosts(
 	match parse_hosts(&paths.project, Containment::Within(&paths.root)) {
 		Ok(project) => {
 			for (alias, host) in project {
-				if hosts.contains_key(&alias) {
-					tracing::warn!(
-						%alias,
-						path = %paths.project.display(),
-						"project SSH host ignored: a user host has the same alias"
-					);
-				} else {
-					hosts.insert(alias, host);
+				match hosts.entry(alias) {
+					std::collections::btree_map::Entry::Occupied(existing) => {
+						tracing::warn!(
+							alias = %existing.key(),
+							path = %paths.project.display(),
+							"project SSH host ignored: a user host has the same alias"
+						);
+					},
+					std::collections::btree_map::Entry::Vacant(slot) => {
+						slot.insert(host);
+					},
 				}
 			}
 		},
@@ -311,8 +319,69 @@ fn persist_hosts(
 	}
 	let body = toml::to_string_pretty(&HostFile { hosts: hosts.clone() })
 		.map_err(|source| SshError::ConfigEncode { path: path.to_path_buf(), source })?;
-	crate::atomic_replace(path, &body)
+	atomic_replace(path, &body)
 		.map_err(|source| SshError::ConfigWrite { path: path.to_path_buf(), source })
+}
+
+static ATOMIC_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_replace(path: &Path, content: &str) -> io::Result<()> {
+	if let Some(parent) = path.parent() {
+		fs::create_dir_all(parent)?;
+	}
+	let sequence = ATOMIC_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+	let name = path
+		.file_name()
+		.and_then(|name| name.to_str())
+		.unwrap_or("state");
+	let temporary = path.with_file_name(format!(".{name}.{}.{}.tmp", id(), sequence));
+	let mut options = OpenOptions::new();
+	options.write(true).create_new(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt as _;
+		options.mode(0o600);
+	}
+	let mut file = options.open(&temporary)?;
+	let result = (|| {
+		file.write_all(content.as_bytes())?;
+		file.sync_all()?;
+		drop(file);
+		replace_atomic_path(&temporary, path)?;
+		#[cfg(unix)]
+		if let Some(parent) = path.parent() {
+			fs::File::open(parent)?.sync_all()?;
+		}
+		Ok(())
+	})();
+	if result.is_err() {
+		let _ = fs::remove_file(&temporary);
+	}
+	result
+}
+
+fn replace_atomic_path(temporary: &Path, path: &Path) -> io::Result<()> {
+	match fs::rename(temporary, path) {
+		Ok(()) => Ok(()),
+		#[cfg(windows)]
+		Err(original) if original.raw_os_error() == Some(5) => {
+			let backup = path.with_extension(format!("{}.bak", id()));
+			match fs::rename(path, &backup) {
+				Ok(()) => {},
+				Err(error) if error.kind() == io::ErrorKind::NotFound => {
+					return fs::rename(temporary, path);
+				},
+				Err(_) => return Err(original),
+			}
+			if let Err(error) = fs::rename(temporary, path) {
+				let _ = fs::rename(&backup, path);
+				return Err(error);
+			}
+			let _ = fs::remove_file(backup);
+			Ok(())
+		},
+		Err(error) => Err(error),
+	}
 }
 
 /// Checks one host the way loading and [`HostStore::upsert`] do.
@@ -522,12 +591,12 @@ struct ClientHandler {
 impl client::Handler for ClientHandler {
 	type Error = russh::Error;
 
-	async fn check_server_key(
+	fn check_server_key(
 		&mut self,
 		key: &russh::keys::PublicKeyOrCertificate,
-	) -> Result<bool, Self::Error> {
+	) -> impl Future<Output = Result<bool, Self::Error>> + Send {
 		let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
-		Ok(fingerprint == self.expected.as_str())
+		std::future::ready(Ok(fingerprint == self.expected.as_str()))
 	}
 }
 
@@ -746,7 +815,7 @@ impl SshService {
 					.read_dir(path)
 					.await?
 					.collect::<Vec<_>>();
-				entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+				entries.sort_by_key(|entry| entry.file_name());
 				let truncated = entries.len() > limit;
 				entries.truncate(limit);
 				Ok((
@@ -852,7 +921,7 @@ impl SshService {
 					match message {
 						russh::ChannelMsg::Data { data } => append_bounded(&mut stdout, &data, limit)?,
 						russh::ChannelMsg::ExtendedData { data, .. } => {
-							append_bounded(&mut stderr, &data, limit)?
+							append_bounded(&mut stderr, &data, limit)?;
 						},
 						russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
 						_ => {},

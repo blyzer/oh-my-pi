@@ -4,13 +4,13 @@ use std::{env, sync::Arc, time::Duration};
 
 use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
 use omp_core::{Str, project_file::Containment};
-use omp_envd::ssh::{HostStore, SshService};
 use omp_exec::{
 	BackendId, Eligibility, ExecutionBackend, ExecutionEvent, ExecutionId, ExecutionRequest,
 	ExecutionRun, Intent, NeedSet, OutputSpec, Platform, PlatformRequirement, ResourceRequirements,
 	ToolchainId,
 };
 use omp_exec_ssh::{Config, SshBackend};
+use omp_ssh::{HostStore, SshService};
 
 #[tokio::test]
 #[ignore = "requires OMP_SSH_TEST_HOSTS from scripts/ssh-loopback-fixture.sh"]

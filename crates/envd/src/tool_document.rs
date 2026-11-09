@@ -59,14 +59,13 @@ use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+#[cfg(feature = "cap-ssh")]
+use super::tool_url::ssh;
 use super::{
 	blobs::BlobHost,
 	docs::{DocumentError, DocumentHost, DocumentLease, lease_target},
 	editor_base::{CommitAnchor, EditorConflict, start_write_backs},
-	tool_url::{
-		local::{self, LocalWriteError},
-		ssh,
-	},
+	tool_url::local::{self, LocalWriteError},
 };
 use crate::{
 	docserver::fs::{self, LocalFs},
@@ -1704,17 +1703,24 @@ impl WriteDocuments for DocumentHost {
 		let byte_len = request.content.len() as u64;
 		let revision = match request.capability {
 			MutationCapability::Ssh => {
-				let Some(resource) = request.uri.strip_prefix("ssh://") else {
-					return Err(write_rejected("invalid SSH mutation URI"));
-				};
-				let (alias, path) = ssh::parse_resource(resource.as_str())
-					.map_err(|fault| write_rejected(fault.message().clone()))?;
-				services
-					.ssh
-					.write(&alias, &path, request.content.as_bytes())
-					.await
-					.map_err(write_rejected)?;
-				NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed)
+				#[cfg(not(feature = "cap-ssh"))]
+				{
+					return Err(write_rejected("ssh:// writes are not compiled into this environment"));
+				}
+				#[cfg(feature = "cap-ssh")]
+				{
+					let Some(resource) = request.uri.strip_prefix("ssh://") else {
+						return Err(write_rejected("invalid SSH mutation URI"));
+					};
+					let (alias, path) = ssh::parse_resource(resource.as_str())
+						.map_err(|fault| write_rejected(fault.message().clone()))?;
+					services
+						.ssh
+						.write(&alias, &path, request.content.as_bytes())
+						.await
+						.map_err(write_rejected)?;
+					NEXT_TRANSACTION.fetch_add(1, Ordering::Relaxed)
+				}
 			},
 			MutationCapability::Vault => {
 				let Some(resource) = request.uri.strip_prefix("vault://") else {

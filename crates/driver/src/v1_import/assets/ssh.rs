@@ -15,7 +15,7 @@ use std::{
 };
 
 use omp_core::{Str, project_file::Containment};
-use omp_envd::ssh::{
+use omp_ssh::{
 	AuthPolicy, HostConfig, HostStore, known_host_fingerprint, validate_configured_host,
 };
 use serde::Deserialize;
