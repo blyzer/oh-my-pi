@@ -894,6 +894,14 @@ pub enum SessionToolError {
 pub trait SessionTool: Send + Sync {
 	/// Exact model-facing declaration.
 	fn spec(&self) -> &ToolSpec;
+
+	/// Whether this tool enforces admission denials before its own approval.
+	/// A tool opting in must perform its own human approval for non-deny
+	/// verdicts.
+	fn requires_admission_deny_check(&self) -> bool {
+		false
+	}
+
 	/// Executes one committed call against the authoritative session.
 	fn call<'a>(&'a self, cx: SessionToolCx<'a>, args: Box<RawValue>) -> SessionToolFuture<'a>;
 
@@ -2117,8 +2125,49 @@ impl Dispatcher {
 			// filing, so one invocation can open only one durable prompt.
 			if call.ticket.is_none() {
 				let mut specs = std::mem::take(&mut call.approval_specs);
+				if let Unit::Session(tool) = &call.unit
+					&& tool.requires_admission_deny_check()
+				{
+					let verdict = match &self.admission {
+						Some(admission) => {
+							let spec = tool.spec();
+							admission.admit(
+								call.identity.name.as_str(),
+								&spec.effects,
+								spec.confinement,
+								&args,
+								&[],
+							)
+						},
+						None => ToolAdmissionVerdict::Deny(Str::new_static(
+							"tool admission is not configured; the call was not started",
+						)),
+					};
+					let reason = match verdict {
+						ToolAdmissionVerdict::Deny(reason) => Some(reason),
+						ToolAdmissionVerdict::Prompt(requirements) if requirements.is_empty() => {
+							Some(Str::new_static(
+								"admission asked for approval without a requirement; the call was not \
+								 started",
+							))
+						},
+						ToolAdmissionVerdict::Allow | ToolAdmissionVerdict::Prompt(_) => None,
+					};
+					if let Some(reason) = reason {
+						let mut output = std::mem::take(call.output(&self.committer.policy));
+						let report = self.committer.commit_abort(
+							session,
+							call,
+							Abort::Skipped { reason },
+							&mut output,
+						)?;
+						call.phase = Phase::Settled;
+						call.report = Some(report);
+						continue;
+					}
+				}
 				// Worker/remote calls are admitted by their environment;
-				// session tools are trusted host code.
+				// only native calls use the full admission prompt here.
 				if let Unit::Native { pins, .. } = &call.unit
 					&& let Some(admission) = &self.admission
 				{

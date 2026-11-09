@@ -2705,6 +2705,11 @@ pub async fn compose_kernel(
 	let live_python_components = python_components.clone();
 	let _installed = extension_registrar.install(&mut director_registry, &mut component_registry);
 
+	let remote_build = if tools_enabled {
+		crate::remote_build::enabled(&ctx)
+	} else {
+		None
+	};
 	let complete_registry = options
 		.tool_registry
 		.clone()
@@ -2713,6 +2718,10 @@ pub async fn compose_kernel(
 		install_goal_contract(complete_registry)?
 	} else {
 		complete_registry
+	};
+	let complete_registry = match remote_build {
+		Some(remote_build) => Arc::new(remote_build.declare(&complete_registry)?),
+		None => complete_registry,
 	};
 	let registry = if options.no_tools {
 		if options.tools.is_some() {
@@ -3042,7 +3051,7 @@ pub async fn compose_kernel(
 	let mut kernel = install_tool_authority(
 		kernel,
 		&session,
-		EnvToolExecutor::new(tool_client, approvals),
+		EnvToolExecutor::new(tool_client, approvals.clone()),
 		admission,
 	);
 	kernel
@@ -3172,6 +3181,18 @@ pub async fn compose_kernel(
 		kernel.inference_mut().retain_eval_parent(lease);
 
 		kernel = kernel.with_session_tool(Arc::new(super::goal::GoalSessionTool::new()));
+		if let Some(remote_build) = remote_build {
+			kernel = kernel.with_session_tool(Arc::new(crate::remote_build::RemoteBuildTool::new(
+				remote_build,
+				Arc::clone(&ctx),
+				approvals,
+				crate::remote_build::EnvironmentHost::new(
+					hub_environment.clone(),
+					project_root.clone(),
+				),
+				name.clone(),
+			)));
+		}
 		// `todo` is a session reducer: every invocation starts from the
 		// journal-derived `<meta><todo>` projection, including after resume,
 		// rewind, or an observer-authored todo patch.

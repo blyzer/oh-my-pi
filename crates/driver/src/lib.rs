@@ -24,6 +24,7 @@ pub mod plugin_hooks;
 pub mod prompt_input;
 pub mod prompt_templates;
 pub mod registry;
+pub mod remote_build;
 pub mod rules;
 pub mod secrets;
 pub mod session_bridge;

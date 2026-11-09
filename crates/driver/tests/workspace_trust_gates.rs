@@ -20,7 +20,8 @@ use std::{
 use flume::Receiver;
 use omp_agent::{Kernel, RunControl, TurnInput};
 use omp_ai::{
-	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, Usage,
+	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Registry, ToolCall,
+	ToolCallId, Usage,
 	event::WorkflowResponse,
 	layer::{LayerCall, stack::RouteProviderService},
 	provider::fake::{FakeProvider, FakeScript},
@@ -152,6 +153,14 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 	/// once, the prompt slots resolved under it, and both handed to
 	/// composition.
 	async fn compose(&self, gateway: &Gateway) -> (Kernel<ComposedInference>, Session) {
+		self.compose_with_tools(gateway, false).await
+	}
+
+	async fn compose_with_tools(
+		&self,
+		gateway: &Gateway,
+		tools_enabled: bool,
+	) -> (Kernel<ComposedInference>, Session) {
 		let decision = evaluate_workspace(&self.data, &self.project);
 		let (custom_prompt, append_prompt) =
 			resolve_system_inputs(&self.project, &self.home, None, None, decision.trust())
@@ -159,7 +168,8 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		let options = KernelOptions {
 			session: Some(self.session.clone()),
 			sessions_dir: self.session.parent().map(Path::to_path_buf),
-			no_tools: true,
+			no_tools: !tools_enabled,
+			tools: tools_enabled.then(|| vec![Str::new_static("remote_build")]),
 			gateway: Some(gateway.channel.clone()),
 			prompt: PromptOverrides { custom_prompt, append_prompt, ..PromptOverrides::default() },
 			workspace_trust: WorkspaceTrustSource::Fixed(decision),
@@ -209,6 +219,10 @@ struct Gateway {
 
 impl Gateway {
 	async fn start(scratch: &Path) -> Self {
+		Self::start_with_registry(scratch, Arc::new(omp_tool::Registry::new())).await
+	}
+
+	async fn start_with_registry(scratch: &Path, tools: Arc<omp_tool::Registry>) -> Self {
 		let mut compiled = Catalog::embedded().compiled().clone();
 		for provider in &mut compiled.providers {
 			provider.management = ManagementCapabilities {
@@ -260,12 +274,8 @@ impl Gateway {
 		)
 		.expect("conversation store");
 		let (responses, incoming) = flume::bounded(32);
-		let rpc = InferenceRpc::new_for_test(
-			builder.build().expect("registry"),
-			sessions,
-			Arc::new(omp_tool::Registry::new()),
-			responses,
-		);
+		let rpc =
+			InferenceRpc::new_for_test(builder.build().expect("registry"), sessions, tools, responses);
 		let socket = scratch.join("gateway.sock");
 		let listener = omp_rpc::uds::listen(&socket).await.expect("gateway socket");
 		let serving = tokio::spawn(async move {
@@ -364,6 +374,63 @@ fn agents_loaded(session: &Session) -> bool {
 		.expect("context files")
 		.iter()
 		.any(|file| file["content"] == PROJECT_AGENTS)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_routes_remote_build_to_the_session_tool() {
+	let workspace = Workspace::new();
+	omp_driver::remote_build::SV_EXEC_AGENT_RUNS
+		.set(&workspace.con, true)
+		.expect("enable remote builds");
+	let registry = omp_driver::remote_build::enabled(&workspace.con)
+		.expect("remote builds enabled")
+		.declare(&omp_tool::Registry::new())
+		.expect("remote build declaration");
+	let gateway =
+		Gateway::start_with_registry(workspace.home.parent().expect("scratch"), Arc::new(registry))
+			.await;
+	let _daemon = workspace.daemon(WorkspaceTrust::Untrusted).await;
+	let (mut kernel, mut session) = workspace.compose_with_tools(&gateway, true).await;
+	assert!(kernel.tool_registry().live_spec("remote_build").is_ok());
+
+	let args = serde_json::json!({ "recipe": "test-pkg", "i": "Test" });
+	let call = ToolCall {
+		id:        ToolCallId::from("remote-build-call"),
+		name:      Str::new_static("remote_build"),
+		arguments: omp_ai::OpaqueJson::new(args.clone()),
+	};
+	gateway.fake.push(FakeScript::chat(vec![
+		Ok(ChatEvent::ToolCallStarted { index: 0, id: call.id.clone(), name: call.name.clone() }),
+		Ok(ChatEvent::ToolArgumentsDelta {
+			index: 0,
+			bytes: bytes::Bytes::from(serde_json::to_vec(&args).expect("arguments")),
+		}),
+		Ok(ChatEvent::ToolCallReady { index: 0, call }),
+		Ok(ChatEvent::Completed(Completion {
+			reason:  FinishReason::ToolCalls,
+			blocks:  1,
+			usage:   Usage::default(),
+			receipt: ExecutionReceipt::default().into(),
+		})),
+	]));
+	gateway.answer("Done.");
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: Str::new_static("run the build"), attachments: Vec::new() },
+			RunControl::new(CancellationToken::new(), None),
+		)
+		.await
+		.expect("turn");
+	assert!(
+		session.entries().any(|entry| {
+			serde_json::from_str::<serde_json::Value>(entry.data.as_str()).is_ok_and(|value| {
+				value["fault"]["kind"] == "faulted"
+					&& value["fault"]["value"]["kind"] == "invalid_arity"
+			})
+		}),
+		"the production session tool must validate the request"
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

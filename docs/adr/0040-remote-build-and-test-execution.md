@@ -797,6 +797,7 @@ redirect uploads (`crates/con/src/spec.rs:29-36`). They live in user cfg (`~/.o2
 | `sv_exec_upload_exclude` | empty | Extra exclusion globs, added to the defaults |
 | `sv_exec_upload_allow` | empty | Paths the operator allows despite a deny rule |
 | `sv_exec_upload_untracked` | `non-ignored` | `non-ignored` or `none` |
+| `sv_exec_agent_runs` | `0` | Whether agents may run remote-eligible `just` recipes through the `remote_build` tool (Part A.3). Read once when a session is composed. While it is off, the session has no such tool. A per-tool deny stops the call before any prompt or egress. Every other run requires a once-only human approval of the endpoint host, and nothing falls back to local. It stays off by default until gates T1 to T12 pass. |
 
 Credential rules:
 - The credential reaches only gRPC metadata at the backend boundary, wrapped in `SecretString`.
@@ -1145,10 +1146,21 @@ Composed into a product path (Part L Slice 1 and the Slice 2 local path):
   `crates/driver/src/cleanse/production.rs:run_checker` compose `LocalBackend`. `run_checker` is
   the one product caller of `place`. It offers no backend, so the call can only refuse an
   unplaceable request, and every admitted checker runs locally.
+- The agent capability, off by default. `crates/driver/src/remote_build.rs:RemoteBuildTool` is the
+  `remote_build` session tool, composed only when `sv_exec_agent_runs` is set. It runs one recipe
+  that `crates/driver/src/adw/remote.rs:eligible` accepts. `test-pkg` and `check-pkg` require a
+  workspace package; the other remote-eligible recipes take no package. Invalid arity is refused
+  before capture or the network prompt. The session tool honors its per-tool deny policy before any
+  prompt or egress, and fails closed if no tool admission authority is installed. Otherwise the endpoint host
+  from operator cfg is the subject of a once-only human `network` prompt. The destination is fixed
+  before that prompt and remains the destination used for the connection and journal even if cfg
+  changes while the user decides. Only after approval does the tool connect and start the run through
+  `JobBoard::start_execution`.
 - Operator convars in `crates/driver/src/exec_composer.rs`: `sv_exec_remote_endpoint`,
   `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`,
   `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`. ADW placement
-  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`.
+  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`. The
+  agent capability convar in `crates/driver/src/remote_build.rs`: `sv_exec_agent_runs`.
 - Telemetry. The `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`,
   `omp.exec.run` and `omp.exec.download` spans are emitted. `ExecutedActionMetadata` fields are
   captured in `omp.exec.worker.*` tracing events (PR #351).
@@ -1165,6 +1177,10 @@ Present, but used by no product path:
   `omp-exec-buildbuddy`.
 - The SSH backend (`crates/exec-ssh/`). `crates/driver/Cargo.toml` declares `omp-exec-ssh`, but no
   driver source uses `omp_exec_ssh`.
+
+The assessment below records the tree as of 2026-11-04. The agent capability described above
+subsequently added an execution-job producer, so the claims below that no producer exists are
+historical. The producer does not by itself establish real reattachment or acceptance of the gate.
 
 The 2026-10-31 production gate is unmet:
 

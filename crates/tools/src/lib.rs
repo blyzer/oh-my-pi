@@ -126,6 +126,8 @@ pub mod memory_edit;
 pub mod output_schema;
 /// Reads across local and special sources.
 pub mod read;
+/// Remote build contract for one approved remote `just` recipe run.
+pub mod remote_build;
 /// Review finding parsing and priority normalization.
 pub mod review;
 /// Long-tail repository security scan device.
