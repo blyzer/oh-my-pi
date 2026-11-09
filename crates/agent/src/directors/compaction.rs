@@ -24,8 +24,8 @@ use omp_snapcompact::archive::Archive;
 
 use super::snapcompact::{self, Fallback};
 use crate::{
-	AI_COMPACT_THRESHOLD, AI_COMPACTION_STRATEGY, CompactionStrategy, KernelEvent,
-	LifecycleHookError, LifecycleHooks,
+	AI_COMPACT_THRESHOLD, AI_COMPACTION_STRATEGY, CompactionStrategy, LifecycleHookError,
+	LifecycleHooks,
 	director::{BoxFut, Director, DirectorError, MutDirectorCx, Prepared, RouteFacts},
 };
 
@@ -294,7 +294,7 @@ impl CompactionDirector {
 
 		// The gauge tick pulses while the summary is produced and settles once
 		// the boundary lands (or the run fails).
-		cx.notify(KernelEvent::CompactionSpeculating {
+		cx.notify(crate::DirectorNotice::CompactionSpeculating {
 			percent: occupancy_percent(context_tokens, context_window),
 		});
 		// An extension-authored summary replaces every producer.
@@ -316,7 +316,7 @@ impl CompactionDirector {
 				Ok(archived) => {
 					let settled =
 						self.journal_archive(cx, &plan, previous.as_ref(), &kept, archived, warning);
-					cx.notify(KernelEvent::CompactionSettled { applied: settled.is_ok() });
+					cx.notify(crate::DirectorNotice::CompactionSettled { applied: settled.is_ok() });
 					return settled;
 				},
 				Err(reason) => fallback = Some(reason),
@@ -353,7 +353,7 @@ impl CompactionDirector {
 			);
 			self.summarize(cx, summary_request).await
 		};
-		cx.notify(KernelEvent::CompactionSettled { applied: summarized.is_ok() });
+		cx.notify(crate::DirectorNotice::CompactionSettled { applied: summarized.is_ok() });
 		let summary = summarized?;
 		let tokens_after = estimate_text_tokens(summary.as_str()).saturating_add(
 			kept

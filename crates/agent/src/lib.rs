@@ -2,18 +2,13 @@
 
 #![feature(type_alias_impl_trait)]
 
-pub mod approvals;
 pub mod cancel;
 pub mod context;
-pub mod delegated;
-pub mod director;
 pub mod directors;
 pub mod dispatch;
 pub mod env;
 pub mod events;
-pub mod extensions;
 pub mod file_mentions;
-pub mod hooks;
 pub mod jobs;
 pub mod local;
 #[path = "loop.rs"]
@@ -30,8 +25,11 @@ pub mod vars;
 /// Image-input policy (`ai_vision`).
 pub mod vision;
 
+mod contract_impls;
+
 pub use approvals::*;
 pub use cancel::*;
+pub use contract_impls::{InferenceErase, UpMailbox, kernel_approval_route, up_same_channel};
 pub use director::*;
 pub use dispatch::*;
 pub use env::*;
@@ -43,6 +41,7 @@ pub use jobs::*;
 pub use local::*;
 pub use loop_::*;
 pub use model_watch::*;
+pub use omp_contract::{approvals, delegated, director, extensions, hooks, mailbox::KernelSender};
 pub use pause::*;
 pub use prompt::*;
 pub use registry::*;

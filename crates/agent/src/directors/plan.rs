@@ -3,6 +3,7 @@
 use omp_core::Str;
 use omp_dom::{Dom, Node};
 
+use super::force_tool::ForceTool;
 use crate::director::{
 	BindValue, Director, DirectorCx, DirectorEffect, ForceUntil, Slot, StateUpdate, TurnView,
 	Verdict, state_bool, state_int, state_str, turn_call_inputs, turn_called,
@@ -181,12 +182,12 @@ impl Director for Plan {
 		updates
 	}
 
-	fn evaluate(&self, _dom: &Dom, cx: &DirectorCx<'_>, _turn: &TurnView) -> DirectorEffect {
+	fn evaluate(&self, _dom: &Dom, _cx: &crate::DirectorCx<'_>, _turn: &TurnView) -> DirectorEffect {
 		if !self.plan_written {
 			if self.write_attempts >= 3 {
 				return DirectorEffect::new(Verdict::Yield);
 			}
-			let verdict = cx.force_tool(
+			let verdict = Verdict::Push(Box::new(ForceTool::new(
 				"write",
 				ForceUntil::ToolCalled(Str::new_static("write")),
 				Some(Str::new(format!(
@@ -194,7 +195,7 @@ impl Director for Plan {
 					self.plan_file
 				))),
 				3,
-			);
+			)));
 			return DirectorEffect::new(verdict)
 				.with_update("write_attempts", BindValue::Int(i64::from(self.write_attempts + 1)))
 				.with_aside(format!(
@@ -210,14 +211,14 @@ impl Director for Plan {
 		if self.decision_attempts >= 3 {
 			return DirectorEffect::new(Verdict::Yield);
 		}
-		DirectorEffect::new(cx.force_tool(
+		DirectorEffect::new(Verdict::Push(Box::new(ForceTool::new(
 			"required",
 			ForceUntil::AnyToolCall,
 			Some(Str::new_static(
 				"Present the completed plan for an explicit decision before yielding.",
 			)),
 			3,
-		))
+		))))
 		.with_update("decision_attempts", BindValue::Int(i64::from(self.decision_attempts + 1)))
 	}
 }

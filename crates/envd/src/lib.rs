@@ -139,9 +139,9 @@ use nix::{
 	sys::signal::{self, Signal},
 	unistd::{Pid, User},
 };
-use omp_agent::KernelSender;
 use omp_ai::auth::AuthControlHandle;
 use omp_con::Ctx;
+use omp_contract::KernelSender;
 use omp_core::{Str, Ulid, sf};
 use omp_env::{
 	AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames, project_state::DaemonPolicy,
@@ -1298,8 +1298,8 @@ impl ProjectEnvironment {
 	/// decided by their unreachable rules, which deny a sandbox amendment.
 	pub fn bind_approval_authority(
 		&self,
-		book: Option<Arc<omp_agent::ApprovalBook>>,
-		route: Option<omp_agent::ApprovalRoute>,
+		book: Option<Arc<omp_contract::ApprovalBook>>,
+		route: Option<omp_contract::ApprovalRoute>,
 	) {
 		if let Some(relay) = &self.approval_relay {
 			relay.write().clone_from(&route);
@@ -1387,7 +1387,7 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the live per-session admission hook gate.
-	pub fn admission_gate(&self) -> Arc<omp_agent::HookGate> {
+	pub fn admission_gate(&self) -> Arc<omp_contract::HookGate> {
 		self.lifecycle.server.admission_gate()
 	}
 
@@ -1420,7 +1420,7 @@ impl ProjectEnvironment {
 	/// registrar.
 	pub fn register_python_extensions(
 		&self,
-		registrar: &mut omp_agent::ExtensionRegistrar,
+		registrar: &mut omp_contract::ExtensionRegistrar,
 	) -> Result<Vec<exthost::PyComponent>, exthost::PyExtensionError> {
 		self.lifecycle.server.register_python_extensions(registrar)
 	}

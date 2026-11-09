@@ -11,7 +11,7 @@ use std::{
 
 use omp_agent::{
 	AutoreplyRequest, CallControl, EnvEvent, JobBoard, JobSettlement, Received, SessionAuthority,
-	SessionEndpoint, SessionRole, SessionTool, SessionToolCx, SessionToolFuture, Up,
+	SessionEndpoint, SessionRole, SessionTool, SessionToolCx, SessionToolFuture,
 };
 use omp_core::{EnvPath, Str, Ulid, sf};
 use omp_dom::{Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
@@ -341,9 +341,9 @@ pub(crate) fn deliver_authenticated_peer(
 	// display-only and never receives `Up::Peer`.
 	if target
 		.up
-		.send(Up::Env(EnvEvent::IrcTraffic { payload: Arc::new(incoming) }))
+		.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(incoming) })
 		.is_err()
-		|| target.up.send(Up::Peer(body.clone())).is_err()
+		|| target.up.try_send_peer(body.clone()).is_err()
 	{
 		return false;
 	}
@@ -362,7 +362,7 @@ pub(crate) fn deliver_authenticated_peer(
 		// delivery. A disconnected main never makes child traffic fail.
 		let _ = main
 			.up
-			.send(Up::Env(EnvEvent::IrcTraffic { payload: Arc::new(relay) }));
+			.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(relay) });
 	}
 	true
 }

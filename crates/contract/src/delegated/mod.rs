@@ -4,8 +4,8 @@
 //! own agent loop, tools, sessions and provider authentication, while OMP owns
 //! the process lifecycle, cancellation, timeouts, working-directory policy and
 //! the normalized event stream. It is **not** a model transport: it never
-//! implements [`crate::Inference`], is never registered in the provider
-//! catalog, and its output is never flattened into a raw token stream.
+//! implements the agent kernel's inference trait, is never registered in the
+//! provider catalog, and its output is never flattened into a raw token stream.
 //!
 //! The contract has three layers:
 //!

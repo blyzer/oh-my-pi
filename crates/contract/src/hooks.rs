@@ -20,7 +20,7 @@ use smallvec::SmallVec;
 use strum::{Display, EnumString, IntoStaticStr};
 use thiserror::Error;
 
-use crate::{ApprovalSpec, BoxFut};
+use crate::{approvals::ApprovalSpec, director::BoxFut};
 
 /// Ordered stage in the hook decision procedure.
 #[allow(missing_docs, reason = "strum IntoStaticStr generates undocumented as_str")]
@@ -749,7 +749,7 @@ impl SessionSwitched {
 }
 
 /// A session's name on the lifecycle surface: its journal file name.
-pub(crate) fn journal_name(session: &omp_session::Session) -> Str {
+pub fn journal_name(session: &omp_session::Session) -> Str {
 	session
 		.journal_path()
 		.file_name()
@@ -1982,7 +1982,7 @@ mod tests {
 			&'a self,
 			event: HookEventId,
 			payload: &'a serde_json::Value,
-		) -> crate::BoxFut<'a, super::NativeReply> {
+		) -> crate::director::BoxFut<'a, super::NativeReply> {
 			self.seen.lock().push((event, payload.clone()));
 			Box::pin(std::future::ready(self.reply.clone()))
 		}

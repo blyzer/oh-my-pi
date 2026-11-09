@@ -745,7 +745,7 @@ impl<C> Kernel<C> {
 	/// fire through the installed hook gate.
 	#[must_use]
 	pub fn approval_route(&self) -> crate::ApprovalRoute {
-		crate::ApprovalRoute::to_kernel(
+		crate::kernel_approval_route(
 			self.mailbox_tx.clone(),
 			self
 				.lifecycle_hooks
@@ -1577,9 +1577,10 @@ impl<C: Inference> Kernel<C> {
 					self.approvals.clone(),
 				);
 				let preflight = {
+					let mut erased = crate::InferenceErase(&mut self.client);
 					let mut cx = MutDirectorCx {
 						session,
-						inference: &mut self.client,
+						inference: &mut erased,
 						blobs: &self.dispatcher.policy().spill,
 						route: &route,
 						turn,
@@ -1976,9 +1977,10 @@ impl<C: Inference> Kernel<C> {
 				self.approvals.clone(),
 			);
 			let reviewed = {
+				let mut erased = crate::InferenceErase(&mut self.client);
 				let mut cx = MutDirectorCx {
 					session,
-					inference: &mut self.client,
+					inference: &mut erased,
 					blobs: &self.dispatcher.policy().spill,
 					route: &route,
 					turn,
@@ -3879,9 +3881,10 @@ impl<C: Inference> Kernel<C> {
 		// session is free again, exactly as a blocking `/compact` in pi.
 		let mut deferred = Vec::new();
 		let signal = {
+			let mut erased = crate::InferenceErase(&mut self.client);
 			let mut cx = MutDirectorCx {
 				session,
-				inference: &mut self.client,
+				inference: &mut erased,
 				blobs: &self.dispatcher.policy().spill,
 				route: &route,
 				turn,

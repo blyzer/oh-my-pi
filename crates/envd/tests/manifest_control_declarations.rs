@@ -2,7 +2,7 @@
 //! cannot gain authority.
 use std::collections::BTreeMap;
 
-use omp_agent::HookPhase;
+use omp_contract::HookPhase;
 use omp_core::{ArtifactDigest, Provenance, Str, sf};
 use omp_envd::{
 	exthost::{

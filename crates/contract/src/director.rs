@@ -2,6 +2,7 @@
 
 use std::{future, future::Future, pin::Pin, sync::Arc};
 
+use linkme::distributed_slice;
 use omp_ai::{ChatRequest, ChatStream, ContentPart, Message, Role, ToolCall};
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Node, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
@@ -9,8 +10,6 @@ use omp_journal::blob::{BlobStore, Error as BlobError};
 use omp_session::{Session, SessionError};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use thiserror::Error;
-
-use crate::Inference;
 
 const STATUS: &str = "status";
 const CLAIMS: &str = "claims";
@@ -395,7 +394,11 @@ impl<'a> DirectorCx<'a> {
 		self.node
 	}
 
-	const fn for_director<'b>(&'b self, director: Handle, node: &'b Node) -> DirectorCx<'b> {
+	pub(crate) const fn for_director<'b>(
+		&'b self,
+		director: Handle,
+		node: &'b Node,
+	) -> DirectorCx<'b> {
 		DirectorCx {
 			turn:             self.turn,
 			route:            self.route,
@@ -405,20 +408,6 @@ impl<'a> DirectorCx<'a> {
 			node:             Some(node),
 			director:         Some(director),
 		}
-	}
-
-	/// Constructs a child which requires one named tool call before yielding.
-	#[must_use]
-	pub fn force_tool(
-		&self,
-		name: impl Into<Str>,
-		until: ForceUntil,
-		reminder: Option<Str>,
-		retries: u32,
-	) -> Verdict {
-		Verdict::Push(Box::new(crate::directors::force_tool::ForceTool::new(
-			name, until, reminder, retries,
-		)))
 	}
 }
 
@@ -435,7 +424,7 @@ pub struct TurnView {
 	pub stop_reason:    Str,
 }
 
-/// Predicate which completes a [`crate::directors::force_tool::ForceTool`].
+/// Predicate which completes a force-tool Director.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForceUntil {
 	/// Any tool invocation satisfies the request.
@@ -555,20 +544,52 @@ pub struct MutDirectorCx<'a> {
 	pub director:  Option<Handle>,
 	/// Observer notifications for progress that is not journaled (the
 	/// compaction speculation pulse); `None` in headless tests.
-	pub events:    Option<&'a crate::KernelEvents>,
+	pub events:    Option<&'a dyn DirectorNotify>,
 	/// Effective control plane (archive, session, and engagement layers);
 	/// `None` when the host composed no console.
 	pub con:       Option<&'a omp_con::Ctx>,
 	/// Extension lifecycle gates (`compaction`, `thread_projection`, …);
 	/// `None` when no extension host is attached.
-	pub hooks:     Option<&'a crate::LifecycleHooks>,
+	pub hooks:     Option<&'a crate::hooks::LifecycleHooks>,
+}
+
+/// Ephemeral compaction progress a Director may publish.
+///
+/// The kernel event enum stays in the agent. This trait is the slice the
+/// compaction Director needs.
+pub trait DirectorNotify: Send + Sync {
+	/// The compaction Director started producing a summary.
+	fn compaction_speculating(&self, percent: u8);
+	/// The compaction summary settled or was abandoned.
+	fn compaction_settled(&self, applied: bool);
+}
+
+/// One compaction observation a Director publishes through [`DirectorNotify`].
+pub enum DirectorNotice {
+	/// Summary production started.
+	CompactionSpeculating {
+		/// Live context occupancy, in percent of the context window.
+		percent: u8,
+	},
+	/// The summary settled or was abandoned.
+	CompactionSettled {
+		/// Whether a boundary landed.
+		applied: bool,
+	},
 }
 
 impl MutDirectorCx<'_> {
 	/// Publishes an ephemeral observer notification when a sink is attached.
-	pub fn notify(&self, event: crate::KernelEvent) {
+	pub fn notify(&self, notice: DirectorNotice) {
 		if let Some(events) = self.events {
-			events.publish(event);
+			match notice {
+				DirectorNotice::CompactionSpeculating { percent } => {
+					events.compaction_speculating(percent);
+				},
+				DirectorNotice::CompactionSettled { applied } => {
+					events.compaction_settled(applied);
+				},
+			}
 		}
 	}
 
@@ -602,24 +623,6 @@ pub trait ErasedInference: Send {
 	) -> BoxFut<'a, Result<ChatStream, omp_ai::Error>> {
 		let _ = selector;
 		self.execute(request)
-	}
-}
-
-impl<T> ErasedInference for T
-where
-	T: Inference,
-{
-	fn execute(&mut self, request: ChatRequest) -> BoxFut<'_, Result<ChatStream, omp_ai::Error>> {
-		Box::pin(self.chat(request))
-	}
-
-	fn execute_on<'a>(
-		&'a mut self,
-		selector: &str,
-		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_ai::Error>> {
-		let selector = Str::new(selector);
-		Box::pin(async move { self.chat_on(selector.as_str(), request).await })
 	}
 }
 
@@ -739,7 +742,7 @@ pub enum DirectorError {
 	ConWrite(#[from] omp_session::components::con::ConComponentError),
 	/// An extension lifecycle hook failed.
 	#[error(transparent)]
-	Hook(#[from] crate::LifecycleHookError),
+	Hook(#[from] crate::hooks::LifecycleHookError),
 	/// Projecting hidden history into inference messages failed.
 	#[error(transparent)]
 	ThreadProjection(#[from] omp_ai::ThreadProjectionError),
@@ -766,6 +769,13 @@ pub enum DirectorError {
 /// Object-safe constructor used to re-derive one Director from element props.
 pub type DirectorConstructor = fn(&Node) -> Box<dyn Director>;
 
+/// Built-in Director registrars contributed by crates that link this contract.
+///
+/// `omp-agent` installs the product directors. A process that does not link
+/// the agent gets an empty [`DirectorRegistry::standard`] registry.
+#[distributed_slice]
+pub static STANDARD_DIRECTORS: [fn(&mut DirectorRegistry)] = [..];
+
 /// Registry of stateless constructors used during tree re-derivation.
 #[derive(Clone, Default)]
 pub struct DirectorRegistry {
@@ -780,11 +790,13 @@ impl DirectorRegistry {
 		Self::default()
 	}
 
-	/// Creates the built-in registry.
+	/// Creates the built-in registry from every linked registrar.
 	#[must_use]
 	pub fn standard() -> Self {
 		let mut registry = Self::new();
-		crate::directors::register_standard(&mut registry);
+		for register in STANDARD_DIRECTORS {
+			register(&mut registry);
+		}
 		registry
 	}
 
@@ -1613,7 +1625,7 @@ fn custom(key: &str) -> PropKey {
 	PropKey::Custom(Str::new(key))
 }
 
-pub(crate) fn update_ops(handle: Handle, updates: Vec<StateUpdate>) -> Vec<Op> {
+pub fn update_ops(handle: Handle, updates: Vec<StateUpdate>) -> Vec<Op> {
 	updates
 		.into_iter()
 		.map(|update| Op::Set {
@@ -1624,7 +1636,7 @@ pub(crate) fn update_ops(handle: Handle, updates: Vec<StateUpdate>) -> Vec<Op> {
 		.collect()
 }
 
-pub(crate) fn patch(
+pub fn patch(
 	session: &mut Session,
 	label: &'static str,
 	ops: Vec<Op>,
@@ -1656,11 +1668,11 @@ fn con_write_ops(session: &Session, writes: &[(Str, BindValue)]) -> Result<Vec<O
 }
 
 /// DOM property key for one durable Director state field.
-pub(crate) fn state_key(key: &str) -> PropKey {
+pub fn state_key(key: &str) -> PropKey {
 	custom(&format!("{STATE_PREFIX}{key}"))
 }
 
-pub(crate) fn developer_op(dom: &Dom, turn: Handle, text: Str) -> Op {
+pub fn developer_op(dom: &Dom, turn: Handle, text: Str) -> Op {
 	Op::Ins {
 		parent: turn,
 		after:  dom.children(turn).last().copied(),

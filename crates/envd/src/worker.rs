@@ -15,7 +15,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use flume::Receiver;
 use notify::{RecursiveMode, Watcher as _};
-use omp_agent::{GateError, HookEvent, HookGate, HookPatch};
+use omp_contract::{GateError, HookEvent, HookGate, HookPatch};
 use omp_core::{
 	CowBytes, Duration as CoreDuration, InvocationPhase, LifecyclePhase, Principal, RestartReason,
 	Str, sf,
@@ -2251,7 +2251,7 @@ impl ExtHostSupervisor {
 	/// Registers every frozen Python Director and Component with the engine.
 	pub fn register_python_extensions(
 		&self,
-		registrar: &mut omp_agent::ExtensionRegistrar,
+		registrar: &mut omp_contract::ExtensionRegistrar,
 	) -> Result<Vec<crate::exthost::PyComponent>, crate::exthost::PyExtensionError> {
 		let evidence = self.frozen_registry.lock();
 		let mut components = Vec::new();

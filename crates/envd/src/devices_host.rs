@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use bytes::Bytes;
 use futures::StreamExt as _;
-use omp_agent::{ApprovalRoute, GateEvent, GateOutcome, HookGate};
+use omp_contract::{ApprovalRoute, GateEvent, GateOutcome, HookGate};
 use omp_core::{Duration, DurationUnit, Hash32, Str, sf};
 use omp_proto::toolhost::v1::HookEventId;
 use omp_shell_builtins::{

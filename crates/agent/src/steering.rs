@@ -17,7 +17,7 @@ use omp_journal::{
 };
 use omp_session::{Session, SessionError};
 
-use crate::SteeringMode;
+use crate::{ApprovalOutcome, SteeringMode};
 
 pub(crate) const EMPTY_OUTPUT_RETRY_CAP: u8 = 3;
 const EMPTY_OUTPUT_CAP_NOTICE: &str =
@@ -122,26 +122,6 @@ impl std::fmt::Debug for SessionMutation {
 			.debug_struct("SessionMutation")
 			.finish_non_exhaustive()
 	}
-}
-
-/// The result of a remote approval decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ApprovalOutcome {
-	/// A decision was durably appended at this journal index.
-	Applied {
-		/// Identity of the committed journal entry.
-		entry: omp_journal::EntryId,
-		/// One-based index of the appended journal entry.
-		seq:   u64,
-	},
-	/// The same keyed decision was already durably appended.
-	Duplicate {
-		/// Identity of the original journal entry.
-		entry: omp_journal::EntryId,
-	},
-	/// No approval with this identity is pending: it is unknown, already
-	/// decided, or withdrawn.
-	NotPending,
 }
 
 /// Whether anyone waits for an approval's outcome, and how a retry is known.

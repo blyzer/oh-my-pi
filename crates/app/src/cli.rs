@@ -189,7 +189,7 @@ impl FromStr for ApprovalMode {
 		}
 	}
 }
-impl From<ApprovalMode> for omp_envd::tool_settings::ApprovalMode {
+impl From<ApprovalMode> for omp_contract::posture::ApprovalMode {
 	fn from(value: ApprovalMode) -> Self {
 		match value {
 			ApprovalMode::AlwaysAsk => Self::AlwaysAsk,

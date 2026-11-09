@@ -1,0 +1,39 @@
+[package]
+name = "omp-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared agent and environment vocabulary: approvals, hooks, directors, posture, and eval-bridge contracts"
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+flume.workspace = true
+futures.workspace = true
+linkme.workspace = true
+omp-ai.workspace = true
+omp-catalog.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+omp-dom.workspace = true
+omp-ext.workspace = true
+omp-journal.workspace = true
+omp-proto.workspace = true
+omp-session.workspace = true
+omp-tool.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

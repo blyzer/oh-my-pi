@@ -16,10 +16,6 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use omp_agent::{
-	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate, HookPatch,
-	HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
-};
 use omp_ai::{
 	BeforeRequestDenied, BeforeRequestDraft, BeforeRequestMutation, CredentialDisabledObservation,
 	ModelsDiscoverHookPage, ModelsDiscoverHookRequest, ProviderHookCredential, ProviderHookError,
@@ -38,6 +34,10 @@ use omp_ai::{
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
 use omp_con::Ctx;
+use omp_contract::{
+	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate,
+	HookPatch, HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
+};
 use omp_core::{
 	Duration, ExposeSecret as _, FastHashSet, Hash32, InvocationPhase, LifecyclePhase, SecretString,
 	Str, Ulid, sf,
@@ -198,7 +198,7 @@ pub struct RegistryBridges {
 	pub host_resources:         Option<Arc<dyn HostResources>>,
 	/// Live session routing authority for `agent://`, `history://`, and
 	/// attachments.
-	pub session_authority:      Option<Arc<dyn omp_agent::SessionAuthority>>,
+	pub session_authority:      Option<Arc<dyn omp_contract::SessionAuthority>>,
 	/// Background telemetry delivery started once credentials exist.
 	pub telemetry_upload:       Option<Arc<dyn TelemetryUpload>>,
 	/// Fallback presenter for interactive `ask` invocations.
@@ -3640,7 +3640,7 @@ fn configured_model_edit_revision(ctx: &Ctx) -> Result<Option<Rev>, EnvdError> {
 
 fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
 	let settings = omp_catalog::settings::ModelSettings::from_con(ctx);
-	let selected = omp_agent::AI_MODEL.get(ctx);
+	let selected = omp_contract::AI_MODEL.get(ctx);
 	if let Some(role) = selected.strip_prefix("@") {
 		return settings.role_selector(role.as_str()).cloned();
 	}
@@ -5356,14 +5356,14 @@ impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
 		});
 		binding
 			.sender
-			.send(omp_agent::Up::Env(omp_agent::EnvEvent::CheckpointOpened {
+			.send(omp_contract::EnvEvent::CheckpointOpened {
 				token,
 				label,
 				goal,
 				parent_token,
 				started_at,
 				workspace: snapshot,
-			}))
+			})
 			.map_err(|_| {
 				checkpoint_fault(checkpoint::FaultCode::Control, "active Agent mailbox is closed")
 			})?;
@@ -5486,13 +5486,13 @@ impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
 		let rewound_at = epoch_millis()?;
 		if binding
 			.sender
-			.send(omp_agent::Up::Env(omp_agent::EnvEvent::CheckpointRewind {
+			.send(omp_contract::EnvEvent::CheckpointRewind {
 				token: active.info.token.clone(),
 				report: report.clone(),
 				receipt: receipt.clone(),
 				workspace: restored.clone(),
 				rewound_at,
-			}))
+			})
 			.is_err()
 		{
 			rollback_workspace(&workspace, &restored).await;
@@ -6161,7 +6161,7 @@ mod tests {
 	async fn checkpoint_cache_rehydrates_from_the_selected_branch_and_clears_on_switch() {
 		let control = AgentCheckpointControl::default();
 		let (sender, _mailbox) = flume::unbounded();
-		control.bind(7, sender);
+		control.bind(7, Arc::new(sender));
 		let mut dom = omp_dom::Dom::new();
 		dom.apply(&omp_dom::Txn {
 			cause: omp_journal::EntryId::default(),

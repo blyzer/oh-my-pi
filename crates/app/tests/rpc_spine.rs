@@ -14,6 +14,7 @@ use omp_ai::{
 	ProviderId, RequestId, ResponseMeta, RouteId, Usage,
 };
 use omp_app::rpc_mode::RpcUiBridge;
+use omp_contract::posture::ApprovalMode;
 use omp_core::Str;
 use omp_driver::{
 	headless::kernel::{
@@ -22,7 +23,7 @@ use omp_driver::{
 	},
 	sessions::SessionRegistry,
 };
-use omp_envd::{ActiveContentInputs, tool_settings::ApprovalMode};
+use omp_envd::ActiveContentInputs;
 use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::blob::BlobStore;
 use omp_rpc::framing::{MAX_FRAME_BYTES, RpcFrameDecoder, encode_json_v2};

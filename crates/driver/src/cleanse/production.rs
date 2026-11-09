@@ -9,12 +9,13 @@ use std::{
 };
 
 use omp_adw::{NetworkScope, Posture, Requirement, WriteScope};
+use omp_contract::posture::{ApprovalMode, effective_approval_mode};
 use omp_core::{Str, sf};
 use omp_dom::{NodeSpec, Op, Tag, Txn};
 use omp_envd::{
-	admission::{SandboxState, effective_approval_mode},
+	admission::probe_sandbox,
 	exec_settings::{ExecSandboxMode, NetworkConfinement, SV_SANDBOX_MODE, network_confinement},
-	tool_settings::{ApprovalMode, ToolSettings},
+	tool_settings::ToolSettings,
 };
 use omp_exec::{
 	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
@@ -197,7 +198,7 @@ impl ProductionCleanseHost {
 	}
 
 	fn posture(&self) -> Posture {
-		let sandbox = SandboxState::probe(&self.ctx, &self.root);
+		let sandbox = probe_sandbox(&self.ctx, &self.root);
 		let mode = SV_SANDBOX_MODE.get(&self.ctx);
 		let unconfined = mode != ExecSandboxMode::Off && !sandbox.confines();
 		Posture {

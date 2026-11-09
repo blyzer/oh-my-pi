@@ -49,7 +49,7 @@ pub struct ServiceState {
 	pub project:           PathBuf,
 	/// The invocation's `--approval-mode` / `--yolo` override, which outranks
 	/// the convar.
-	pub approval_override: Option<omp_envd::tool_settings::ApprovalMode>,
+	pub approval_override: Option<omp_contract::posture::ApprovalMode>,
 	/// Agent Plugins roots the invocation named (`--plugin-dir`,
 	/// `--extension`): `/plugins approve` resolves their commands like the
 	/// session did.

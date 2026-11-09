@@ -15,6 +15,9 @@ pub mod vibe;
 
 use crate::director::DirectorRegistry;
 
+#[linkme::distributed_slice(omp_contract::director::STANDARD_DIRECTORS)]
+static REGISTER_STANDARD: fn(&mut DirectorRegistry) = register_standard;
+
 /// Mode prompts a Director engagement selects through its `ai_prompt_mode`
 /// bind; the kernel renders the selected one as a system item on every
 /// request while the bind is effective.

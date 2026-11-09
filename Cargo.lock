@@ -7732,9 +7732,11 @@ dependencies = [
  "globset",
  "insta",
  "jiff",
+ "linkme",
  "omp-ai",
  "omp-catalog",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-exec",
@@ -7865,6 +7867,7 @@ dependencies = [
  "omp-chat",
  "omp-collab",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-driver",
@@ -8158,6 +8161,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-contract"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "flume",
+ "futures",
+ "linkme",
+ "omp-ai",
+ "omp-catalog",
+ "omp-con",
+ "omp-core",
+ "omp-dom",
+ "omp-ext",
+ "omp-journal",
+ "omp-proto",
+ "omp-session",
+ "omp-tool",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "strum",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "omp-core"
 version = "2.0.0"
 dependencies = [
@@ -8266,6 +8299,7 @@ dependencies = [
  "omp-catalog",
  "omp-collab",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-env",
@@ -8447,7 +8481,6 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "omp-adw",
- "omp-agent",
  "omp-ai",
  "omp-ar",
  "omp-ast",
@@ -8455,6 +8488,7 @@ dependencies = [
  "omp-cache",
  "omp-catalog",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-desktop",
  "omp-dom",

@@ -158,7 +158,7 @@ pub struct KernelOptions {
 	/// Invocation-only provider API key.
 	pub api_key:            Option<SecretString>,
 	/// Invocation-only approval policy.
-	pub approval_mode:      Option<omp_envd::tool_settings::ApprovalMode>,
+	pub approval_mode:      Option<omp_contract::posture::ApprovalMode>,
 	/// Whether `model_selector` came from an explicit `--model`.
 	pub model_override:     bool,
 	/// How the launch model settles after discovery.
@@ -278,7 +278,7 @@ pub struct ProductionInference {
 	stack:              ProductionStack,
 	con:                Arc<omp_con::Ctx>,
 	_python_components: Vec<omp_envd::exthost::PyComponent>,
-	_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
+	_eval_parent:       Option<omp_contract::eval_bridge::ParentBindingLease>,
 	_ephemeral_journal: Option<EphemeralJournal>,
 	rules:              Arc<crate::discovery::rules::RuleScope>,
 	workspace_trust:    omp_ext::workspace_trust::TrustDecision,
@@ -602,11 +602,11 @@ impl EnvToolExecutor {
 	/// The sandbox state the environment that admits this executor's calls
 	/// reported in its handshake (`ServerHello.sandbox_state`); `None` before
 	/// a handshake or when it reported none.
-	fn reported_sandbox(&self) -> Option<omp_envd::admission::SandboxState> {
+	fn reported_sandbox(&self) -> Option<omp_contract::posture::SandboxState> {
 		self
 			.client
 			.info()
-			.and_then(|hello| omp_envd::admission::SandboxState::from_wire(hello.sandbox_state()))
+			.and_then(|hello| omp_contract::posture::SandboxState::from_wire(hello.sandbox_state()))
 	}
 }
 
@@ -669,8 +669,8 @@ pub fn install_tool_authority<C>(
 fn session_posture(
 	admission: &SettingsAdmission,
 	executor: &EnvToolExecutor,
-) -> Option<omp_envd::admission::ApprovalPosture> {
-	omp_envd::admission::ApprovalPosture::resolve(
+) -> Option<omp_contract::posture::ApprovalPosture> {
+	omp_contract::posture::ApprovalPosture::resolve(
 		admission.settings.configured_approval(),
 		executor.reported_sandbox().unwrap_or(admission.sandbox),
 	)
@@ -901,9 +901,9 @@ fn admission_specs(
 		.is_some_and(|effects| effects.fetch.is_some());
 	let tier = effects
 		.as_ref()
-		.map(omp_envd::admission::ApprovalTier::from_effects);
+		.map(omp_contract::posture::ApprovalTier::from_effects);
 	let shown = args.chars().take(512).collect::<String>();
-	let tool = (tier != Some(omp_envd::admission::ApprovalTier::Fetch)).then(|| {
+	let tool = (tier != Some(omp_contract::posture::ApprovalTier::Fetch)).then(|| {
 		requirement(
 			sf!("Run {name}"),
 			sf!("{name} {shown}"),
@@ -936,7 +936,7 @@ fn admission_specs(
 /// [`install_tool_authority`] installs it.
 pub struct SettingsAdmission {
 	settings:    omp_envd::tool_settings::ToolSettings,
-	sandbox:     omp_envd::admission::SandboxState,
+	sandbox:     omp_contract::posture::SandboxState,
 	posture:     PostureNotice,
 	/// Names the hosts the fetches of the native tools this kernel runs reach
 	/// ([`Self::with_fetch_hosts`]); without it every such fetch is asked as
@@ -947,7 +947,7 @@ pub struct SettingsAdmission {
 /// The live session's one report that its `yolo` runs with no sandbox
 /// confining it.
 ///
-/// The report ([`omp_envd::admission::ApprovalPosture`]) is a typed
+/// The report ([`omp_contract::posture::ApprovalPosture`]) is a typed
 /// `approval-posture` notice on the kernel mailbox, posted when the first call
 /// of any tool is admitted. Calls are admitted in two places: by the kernel
 /// ([`SettingsAdmission`], for the native tools this process runs) and by the
@@ -962,7 +962,7 @@ struct PostureNotice(Option<Arc<PendingPosture>>);
 /// A posture to report, where to, and whether the session the kernel serves
 /// has been told.
 struct PendingPosture {
-	posture: omp_envd::admission::ApprovalPosture,
+	posture: omp_contract::posture::ApprovalPosture,
 	mailbox: flume::Sender<omp_agent::Up>,
 	/// Set when an admission posts the report, and re-derived from the live
 	/// branch of the session the kernel serves ([`Self::sync`]).
@@ -983,9 +983,9 @@ impl PendingPosture {
 			.any(|node| {
 				node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Notice)
 					&& node.prop(&name).and_then(Value::as_str)
-						== Some(omp_envd::admission::APPROVAL_POSTURE_NOTICE)
+						== Some(omp_contract::posture::APPROVAL_POSTURE_NOTICE)
 					&& matches!(node.prop(&data), Some(Value::Json(payload))
-						if serde_json::from_str::<omp_envd::admission::ApprovalPosture>(payload.get())
+						if serde_json::from_str::<omp_contract::posture::ApprovalPosture>(payload.get())
 							.is_ok_and(|told| told == self.posture))
 			});
 		self
@@ -1027,7 +1027,7 @@ impl PostureNotice {
 			.mailbox
 			.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
 				kind: Str::new_static("warn"),
-				name: Str::new_static(omp_envd::admission::APPROVAL_POSTURE_NOTICE),
+				name: Str::new_static(omp_contract::posture::APPROVAL_POSTURE_NOTICE),
 				data,
 				body: pending.posture.body(),
 			}));
@@ -1066,13 +1066,13 @@ impl SettingsAdmission {
 	#[must_use]
 	pub fn new(
 		ctx: &omp_con::Ctx,
-		approval_mode: Option<omp_envd::tool_settings::ApprovalMode>,
+		approval_mode: Option<omp_contract::posture::ApprovalMode>,
 		workspace_root: &Path,
 	) -> Self {
 		Self {
 			settings:    omp_envd::tool_settings::ToolSettings::from_con(ctx)
 				.with_approval_mode_override(approval_mode),
-			sandbox:     omp_envd::admission::SandboxState::probe(ctx, workspace_root),
+			sandbox:     omp_envd::admission::probe_sandbox(ctx, workspace_root),
 			posture:     PostureNotice::default(),
 			fetch_hosts: None,
 		}
@@ -1122,11 +1122,11 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 			.settings
 			.approval_for(name, name, effects, confinement, self.sandbox);
 		match resolved.policy {
-			omp_envd::admission::ApprovalPolicy::Allow => omp_agent::ToolAdmissionVerdict::Allow,
-			omp_envd::admission::ApprovalPolicy::Deny => omp_agent::ToolAdmissionVerdict::Deny(sf!(
+			omp_contract::posture::ApprovalPolicy::Allow => omp_agent::ToolAdmissionVerdict::Allow,
+			omp_contract::posture::ApprovalPolicy::Deny => omp_agent::ToolAdmissionVerdict::Deny(sf!(
 				"tool `{name}` is denied by approval policy (tools.approval.{name})"
 			)),
-			omp_envd::admission::ApprovalPolicy::Prompt => {
+			omp_contract::posture::ApprovalPolicy::Prompt => {
 				let command = serde_json::from_str::<serde_json::Value>(args.get())
 					.ok()
 					.and_then(|value| {
@@ -1137,7 +1137,7 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 					});
 				let evidence = admission_evidence(
 					&resolved,
-					omp_envd::admission::effective_approval_mode(
+					omp_contract::posture::effective_approval_mode(
 						self.settings.configured_approval(),
 						self.sandbox,
 					),
@@ -1167,7 +1167,7 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 					)]);
 				}
 				let shown = args.get().chars().take(512).collect::<String>();
-				let tool = (resolved.tier != omp_envd::admission::ApprovalTier::Fetch).then(|| {
+				let tool = (resolved.tier != omp_contract::posture::ApprovalTier::Fetch).then(|| {
 					requirement(sf!("Run {name}"), sf!("{name} {shown}"), Str::new(name), "tool")
 				});
 				let named = effects.fetch.is_some().then(|| match &self.fetch_hosts {
@@ -1196,8 +1196,8 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 /// in force for it, and, when the session's `yolo` holds only inside the
 /// sandbox, that this tool runs outside it.
 fn admission_evidence(
-	resolved: &omp_envd::admission::ResolvedApproval,
-	session_mode: omp_envd::tool_settings::ApprovalMode,
+	resolved: &omp_contract::posture::ResolvedApproval,
+	session_mode: omp_contract::posture::ApprovalMode,
 ) -> Vec<Str> {
 	let tier: &'static str = resolved.tier.into();
 	let confinement: &'static str = resolved.confinement.into();
@@ -2109,7 +2109,7 @@ pub enum ComposedInference {
 		/// Live Python Component reducers retained for the controller lifetime.
 		_python_components: Vec<omp_envd::exthost::PyComponent>,
 		/// Authenticated eval-parent binding retained for this kernel.
-		_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
+		_eval_parent:       Option<omp_contract::eval_bridge::ParentBindingLease>,
 		/// No-session journal cleanup owner.
 		_ephemeral_journal: Option<EphemeralJournal>,
 		/// Discovered rules and the agent class the live session runs as.
@@ -2127,7 +2127,7 @@ impl ComposedInference {
 		}
 	}
 
-	fn retain_eval_parent(&mut self, lease: omp_envd::eval::ParentBindingLease) {
+	fn retain_eval_parent(&mut self, lease: omp_contract::eval_bridge::ParentBindingLease) {
 		match self {
 			Self::Production(inference) => inference._eval_parent = Some(lease),
 			Self::Gateway { _eval_parent, .. } => *_eval_parent = Some(lease),
@@ -3057,7 +3057,7 @@ pub async fn compose_kernel(
 	kernel
 		.inference()
 		.environment()
-		.bind_mcp_literal_notices(kernel.mailbox());
+		.bind_mcp_literal_notices(Arc::new(omp_agent::UpMailbox(kernel.mailbox())));
 	kernel.register_live_component(con_journal.live_component());
 	for component in live_python_components {
 		kernel.register_live_component(Box::new(component));
@@ -3116,7 +3116,7 @@ pub async fn compose_kernel(
 	let session_mutator = crate::subagent::workpool_scheduler::SessionMutator::new(up.clone());
 	kernel
 		.inference()
-		.refresh_agent_control(up.clone(), session.dom());
+		.refresh_agent_control(Arc::new(omp_agent::UpMailbox(up.clone())), session.dom());
 	let autoreply = crate::subagent::autoreply::producer(
 		kernel.inference(),
 		&live_sessions,
@@ -4547,7 +4547,7 @@ mod tests {
 			.expect("raw args");
 		let admission = super::SettingsAdmission {
 			settings:    ToolSettings::default()
-				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk)),
+				.with_approval_mode_override(Some(omp_contract::posture::ApprovalMode::AlwaysAsk)),
 			sandbox:     SandboxState::Off,
 			posture:     super::PostureNotice::default(),
 			fetch_hosts: None,
@@ -4637,7 +4637,7 @@ mod tests {
 
 		let explicit = admission(
 			ToolSettings::default()
-				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::Yolo)),
+				.with_approval_mode_override(Some(omp_contract::posture::ApprovalMode::Yolo)),
 		);
 		assert!(matches!(
 			explicit.admit("web_search", &web_search, Confinement::Host, &args, &[]),
@@ -4712,7 +4712,7 @@ mod tests {
 			panic!("one typed notice for the first session, {} posted", posted.len());
 		};
 		assert_eq!(kind.as_str(), "warn");
-		assert_eq!(name.as_str(), omp_envd::admission::APPROVAL_POSTURE_NOTICE);
+		assert_eq!(name.as_str(), omp_contract::posture::APPROVAL_POSTURE_NOTICE);
 		assert_eq!(
 			serde_json::from_str::<serde_json::Value>(data.get()).expect("typed payload"),
 			serde_json::json!({
@@ -4794,7 +4794,7 @@ mod tests {
 			effective: ApprovalMode::Write,
 			sandbox,
 			workspace_trust: WorkspaceTrust::Untrusted,
-			reason: omp_envd::admission::ApprovalPostureReason::DefaultWithoutSandbox,
+			reason: omp_contract::posture::ApprovalPostureReason::DefaultWithoutSandbox,
 		};
 
 		// A daemon whose sandbox confines its commands keeps the defaulted
@@ -5793,10 +5793,10 @@ mod tests {
 	#[test]
 	fn approval_override_is_typed_in_kernel_options() {
 		let options = KernelOptions {
-			approval_mode: Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk),
+			approval_mode: Some(omp_contract::posture::ApprovalMode::AlwaysAsk),
 			..KernelOptions::default()
 		};
-		assert_eq!(options.approval_mode, Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk));
+		assert_eq!(options.approval_mode, Some(omp_contract::posture::ApprovalMode::AlwaysAsk));
 	}
 
 	/// An auxiliary call moved to its selected model keeps an explicit

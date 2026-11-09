@@ -2020,7 +2020,7 @@ mod tests {
 		assert!(options.py_eval);
 		assert_eq!(options.spawn_idle_timeout, Some(3));
 		assert!(options.api_key.is_some());
-		assert_eq!(options.approval_mode, Some(omp_envd::tool_settings::ApprovalMode::Yolo));
+		assert_eq!(options.approval_mode, Some(omp_contract::posture::ApprovalMode::Yolo));
 		assert!(options.model_override);
 		assert_eq!(options.provider.as_ref().map(|provider| provider.as_str()), Some("openai"));
 		assert_eq!(options.prompt_cache_key.as_deref(), Some("cache"));

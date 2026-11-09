@@ -137,7 +137,8 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 - **DONE** Phase 0: `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts. Recorded in ADR 0045, section "Build-weight baseline (ADR 0049 Phase 0)". PR #542.
 - **DONE** Phase 1 ENVD-16: `ExecError`, `ExecEvent`, and the `ExecHost` / `ExecRun` traits live in `omp-exec`. envd implements the traits; the concrete session host stays in `crates/envd/src/exec.rs`. `omp-exec-local` does not depend on `omp-envd`. PR #543.
 - **DONE** Phase 1 ENVD-07: `SshService` and the configured-host authority live in `omp-ssh`. `omp-exec-ssh` does not depend on `omp-envd`. envd `ssh://` reads are behind `cap-ssh` (default-on in `omp-app`). `russh` left `crates/envd/Cargo.toml`. Measured `omp-exec-ssh` closure is 456 crates (selected unification, default edges), above the ≤300 exit. PR #544.
-- **OPEN** Phase 1 remainder: ENVD-02 / 0046 item 2 contract crate.
+- **DONE** Phase 1 ENVD-02: shared approval, hook, director, session, posture, and eval-bridge vocabulary lives in `omp-contract`. `omp-envd` does not depend on `omp-agent`. Driver and app import posture and eval-bridge types from `omp-contract`. Selected-unification closures after the split: `omp-app` 1332, `omp-envd` 1031. The `omp-exec-ssh` 456-crate miss and the ≤300 budget are unchanged. Timings not re-run.
+- **OPEN** Phase 1 closure exit: `omp-exec-ssh` remains 456 crates, above ≤300. The vocabulary task ENVD-02 is done. Phases 2–5 follow.
 - **BLOCKED** Phase 2: 0046 item 1 table-driven roster; ENVD-03/04 splits.
 - **BLOCKED** Phase 3: `cap-*` features for computer, browser, tts/media (ENVD-08/09).
 - **BLOCKED** Phase 4: `omp-forge`/`omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, forge-neutral `pr://`/`issue://`; GitLab adapter (extension) first; GitHub adapter parity; remove `envd/src/github*.rs` and `github@3`.

@@ -22,8 +22,8 @@ use bytes::{Buf as _, Bytes, BytesMut};
 use flume::Receiver;
 use futures::future::try_join_all;
 use nix::errno::Errno;
-use omp_agent::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
 use omp_cache::github_cache::GithubCache;
+use omp_contract::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
 use omp_core::{Hash32, Str, sf};
 use omp_exec::{ExecError, ExecEvent, IdentityError, LeaseError};
 use omp_journal::blob::{BlobStage, BlobStore};
@@ -62,7 +62,7 @@ use url::Url;
 
 use super::{
 	admission,
-	admission::{GithubMutationTarget, SandboxUnavailable},
+	admission::GithubMutationTarget,
 	approval_relay::{EnvApprover, OwnedApprovals, RouteBinding},
 	devices_host::{CommandDevices, CommandIssuer, IssuerCell},
 	exec_network_diag::{
@@ -565,7 +565,10 @@ impl ExecHost {
 			// state resolves a defaulted `yolo` to `write` and the shell to the
 			// `exec` tier. A sandbox the user asked for stays a hard error.
 			Err(source)
-				if !settings.explicit && SandboxUnavailable::classify(&source).runs_unsandboxed() =>
+				if !settings.explicit
+					&& crate::exec_sandbox::runs_unsandboxed(
+						crate::exec_sandbox::classify_unavailable(&source),
+					) =>
 			{
 				tracing::warn!(%source, "sandbox unavailable; commands run unsandboxed under approval");
 				Ok(None)
@@ -4612,9 +4615,9 @@ mod tests {
 
 	fn decision(
 		scope: ApprovalScope,
-		source: omp_agent::ApprovalSource,
-	) -> omp_agent::ApprovalDecision {
-		omp_agent::ApprovalDecision {
+		source: omp_contract::ApprovalSource,
+	) -> omp_contract::ApprovalDecision {
+		omp_contract::ApprovalDecision {
 			approved: true,
 			scope,
 			source,
@@ -4628,11 +4631,11 @@ mod tests {
 	/// prompt with `answer`, and returns the filed requirement and the grant.
 	async fn amend_through_route(
 		host: &ExecHost,
-		inbox: &omp_agent::ApprovalInbox,
+		inbox: &omp_contract::ApprovalInbox,
 		command: &str,
 		fact: &SandboxDenialFact,
 		scope: &str,
-		answer: omp_agent::ApprovalDecision,
+		answer: omp_contract::ApprovalDecision,
 	) -> (ApprovalSpec, Option<AmendmentGrant>) {
 		let approval = host.approve_sandbox_amendment(None, command, fact, scope);
 		tokio::pin!(approval);
@@ -4653,7 +4656,7 @@ mod tests {
 	#[tokio::test]
 	async fn jit_approval_names_only_the_detected_capability_and_exact_command() {
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let command = "printf ready; touch /private/blocked";
 		let fact = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
@@ -4663,7 +4666,7 @@ mod tests {
 			command,
 			&fact,
 			"/private",
-			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+			decision(ApprovalScope::Once, omp_contract::ApprovalSource::User),
 		)
 		.await;
 		assert_eq!(reason.kind, "sandbox_amendment");
@@ -4680,7 +4683,7 @@ mod tests {
 			command,
 			&fact,
 			"network api.example.test:443",
-			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+			decision(ApprovalScope::Once, omp_contract::ApprovalSource::User),
 		)
 		.await;
 		assert_eq!(reason.subject, "network api.example.test:443");
@@ -4699,9 +4702,9 @@ mod tests {
 	/// network fact extends the binding's grants.
 	#[tokio::test]
 	async fn network_amendments_offer_the_session_and_paths_stay_once() {
-		use omp_agent::ApprovalSource;
+		use omp_contract::ApprovalSource;
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let grants = host.egress_grants(None).expect("the bound route's grants");
 		let network = SandboxDenialFact::Network { host: sf!("pypi.org"), port: 443 };
@@ -4832,7 +4835,7 @@ mod tests {
 	fn rebinding_or_revoking_the_route_clears_its_egress_grants() {
 		let host = ExecHost::new();
 		assert!(host.egress_grants(None).is_none(), "no route, no binding");
-		let (route, _inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, _inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route.clone()));
 		let first = host.egress_grants(None).expect("bound grants");
 		first.insert("pypi.org", 443);
@@ -4866,7 +4869,7 @@ mod tests {
 		use v1::server_frame::Body;
 
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let (responses, frames) = flume::bounded(4);
 		let approvals = crate::approval_relay::ConnectionApprovals::new(responses);

@@ -9,7 +9,7 @@ use std::{
 	time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
-use omp_agent::{EnvEvent, SessionAuthority, SessionEndpoint, SessionRole, Up};
+use omp_agent::{EnvEvent, SessionAuthority, SessionEndpoint, SessionRole};
 use omp_core::{FastHashMap, FastHashSet, Str, Ulid, sf};
 use omp_journal::data::{IrcDirection, IrcTraffic, WorkpoolMode, WorkpoolObservation};
 use parking_lot::Mutex;
@@ -282,7 +282,7 @@ impl WorkpoolProducer {
 		});
 		match owner
 			.up
-			.try_send(Up::Env(EnvEvent::IrcTraffic { payload: Arc::new(payload) }))
+			.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(payload) })
 		{
 			Ok(()) => {
 				state.last_timestamp_ms = timestamp_ms;
@@ -292,10 +292,10 @@ impl WorkpoolProducer {
 				}
 				Ok(WorkpoolReceipt { producer: self.producer, id: staged.id.clone() })
 			},
-			Err(flume::TrySendError::Full(_)) => {
+			Err(omp_contract::MailboxReject::Full(_)) => {
 				Err(WorkpoolProducerError::MailboxFull { owner: owner.id })
 			},
-			Err(flume::TrySendError::Disconnected(_)) => {
+			Err(omp_contract::MailboxReject::Disconnected(_)) => {
 				Err(WorkpoolProducerError::OwnerDisconnected { owner: owner.id })
 			},
 		}
@@ -351,34 +351,24 @@ impl WorkpoolProducer {
 				mode: None,
 				timestamp_ms,
 			};
-			tokio::select! {
-				biased;
-				() = cancel.cancelled() => {
-					return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
-				},
-				result = owner.up.send_async(Up::Env(EnvEvent::IrcTraffic {
-					payload: Arc::new(incoming),
-				})) => {
-					result.map_err(|_| WorkpoolProducerError::OwnerDisconnected {
-						owner: owner.id.clone(),
-					})?;
-				},
+			if cancel.is_cancelled() {
+				return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
 			}
+			owner
+				.up
+				.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(incoming) })
+				.map_err(|_| WorkpoolProducerError::OwnerDisconnected { owner: owner.id.clone() })?;
 			let mut state = self.state.lock();
 			state.last_timestamp_ms = timestamp_ms;
 			state.result_observations.insert(reply_to.id.clone());
 		}
-		tokio::select! {
-			biased;
-			() = cancel.cancelled() => {
-				return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
-			},
-			result = owner.up.send_async(Up::Peer(body.clone())) => {
-				result.map_err(|_| WorkpoolProducerError::OwnerDisconnected {
-					owner: owner.id.clone(),
-				})?;
-			},
+		if cancel.is_cancelled() {
+			return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
 		}
+		owner
+			.up
+			.try_send_peer(body.clone())
+			.map_err(|_| WorkpoolProducerError::OwnerDisconnected { owner: owner.id.clone() })?;
 		self.state.lock().results.insert(reply_to.id.clone());
 		if let Some(main) = self.authority.relay_target(&target, &owner) {
 			let relay = IrcTraffic {
@@ -393,7 +383,7 @@ impl WorkpoolProducer {
 			};
 			let _ = main
 				.up
-				.try_send(Up::Env(EnvEvent::IrcTraffic { payload: Arc::new(relay) }));
+				.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(relay) });
 		}
 		Ok(())
 	}
@@ -471,7 +461,7 @@ impl WorkpoolProducer {
 fn same_endpoint(left: &SessionEndpoint, right: &SessionEndpoint) -> bool {
 	left.id == right.id
 		&& left.name == right.name
-		&& left.up.same_channel(&right.up)
+		&& left.up.same_mailbox(right.up.as_ref())
 		&& left.topology == right.topology
 }
 

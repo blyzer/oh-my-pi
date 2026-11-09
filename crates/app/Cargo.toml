@@ -61,6 +61,7 @@ indicatif.workspace = true
 miette.workspace = true
 omp-adw.workspace = true
 omp-agent.workspace = true
+omp-contract.workspace = true
 omp-ar.workspace = true
 omp-chat.workspace = true
 omp-collab.workspace = true

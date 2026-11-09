@@ -13,8 +13,8 @@ pub(super) mod vault;
 
 use std::{fmt::Display, path::PathBuf, sync::Arc};
 
-use omp_agent::{SessionAuthority, SessionEndpoint};
 use omp_cache::github_cache::GithubCache;
+use omp_contract::{SessionAuthority, SessionEndpoint};
 use omp_core::{CowBytes, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 use omp_journal::blob::{BlobRef, BlobStore};
@@ -932,7 +932,9 @@ fn source_fault(cause: impl std::fmt::Display) -> Fault {
 
 #[cfg(test)]
 mod tests {
-	use omp_agent::{SessionRole, SessionTopology, Up};
+	use std::sync::Arc;
+
+	use omp_contract::{EnvEvent, EnvEventSink, SessionRole, SessionTopology};
 	use omp_core::sf;
 	use omp_dom::{NodeSpec, Op, Txn};
 	use omp_journal::EntryId;
@@ -967,13 +969,13 @@ mod tests {
 	}
 
 	fn endpoint(id: &'static str, dom: &Dom) -> SessionEndpoint {
-		let (up, _rx) = flume::unbounded::<Up>();
+		let (up, _rx) = flume::unbounded::<EnvEvent>();
 		SessionEndpoint {
-			id: sf!(id),
-			name: sf!(id),
-			up,
-			snapshot: Arc::new(RwLock::new(dom.snapshot())),
-			topology: SessionTopology {
+			id:        sf!(id),
+			name:      sf!(id),
+			up:        Arc::new(up),
+			snapshot:  Arc::new(RwLock::new(dom.snapshot())),
+			topology:  SessionTopology {
 				role:      SessionRole::Main,
 				parent_id: None,
 				main_id:   sf!(id),
