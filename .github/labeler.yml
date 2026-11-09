@@ -53,6 +53,7 @@ area/tools:
       - any-glob-to-any-file:
           - 'crates/tool/**'
           - 'crates/tools/**'
+          - 'crates/roster-probe/**'
           - 'crates/edit/**'
           - 'crates/ast/**'
           - 'crates/walker/**'
