@@ -118,9 +118,13 @@ rustix.workspace = true
 
 [dev-dependencies]
 # Hermetic `git` fixtures: tests never read the developer's git configuration.
+omp-adw.workspace = true
+omp-exec.workspace = true
+omp-exec-local.workspace = true
 omp-vcs = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

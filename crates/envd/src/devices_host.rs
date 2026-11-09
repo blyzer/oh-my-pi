@@ -1042,9 +1042,10 @@ mod tests {
 	/// ownerless.
 	#[tokio::test]
 	async fn a_scripted_dyn_eval_runs_as_the_issuing_session_owner() {
+		use omp_exec::ExecEvent;
 		use omp_proto::env::v1::{ExecOutcome, ExecRequest, OpenSessionRequest, Script};
 
-		use crate::exec::{ExecEvent, ExecHost};
+		use crate::exec::ExecHost;
 
 		let scratch = tempfile::tempdir().expect("scratch");
 		let owners = Arc::new(Mutex::new(Vec::new()));

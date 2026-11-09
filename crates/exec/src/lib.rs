@@ -49,6 +49,7 @@ mod deny;
 mod digest;
 mod error;
 mod handle;
+mod host;
 mod ids;
 mod place;
 mod platform;
@@ -72,6 +73,7 @@ pub use error::{
 	Unplaceable, fallback_eligible,
 };
 pub use handle::{ReattachHandle, ReattachSchema, ResumeSupport};
+pub use host::{ExecError, ExecEvent, ExecHost, ExecRun, IdentityError, LeaseError, StoreError};
 pub use ids::{BackendId, CacheName, ExecutionId, ToolchainId};
 pub use place::{Placement, admit, place};
 pub use platform::{

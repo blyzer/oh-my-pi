@@ -11,9 +11,10 @@ use omp_envd::{
 		Environment, ServerConfig,
 		connection::{ConnectionConfig, serve_connection},
 	},
-	exec::{ExecEvent, ExecHost, ProcessEvent},
+	exec::{ExecHost, ProcessEvent},
 	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
+use omp_exec::ExecEvent;
 use omp_proto::env::v1::{
 	AttachOutput, ConflictReason, CreateWorktree, DestroyWorktree, ExecRequest, MergeMode,
 	MergeWorktree, OpenSessionRequest, RestoreWorkspace, Script, SnapshotWorkspace,

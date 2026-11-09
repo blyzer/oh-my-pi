@@ -25,6 +25,7 @@ use omp_core::{Hash32, Str, Ulid, sf};
 use omp_env::{
 	EnvClient, InProcessEnvTransport, partition::FramePipe, project_state::DaemonPolicy,
 };
+use omp_exec::{ExecError, ExecEvent};
 use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::blob;
 use omp_proto::{
@@ -99,7 +100,7 @@ use super::{
 	eval::{
 		BridgeHostError, ParentBindingLease, ParentSessionHost, PreludeInvoker, SessionBridgeHost,
 	},
-	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
+	exec::{ExecHost, ExecRun, ProcessEvent},
 	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
 	fetch_host::{FetchHostNamer, resolve_locators},
@@ -10658,7 +10659,7 @@ fn spawn_exec(
 				},
 				Some(ExecEvent::Exit(exit)) => {
 					terminal = true;
-					send_body(&responses, request_id, server_frame::Body::Exit(exit)).await;
+					send_body(&responses, request_id, server_frame::Body::Exit(*exit)).await;
 					break;
 				},
 				None => break,

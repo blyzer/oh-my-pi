@@ -25,6 +25,11 @@ are composed by `omp-driver`. Keeping the domain here means placement and
 failure classification are testable as plain functions, and a new backend or
 a new build system is added without touching the other side.
 
+`ExecHost` and `ExecRun` are the process-authority contract a local backend
+drives (ADR 0049 D3.1). The traits, `ExecError`, and `ExecEvent` live here so
+`omp-exec-local` does not depend on `omp-envd`. envd keeps the session host
+and implements the traits. The contract types perform no I/O.
+
 Two separations are load-bearing:
 
 - **Adapters never name a backend, and backends never inspect argv.** The

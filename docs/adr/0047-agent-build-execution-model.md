@@ -137,6 +137,12 @@ removes `omp-exec-buildbuddy` from the workspace, and that has not happened.
 
 [ADR 0049](0049-tiered-integration-architecture.md) (D3.1, ADR 0045 ENVD-16) moves `ExecError`, `ExecEvent`, `ExecHost` and `ExecRun` from `omp-envd` into `omp-exec`. envd keeps implementing `ExecHost`; `omp-exec-local` stops depending on `omp-envd`. This is a type move. It does not change Decision item 3 (envd keeps its process, filesystem, blob and sandbox authorities) and does not satisfy this record's G1 acceptance gate, which stays open.
 
+Landed: `omp_exec::{ExecError, ExecEvent, ExecHost, ExecRun}` are the contract. `ExecHost` and `ExecRun` in `omp-exec` are traits. The concrete session host and run stay in `crates/envd/src/exec.rs` and implement those traits. `IdentityError`, `StoreError` and `LeaseError` moved with `ExecError` because its `#[from]` sources have to live in the same crate. envd does not re-export the moved types. `omp-exec-local` is generic over `H: ExecHost` and has no dependency on `omp-envd`. The in-process proof is `crates/envd/tests/exec_local_backend.rs`.
+
+Deviation, recorded, not a decision change: moving the concrete `ExecHost` struct would carry sandbox, shell, and envd-private modules into `omp-exec`, recreate an envd edge, and miss the closure exit (≤ 300 crates). The trait split is the shape that keeps "envd implements ExecHost" and "no re-export" at the same time. `close_session` is on the trait because `LocalRun`'s drop closes the session the backend opened. `ExecEvent::Exit` boxes the prost `ExitEvent` so the enum stays at most 128 bytes; callers unbox where they need the message itself.
+
+Closure, measured 2026-11-09 on this Linux host with `resolver.feature-unification = "selected"` (the workspace default unifies every member, so a bare `cargo tree -p omp-exec-local` still names `omp-envd` through other workspace crates). Unique packages, default edges: 287 host, 290 `x86_64-unknown-linux-gnu`, 285 `aarch64-apple-darwin`. `cargo tree -p omp-exec-local -i omp-envd` under selected unification reports that `omp-envd` is not in the graph. The macOS number is resolution only; that target is not installed here.
+
 ## References
 
 - ADRs 0003, 0006, 0009, 0010, 0011, 0028, 0039, 0040 (and its 2026-10-10 amendment).

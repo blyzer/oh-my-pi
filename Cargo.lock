@@ -7871,6 +7871,7 @@ dependencies = [
  "omp-edit",
  "omp-env",
  "omp-envd",
+ "omp-exec",
  "omp-ext",
  "omp-gui",
  "omp-http",
@@ -8443,6 +8444,7 @@ dependencies = [
  "miette",
  "nix 0.31.3",
  "notify",
+ "omp-adw",
  "omp-agent",
  "omp-ai",
  "omp-ar",
@@ -8457,6 +8459,7 @@ dependencies = [
  "omp-edit",
  "omp-env",
  "omp-exec",
+ "omp-exec-local",
  "omp-ext",
  "omp-http",
  "omp-journal",
@@ -8513,9 +8516,14 @@ dependencies = [
 name = "omp-exec"
 version = "2.0.0"
 dependencies = [
+ "bytes",
  "omp-adw",
  "omp-core",
+ "omp-journal",
+ "omp-proto",
+ "omp-sandbox",
  "proptest",
+ "prost",
  "serde",
  "serde_json",
  "strum",
@@ -8550,12 +8558,9 @@ dependencies = [
  "bytes",
  "omp-adw",
  "omp-core",
- "omp-envd",
  "omp-exec",
  "omp-proto",
- "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "url",
 ]
 
