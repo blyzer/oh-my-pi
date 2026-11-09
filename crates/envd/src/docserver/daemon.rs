@@ -11,7 +11,7 @@ use std::path::Path;
 use std::{
 	env, ffi, fs,
 	fs::{File, OpenOptions},
-	os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+	os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
 };
 use std::{io, mem, path::PathBuf, result, sync::Arc, time::Duration};
 
@@ -139,16 +139,6 @@ pub enum Error {
 		/// Underlying file locking error.
 		#[source]
 		source: Errno,
-	},
-
-	/// Cannot set permissions on the lock directory.
-	#[error("cannot secure lock directory {directory:?}: {source}")]
-	SecureLockDirectory {
-		/// Path to the lock directory.
-		directory: PathBuf,
-		/// Underlying I/O error.
-		#[source]
-		source:    io::Error,
 	},
 
 	/// Cannot create the lock directory.
@@ -414,9 +404,10 @@ fn lock_directory() -> Result<PathBuf> {
 		Some(runtime) if runtime.is_absolute() => runtime.join("omp-envd-docserver"),
 		_ => env::temp_dir().join(format!("omp-envd-docserver-{user_id}")),
 	};
-	match fs::create_dir(&directory) {
-		Ok(()) => fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-			.map_err(|source| Error::SecureLockDirectory { directory: directory.clone(), source })?,
+	// Create with the final mode in one syscall: a create-then-chmod pair lets a
+	// concurrent caller observe the directory while it is still world-readable.
+	match fs::DirBuilder::new().mode(0o700).create(&directory) {
+		Ok(()) => {},
 		Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
 		Err(source) => {
 			return Err(Error::CreateLockDirectory { directory, source });
