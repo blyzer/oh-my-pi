@@ -688,13 +688,14 @@ impl SchedulerRegistry {
 		self.producers.release_owner(self.owner.as_str());
 	}
 
-	/// Adapts this scheduler to [`omp_envd::eval::ParentSessionHost::workpool`]
-	/// and publishes one correlated status only after the operation commits.
+	/// Adapts this scheduler to
+	/// [`omp_contract::eval_bridge::ParentSessionHost::workpool`] and publishes
+	/// one correlated status only after the operation commits.
 	pub async fn bridge_host_call(
 		&self,
 		args: Json,
-		progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
+		progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		let op = args
 			.get("op")
 			.and_then(Json::as_str)
@@ -703,7 +704,7 @@ impl SchedulerRegistry {
 		let result = self
 			.bridge_call(args)
 			.await
-			.map_err(omp_envd::eval::BridgeHostError::caused)?;
+			.map_err(omp_contract::eval_bridge::BridgeHostError::caused)?;
 		progress.progress(json!({
 			"op": "workpool",
 			"action": op,
@@ -826,11 +827,14 @@ impl WorkpoolSessionHost {
 }
 
 #[async_trait]
-impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
+impl omp_contract::eval_bridge::ParentSessionHost for WorkpoolSessionHost {
 	fn eval_session_config(
 		&self,
-	) -> Result<omp_envd::eval::EvalSessionConfig, omp_envd::eval::BridgeHostError> {
-		Ok(omp_envd::eval::EvalSessionConfig {
+	) -> Result<
+		omp_contract::eval_bridge::EvalSessionConfig,
+		omp_contract::eval_bridge::BridgeHostError,
+	> {
+		Ok(omp_contract::eval_bridge::EvalSessionConfig {
 			cwd:              self.cwd.clone(),
 			local_roots_json: None,
 		})
@@ -843,9 +847,9 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 	async fn completion(
 		&self,
 		_args: Json,
-		_progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
-		Err(omp_envd::eval::BridgeHostError::message(
+		_progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
+		Err(omp_contract::eval_bridge::BridgeHostError::message(
 			"eval completion is unavailable for this parent session",
 		))
 	}
@@ -857,9 +861,9 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 	async fn agent(
 		&self,
 		_args: Json,
-		_progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
-		Err(omp_envd::eval::BridgeHostError::message(
+		_progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
+		Err(omp_contract::eval_bridge::BridgeHostError::message(
 			"eval agent is unavailable for this parent session",
 		))
 	}
@@ -868,8 +872,11 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 		false
 	}
 
-	async fn concurrency(&self, _args: Json) -> Result<Json, omp_envd::eval::BridgeHostError> {
-		Err(omp_envd::eval::BridgeHostError::message(
+	async fn concurrency(
+		&self,
+		_args: Json,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
+		Err(omp_contract::eval_bridge::BridgeHostError::message(
 			"eval concurrency is unavailable for this parent session",
 		))
 	}
@@ -878,8 +885,8 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 		false
 	}
 
-	async fn budget(&self, _args: Json) -> Result<Json, omp_envd::eval::BridgeHostError> {
-		Err(omp_envd::eval::BridgeHostError::message(
+	async fn budget(&self, _args: Json) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
+		Err(omp_contract::eval_bridge::BridgeHostError::message(
 			"eval budget is unavailable for this parent session",
 		))
 	}
@@ -902,13 +909,16 @@ impl<P> WorkpoolParentHost<P> {
 }
 
 #[async_trait]
-impl<P> omp_envd::eval::ParentSessionHost for WorkpoolParentHost<P>
+impl<P> omp_contract::eval_bridge::ParentSessionHost for WorkpoolParentHost<P>
 where
-	P: omp_envd::eval::ParentSessionHost,
+	P: omp_contract::eval_bridge::ParentSessionHost,
 {
 	fn eval_session_config(
 		&self,
-	) -> Result<omp_envd::eval::EvalSessionConfig, omp_envd::eval::BridgeHostError> {
+	) -> Result<
+		omp_contract::eval_bridge::EvalSessionConfig,
+		omp_contract::eval_bridge::BridgeHostError,
+	> {
 		self.inner.eval_session_config()
 	}
 
@@ -924,8 +934,8 @@ where
 	async fn completion(
 		&self,
 		args: Json,
-		progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
+		progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		self.inner.completion(args, progress).await
 	}
 
@@ -936,8 +946,8 @@ where
 	async fn agent(
 		&self,
 		args: Json,
-		progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
+		progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		self.inner.agent(args, progress).await
 	}
 
@@ -948,8 +958,8 @@ where
 	async fn workpool(
 		&self,
 		args: Json,
-		progress: &dyn omp_envd::eval::BridgeProgressSink,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
+		progress: &dyn omp_contract::eval_bridge::BridgeProgressSink,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		self.scheduler.bridge_host_call(args, progress).await
 	}
 
@@ -957,7 +967,10 @@ where
 		self.inner.concurrency_available()
 	}
 
-	async fn concurrency(&self, args: Json) -> Result<Json, omp_envd::eval::BridgeHostError> {
+	async fn concurrency(
+		&self,
+		args: Json,
+	) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		self.inner.concurrency(args).await
 	}
 
@@ -965,7 +978,7 @@ where
 		self.inner.budget_available()
 	}
 
-	async fn budget(&self, args: Json) -> Result<Json, omp_envd::eval::BridgeHostError> {
+	async fn budget(&self, args: Json) -> Result<Json, omp_contract::eval_bridge::BridgeHostError> {
 		self.inner.budget(args).await
 	}
 }

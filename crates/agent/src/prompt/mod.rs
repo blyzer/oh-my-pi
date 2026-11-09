@@ -4,6 +4,7 @@ pub mod assets;
 mod projection;
 mod slots;
 
+pub use omp_contract::prompt_memory::{PromptMemoryInput, PromptMemorySlotInput};
 use omp_dom::Dom;
 use omp_proto::thread::v1::{Item, Role, item};
 use omp_scribe::{Props, Value};
@@ -15,26 +16,6 @@ pub use slots::{
 use thiserror::Error;
 
 use self::slots::{hash_framed, system_text};
-
-/// One immutable runtime-owned memory slot.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PromptMemorySlotInput {
-	/// Slot-local revision.
-	pub generation: u64,
-	/// Fully framed, bounded contribution.
-	pub content:    Option<omp_core::Str>,
-}
-
-/// Immutable Memory, Standing, and Recall slot snapshot.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PromptMemoryInput {
-	/// Compaction-epoch memory background.
-	pub memory:   PromptMemorySlotInput,
-	/// Compaction-epoch non-directive guidance.
-	pub standing: PromptMemorySlotInput,
-	/// Per-turn volatile recall.
-	pub recall:   PromptMemorySlotInput,
-}
 
 /// Canonical provider-facing prompt source.
 #[derive(Clone, Copy, Debug, Default)]

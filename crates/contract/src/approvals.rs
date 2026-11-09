@@ -570,7 +570,7 @@ fn find_ticket(
 		.ok_or_else(|| ApprovalError::UnknownTicket { id: Str::new(ticket_id) })
 }
 
-pub(crate) fn epoch_millis() -> u64 {
+pub fn epoch_millis() -> u64 {
 	std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
 		.map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -588,7 +588,7 @@ struct RouteInner {
 	pending: Mutex<std::collections::BTreeMap<Str, PendingRequest>>,
 	/// `tool_approval_requested` / `tool_approval_resolved` observers around
 	/// every prompted approval.
-	hooks:   Option<crate::LifecycleHooks>,
+	hooks:   Option<crate::hooks::LifecycleHooks>,
 }
 
 impl RouteInner {
@@ -653,19 +653,28 @@ fn approval_target(ticket: &ApprovalTicket) -> serde_json::Value {
 	})
 }
 
+/// Delivers one approval prompt onto the kernel mailbox.
+///
+/// The kernel adapts this onto its control channel. The route never names
+/// that channel's other messages.
+pub trait ApprovalMailbox: Send + Sync {
+	/// Forwards `request`. The request comes back when the mailbox is gone.
+	fn deliver(&self, request: ApprovalRequest) -> Result<(), ApprovalRequest>;
+}
+
 /// Where a route delivers the prompts it files: a standalone host inbox, or
 /// the kernel mailbox so the request is journaled and answered at the same
 /// safe points as every other control message.
 enum RouteSink {
 	Inbox(flume::Sender<ApprovalRequest>),
-	Kernel(flume::Sender<crate::Up>),
+	Mailbox(Arc<dyn ApprovalMailbox>),
 }
 
 impl RouteSink {
 	fn deliver(&self, request: ApprovalRequest) -> Result<(), ()> {
 		match self {
 			Self::Inbox(tx) => tx.send(request).map_err(|_| ()),
-			Self::Kernel(tx) => tx.send(crate::Up::Approval(request)).map_err(|_| ()),
+			Self::Mailbox(mailbox) => mailbox.deliver(request).map_err(|_| ()),
 		}
 	}
 }
@@ -717,8 +726,34 @@ impl ApprovalRequest {
 	}
 }
 
+/// Publishes a journaled approval prompt to session observers.
+pub trait ApprovalPublisher: Send + Sync {
+	/// One pending prompt was opened.
+	fn publish_requested(&self, ticket: ApprovalTicket);
+}
+
+/// Durable result of journaling one approval decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalOutcome {
+	/// A decision was durably appended at this journal index.
+	Applied {
+		/// Identity of the committed journal entry.
+		entry: omp_journal::EntryId,
+		/// One-based index of the appended journal entry.
+		seq:   u64,
+	},
+	/// The same keyed decision was already durably appended.
+	Duplicate {
+		/// Identity of the original journal entry.
+		entry: omp_journal::EntryId,
+	},
+	/// No approval with this identity is pending: it is unknown, already
+	/// decided, or withdrawn.
+	NotPending,
+}
+
 /// Kernel-owned bridge between route prompts and the journaled `<prompt>`
-/// elements a host answers through [`crate::Up::Approve`].
+/// elements a host answers through the kernel mailbox.
 ///
 /// The DOM is the authority: filing opens (or merges into) the durable
 /// prompt, a decision is journaled first and only then relayed to the waiting
@@ -728,18 +763,17 @@ impl ApprovalRequest {
 pub struct ApprovalDesk {
 	book:    Arc<ApprovalBook>,
 	pending: Arc<Mutex<std::collections::BTreeMap<Str, Vec<ApprovalRequest>>>>,
-	events:  crate::events::KernelEvents,
+	events:  Arc<dyn ApprovalPublisher>,
 }
 
 impl ApprovalDesk {
-	/// Creates the desk publishing [`crate::KernelEvent::ApprovalRequested`]
-	/// on `events`.
+	/// Creates the desk publishing each opened prompt through `events`.
 	#[must_use]
-	pub fn new(events: crate::events::KernelEvents) -> Self {
+	pub fn new(events: impl ApprovalPublisher + 'static) -> Self {
 		Self {
-			book: Arc::new(ApprovalBook::new()),
+			book:    Arc::new(ApprovalBook::new()),
 			pending: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-			events,
+			events:  Arc::new(events),
 		}
 	}
 
@@ -770,9 +804,7 @@ impl ApprovalDesk {
 			.entry(ticket.ticket_id.clone())
 			.or_default()
 			.push(request);
-		self
-			.events
-			.publish(crate::KernelEvent::ApprovalRequested(ticket.clone()));
+		self.events.publish_requested(ticket.clone());
 		Ok(ticket)
 	}
 
@@ -802,9 +834,7 @@ impl ApprovalDesk {
 		if let Some(grant) = session_grant(session, &ticket) {
 			return self.book.decide(session, ticket.ticket_id.as_str(), grant);
 		}
-		self
-			.events
-			.publish(crate::KernelEvent::ApprovalRequested(ticket.clone()));
+		self.events.publish_requested(ticket.clone());
 		Ok(ticket)
 	}
 
@@ -821,16 +851,16 @@ impl ApprovalDesk {
 		Ok(ticket)
 	}
 
-	pub(crate) fn decide_keyed(
+	pub fn decide_keyed(
 		&self,
 		session: &mut Session,
 		ticket_id: &str,
 		decision: ApprovalDecision,
 		key: omp_journal::idempotency::IdempotencyKey,
-	) -> Result<(crate::ApprovalOutcome, Option<ApprovalTicket>), ApprovalError> {
+	) -> Result<(ApprovalOutcome, Option<ApprovalTicket>), ApprovalError> {
 		let identity = ApprovalIdentity { ticket_id, decision: &decision };
 		if let Some(entry) = session.replay_keyed_patch(&key, "approval.decide", &identity)? {
-			return Ok((crate::ApprovalOutcome::Duplicate { entry }, None));
+			return Ok((ApprovalOutcome::Duplicate { entry }, None));
 		}
 		let (ticket, outcome) =
 			self
@@ -841,12 +871,10 @@ impl ApprovalDesk {
 				self.relay(ticket_id, &decision);
 				let seq =
 					u64::try_from(session.entry_count()).expect("journal entry count fits in u64");
-				Ok((crate::ApprovalOutcome::Applied { entry, seq }, Some(ticket)))
+				Ok((ApprovalOutcome::Applied { entry, seq }, Some(ticket)))
 			},
-			Some(AppendOutcome::Replayed(entry)) => {
-				Ok((crate::ApprovalOutcome::Duplicate { entry }, None))
-			},
-			None => Ok((crate::ApprovalOutcome::NotPending, None)),
+			Some(AppendOutcome::Replayed(entry)) => Ok((ApprovalOutcome::Duplicate { entry }, None)),
+			None => Ok((ApprovalOutcome::NotPending, None)),
 		}
 	}
 
@@ -993,7 +1021,7 @@ impl ApprovalRoute {
 	#[must_use]
 	pub fn new(
 		_book: Arc<ApprovalBook>,
-		hook_gate: Option<Arc<crate::HookGate>>,
+		hook_gate: Option<Arc<crate::hooks::HookGate>>,
 	) -> (Self, ApprovalInbox) {
 		let (tx, rx) = flume::unbounded();
 		(
@@ -1002,27 +1030,27 @@ impl ApprovalRoute {
 					next_id: AtomicU64::new(1),
 					tx:      RouteSink::Inbox(tx),
 					pending: Mutex::new(std::collections::BTreeMap::new()),
-					hooks:   hook_gate.map(crate::LifecycleHooks::new),
+					hooks:   hook_gate.map(crate::hooks::LifecycleHooks::new),
 				}),
 			},
 			ApprovalInbox { rx },
 		)
 	}
 
-	/// Creates a route whose prompts land in the kernel mailbox as
-	/// [`crate::Up::Approval`], where the turn loop journals them and relays
-	/// the host's [`crate::Up::Approve`] back through the same request.
+	/// Creates a route whose prompts land on `mailbox`, where the turn loop
+	/// journals them and relays the host's decision back through the same
+	/// request.
 	#[must_use]
-	pub fn to_kernel(
-		mailbox: flume::Sender<crate::Up>,
-		hook_gate: Option<Arc<crate::HookGate>>,
+	pub fn to_mailbox(
+		mailbox: Arc<dyn ApprovalMailbox>,
+		hook_gate: Option<Arc<crate::hooks::HookGate>>,
 	) -> Self {
 		Self {
 			inner: Arc::new(RouteInner {
 				next_id: AtomicU64::new(1),
-				tx:      RouteSink::Kernel(mailbox),
+				tx:      RouteSink::Mailbox(mailbox),
 				pending: Mutex::new(std::collections::BTreeMap::new()),
-				hooks:   hook_gate.map(crate::LifecycleHooks::new),
+				hooks:   hook_gate.map(crate::hooks::LifecycleHooks::new),
 			}),
 		}
 	}

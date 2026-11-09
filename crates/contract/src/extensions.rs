@@ -11,7 +11,7 @@ use omp_session::{Component, ComponentRegistry};
 use omp_tool::{Confinement, ToolSpec};
 use thiserror::Error;
 
-use crate::{Director, DirectorRegistry, Up};
+use crate::director::{Director, DirectorRegistry};
 
 /// Failure from a live extension Component reducer.
 #[derive(Clone, Copy, Debug, Error)]
@@ -33,9 +33,6 @@ pub trait LiveComponent: Send + Sync {
 	/// Produces ordinary ADR 0003 DOM operations.
 	fn reduce(&self, entry: &Entry, dom: &Dom) -> Result<Vec<Op>, LiveComponentError>;
 }
-
-/// Sending half of the kernel's single upward mailbox.
-pub type KernelSender = flume::Sender<Up>;
 
 /// Engine registrations installed for one extension generation.
 pub struct InstalledExtensions {
@@ -133,7 +130,7 @@ mod tests {
 	use omp_tool::{Confinement, Constraint, Effects, Rev, ToolSpec};
 
 	use super::ExtensionRegistrar;
-	use crate::{Director, DirectorRegistry, Verdict};
+	use crate::director::{Director, DirectorRegistry, Verdict};
 
 	struct ContinueDirector;
 
@@ -142,7 +139,11 @@ mod tests {
 			"extension-test"
 		}
 
-		fn on_yield(&self, _: &crate::DirectorCx<'_>, _: &crate::TurnView) -> Verdict {
+		fn on_yield(
+			&self,
+			_: &crate::director::DirectorCx<'_>,
+			_: &crate::director::TurnView,
+		) -> Verdict {
 			Verdict::Continue { reminder: None }
 		}
 	}

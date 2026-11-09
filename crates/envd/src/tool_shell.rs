@@ -794,11 +794,11 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	async fn approval_gated_sandbox_run(
 		root: &Path,
-	) -> (ShellExecHost, Session, HostShellRun, omp_agent::ApprovalInbox) {
+	) -> (ShellExecHost, Session, HostShellRun, omp_contract::ApprovalInbox) {
 		std::fs::create_dir(root.join(".git")).expect("git carve-out");
 		let exec = ExecHost::new();
-		let book = Arc::new(omp_agent::ApprovalBook::new());
-		let (route, inbox) = omp_agent::ApprovalRoute::new(book, None);
+		let book = Arc::new(omp_contract::ApprovalBook::new());
+		let (route, inbox) = omp_contract::ApprovalRoute::new(book, None);
 		exec.bind_sandbox_approval_route(Some(route));
 		let root_uri = Url::from_directory_path(root)
 			.expect("workspace URI")
@@ -830,8 +830,8 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	async fn pending_sandbox_approval(
 		run: &mut HostShellRun,
-		inbox: &omp_agent::ApprovalInbox,
-	) -> omp_agent::ApprovalRequest {
+		inbox: &omp_contract::ApprovalInbox,
+	) -> omp_contract::ApprovalRequest {
 		loop {
 			let pending = run.next_event();
 			tokio::pin!(pending);
@@ -849,12 +849,12 @@ mod tests {
 	}
 
 	#[cfg(target_os = "macos")]
-	fn approve_sandbox_amendment(request: omp_agent::ApprovalRequest) {
+	fn approve_sandbox_amendment(request: omp_contract::ApprovalRequest) {
 		request
-			.respond(omp_agent::ApprovalDecision {
+			.respond(omp_contract::ApprovalDecision {
 				approved:   true,
-				scope:      omp_agent::ApprovalScope::Once,
-				source:     omp_agent::ApprovalSource::User,
+				scope:      omp_contract::ApprovalScope::Once,
+				source:     omp_contract::ApprovalSource::User,
 				decided_by: Some(sf!("test approver")),
 				reason:     None,
 				audited:    false,
@@ -952,8 +952,8 @@ mod tests {
 		let root = tempfile::tempdir().expect("workspace");
 		std::fs::create_dir(root.path().join(".git")).expect("git carve-out");
 		let exec = ExecHost::new();
-		let book = Arc::new(omp_agent::ApprovalBook::new());
-		let (route, inbox) = omp_agent::ApprovalRoute::new(Arc::clone(&book), None);
+		let book = Arc::new(omp_contract::ApprovalBook::new());
+		let (route, inbox) = omp_contract::ApprovalRoute::new(Arc::clone(&book), None);
 		exec.bind_sandbox_approval_route(Some(route));
 		let root_uri = Url::from_directory_path(root.path())
 			.expect("workspace URI")
@@ -988,10 +988,10 @@ mod tests {
 					.any(|fact| fact.ends_with(".git/approved.txt"))
 			);
 			request
-				.respond(omp_agent::ApprovalDecision {
+				.respond(omp_contract::ApprovalDecision {
 					approved:   true,
-					scope:      omp_agent::ApprovalScope::Once,
-					source:     omp_agent::ApprovalSource::User,
+					scope:      omp_contract::ApprovalScope::Once,
+					source:     omp_contract::ApprovalSource::User,
 					decided_by: Some(sf!("test approver")),
 					reason:     None,
 					audited:    false,
@@ -1108,12 +1108,12 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	fn network_amendment_host(
 		root: &Path,
-		scope: omp_agent::ApprovalScope,
+		scope: omp_contract::ApprovalScope,
 		deny: &[&'static str],
 	) -> AmendingHost {
 		let exec = ExecHost::new();
 		let (route, inbox) =
-			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+			omp_contract::ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		exec.bind_sandbox_approval_route(Some(route));
 		let (asked, prompts) = flume::unbounded();
 		let approver = tokio::spawn(async move {
@@ -1122,10 +1122,10 @@ mod tests {
 				assert_eq!(reason.kind, "sandbox_amendment");
 				let _ = asked.send((reason.subject.clone(), reason.scopes.clone()));
 				request
-					.respond(omp_agent::ApprovalDecision {
+					.respond(omp_contract::ApprovalDecision {
 						approved:   true,
 						scope:      scope.clone(),
-						source:     omp_agent::ApprovalSource::User,
+						source:     omp_contract::ApprovalSource::User,
 						decided_by: Some(sf!("test approver")),
 						reason:     None,
 						audited:    false,
@@ -1166,7 +1166,7 @@ mod tests {
 		let (first, second) = (LoopbackUpstream::serve(), LoopbackUpstream::serve());
 		let command = format!("{} && {}", first.fetch(), second.fetch());
 		let AmendingHost { host, prompts, approver } =
-			network_amendment_host(root.path(), omp_agent::ApprovalScope::Session, &[]);
+			network_amendment_host(root.path(), omp_contract::ApprovalScope::Session, &[]);
 		let session = host
 			.open_session(SessionOptions::default())
 			.await
@@ -1234,7 +1234,7 @@ mod tests {
 		let (first, second) = (LoopbackUpstream::serve(), LoopbackUpstream::serve());
 		let command = format!("{} && {}", first.fetch(), second.fetch());
 		let AmendingHost { host, prompts, approver } =
-			network_amendment_host(root.path(), omp_agent::ApprovalScope::Once, &[]);
+			network_amendment_host(root.path(), omp_contract::ApprovalScope::Once, &[]);
 		let session = host
 			.open_session(SessionOptions::default())
 			.await
@@ -1284,7 +1284,7 @@ mod tests {
 		let root = tempfile::tempdir().expect("workspace");
 		let upstream = LoopbackUpstream::serve();
 		let AmendingHost { host, prompts, approver } =
-			network_amendment_host(root.path(), omp_agent::ApprovalScope::Session, &["localhost"]);
+			network_amendment_host(root.path(), omp_contract::ApprovalScope::Session, &["localhost"]);
 		let session = host
 			.open_session(SessionOptions::default())
 			.await

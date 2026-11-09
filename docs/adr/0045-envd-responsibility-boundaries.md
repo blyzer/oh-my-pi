@@ -160,3 +160,5 @@ Closure counts are `cargo tree -p <crate> -e normal --prefix none --locked | sor
 | `omp-envd` | 1144 | 1152 | 1120 |
 | `omp-exec-local` | 1146 | 1154 | 1122 |
 | `omp-exec-ssh` | 1146 | 1154 | 1122 |
+
+ENVD-02 remeasured the host column with the same selected-unification command after `omp-contract` landed. `omp-app` is 1332 (was 1327). `omp-envd` is 1031 (was 1144) and has no normal-edge `omp-agent` dependency. The other two rows and the target columns were not remeasured. Cold and incremental timings were not re-run. The `omp-exec-ssh` 456-crate miss and the ≤300 budget are unchanged.

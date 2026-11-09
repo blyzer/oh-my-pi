@@ -13,7 +13,7 @@ use std::{
 };
 
 use flume::Receiver;
-use omp_agent::{SlotClass, SlotId};
+use omp_contract::{SlotClass, SlotId};
 use omp_core::{CowBytes, InvocationPhase, LifecyclePhase, SparseMap, Str, sf};
 use omp_proto::{
 	toolhost::{

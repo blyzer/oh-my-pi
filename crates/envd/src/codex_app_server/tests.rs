@@ -7,7 +7,8 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use omp_agent::{
+use omp_ai::UsageSource;
+use omp_contract::{
 	approvals::{ApprovalDecision, ApprovalScope, ApprovalSource},
 	delegated::{
 		ActiveSession, ApprovalPosture, AuthStatus, Capabilities, CliSessionId, CliVersion,
@@ -19,7 +20,6 @@ use omp_agent::{
 		UnknownAuth, start_session,
 	},
 };
-use omp_ai::UsageSource;
 use omp_core::{Hash32, Str};
 use serde::Deserialize;
 use tokio::{

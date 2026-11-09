@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use omp_agent::delegated::{
+use omp_contract::delegated::{
 	CallId, CliSessionId, DelegatedEvent, DelegatedPrompt, DelegatedSession, ExecutorError,
 	ExitFact, FrameFault, LifecycleEvent, PermissionAnswer, PermissionKind, PermissionRequest,
 	PromptId, ProtocolViolation, SessionInfo, SessionRequest, ToolEvent, ToolKind, ToolOutcome,
@@ -93,7 +93,7 @@ struct PendingPermission {
 
 /// A live ACP session implementing [`DelegatedSession`].
 pub struct AcpDelegatedSession {
-	executor:       omp_agent::delegated::ExecutorId,
+	executor:       omp_contract::delegated::ExecutorId,
 	session_id:     Str,
 	/// The underlying transport.
 	inner:          AcpSession<Box<dyn AsyncRead + Unpin + Send>>,
@@ -133,7 +133,7 @@ impl AcpDelegatedSession {
 	/// `writer` is a separate object because [`AcpSession`] takes `R:
 	/// AsyncRead`; we box both here.
 	pub async fn handshake<R, W>(
-		executor_id: omp_agent::delegated::ExecutorId,
+		executor_id: omp_contract::delegated::ExecutorId,
 		reader: R,
 		writer: W,
 		tree: Option<ChildTree>,
@@ -609,9 +609,9 @@ impl DelegatedSession for AcpDelegatedSession {
 					.retain(|k, _| !k.as_str().starts_with("__prompt_rpc_"));
 				let turn = self.turn.clone();
 				let failure = if self.login_required || wire::is_missing_login(code, data.as_ref()) {
-					omp_agent::delegated::RemoteFailure::AuthRequired
+					omp_contract::delegated::RemoteFailure::AuthRequired
 				} else {
-					omp_agent::delegated::RemoteFailure::Internal
+					omp_contract::delegated::RemoteFailure::Internal
 				};
 				self
 					.queue
@@ -712,7 +712,7 @@ impl DelegatedSession for AcpDelegatedSession {
 		} else {
 			Err(ExecutorError::TeardownFailed {
 				executor: self.executor.clone(),
-				fault:    omp_agent::delegated::TeardownFault::Unreaped,
+				fault:    omp_contract::delegated::TeardownFault::Unreaped,
 			})
 		}
 	}
@@ -728,7 +728,7 @@ impl Drop for AcpDelegatedSession {
 
 /// Converts a session-level [`SessionError`] to [`ExecutorError`].
 fn session_error(
-	executor: &omp_agent::delegated::ExecutorId,
+	executor: &omp_contract::delegated::ExecutorId,
 	error: SessionError,
 ) -> ExecutorError {
 	match error {
@@ -747,7 +747,7 @@ fn session_error(
 /// `limit` elapses.
 async fn await_response<R, T>(
 	session: &mut AcpSession<R>,
-	executor: &omp_agent::delegated::ExecutorId,
+	executor: &omp_contract::delegated::ExecutorId,
 	rpc_id: i64,
 	context: &'static str,
 	limit: std::time::Duration,

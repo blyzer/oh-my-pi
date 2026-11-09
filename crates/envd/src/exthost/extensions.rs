@@ -8,12 +8,12 @@ use std::{
 };
 
 use bytes::Bytes;
-use omp_agent::{
+use omp_con::{Ctx, DynamicVarSpec, Origin, TypeSpec, Value as ConValue, VarFlags};
+use omp_contract::{
 	BindValue, BoxFut, Director, DirectorCx, DirectorEffect, DirectorError, ExtensionRegistrar,
 	LiveComponent, LiveComponentError, MutDirectorCx, Prepared, Slot, StateUpdate, TurnView,
 	Verdict,
 };
-use omp_con::{Ctx, DynamicVarSpec, Origin, TypeSpec, Value as ConValue, VarFlags};
 use omp_core::{Provenance, Str, sf};
 use omp_dom::{Node, Op, Txn};
 use omp_ext::config::{SettingSchema, SettingType, extension_setting_convar_name};

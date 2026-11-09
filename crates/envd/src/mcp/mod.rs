@@ -1020,6 +1020,7 @@ mod config_tests {
 		time::Duration,
 	};
 
+	use omp_contract::EnvEventSink;
 	use omp_ext::workspace_trust::inventory::MCP_PROJECT_FILES;
 
 	use super::*;
@@ -1107,7 +1108,7 @@ mod config_tests {
 			McpManager::new(Arc::clone(&service), Arc::new(RejectConnector), Arc::from([]), project);
 		service.bind_manager(&manager);
 		let (session, notices) = flume::unbounded();
-		manager.bind_literal_notice_sink(session);
+		manager.bind_literal_notice_sink(std::sync::Arc::new(session));
 
 		service
 			.start_native_configs(ProjectMcpPolicy::Trusted)
@@ -1115,9 +1116,7 @@ mod config_tests {
 			.expect("project config starts");
 
 		let posted = notices.drain().collect::<Vec<_>>();
-		let [omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice { name, data, .. })] =
-			posted.as_slice()
-		else {
+		let [omp_contract::EnvEvent::TypedNotice { name, data, .. }] = posted.as_slice() else {
 			panic!("one typed literal-value notice reaches the session, got {}", posted.len());
 		};
 		assert_eq!(name.as_str(), config_values::LITERAL_VALUE_NOTICE);

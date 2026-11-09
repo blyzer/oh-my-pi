@@ -16,11 +16,12 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use flume::Receiver;
 use futures::StreamExt as _;
-use omp_agent::{
-	ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, SessionRole, TicketState,
-};
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_con::Ctx;
+use omp_contract::{
+	ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, SessionRole,
+	TicketState,
+};
 use omp_core::{Hash32, Str, Ulid, sf};
 use omp_env::{
 	EnvClient, InProcessEnvTransport, partition::FramePipe, project_state::DaemonPolicy,
@@ -994,12 +995,9 @@ impl LateDiagnosticsBatcher {
 				}
 				mem::take(&mut *pending)
 			};
-			let _ = self
-				.sender
-				.send_async(omp_agent::Up::Env(omp_agent::EnvEvent::LateDiagnostics(
-					omp_session::late_diagnostics::LateDiagnostics { files },
-				)))
-				.await;
+			let _ = self.sender.send(omp_contract::EnvEvent::LateDiagnostics(
+				omp_session::late_diagnostics::LateDiagnostics { files },
+			));
 			let pending = self.pending.lock();
 			if pending.is_empty() {
 				self.scheduled.store(false, Ordering::Release);
@@ -1873,7 +1871,7 @@ fn same_control_connection(
 fn bind_live_session_authority_snapshot(
 	config: &mut ExtHostConfig,
 	root: &Path,
-	authority: Option<&Arc<dyn omp_agent::SessionAuthority>>,
+	authority: Option<&Arc<dyn omp_contract::SessionAuthority>>,
 ) {
 	let Some(authority) = authority else {
 		return;
@@ -3446,7 +3444,7 @@ impl EnvServer {
 	/// registrar.
 	pub fn register_python_extensions(
 		&self,
-		registrar: &mut omp_agent::ExtensionRegistrar,
+		registrar: &mut omp_contract::ExtensionRegistrar,
 	) -> Result<Vec<crate::exthost::PyComponent>, crate::exthost::PyExtensionError> {
 		self.ext_hosts.register_python_extensions(registrar)
 	}
@@ -3639,11 +3637,10 @@ impl EnvServer {
 				let sender = sender.clone();
 				Box::pin(async move {
 					sender
-						.send_async(omp_agent::Up::Env(omp_agent::EnvEvent::StagedPreview {
+						.send(omp_contract::EnvEvent::StagedPreview {
 							proposal_id: pending.id,
 							source_tool: pending.source_tool,
-						}))
-						.await
+						})
 						.map_err(|_| omp_tools::staging::ProposalActivationError::Rejected)
 				})
 			}));
@@ -13101,7 +13098,9 @@ mod tests {
 	use std::{fs, os::unix::fs::PermissionsExt as _, sync::Arc};
 
 	use flume::Receiver;
-	use omp_agent::{ApprovalBook, ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource};
+	use omp_contract::{
+		ApprovalBook, ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource,
+	};
 	use omp_core::{EnvPath, Principal};
 	use omp_env::{EnvClient, ExecEvent as ClientExecEvent};
 	use omp_proto::{
@@ -13131,14 +13130,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn late_diagnostics_batch_by_path_in_arrival_order() {
+		use omp_contract::{EnvEvent, EnvEventSink};
 		use omp_session::late_diagnostics::{LateDiagnostics, LateDiagnosticsFile};
 
 		let (sender, receiver) = flume::unbounded();
 		let batcher = Arc::new(LateDiagnosticsBatcher {
-			pending: parking_lot::Mutex::new(Vec::new()),
+			pending:   parking_lot::Mutex::new(Vec::new()),
 			scheduled: AtomicBool::new(false),
-			active: AtomicBool::new(true),
-			sender,
+			active:    AtomicBool::new(true),
+			sender:    Arc::new(sender),
 		});
 		batcher.push(LateDiagnostics {
 			files: vec![LateDiagnosticsFile {
@@ -13160,7 +13160,7 @@ mod tests {
 			.await
 			.expect("batch deadline")
 			.expect("batch event");
-		let omp_agent::Up::Env(omp_agent::EnvEvent::LateDiagnostics(diagnostics)) = event else {
+		let EnvEvent::LateDiagnostics(diagnostics) = event else {
 			panic!("expected late diagnostics");
 		};
 		assert_eq!(diagnostics.files.len(), 1);

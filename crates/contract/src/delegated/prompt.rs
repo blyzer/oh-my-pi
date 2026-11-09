@@ -24,8 +24,6 @@ use omp_core::{Hash32, Str};
 use omp_proto::thread::v1::{self as thread, Item, item, part};
 use thiserror::Error;
 
-use crate::prompt::RenderedPrompt;
-
 /// Who a prompt section speaks as.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -111,24 +109,22 @@ impl DelegatedPrompt {
 		Ok(Self::from_sections(sections, bands))
 	}
 
-	/// Builds the prompt from a [`RenderedPrompt`].
-	///
-	/// `RenderedPrompt::items` already flattens all four bands in order
-	/// (Frozen, Stable, Dynamic, Volatile), so no volatile items are passed
-	/// separately. A caller that renders the way the kernel does, with
-	/// `CanonicalPromptSource::system_items` plus `volatile_items`, uses
-	/// [`DelegatedPrompt::from_items`] instead; either way the sections are
-	/// exactly what OMP would have sent its own model.
+	/// Builds the prompt from items that already flatten all four bands in
+	/// order (Frozen, Stable, Dynamic, Volatile), so no volatile items are
+	/// passed separately. A caller that renders the way the kernel does, with
+	/// system items plus volatile items, uses [`DelegatedPrompt::from_items`]
+	/// instead; either way the sections are exactly what OMP would have sent
+	/// its own model.
 	///
 	/// # Errors
 	///
 	/// [`PromptConversionError`] when an item cannot be carried as text.
 	pub fn from_rendered(
-		rendered: &RenderedPrompt,
+		items: &[Item],
+		bands: [Hash32; 4],
 		user_turn: Str,
 	) -> Result<Self, PromptConversionError> {
-		let bands = rendered.bands.map(|band| Hash32::new(*band.as_bytes()));
-		Self::from_items(&rendered.items, &[], user_turn, bands)
+		Self::from_items(items, &[], user_turn, bands)
 	}
 
 	/// Builds the prompt from sections that are already plain text.

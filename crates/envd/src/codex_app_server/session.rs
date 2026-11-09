@@ -12,14 +12,14 @@
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
 use bytes::Bytes;
-use omp_agent::delegated::{
+use omp_ai::{Usage, UsageSource};
+use omp_contract::delegated::{
 	CallId, CliSessionId, CliVersion, DelegatedEvent, DelegatedPrompt, DelegatedSession,
 	ExecutorError, ExecutorId, ExitFact, Feature, FrameFault, LifecycleEvent, PermissionAnswer,
 	PermissionKind, PermissionRequest, PromptId, PromptRole, PromptSection, ProtocolViolation,
 	RemoteFailure, SessionInfo, SessionRequest, TeardownFault, ToolEvent, ToolKind, ToolOutcome,
 	TurnAccepted, TurnEnd, TurnId, TurnInput, VersionRange,
 };
-use omp_ai::{Usage, UsageSource};
 use omp_core::{Str, sf};
 use serde::{
 	Serialize,

@@ -14,7 +14,6 @@ use futures::{
 	Future, FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, header::WWW_AUTHENTICATE};
-use omp_agent::KernelSender;
 use omp_ai::{
 	auth::{
 		AuthControlHandle, StoreError,
@@ -23,6 +22,7 @@ use omp_ai::{
 	id::PrincipalId,
 };
 use omp_con::Ctx;
+use omp_contract::KernelSender;
 use omp_core::{Hash32, Str, StrMut, sf};
 use omp_oauth::{AuthChallenge, ChallengeKind, discover_auth_challenge};
 use omp_proto::env::v1 as pb;
@@ -3316,12 +3316,12 @@ fn send_literal_notice(sink: &KernelSender, notice: LiteralValueNotice) {
 		tracing::warn!("literal project MCP notice could not be encoded");
 		return;
 	};
-	let _ = sink.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
+	let _ = sink.send(omp_contract::EnvEvent::TypedNotice {
 		kind: Str::new_static("warn"),
 		name: Str::new_static(LITERAL_VALUE_NOTICE),
 		data,
 		body: Str::new(notice.to_string()),
-	}));
+	});
 }
 
 impl Drop for McpManager {

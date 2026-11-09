@@ -12,7 +12,9 @@ use std::{
 
 use bytes::BytesMut;
 use flume::Receiver;
-use omp_agent::{EnvEvent, GateError, HookEvent, HookGate, HookPatch, HookPhase, KernelSender, Up};
+use omp_contract::{
+	EnvEvent, GateError, HookEvent, HookGate, HookPatch, HookPhase, KernelSender,
+};
 pub use omp_core::{ActivateReason, LifecyclePhase, Principal, RestartReason, sf};
 use omp_core::{InvocationPhase, Provenance, Str};
 use omp_ext::config::{SettingSchema, StaticDeclaration, StaticDeclarations};
@@ -275,9 +277,9 @@ impl AvailabilitySink for RegistryAvailabilitySink {
 				})
 			}).collect::<Vec<_>>(),
 		});
-		let _ = self.mailbox.try_send(Up::Env(EnvEvent::DeviceAvailability {
-			payload: Str::new(payload.to_string()),
-		}));
+		let _ = self
+			.mailbox
+			.try_send(EnvEvent::DeviceAvailability { payload: Str::new(payload.to_string()) });
 	}
 }
 /// A tool identity in the authoritative manifest declaration set.

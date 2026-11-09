@@ -43,7 +43,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_agent::{
+use omp_contract::{
 	ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket,
 	TicketState,
 };
@@ -904,14 +904,14 @@ mod tests {
 		}
 	}
 
-	async fn filed(inbox: &omp_agent::ApprovalInbox) -> omp_agent::ApprovalRequest {
+	async fn filed(inbox: &omp_contract::ApprovalInbox) -> omp_contract::ApprovalRequest {
 		time::timeout(PUMP_WAIT, inbox.recv())
 			.await
 			.expect("relayed prompt was not filed")
 			.expect("approval inbox")
 	}
 
-	async fn abandoned(request: &omp_agent::ApprovalRequest) {
+	async fn abandoned(request: &omp_contract::ApprovalRequest) {
 		time::timeout(PUMP_WAIT, async {
 			while !request.is_abandoned() {
 				time::sleep(Duration::from_millis(5)).await;
@@ -921,8 +921,8 @@ mod tests {
 		.expect("the filed prompt was not withdrawn");
 	}
 
-	fn session_route() -> (ApprovalRoute, omp_agent::ApprovalInbox) {
-		ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None)
+	fn session_route() -> (ApprovalRoute, omp_contract::ApprovalInbox) {
+		ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None)
 	}
 
 	#[test]

@@ -3,13 +3,14 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use omp_agent::Kernel;
+use omp_contract::posture::ApprovalMode;
 use omp_core::{Principal, Str, sf};
 use omp_driver::headless::kernel::{
 	EnvToolExecutor, SettingsAdmission, bind_environment_approvals, install_tool_authority,
 };
 use omp_envd::{
 	ActiveContentInputs, EnvServer, ProjectEnvironment, RegistryBridges,
-	exthost::ConvarControlFactory, tool_settings::ApprovalMode, worker::ExtHostConfig,
+	exthost::ConvarControlFactory, worker::ExtHostConfig,
 };
 use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_session::Session;
@@ -61,7 +62,7 @@ pub fn posture_notices(session: &Session) -> Vec<serde_json::Value> {
 			node
 				.prop(&omp_dom::PropKey::Custom(Str::new_static("name")))
 				.and_then(omp_dom::Value::as_str)
-				== Some(omp_envd::admission::APPROVAL_POSTURE_NOTICE)
+				== Some(omp_contract::posture::APPROVAL_POSTURE_NOTICE)
 		})
 		.map(|node| match node.prop(&omp_dom::PropId::Data.into()) {
 			Some(omp_dom::Value::Json(data)) => serde_json::from_str(data.get()).expect("payload"),

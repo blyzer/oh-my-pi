@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use omp_agent::{JobBoard, SessionTopology, Up, jobs::undelivered};
+use omp_contract::eval_bridge::ParentSessionHost as _;
 use omp_core::{Str, sf};
 use omp_driver::{
 	sessions::{IrcRelayPolicy, KernelHandle, SessionId, SessionRegistry},
@@ -22,7 +23,6 @@ use omp_driver::{
 		},
 	},
 };
-use omp_envd::eval::ParentSessionHost as _;
 use omp_session::{ComponentRegistry, Session};
 use parking_lot::RwLock;
 use serde_json::json;
@@ -275,7 +275,7 @@ async fn eval_parent_host_routes_workpool_mutations_through_the_kernel_actor() {
 		WorkpoolSessionHost::new(std::path::PathBuf::from("/project")),
 		Arc::clone(&harness.registry),
 	);
-	let progress = omp_envd::eval::NoopBridgeProgress;
+	let progress = omp_contract::eval_bridge::NoopBridgeProgress;
 	let created = host
 		.workpool(json!({"op":"create","name":"eval-live","agent":"task"}), &progress)
 		.await

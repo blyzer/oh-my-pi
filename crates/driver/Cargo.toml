@@ -40,6 +40,7 @@ jiff.workspace = true
 memchr.workspace = true
 omp-adw.workspace = true
 omp-agent.workspace = true
+omp-contract.workspace = true
 omp-ar.workspace = true
 omp-collab.workspace = true
 omp-core.workspace = true

@@ -12,6 +12,8 @@ description = "Agent kernel: journal-first turn loop, tool dispatch, cancellatio
 workspace = true
 
 [dependencies]
+linkme.workspace = true
+omp-contract.workspace = true
 omp-core.workspace = true
 omp-catalog.workspace = true
 omp-journal.workspace = true

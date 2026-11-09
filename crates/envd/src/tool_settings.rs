@@ -15,8 +15,6 @@ use super::admission::{
 	ApprovalPolicy, ConfiguredApproval, Provenance, ResolvedApproval, SandboxState, resolve_approval,
 };
 
-omp_con::con_enum!(ApprovalMode);
-
 omp_con::var! {
 	/// Per-tool availability overrides.
 	pub static SV_TOOLS_ENABLED = sv_tools_enabled: Kv {

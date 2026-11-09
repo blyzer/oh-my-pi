@@ -12,12 +12,13 @@ use omp_chat::overlays::services::{
 	ApprovalPostureRow, CleanseOutcome, CleanseRequest, CleanseRun, MemoryOp, Pending, ServiceError,
 	ServiceResult, SshHostRow, SshHostSpec,
 };
+use omp_contract::posture::{Provenance, SandboxState, call_approval_mode};
 use omp_core::{Str, project_file::Containment, sf};
 use omp_driver::cleanse::{
 	CleanseArgs, CleanseStatus, TargetChoice,
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
 };
-use omp_envd::admission::{Provenance, SandboxState, call_approval_mode};
+use omp_envd::admission::probe_sandbox;
 use omp_ext::workspace_trust::{
 	WorkspaceTrust,
 	inventory::{PROJECT_DIR, SECRETS_FILE},
@@ -45,7 +46,7 @@ pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
 		.with_workspace_trust(state.workspace_trust)
 		.with_approval_mode_override(state.approval_override);
-	let sandbox = SandboxState::probe(&state.con, &state.project);
+	let sandbox = probe_sandbox(&state.con, &state.project);
 	let configured = settings.configured_approval();
 	let in_force =
 		|confinement| -> &'static str { call_approval_mode(configured, sandbox, confinement).into() };

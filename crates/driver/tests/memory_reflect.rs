@@ -25,13 +25,13 @@ use omp_ai::{
 	OpaqueJson, RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
 };
 use omp_catalog::{ProviderId, RouteId};
+use omp_contract::posture::ApprovalMode;
 use omp_core::Str;
 use omp_driver::headless::reflection::{REFLECTION_SELECTOR, bind_reflection};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
 	host_settings::{AI_MEMORY_BACKEND, MemoryBackendSetting},
-	tool_settings::ApprovalMode,
 };
 use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::{blob::BlobStore, kind};

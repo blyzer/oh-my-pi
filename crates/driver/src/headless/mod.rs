@@ -44,7 +44,7 @@ pub enum HeadlessError {
 	ReflectionBridge(#[from] omp_envd::memory::ReflectionBindingError),
 	/// The authenticated eval parent could not be bound.
 	#[error("eval parent binding failed")]
-	EvalParent(#[from] omp_envd::eval::BridgeHostError),
+	EvalParent(#[from] omp_contract::eval_bridge::BridgeHostError),
 	/// A child-specific yield schema could not be compiled.
 	#[error("child yield schema composition failed")]
 	YieldSchema(#[from] omp_tools::yield_tool::SchemaContractError),

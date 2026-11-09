@@ -2,7 +2,6 @@ use std::{
 	collections::BTreeMap,
 	ffi::CString,
 	fmt::{self, Display},
-	path::PathBuf,
 	process,
 	sync::{
 		Arc, OnceLock,
@@ -15,11 +14,16 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use im::OrdSet;
-use omp_core::{ExposeSecret as _, IntoStr, SecretString, Str, Ulid, sf};
+use omp_contract::eval_bridge::ParentRegistry;
+pub use omp_contract::eval_bridge::{
+	BridgeHost, BridgeHostError, BridgeProgressSink, EvalSessionConfig, NoopBridgeProgress,
+	ParentBindingLease, ParentSessionHost,
+};
+use omp_core::{ExposeSecret as _, SecretString, Str, Ulid, sf};
 use omp_proto::toolhost::v1::PreludeParamKind;
 use omp_tool::{
 	CapsBase, Diag, DiagEnvelope, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part,
-	PromptCaps, Registry, RosterDenial, ToolIdentity, ToolRestrictions, ToolRoute,
+	PromptCaps, Registry, ToolIdentity, ToolRestrictions, ToolRoute,
 };
 use omp_tools::eval::{RuntimeSnapshot, idle_timeout::TimeoutHandle, kernel::NamespaceInstaller};
 use parking_lot::Mutex;
@@ -392,83 +396,6 @@ impl fmt::Debug for BridgeGrant {
 	}
 }
 
-/// Failure returned by the authenticated host operation serving an eval bridge
-/// call.
-#[derive(Debug, Error)]
-pub enum BridgeHostError {
-	/// Model-facing failure message produced by the host-side operation.
-	#[error("{0}")]
-	Message(Str),
-	/// Canonical policy denial produced before a child session exists.
-	#[error("child session spawn was denied by policy")]
-	PolicyDenied(Arc<omp_tool::PolicyDenied>),
-	/// The resolved per-tool approval policy denies this nested native call.
-	/// Eval-level approval is the unit of prompts, so an explicit `deny`
-	/// refuses without prompting.
-	#[error(
-		"tool `{tool}` is denied by approval policy (tools.approval.{tool}); no action was taken"
-	)]
-	ApprovalDenied {
-		/// Refused native tool.
-		tool: Str,
-	},
-	/// The calling invocation's roster restrictions (`sv_tools`, a mode
-	/// Director's bind, a `turn_start` hook, or plan mode's plan-file scope)
-	/// refuse this nested call.
-	#[error("nested tool call refused: {0}")]
-	RosterRestricted(RosterDenial),
-}
-
-impl BridgeHostError {
-	/// Constructs a model-facing bridge failure with the provided message.
-	pub fn message(message: impl IntoStr) -> Self {
-		Self::Message(message.into_str())
-	}
-
-	/// Constructs a model-facing bridge failure, rendering the cause once at
-	/// this model-facing fault boundary.
-	pub fn caused(cause: impl fmt::Display) -> Self {
-		Self::Message(sf!("{cause}"))
-	}
-
-	/// Constructs a model-facing bridge failure for a failed operation,
-	/// rendering the cause once at this model-facing fault boundary.
-	pub fn because(operation: impl fmt::Display, cause: impl fmt::Display) -> Self {
-		Self::Message(sf!("{operation}: {cause}"))
-	}
-}
-
-/// Correlated, ordered progress destination for one bridge request.
-pub trait BridgeProgressSink: Send + Sync {
-	/// Emits one bounded progress event before the terminal response.
-	fn progress(&self, event: Value) -> Result<(), BridgeHostError>;
-}
-
-/// Progress sink used when a caller does not consume intermediate events.
-pub struct NoopBridgeProgress;
-
-impl BridgeProgressSink for NoopBridgeProgress {
-	fn progress(&self, _event: Value) -> Result<(), BridgeHostError> {
-		Ok(())
-	}
-}
-
-/// Real host-side boundary used for ordinary tools and the privileged eval
-/// completion/agent/workpool/budget operations. Implementations receive only
-/// calls that passed grant authentication and capability checks.
-#[async_trait]
-pub trait BridgeHost: Send + Sync {
-	/// Dispatches one authenticated, capability-checked eval request into the
-	/// host.
-	///
-	/// Progress is emitted in request order before the returned terminal value.
-	async fn call(
-		&self,
-		name: &str,
-		args: Value,
-		progress: &dyn BridgeProgressSink,
-	) -> Result<Value, BridgeHostError>;
-}
 /// Cold worker-IPC boundary for extension-provided prelude helpers.
 #[async_trait]
 pub trait PreludeInvoker: Send + Sync {
@@ -856,133 +783,14 @@ fn attach_diags(mut value: Value, diags: Vec<Diag>) -> Result<Value, BridgeHostE
 	Ok(value)
 }
 
-/// Optional capabilities owned by the live parent agent session.
-///
-/// The environment never synthesizes these operations. A session composition
-/// that can perform them supplies this authenticated callback; otherwise the
-/// corresponding bridge names are omitted from the grant.
-#[async_trait]
-pub trait ParentSessionHost: Send + Sync {
-	/// Freezes the filesystem and managed-environment authority of the current
-	/// parent session.
-	fn eval_session_config(&self) -> Result<EvalSessionConfig, BridgeHostError>;
-
-	/// Releases process-local child schedulers when this authenticated parent
-	/// binding is retired or replaced. Durable observations remain journaled.
-	fn release_eval_owner(&self) {}
-
-	/// Whether this parent owns a completion implementation.
-	fn completion_available(&self) -> bool {
-		true
+fn runtime_snapshot(config: &EvalSessionConfig) -> RuntimeSnapshot {
+	RuntimeSnapshot {
+		cwd:          Some(config.cwd.clone()),
+		managed_env:  [(sf!("OMP_EVAL_LOCAL_ROOTS"), config.local_roots_json.clone())]
+			.into_iter()
+			.collect(),
+		restrictions: None,
 	}
-
-	/// Runs a parent-session model completion and forwards ordered progress to
-	/// the eval caller.
-	async fn completion(
-		&self,
-		args: Value,
-		progress: &dyn BridgeProgressSink,
-	) -> Result<Value, BridgeHostError>;
-	/// Whether this parent owns a child-agent implementation.
-	fn agent_available(&self) -> bool {
-		true
-	}
-
-	/// Runs a parent-session child agent and forwards ordered progress to the
-	/// eval caller.
-	async fn agent(
-		&self,
-		args: Value,
-		progress: &dyn BridgeProgressSink,
-	) -> Result<Value, BridgeHostError>;
-	/// Whether this parent owns a live workpool scheduler. Capability
-	/// advertisement is withheld until this returns true.
-	fn workpool_available(&self) -> bool {
-		false
-	}
-
-	/// Creates or operates a parent-owned persistent subagent workpool.
-	async fn workpool(
-		&self,
-		args: Value,
-		progress: &dyn BridgeProgressSink,
-	) -> Result<Value, BridgeHostError> {
-		let _ = (args, progress);
-		Err(BridgeHostError::message("eval workpool is unavailable for this parent session"))
-	}
-	/// Whether this parent owns concurrency controls.
-	fn concurrency_available(&self) -> bool {
-		true
-	}
-
-	/// Applies the parent session's concurrency operation to extension-supplied
-	/// arguments.
-	async fn concurrency(&self, args: Value) -> Result<Value, BridgeHostError>;
-	/// Whether this parent owns budget controls.
-	fn budget_available(&self) -> bool {
-		true
-	}
-
-	/// Reads or updates parent-session budget state using extension-supplied
-	/// arguments.
-	async fn budget(&self, args: Value) -> Result<Value, BridgeHostError>;
-}
-
-/// Filesystem authority projected by a live parent session into one eval run.
-///
-/// Session and artifact access never enters the child environment: `output()`
-/// uses the authenticated Read bridge against journal-derived agent/job views
-/// and the session CAS.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EvalSessionConfig {
-	/// Environment-authorized working directory for each cell.
-	pub cwd:              PathBuf,
-	/// Serialized bounded `local://` root projection, or removal when absent.
-	pub local_roots_json: Option<Str>,
-}
-
-impl EvalSessionConfig {
-	fn runtime_snapshot(&self) -> RuntimeSnapshot {
-		RuntimeSnapshot {
-			cwd:          Some(self.cwd.clone()),
-			managed_env:  [(sf!("OMP_EVAL_LOCAL_ROOTS"), self.local_roots_json.clone())]
-				.into_iter()
-				.collect(),
-			restrictions: None,
-		}
-	}
-}
-
-/// Revocable parent binding for one embedded session owner.
-#[must_use]
-pub struct ParentBindingLease {
-	parents:    Arc<Mutex<BTreeMap<Str, ParentBinding>>>,
-	owner:      Str,
-	generation: Ulid,
-}
-
-impl Drop for ParentBindingLease {
-	fn drop(&mut self) {
-		let parent = {
-			let mut parents = self.parents.lock();
-			if parents
-				.get(&self.owner)
-				.is_some_and(|binding| binding.generation == self.generation)
-			{
-				parents.remove(&self.owner).map(|binding| binding.parent)
-			} else {
-				None
-			}
-		};
-		if let Some(parent) = parent {
-			parent.release_eval_owner();
-		}
-	}
-}
-
-struct ParentBinding {
-	generation: Ulid,
-	parent:     Arc<dyn ParentSessionHost>,
 }
 
 #[derive(Clone)]
@@ -1003,7 +811,7 @@ pub struct SessionBridgeHost {
 	/// call to a tool resolved to `deny` is refused.
 	approval:          OnceLock<Arc<BTreeMap<Str, ApprovalPolicy>>>,
 	prelude:           OnceLock<(Arc<PreludeTable>, Arc<dyn PreludeInvoker>)>,
-	parents:           Arc<Mutex<BTreeMap<Str, ParentBinding>>>,
+	parents:           ParentRegistry,
 	runtime_snapshots: Mutex<BTreeMap<(Str, Bytes), RuntimeLease>>,
 }
 
@@ -1013,7 +821,7 @@ impl SessionBridgeHost {
 			registry:          OnceLock::new(),
 			approval:          OnceLock::new(),
 			prelude:           OnceLock::new(),
-			parents:           Arc::new(Mutex::new(BTreeMap::new())),
+			parents:           ParentRegistry::new(),
 			runtime_snapshots: Mutex::new(BTreeMap::new()),
 		}
 	}
@@ -1104,43 +912,14 @@ impl SessionBridgeHost {
 		owner: Str,
 		parent: Arc<dyn ParentSessionHost>,
 	) -> Result<ParentBindingLease, BridgeHostError> {
-		if owner.is_empty() {
-			return Err(BridgeHostError::message("eval bridge parent owner is empty"));
-		}
-		let generation = Ulid::generate();
-		let mut parents = self.parents.lock();
-		if parents.contains_key(&owner) {
-			return Err(BridgeHostError::message("eval bridge parent owner is already bound"));
-		}
-		parents.insert(owner.clone(), ParentBinding { generation, parent });
-		drop(parents);
-		Ok(ParentBindingLease { parents: Arc::clone(&self.parents), owner, generation })
+		self.parents.bind(owner, parent)
 	}
 
 	fn parent_for(
 		&self,
 		owner: &str,
 	) -> Result<(Str, Ulid, Arc<dyn ParentSessionHost>), BridgeHostError> {
-		let parents = self.parents.lock();
-		if let Some(binding) = parents.get(owner) {
-			return Ok((Str::new(owner), binding.generation, Arc::clone(&binding.parent)));
-		}
-		let Ok((session, agent)) = serde_json::from_str::<(Str, Str)>(owner) else {
-			return Err(BridgeHostError::message(
-				"eval bridge parent session is not bound for this owner",
-			));
-		};
-		if session.is_empty() || agent.is_empty() {
-			return Err(BridgeHostError::message(
-				"eval bridge parent session is not bound for this owner",
-			));
-		}
-		let Some(binding) = parents.get(&session) else {
-			return Err(BridgeHostError::message(
-				"eval bridge parent session is not bound for this owner",
-			));
-		};
-		Ok((session, binding.generation, Arc::clone(&binding.parent)))
+		self.parents.parent_for(owner)
 	}
 
 	pub(super) fn freeze_runtime(
@@ -1158,7 +937,7 @@ impl SessionBridgeHost {
 				generation,
 				parent,
 			});
-		Ok(config.runtime_snapshot())
+		Ok(runtime_snapshot(&config))
 	}
 
 	pub(super) fn release_runtime(&self, owner: &str, session: &Bytes) {
@@ -1192,25 +971,14 @@ impl SessionBridgeHost {
 		} else {
 			capabilities
 		};
-		let parents = self.parents.lock();
-		if parents.is_empty() {
+		if self.parents.is_empty() {
 			return Ok(capabilities);
 		}
-		let has_completion = parents
-			.values()
-			.all(|binding| binding.parent.completion_available());
-		let has_agent = parents
-			.values()
-			.all(|binding| binding.parent.agent_available());
-		let has_concurrency = parents
-			.values()
-			.all(|binding| binding.parent.concurrency_available());
-		let has_budget = parents
-			.values()
-			.all(|binding| binding.parent.budget_available());
-		let has_workpool = parents
-			.values()
-			.all(|binding| binding.parent.workpool_available());
+		let has_completion = self.parents.all(|parent| parent.completion_available());
+		let has_agent = self.parents.all(|parent| parent.agent_available());
+		let has_concurrency = self.parents.all(|parent| parent.concurrency_available());
+		let has_budget = self.parents.all(|parent| parent.budget_available());
+		let has_workpool = self.parents.all(|parent| parent.workpool_available());
 		let capabilities = if has_completion {
 			capabilities.with_completion()
 		} else {
@@ -1284,9 +1052,7 @@ impl SessionBridgeHost {
 		};
 		if !self
 			.parents
-			.lock()
-			.get(&binding_owner)
-			.is_some_and(|binding| binding.generation == generation)
+			.generation_matches(binding_owner.as_str(), generation)
 		{
 			return Err(BridgeHostError::message("eval bridge parent lease was revoked"));
 		}
