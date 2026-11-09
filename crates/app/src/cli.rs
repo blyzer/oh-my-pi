@@ -2567,7 +2567,7 @@ pub struct AttachArgs {
 /// Execution-job inspection and reattach options.
 #[derive(Clone, Debug, Args)]
 pub struct JobsArgs {
-	/// Override the session journal path to read.
+	/// Session journal to open; the command holds it as its one writer.
 	#[arg(long, value_name = "PATH")]
 	pub journal: Option<PathBuf>,
 	/// Job operation; defaults to listing all jobs.
@@ -2580,7 +2580,8 @@ pub struct JobsArgs {
 pub enum JobsCommand {
 	/// List all jobs recorded in the session journal.
 	Ls,
-	/// Print the reattach handle for one execution job.
+	/// Resume watching one accepted execution job until it settles; Ctrl-C
+	/// detaches and leaves its backend work running.
 	Attach {
 		/// Stable job id.
 		id: Str,
