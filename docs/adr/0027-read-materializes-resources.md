@@ -74,6 +74,13 @@ New resource kinds are added as projections behind `Read`, NEVER as new roster t
 - Cost accepted: `Read` is a large, deep module (parsers, converters, a URL resolver, a range
   grammar). `Read` is complicated so reading isn't.
 
+## Amendment (2026-11-09): `pr://` and `issue://` are forge-neutral
+
+Under [ADR 0049](0049-tiered-integration-architecture.md) D2.5:
+- `pr://` and `issue://` mean "a forge change request/issue", not "a cached GitHub pull request/issue". A `Delegated` resolver serves them, keeping core-side caching and selectors, from the extension that owns the host.
+- The scheme vocabulary does not grow, and vendor concepts get no new schemes.
+- Extensions that need readable resources use `mcp://`, by mounting an MCP server with `omp.mcp.mount`, or expose devices.
+
 ## Status in omp
 
 **Status: Implemented.** `Read` materializes local, internal, web, archive, SQLite, notebook, document, image and structural resources; I found no missing resource kind. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)

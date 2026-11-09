@@ -80,6 +80,15 @@ can actually terminate.
   documented, not papered over.
 - Cost accepted: pi's TypeScript extensions are not portable; the ecosystem restarts in Python.
 
+## Amendment (2026-11-09): first-party extension tier and vendor adapters
+
+Under [ADR 0049](0049-tiered-integration-architecture.md):
+- **All vendor integrations are extensions** (tier T2): forge, CI and execution vendors. They reach core only through the neutral contracts and the `Delegated` adapters.
+- **First-party extensions** live in a repository outside `omp2`. An `omp2` CI job runs them at a pinned revision against the frozen `omp.*` API.
+- **Manifests declare effects:** capabilities, fetch hosts and credentials. Anything undeclared stays `Effects::unknown()`.
+- **Additive API surface:** the frozen Python surface gains the `forge/*` and `ci/*` device schemas. No ABI break.
+- Decision items 1 and 2 are unchanged. Python stays the only extension language.
+
 ## Status in omp
 
 **Status: Partially implemented.** Embedded free-threaded CPython hosts extensions, Eval and Directors in killable children; `@remote` placement is declared but not proved end to end. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)

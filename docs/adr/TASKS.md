@@ -34,6 +34,8 @@ Status meanings:
 - 2026-10-28: Owner accepted ADR 0045 Alternative F and item-7 defaults. Admission remains host-decided with envd enforcement; approval relay is issuing-connection-only; reflection relay is bounded; MCP remains envd-owned; daemon sharing requires matching workspace/trust/policy digests; reconnect and schedules remain deferred.
 - 2026-10-28: Owner accepted ADR 0048 with B4 full frame preflight validation, behavior-family golden fixtures including compaction/tool.update/patch, `toolhost` retained in Buf breaking scope, and the lenient B1 decode variant. B9 Variant 1 is the selected implementation direction.
 
+- 2026-11-09: Owner accepted ADR 0049 (tiered integration architecture) and ADR 0046, with the rulings recorded in ADR 0046. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors. The owner ruled that `envd/src/codex_app_server` stays as a recorded exception with two exits (ADR 0043). ADRs 0027, 0036, 0043, 0045 and 0047 were amended; ADR 0040 and ADR 0047 keep their own acceptance gates.
+
 ## Decision matrix for remaining ADR work
 
 The owner authorized the council to decide software-development questions. That authority does not
@@ -127,6 +129,22 @@ ADR status: **accepted 2026-10-28**. Alternative F selected.
 `adr0045-slice-b` remains a valid investigation report. It confirms the
 containment defect and identifies the smallest fix, but it does not authorize
 that fix.
+
+## ADR 0049 — tiered integration architecture (with ADR 0046)
+
+ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
+
+- **OPEN** Phase 0: `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts.
+- **BLOCKED** Phase 1 (needs Phase 0): ENVD-16 `ExecHost` → `omp-exec`; ENVD-07 `ssh` crate, including the `exec-ssh` edge; ENVD-02 / 0046 item 2 contract crate.
+- **BLOCKED** Phase 2: 0046 item 1 table-driven roster; ENVD-03/04 splits.
+- **BLOCKED** Phase 3: `cap-*` features for computer, browser, tts/media (ENVD-08/09).
+- **BLOCKED** Phase 4: `omp-forge`/`omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, forge-neutral `pr://`/`issue://`; GitLab adapter (extension) first; GitHub adapter parity; remove `envd/src/github*.rs` and `github@3`.
+- **BLOCKED** Phase 5: extensions repository, conformance CI job, manifest effect checks, rescue wave 1; 0046 item 4 UI host arms.
+- **BLOCKED** Phase 4 (D6 class A, forge): migrate `cache/src/github_cache.rs`, `chat/src/cards/github.rs` and `chat/src/autocomplete/github_refs.rs` to `forge@1` data, and replace `chat/src/gitwatch.rs`'s `gh` subprocess with `omp-forge-delegated`.
+- **BLOCKED** Phase 4 (D6 class A, execution): BuildBuddy behind the execution `Delegated` adapter; remove `crates/exec-buildbuddy`, `exec-reapi/src/buildbuddy_cancel.rs` and `exec-reapi/proto-buildbuddy` (ADR 0040 amendment).
+- **BLOCKED** Phase 4: check the `codex_app_server` exits (ADR 0043 ruling 2026-11-09). If a maintained Codex ACP route covers the listed gaps, delete the module and add a Codex ACP profile; otherwise keep it.
+- **OPEN** owner choice: the `local` (candle) default.
+- **OPEN** owner choice: owners and wave-1 list for the extensions repository.
 
 ## ADR 0048 — schema and serialization boundaries
 
