@@ -19,8 +19,7 @@ use futures::StreamExt as _;
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_con::Ctx;
 use omp_contract::{
-	ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, SessionRole,
-	TicketState,
+	ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, SessionRole, TicketState,
 };
 use omp_core::{Hash32, Str, Ulid, sf};
 use omp_env::{
@@ -3184,6 +3183,7 @@ impl EnvServer {
 			telemetry_upload,
 			ask_presenter,
 			content,
+			selected_roster,
 		} = bridges;
 		let declarations = build_environment_declaration_inputs(
 			state_dir,
@@ -3218,6 +3218,7 @@ impl EnvServer {
 				search,
 				telemetry_upload,
 				ask_presenter,
+				selected_roster,
 			},
 		)?;
 		session

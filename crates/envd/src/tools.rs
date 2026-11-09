@@ -1,5 +1,7 @@
 //! Production built-in tool registry assembly.
 
+mod roster_host;
+
 #[cfg(test)]
 use std::sync::LazyLock;
 use std::{
@@ -35,8 +37,8 @@ use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
 use omp_con::Ctx;
 use omp_contract::{
-	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate,
-	HookPatch, HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
+	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate, HookPatch,
+	HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
 };
 use omp_core::{
 	Duration, ExposeSecret as _, FastHashSet, Hash32, InvocationPhase, LifecyclePhase, SecretString,
@@ -67,7 +69,6 @@ use omp_tools::{
 	goal,
 	read::{
 		Fault as ReadFault,
-		conflicts::ConflictRegistry,
 		resolver::{ResolverTable, ResourceCompletion, ResourceList, SchemeEntry},
 		selector::ParsedSelector,
 	},
@@ -84,13 +85,11 @@ use super::{
 	admission::DynamicAdmission,
 	approval_relay::OwnedApprovals,
 	blobs::BlobHost,
-	computer::ComputerSessionHost,
 	devices_host::DynHost,
-	docs::{DocumentHost, ResourceMutationServices},
-	document_cache,
+	docs::DocumentHost,
 	eval::{
 		PRELUDE_PYTHON_KEYWORDS, PRELUDE_RESERVED_NAMES, PreludeHelper, PreludeInvoker,
-		PreludeParamStub, PreludeTable, ProcessEvalExec, SessionBridgeHost,
+		PreludeParamStub, PreludeTable, SessionBridgeHost,
 	},
 	exec::ExecHost,
 	exec_settings::{SandboxSettings, ShellSettings},
@@ -105,7 +104,6 @@ use super::{
 		extensions::{SealedRegistryEvidence, SealedRegistryEvidenceError, seal_registry_evidence},
 	},
 	fetch_host::FetchHostNamer,
-	github::GithubService,
 	managed_skills::ManagedSkills,
 	mcp::{
 		McpService,
@@ -115,26 +113,15 @@ use super::{
 	media_tts::{SpeechConfig, SpeechPreference},
 	memory::ReflectionBridgeHost,
 	reflection_relay::OwnedReflection,
-	report_issue,
 	search_backend::SearchBridgeHost,
-	security_scan::SecurityScanService,
-	tool_ast_grep::AstSearchAuthority,
-	tool_debug::DocumentDebugControl,
-	tool_document::SessionReadBlobs,
-	tool_lsp::DocumentLspControl,
-	tool_read_sources::ReadSourceAdapter,
-	tool_search::WorkspaceSearchAdapter,
 	tool_settings::ToolSettings,
-	tool_shell::ShellExecHost,
-	tool_url::{UrlResolver, production_url_resolvers},
-	vault::{VaultPaths, VaultService},
+	tool_url::UrlResolver,
 	worker::{ExtHostSupervisor, HostKey},
 	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
-use crate::{
-	browser_daemon::{BrowserDaemon, BrowserSettings},
-	github_url::GithubCredentialBridge,
-};
+#[cfg(test)]
+use crate::eval::ProcessEvalExec;
+use crate::{browser_daemon::BrowserSettings, github_url::GithubCredentialBridge};
 
 tokio::task_local! {
 	static PTY_DENIED: bool;
@@ -209,6 +196,12 @@ pub struct RegistryBridges {
 	pub ask_presenter:          Option<Arc<dyn omp_tools::ask::AskPresenter>>,
 	/// Plain data: active project content and native roots.
 	pub content:                ActiveContentInputs,
+	/// Built-ins this composition installs.
+	///
+	/// `None` installs the full production roster. `compose_kernel` sets the
+	/// production roster explicitly. A test crate adds a
+	/// [`omp_tools::roster::RosterExtension`].
+	pub selected_roster:        Option<omp_tools::roster::SelectedRoster>,
 }
 
 /// Builds the command credential executor from the live Environment client.
@@ -3675,58 +3668,24 @@ fn speech_config(ctx: &Ctx) -> SpeechConfig {
 	}
 }
 
-fn prepare_registry(registry: &mut Registry) -> Result<(), EnvdError> {
-	registry.protect_core_claims([
-		"read",
-		"write",
-		"bash",
-		"edit",
-		"glob",
-		"eval",
-		"task",
-		"hub",
-		"browser",
-		"learn",
-		"manage_skill",
-		"computer",
-		"lsp",
-		"debug",
-	]);
-	for name in [
-		"read",
-		"edit",
-		"bash",
-		"grep",
-		"glob",
-		"write",
-		"eval",
-		"todo",
-		"ask",
-		"web_search",
-		"think",
-		"goal",
-		"yield",
-		"checkpoint",
-		"rewind",
-		"hub",
-		"browser",
-		"github",
-		"image_gen",
-		"tts",
-		"report_issue",
-		"retain",
-		"recall",
-		"reflect",
-		"memory_edit",
-		"learn",
-		"manage_skill",
-		"lsp",
-		"debug",
-		"computer",
-	] {
-		ensure_name_absent(registry, name)?;
-	}
-	Ok(())
+fn prepare_registry(
+	registry: &mut Registry,
+	roster: &omp_tools::roster::SelectedRoster,
+) -> Result<(), EnvdError> {
+	omp_tools::roster::guard(registry, roster)
+		.map_err(|error| EnvdError::DuplicateToolName { name: Str::new_static(error.name) })
+}
+
+fn resolve_roster(
+	roster: Option<omp_tools::roster::SelectedRoster>,
+) -> omp_tools::roster::SelectedRoster {
+	roster.unwrap_or_else(omp_tools::roster::SelectedRoster::production)
+}
+
+fn tool_name(family: omp_tools::roster::Family) -> &'static str {
+	omp_tools::roster::entry(family)
+		.expect("built-in roster row")
+		.name
 }
 
 struct SessionBaseOutput {
@@ -3757,6 +3716,7 @@ fn register_session_base(
 	image_config: media_devices::ImageConfig,
 	speech_config: SpeechConfig,
 	policy: ToolsPolicy,
+	roster: &omp_tools::roster::SelectedRoster,
 ) -> Result<SessionBaseOutput, EnvdError> {
 	for dynamic in dynamic_tools {
 		dynamic.register(registry)?;
@@ -3764,127 +3724,30 @@ fn register_session_base(
 	for factory in dynamic_tool_factories {
 		factory.register(registry)?;
 	}
-	let search_bridge = Arc::new(SearchBridgeHost::new(search));
-	let github_credentials = Arc::new(GithubCredentialBridge::new());
-	let ask_presenter = PresenterSlot::new(
-		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
-	);
-	for device in [
-		media_devices::image_gen(
-			Arc::clone(&search_bridge),
-			image_config,
-			blobs.clone(),
-			project_root.to_path_buf(),
-		),
-		media_devices::tts_with_config(
-			Arc::clone(&search_bridge),
-			Arc::clone(&github_credentials),
-			speech_config,
-			blobs.clone(),
-			project_root.to_path_buf(),
-		),
-	] {
-		register_instrumented(
-			registry,
-			device,
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	register_instrumented(
+	let mut host = roster_host::SessionHost::new(
 		registry,
-		report_issue::tool(Arc::clone(telemetry)),
-		long_tail_presentation(policy),
-		builtin_device_claims(),
-	)?;
-	let github = GithubService::new(
-		project_root.to_path_buf(),
+		policy,
+		tool_settings,
+		search,
+		ask_presenter,
+		goal_control,
+		telemetry_upload,
+		blobs,
+		project_root,
 		state_dir,
-		Arc::clone(&github_credentials),
+		telemetry,
 		github_cache,
-		blobs.clone(),
+		image_config,
+		speech_config,
 	);
-	if let Some(upload) = telemetry_upload {
-		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
-	}
-	register_instrumented(
-		registry,
-		omp_tools::github::tool(github),
-		long_tail_presentation(policy),
-		builtin_device_claims(),
-	)?;
-	if tool_settings.enabled("web_search") {
-		register_instrumented(
-			registry,
-			omp_tools::web_search::tool(Arc::clone(&search_bridge)),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("todo") {
-		register_instrumented(
-			registry,
-			omp_tools::todo::tool(),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("ask") {
-		register_instrumented(
-			registry,
-			omp_tools::ask::tool_with_vocalizer(
-				Arc::new(ask_presenter.clone()),
-				media_devices::ask_vocalizer(Arc::clone(&search_bridge)),
-			),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("think") {
-		// External-thinking sessions select `think` explicitly via
-		// `advertise_selected`; ordinary models must never see it.
-		register_instrumented(
-			registry,
-			omp_tools::think::tool(),
-			Presentation::Hidden,
-			core_claims(),
-		)?;
-	}
-	if let Some(goal_control) = goal_control {
-		register_instrumented(
-			registry,
-			omp_tools::goal::tool(GoalControlAdapter(goal_control)),
-			Presentation::Hidden,
-			core_claims(),
-		)?;
-	}
-	if tool_settings.enabled("yield") {
-		register_instrumented(
-			registry,
-			omp_tools::yield_tool::tool(),
-			Presentation::Hidden,
-			core_claims(),
-		)?;
-	}
-	let checkpoint_control = AgentCheckpointControl::default();
-	let (checkpoint, rewind) = omp_tools::checkpoint::tools(checkpoint_control.clone());
-	if tool_settings.enabled("checkpoint") {
-		register_instrumented(
-			registry,
-			checkpoint,
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("rewind") {
-		register_instrumented(
-			registry,
-			rewind,
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	Ok(SessionBaseOutput { search_bridge, github_credentials, ask_presenter, checkpoint_control })
+	omp_tools::roster::install_session(&mut host, roster)?;
+	let output = host.output();
+	Ok(SessionBaseOutput {
+		search_bridge:      output.search_bridge,
+		github_credentials: output.github_credentials,
+		ask_presenter:      output.ask_presenter,
+		checkpoint_control: output.checkpoint_control,
+	})
 }
 
 fn register_session_workers(
@@ -4003,15 +3866,16 @@ pub(crate) fn build_environment_declaration_inputs(
 		.collect::<Vec<_>>();
 	let mut task_snapshot =
 		TaskDescriptionSnapshot { helpers: &helper_docs, ..TaskDescriptionSnapshot::standard() };
-	if !tool_settings.enabled("task") {
+	if !tool_settings.enabled(tool_name(omp_tools::roster::Family::Task)) {
 		task_snapshot.agents = &[];
 	}
 	let eval_description = tool_settings
-		.enabled("eval")
+		.enabled(tool_name(omp_tools::roster::Family::Eval))
 		.then(|| omp_tools::eval::task_description(task_snapshot));
 	let dyn_installed = tool_settings.enabled("dyn") && dyn_enabled(policy);
-	let shell_snapshot = (tool_settings.enabled("bash") && shell_settings.enabled).then(|| {
-		omp_tools::shell::ShellPromptSnapshot {
+	let shell_snapshot = (tool_settings.enabled(tool_name(omp_tools::roster::Family::Bash))
+		&& shell_settings.enabled)
+		.then(|| omp_tools::shell::ShellPromptSnapshot {
 			sibling_tools:       Arc::default(),
 			platform:            Str::new(consts::OS),
 			devices:             dyn_installed,
@@ -4028,8 +3892,7 @@ pub(crate) fn build_environment_declaration_inputs(
 				})
 				.collect(),
 			command_prefix:      shell_settings.command_prefix.is_some(),
-		}
-	});
+		});
 	let memory = if memory_settings.backend == omp_memory::MemoryBackend::Off {
 		omp_memory::Capabilities::default()
 	} else {
@@ -4056,10 +3919,10 @@ pub(crate) fn build_environment_declaration_inputs(
 /// declaration and its executor are built from, so the effects the
 /// environment declares for `read` are the ones its calls are judged by.
 ///
-/// [`production_url_resolvers`] registers the resolvers that fetch with stored
-/// credentials (`ssh://`, `issue://`, `pr://`, `mcp://`) whatever
-/// `tools.fetch.enabled` says, so the maximum always holds a credentialed
-/// fetch; the setting only removes the anonymous URL fetch.
+/// [`crate::tool_url::production_url_resolvers`] registers the resolvers that
+/// fetch with stored credentials (`ssh://`, `issue://`, `pr://`, `mcp://`)
+/// whatever `tools.fetch.enabled` says, so the maximum always holds a
+/// credentialed fetch; the setting only removes the anonymous URL fetch.
 fn production_read_policy(
 	tool_settings: &ToolSettings,
 	selected_edit: &Rev,
@@ -4069,7 +3932,8 @@ fn production_read_policy(
 		credentialed_fetch: true,
 		render_markdown:    tool_settings.render_markdown,
 		auto_resize_images: tool_settings.auto_resize_images,
-		hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
+		hashline_headers:   tool_settings.enabled(tool_name(omp_tools::roster::Family::Edit))
+			&& selected_edit.family.as_str() == "hl",
 		summarize:          tool_settings.read_summarize,
 		line_numbers:       tool_settings.read_line_numbers,
 	}
@@ -4098,6 +3962,7 @@ struct EnvironmentDeclaration {
 	claims:       Claims,
 }
 
+#[cfg(test)]
 fn environment_declarations(
 	tool_settings: &ToolSettings,
 	browser_settings: &BrowserSettings,
@@ -4105,121 +3970,32 @@ fn environment_declarations(
 	py_eval: bool,
 	policy: ToolsPolicy,
 ) -> Vec<EnvironmentDeclaration> {
-	let mut declarations = Vec::new();
-	let mut push = |spec, presentation, claims| {
-		declarations.push(EnvironmentDeclaration { spec, presentation, claims });
-	};
-	if browser_settings.enabled && tool_settings.enabled("browser") {
-		push(omp_tools::browser::spec(), long_tail_presentation(policy), builtin_device_claims());
-	}
-	if tool_settings.enabled("computer") {
-		push(omp_tools::computer::spec(), long_tail_presentation(policy), builtin_device_claims());
-	}
-	if tool_settings.enabled("security_scan") {
-		push(omp_tools::security_scan::spec(), Presentation::Device, builtin_device_claims());
-	}
-	if inputs.memory.writable {
-		push(
-			omp_tools::memory::retain_spec(),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		);
-	}
-	if inputs.memory.searchable {
-		push(
-			omp_tools::memory::recall_spec(),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		);
-		push(
-			omp_tools::memory::reflect_spec(),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		);
-	}
-	if inputs.memory.editable {
-		push(omp_tools::memory_edit::spec(), long_tail_presentation(policy), builtin_device_claims());
-	}
-	if inputs.managed_skills {
-		push(
-			omp_tools::manage_skill::spec(),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		);
-		if inputs.memory.writable {
-			push(omp_tools::learn::spec(), long_tail_presentation(policy), builtin_device_claims());
-		}
-	}
-	if tool_settings.enabled("read") {
-		push(
-			omp_tools::read::spec(inputs.read_policy),
-			essential_presentation(policy),
-			core_claims(),
-		);
-	}
-	if tool_settings.enabled("edit") {
-		let mut edits = [
-			omp_tools::edit::replace::legacy_replace_spec(),
-			omp_tools::edit::apply_patch::legacy_patch_spec(),
-			omp_tools::edit::hashline_spec(),
-			omp_tools::edit::replace::replace_spec(),
-			omp_tools::edit::apply_patch::patch_spec(),
-			omp_tools::edit::apply_patch::apply_patch_spec(),
-			omp_tools::edit::apply_patch::sloppy_spec(),
-		];
-		edits.sort_by_key(|spec| spec.rev == inputs.selected_edit);
-		for spec in edits {
-			push(spec, essential_presentation(policy), core_claims());
-		}
-	}
-	if tool_settings.enabled("write") {
-		push(omp_tools::write::spec(), long_tail_presentation(policy), long_tail_claims(policy));
-	}
-	if tool_settings.enabled("lsp") {
-		push(omp_tools::lsp::spec(), long_tail_presentation(policy), long_tail_claims(policy));
-	}
-	if tool_settings.enabled("debug") {
-		push(omp_tools::debug::spec(), long_tail_presentation(policy), long_tail_claims(policy));
-	}
-	let search_policy = production_search_policy(tool_settings);
-	if tool_settings.enabled("grep") {
-		push(omp_tools::grep::spec(search_policy), essential_presentation(policy), core_claims());
-	}
-	if tool_settings.enabled("glob") {
-		push(omp_tools::glob::spec(search_policy), essential_presentation(policy), core_claims());
-	}
-	if tool_settings.enabled("ast_grep") {
-		push(
-			omp_tools::ast_grep::spec(search_policy),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		);
-	}
-	if tool_settings.enabled("ast_edit") {
-		push(omp_tools::ast_edit::spec(), long_tail_presentation(policy), long_tail_claims(policy));
-	}
-	if tool_settings.enabled("eval") {
-		if let Some(description) = &inputs.eval_description {
-			push(
-				omp_tools::eval::spec(description.clone()),
-				long_tail_presentation(policy),
-				long_tail_claims(policy),
-			);
-		}
-	}
-	if py_eval {
-		push(
-			omp_tools::eval::py_eval_spec(),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		);
-	}
-	if tool_settings.enabled("bash") {
-		if let Some(snapshot) = &inputs.shell_snapshot {
-			push(omp_tools::shell::spec(snapshot), bash_presentation(policy), core_claims());
-		}
-	}
-	declarations
+	declare_environment_rows(
+		tool_settings,
+		browser_settings,
+		inputs,
+		py_eval,
+		policy,
+		&omp_tools::roster::SelectedRoster::production(),
+	)
+}
+
+fn declare_environment_rows(
+	tool_settings: &ToolSettings,
+	browser_settings: &BrowserSettings,
+	inputs: &EnvironmentDeclarationInputs,
+	py_eval: bool,
+	policy: ToolsPolicy,
+	roster: &omp_tools::roster::SelectedRoster,
+) -> Vec<EnvironmentDeclaration> {
+	roster_host::DeclarationHost::collect(
+		tool_settings,
+		browser_settings.enabled,
+		inputs,
+		py_eval,
+		policy,
+		roster,
+	)
 }
 
 /// Declares the enabled environment half in a session-owned registry.
@@ -4233,9 +4009,10 @@ fn declare_remote_environment(
 	inputs: &EnvironmentDeclarationInputs,
 	py_eval: bool,
 	policy: ToolsPolicy,
+	roster: &omp_tools::roster::SelectedRoster,
 ) -> Result<(), EnvdError> {
 	for declaration in
-		environment_declarations(tool_settings, browser_settings, inputs, py_eval, policy)
+		declare_environment_rows(tool_settings, browser_settings, inputs, py_eval, policy, roster)
 	{
 		registry.declare_remote(
 			declaration.spec,
@@ -4254,6 +4031,8 @@ pub(crate) struct SessionRegistryBridges {
 	pub search:                 Option<Arc<dyn SearchInference>>,
 	pub telemetry_upload:       Option<Arc<dyn TelemetryUpload>>,
 	pub ask_presenter:          Option<Arc<dyn omp_tools::ask::AskPresenter>>,
+	/// Built-ins this session installs. `None` is the full production roster.
+	pub selected_roster:        Option<omp_tools::roster::SelectedRoster>,
 }
 
 pub(crate) struct SessionRegistryOutput {
@@ -4284,7 +4063,6 @@ pub(crate) fn session_registry(
 	environment: &EnvironmentDeclarationInputs,
 	bridges: SessionRegistryBridges,
 ) -> Result<SessionRegistryOutput, EnvdError> {
-	prepare_registry(&mut registry)?;
 	let SessionRegistryBridges {
 		dynamic_tools,
 		dynamic_tool_factories,
@@ -4292,7 +4070,10 @@ pub(crate) fn session_registry(
 		search,
 		telemetry_upload,
 		ask_presenter,
+		selected_roster,
 	} = bridges;
+	let roster = resolve_roster(selected_roster);
+	prepare_registry(&mut registry, &roster)?;
 	let base = register_session_base(
 		&mut registry,
 		dynamic_tools,
@@ -4310,6 +4091,7 @@ pub(crate) fn session_registry(
 		image_config(con),
 		speech_config(con),
 		policy,
+		&roster,
 	)?;
 	let mut declarations = environment.clone();
 	let shell = declarations.shell_snapshot.take();
@@ -4320,24 +4102,27 @@ pub(crate) fn session_registry(
 		&declarations,
 		py_eval,
 		policy,
+		&roster,
 	)?;
-	if tool_settings.enabled("bash") {
+	let bash = omp_tools::roster::entry(omp_tools::roster::Family::Bash).expect("bash row");
+	if roster
+		.iter()
+		.any(|row| row.family == omp_tools::roster::Family::Bash)
+		&& tool_settings.enabled(bash.name)
+	{
 		if let Some(mut snapshot) = shell {
 			snapshot.sibling_tools = registry
 				.live_identities()
 				.filter_map(|(name, _)| {
-					(name != "bash" && registry.presentation(name).ok() == Some(Presentation::Slot))
-						.then(|| name.clone())
+					(name.as_str() != bash.name
+						&& registry.presentation(name).ok() == Some(Presentation::Slot))
+					.then(|| name.clone())
 				})
 				.collect();
 			let declaration = omp_tools::shell::spec(&snapshot);
 			ensure_name_absent(&registry, &declaration.name)?;
-			registry.declare_remote(
-				declaration,
-				bash_presentation(policy),
-				core_claims(),
-				ExecutionMode::Parallel,
-			)?;
+			let (presentation, claims) = omp_tools::roster::declaration(bash, policy);
+			registry.declare_remote(declaration, presentation, claims, ExecutionMode::Parallel)?;
 		}
 	}
 	register_session_workers(&mut registry, workers, policy)?;
@@ -4432,10 +4217,12 @@ pub(crate) fn production_registry<
 		telemetry_upload,
 		ask_presenter,
 		content,
+		selected_roster,
 	} = bridges;
+	let roster = resolve_roster(selected_roster);
 	exec.configure_sandbox(sandbox_settings, workspace.root());
 	let previews = StagedProposalRegistry::new();
-	prepare_registry(&mut registry)?;
+	prepare_registry(&mut registry, &roster)?;
 	let SessionBaseOutput { search_bridge, github_credentials, ask_presenter, checkpoint_control } =
 		register_session_base(
 			&mut registry,
@@ -4454,471 +4241,65 @@ pub(crate) fn production_registry<
 			image_config(con),
 			speech_config(con),
 			policy,
+			&roster,
 		)?;
-	if browser_settings.enabled && tool_settings.enabled("browser") {
-		let browser_daemon = BrowserDaemon::start(blobs.clone(), browser_settings.clone());
-		environment_registry(
-			&mut registry,
-			omp_tools::browser::tool(browser_daemon),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	if tool_settings.enabled("computer") {
-		let computer = ComputerSessionHost::new(blobs.clone(), con);
-		environment_registry(
-			&mut registry,
-			omp_tools::computer::tool(computer),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	let security = SecurityScanService::new(workspace.root().to_path_buf(), state_dir)
-		.with_credentials(Arc::clone(&github_credentials));
-	if tool_settings.enabled("security_scan") {
-		environment_registry(
-			&mut registry,
-			omp_tools::security_scan::tool(security.clone()),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-	}
-	let reflection_bridge = Arc::new(ReflectionBridgeHost::new());
-	let memory_capabilities = memory.capabilities();
-	if memory_capabilities.writable {
-		environment_registry(
-			&mut registry,
-			omp_tools::memory::retain_tool(Arc::clone(memory)),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	if memory_capabilities.searchable {
-		environment_registry(
-			&mut registry,
-			omp_tools::memory::recall_tool(Arc::clone(memory)),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-		environment_registry(
-			&mut registry,
-			omp_tools::memory::reflect_tool(Arc::clone(memory), Arc::clone(&reflection_bridge)),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	if memory_capabilities.editable {
-		environment_registry(
-			&mut registry,
-			omp_tools::memory_edit::tool(Arc::clone(memory)),
-			long_tail_presentation(policy),
-			builtin_device_claims(),
-		)?;
-	}
-	if managed_skills_enabled(con, autolearn_settings.enabled) {
-		if let Some(managed_skills_root) = content.managed_skills_root {
-			let authority = Arc::new(ManagedSkills::new(
-				managed_skills_root,
-				content.authored_skills,
-				Arc::clone(&hooks),
-			));
-			environment_registry(
-				&mut registry,
-				omp_tools::manage_skill::tool(Arc::clone(&authority)),
-				Presentation::Device,
-				builtin_device_claims(),
-			)?;
-			if memory_capabilities.writable {
-				environment_registry(
-					&mut registry,
-					omp_tools::learn::tool(Arc::clone(memory), authority),
-					Presentation::Device,
-					builtin_device_claims(),
-				)?;
-			}
-		}
-	}
-	let user_config_root = omp_core::dirs::user_config_root()?;
-	#[cfg(feature = "cap-ssh")]
-	let ssh = omp_ssh::SshService::new(
-		omp_ssh::HostStore::load_layered(
-			&omp_ssh::HostPaths::new(&user_config_root, workspace.root()),
-			content.workspace_trust,
-		)
-		.map_err(state_error)?,
-	);
-	let vault = VaultService::load_layered(
-		&VaultPaths::new(&user_config_root, workspace.root()),
-		content.workspace_trust,
-	)
-	.map_err(state_error)?
-	.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
-	documents.set_resource_mutations(ResourceMutationServices {
-		#[cfg(feature = "cap-ssh")]
-		ssh: ssh.clone(),
-		vault: vault.clone(),
-		local_sessions: state_dir.join("sessions"),
-	});
-	let read_sources = ReadSourceAdapter::new(
-		documents.clone(),
-		workspace.clone(),
-		document_cache::project_document_cache(state_dir),
-	);
-	let read_blobs = SessionReadBlobs::open(blobs.clone(), session_id).map_err(EnvdError::State)?;
-	let conflicts = Arc::new(ConflictRegistry::default());
-	let catalog = DeviceCatalog::default();
-	let resolvers = production_url_resolvers(
-		Arc::clone(&conflicts),
-		blobs.store().clone(),
+	let ActiveContentInputs { authored_skills, managed_skills_root, workspace_trust, .. } = content;
+	let skills = if managed_skills_enabled(con, autolearn_settings.enabled) {
+		managed_skills_root
+			.map(|root| Arc::new(ManagedSkills::new(root, authored_skills, Arc::clone(&hooks))))
+	} else {
+		None
+	};
+	let mut environment = roster_host::EnvironmentHost::new(
+		&mut registry,
+		policy,
+		tool_settings,
+		browser_settings,
+		shell_settings,
+		sandbox_settings,
+		con,
+		documents,
+		blobs,
+		exec,
+		workspace,
+		state_dir,
 		session_id,
-		state_dir.join("sessions"),
-		workspace.root().to_path_buf(),
-		github_cache,
+		root_uri,
+		memory,
+		workers,
+		interrupt_grace,
+		py_eval,
+		skills,
 		Arc::clone(&github_credentials),
+		github_cache,
 		url_resolvers,
 		host_resources,
 		session_authority,
 		Arc::clone(mcp),
-		#[cfg(feature = "cap-ssh")]
-		ssh,
-		security,
-		vault,
-	);
-	let environment_edit_dialect = env::var("OMP_EDIT_DIALECT").ok();
-	let force_hashline = env::var_os("OMP_STRICT_EDIT_MODE").is_some();
-	let model_edit_revision = configured_model_edit_revision(con)?;
-	let selected_edit = resolve_edit_revision(EditRevisionCandidates {
-		environment: environment_edit_dialect.as_deref(),
-		model_rule: model_edit_revision.as_ref(),
-		setting: tool_settings.edit_dialect.as_deref(),
-		force_hashline,
-		..EditRevisionCandidates::default()
-	})
-	.map_err(EnvdError::EditDialect)?
-	.revision;
-	let read = omp_tools::read::tool_with_policy(
-		read_sources.clone(),
-		read_blobs.clone(),
-		Arc::clone(&resolvers),
-		Arc::clone(&conflicts),
-		production_read_policy(tool_settings, &selected_edit),
-	);
-	if tool_settings.enabled("read") {
-		environment_registry(&mut registry, read, essential_presentation(policy), core_claims())?;
-	}
-	let edit_repair = tool_settings.edit_auto_repair.then(|| {
-		edit_repair
-			.unwrap_or_else(|| {
-				omp_tools::edit::observer::EditRepairClient::from_completion(invocation_edit_repair)
-			})
-			.with_model_identity(invocation_edit_model)
-	});
-	let edit_observer = omp_tools::edit::observer::EditObserver::new(
-		omp_tools::edit::observer::EditBlackboxConfig {
-			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
-				if path.is_absolute() {
-					path.clone()
-				} else {
-					workspace.root().join(path)
-				}
-			}),
-			model: edit_model
-				.or_else(|| configured_model_identity(con))
-				.unwrap_or_else(|| sf!("unknown")),
-			..omp_tools::edit::observer::EditBlackboxConfig::default()
-		},
+		edit_model,
 		edit_repair,
+		workspace_trust,
+		previews,
 	);
-	let mut hashline_edit = Some(omp_tools::edit::tool_with_observer(
-		documents.clone(),
-		blobs.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-	));
-	let mut legacy_replace_edit = Some(
-		omp_tools::edit::legacy_replace_tool_with_observer(
-			documents.clone(),
-			tool_settings.format_policy,
-			edit_observer.clone(),
-			tool_settings.edit_guard_generated,
-			tool_settings.edit_fuzzy,
-			tool_settings.edit_require_seen,
-		)
-		.with_fuzzy_threshold(tool_settings.edit_fuzzy_threshold),
-	);
-	let mut replace_edit = Some(
-		omp_tools::edit::replace_tool_with_observer(
-			documents.clone(),
-			tool_settings.format_policy,
-			edit_observer.clone(),
-			tool_settings.edit_guard_generated,
-			tool_settings.edit_fuzzy,
-			tool_settings.edit_require_seen,
-		)
-		.with_fuzzy_threshold(tool_settings.edit_fuzzy_threshold),
-	);
-	let mut legacy_patch_edit = Some(omp_tools::edit::legacy_patch_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-		tool_settings.edit_require_seen,
-	));
-	let mut patch_edit = Some(omp_tools::edit::patch_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-		tool_settings.edit_require_seen,
-	));
-	let mut apply_patch_edit = Some(omp_tools::edit::apply_patch_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-		tool_settings.edit_require_seen,
-	));
-	let mut sloppy_edit = Some(omp_tools::edit::sloppy_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer,
-		tool_settings.edit_guard_generated,
-		tool_settings.edit_require_seen,
-	));
-	if tool_settings.enabled("edit") {
-		let mut edits = [
-			(
-				legacy_replace_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				0_u8,
-			),
-			(
-				legacy_patch_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				1,
-			),
-			(
-				hashline_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				2,
-			),
-			(
-				replace_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				3,
-			),
-			(patch_edit.as_ref().expect("constructed").spec().identity(), 4),
-			(
-				apply_patch_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				5,
-			),
-			(sloppy_edit.as_ref().expect("constructed").spec().identity(), 6),
-		];
-		edits.sort_by_key(|(identity, _)| identity.rev == selected_edit);
-		for (_, index) in edits {
-			match index {
-				0 => environment_registry(
-					&mut registry,
-					legacy_replace_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				1 => environment_registry(
-					&mut registry,
-					legacy_patch_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				2 => environment_registry(
-					&mut registry,
-					hashline_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				3 => environment_registry(
-					&mut registry,
-					replace_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				4 => environment_registry(
-					&mut registry,
-					patch_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				5 => environment_registry(
-					&mut registry,
-					apply_patch_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				6 => environment_registry(
-					&mut registry,
-					sloppy_edit.take().expect("once"),
-					essential_presentation(policy),
-					core_claims(),
-				)?,
-				_ => unreachable!(),
-			}
-		}
-	}
-	let write = omp_tools::write::tool_with_policy_and_conflicts(
-		documents.clone(),
-		conflicts,
-		tool_settings.format_policy,
-		tool_settings.edit_guard_generated,
-	);
-	if tool_settings.enabled("write") {
-		environment_registry(
-			&mut registry,
-			write,
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("lsp") {
-		let maximum = tool_settings
-			.max_timeout
-			.and_then(|duration| duration.to_std().ok())
-			.unwrap_or_else(|| time::Duration::from_secs(300));
-		environment_registry(
-			&mut registry,
-			omp_tools::lsp::tool(DocumentLspControl::new(documents.clone(), exec.clone()), maximum),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("debug") {
-		let maximum = tool_settings
-			.max_timeout
-			.and_then(|duration| duration.to_std().ok())
-			.unwrap_or_else(|| time::Duration::from_secs(300));
-		environment_registry(
-			&mut registry,
-			omp_tools::debug::tool(DocumentDebugControl::new(documents.clone()), maximum),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	let search = WorkspaceSearchAdapter::new(
-		workspace.clone(),
-		documents.clone(),
-		read_sources.clone(),
-		Arc::clone(&resolvers),
-	);
-	let search_policy = production_search_policy(tool_settings);
-	let grep = omp_tools::grep::tool(
-		search.clone(),
-		u32::from(tool_settings.grep_context_before),
-		u32::from(tool_settings.grep_context_after),
-		search_policy,
-	);
-	if tool_settings.enabled("grep") {
-		environment_registry(&mut registry, grep, essential_presentation(policy), core_claims())?;
-	}
-	let glob = omp_tools::glob::tool(search, search_policy);
-	if tool_settings.enabled("glob") {
-		environment_registry(&mut registry, glob, essential_presentation(policy), core_claims())?;
-	}
-	if tool_settings.enabled("ast_grep") {
-		let ast_search = AstSearchAuthority::new(
-			workspace.clone(),
-			read_sources.clone(),
-			Arc::clone(&resolvers),
-			state_dir,
-		);
-		environment_registry(
-			&mut registry,
-			omp_tools::ast_grep::tool(ast_search, search_policy),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	if tool_settings.enabled("ast_edit") {
-		environment_registry(
-			&mut registry,
-			omp_tools::ast_edit::tool(workspace.root().to_path_buf(), previews.clone()),
-			long_tail_presentation(policy),
-			long_tail_claims(policy),
-		)?;
-	}
-	let prelude = Arc::new(build_prelude_table(workers)?);
-	let helper_docs = prelude
-		.helpers()
-		.map(|helper| omp_tools::eval::PreludeHelperDescription {
-			signature: helper.signature.as_str(),
-			summary:   helper.summary.as_str(),
-		})
-		.collect::<Vec<_>>();
-	let eval_host = Arc::new(SessionBridgeHost::new());
-	let mut eval_control = EvalSessionControl::default();
-	if tool_settings.enabled("eval") || py_eval {
-		let eval_exec = compose_eval_executor(
-			ProcessEvalExec::production(
-				exec.clone(),
-				Arc::clone(&eval_host),
-				interrupt_grace,
-				blobs.clone(),
-				tool_settings
-					.eval_interpreters
-					.get("py")
-					.map(|path| PathBuf::from(path.as_str())),
-			),
-			py_eval,
-		)?;
-		if let Some(eval_exec) = eval_exec {
-			let mut task_snapshot = TaskDescriptionSnapshot {
-				helpers: &helper_docs,
-				..TaskDescriptionSnapshot::standard()
-			};
-			if !tool_settings.enabled("task") {
-				task_snapshot.agents = &[];
-			}
-			let (eval_tool, control) =
-				omp_tools::eval::eval_controlled_with_task_snapshot(eval_exec.clone(), task_snapshot);
-			eval_control = control;
-			if tool_settings.enabled("eval") {
-				environment_registry(
-					&mut registry,
-					eval_tool,
-					long_tail_presentation(policy),
-					long_tail_claims(policy),
-				)?;
-			}
-			if py_eval {
-				environment_registry(
-					&mut registry,
-					omp_tools::eval::py_eval(eval_exec),
-					long_tail_presentation(policy),
-					long_tail_claims(policy),
-				)?;
-			}
-		}
-	}
+	omp_tools::roster::construct_environment(
+		&mut environment,
+		&roster,
+		omp_tools::roster::InstallPhase::EnvironmentEarly,
+	)?;
+	environment.ensure_resources()?;
+	omp_tools::roster::construct_environment(
+		&mut environment,
+		&roster,
+		omp_tools::roster::InstallPhase::Environment,
+	)?;
+	let catalog = DeviceCatalog::default();
 	let dyn_installed = tool_settings.enabled("dyn") && dyn_enabled(policy);
 	if dyn_installed {
+		let resolvers = environment.resolvers();
 		exec.install_devices(Arc::new(DynHost::new(
 			catalog.clone(),
 			Arc::new(device_invoker),
-			previews.clone(),
+			environment.previews(),
 			Arc::clone(&hooks),
 			blobs.clone(),
 			mcp_manager,
@@ -4931,50 +4312,20 @@ pub(crate) fn production_registry<
 			FetchHostNamer::new(&resolvers),
 		)));
 	}
-	if tool_settings.enabled("bash") && shell_settings.enabled {
-		let sibling_tools = registry
-			.live_identities()
-			.filter_map(|(name, _)| {
-				(name != "bash" && registry.presentation(name).ok() == Some(Presentation::Slot))
-					.then(|| name.clone())
-			})
-			.collect::<Arc<[_]>>();
-		let snapshot = omp_tools::shell::ShellPromptSnapshot {
-			sibling_tools,
-			platform: Str::new(consts::OS),
-			devices: dyn_installed,
-			embedded_builtins: shell_settings.embedded_builtins,
-			interceptor_enabled: shell_settings.interceptor.enabled,
-			interceptor_rules: shell_settings
-				.interceptor
-				.patterns
-				.iter()
-				.map(|rule| omp_tools::shell_intercept::Rule {
-					pattern: rule.pattern.clone(),
-					tool:    rule.tool.clone(),
-					message: rule.message.clone(),
-				})
-				.collect(),
-			command_prefix: shell_settings.command_prefix.is_some(),
-		};
-		let shell = omp_tools::shell::shell_with_snapshot_and_timeout_bounds(
-			ShellExecHost::new(
-				exec.clone(),
-				blobs.clone(),
-				root_uri.clone(),
-				Arc::clone(&resolvers),
-				shell_settings.clone(),
-				sandbox_settings,
-			),
-			shell_timeout_bounds(tool_settings),
-			&snapshot,
-		)
-		.with_auto_background(
-			shell_settings.auto_background.enabled,
-			time::Duration::from_millis(shell_settings.auto_background.threshold_ms),
-		);
-		environment_registry(&mut registry, shell, bash_presentation(policy), core_claims())?;
-	}
+	environment.set_dyn_installed(dyn_installed);
+	omp_tools::roster::construct_environment(
+		&mut environment,
+		&roster,
+		omp_tools::roster::InstallPhase::Shell,
+	)?;
+	let roster_host::EnvironmentParts {
+		reflection: reflection_bridge,
+		eval_host,
+		eval_control,
+		previews,
+		resolvers,
+		prelude,
+	} = environment.finish();
 	register_session_workers(&mut registry, workers, policy)?;
 	let registry = Arc::new(registry);
 	catalog
@@ -5658,44 +5009,6 @@ fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> 
 		return Err(EnvdError::DuplicateToolName { name: Str::from(name) });
 	}
 	Ok(())
-}
-
-const fn essential_presentation(policy: ToolsPolicy) -> Presentation {
-	if matches!(policy, ToolsPolicy::DeviceOnly) {
-		Presentation::Device
-	} else {
-		Presentation::Slot
-	}
-}
-
-const fn bash_presentation(_policy: ToolsPolicy) -> Presentation {
-	Presentation::Slot
-}
-
-const fn long_tail_presentation(policy: ToolsPolicy) -> Presentation {
-	if matches!(policy, ToolsPolicy::ToolOnly) {
-		Presentation::Slot
-	} else {
-		Presentation::Device
-	}
-}
-
-const fn core_claims() -> Claims {
-	Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
-}
-
-/// Claims for a long-tail tool: core precedence only while it rides the wire
-/// roster as a slot; the registry refuses devices at core precedence.
-const fn long_tail_claims(policy: ToolsPolicy) -> Claims {
-	if matches!(policy, ToolsPolicy::ToolOnly) {
-		core_claims()
-	} else {
-		builtin_device_claims()
-	}
-}
-
-const fn builtin_device_claims() -> Claims {
-	Claims { precedence: Precedence::ENHANCEMENT, claimant: sf!("omp/core"), replaces: None }
 }
 
 fn shell_timeout_bounds(settings: &ToolSettings) -> TimeoutBounds {
@@ -6596,6 +5909,7 @@ mod tests {
 			image_config(&con),
 			speech_config(&con),
 			ToolsPolicy::Auto,
+			&omp_tools::roster::SelectedRoster::production(),
 		)
 		.expect("session base registers");
 		specs.extend(
@@ -6646,7 +5960,7 @@ mod tests {
 			&mut registry,
 			omp_tools::todo::tool(),
 			Presentation::Slot,
-			core_claims(),
+			omp_tools::roster::claims(omp_tools::roster::ClaimsClass::Core, ToolsPolicy::Auto),
 		)
 		.expect("session tool");
 		environment_registry(
@@ -6656,13 +5970,18 @@ mod tests {
 				production_search_policy(&ToolSettings::default()),
 			),
 			Presentation::Slot,
-			core_claims(),
+			omp_tools::roster::claims(omp_tools::roster::ClaimsClass::Core, ToolsPolicy::Auto),
 		)
 		.expect("environment tool");
 		let remote = omp_tools::write::spec();
 		let expected_description = remote.description.clone();
 		registry
-			.declare_remote(remote, Presentation::Slot, core_claims(), ExecutionMode::Parallel)
+			.declare_remote(
+				remote,
+				Presentation::Slot,
+				omp_tools::roster::claims(omp_tools::roster::ClaimsClass::Core, ToolsPolicy::Auto),
+				ExecutionMode::Parallel,
+			)
 			.expect("remote environment declaration");
 
 		assert_eq!(registry.locus("write").expect("write locus"), ToolLocus::Environment);
@@ -7011,8 +6330,20 @@ mod tests {
 
 	#[test]
 	fn worker_tools_never_expand_the_auto_slot_roster() {
-		assert_eq!(long_tail_presentation(ToolsPolicy::Auto), Presentation::Device);
-		assert_eq!(long_tail_presentation(ToolsPolicy::ToolOnly), Presentation::Slot);
+		assert_eq!(
+			omp_tools::roster::presentation(
+				omp_tools::roster::PresentationClass::LongTail,
+				ToolsPolicy::Auto,
+			),
+			Presentation::Device,
+		);
+		assert_eq!(
+			omp_tools::roster::presentation(
+				omp_tools::roster::PresentationClass::LongTail,
+				ToolsPolicy::ToolOnly,
+			),
+			Presentation::Slot,
+		);
 	}
 
 	#[test]

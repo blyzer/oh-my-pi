@@ -8881,6 +8881,23 @@ name = "omp-py-link"
 version = "2.0.0"
 
 [[package]]
+name = "omp-roster-probe"
+version = "2.0.0"
+dependencies = [
+ "futures",
+ "omp-con",
+ "omp-core",
+ "omp-envd",
+ "omp-ext",
+ "omp-tool",
+ "omp-tools",
+ "schemars",
+ "serde",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "omp-rpc"
 version = "2.0.0"
 dependencies = [

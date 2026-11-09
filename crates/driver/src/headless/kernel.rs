@@ -2574,6 +2574,7 @@ pub async fn compose_kernel(
 	));
 	let inference_bridge =
 		tools_enabled.then(|| Arc::new(crate::bridges::InferenceBridge::default()));
+	let roster = omp_tools::roster::SelectedRoster::production();
 	let bridges = if tools_enabled {
 		omp_envd::RegistryBridges {
 			command_credentials: Some(Arc::new(crate::bridges::CommandCredentials)),
@@ -2600,26 +2601,8 @@ pub async fn compose_kernel(
 					.collect(),
 				workspace_trust:     workspace_trust.trust(),
 			},
-			dynamic_tools: vec![
-				omp_envd::DynamicTool::new(
-					omp_tools::task::tool(crate::subagent::spawn::TaskDeclarationSpawner),
-					omp_tool::Presentation::Slot,
-					omp_tool::Claims {
-						precedence: omp_tool::Precedence::CORE,
-						claimant:   Str::new_static("omp/core"),
-						replaces:   None,
-					},
-				),
-				omp_envd::DynamicTool::new(
-					omp_tools::hub::tool(crate::subagent::hub::HubDeclarationBackend),
-					omp_tool::Presentation::Slot,
-					omp_tool::Claims {
-						precedence: omp_tool::Precedence::CORE,
-						claimant:   Str::new_static("omp/core"),
-						replaces:   None,
-					},
-				),
-			],
+			dynamic_tools: crate::roster::composer_dynamic_tools(&roster),
+			selected_roster: Some(roster),
 			..omp_envd::RegistryBridges::default()
 		}
 	} else {
@@ -2628,6 +2611,7 @@ pub async fn compose_kernel(
 				workspace_trust: workspace_trust.trust(),
 				..omp_envd::ActiveContentInputs::default()
 			},
+			selected_roster: Some(roster),
 			..omp_envd::RegistryBridges::default()
 		}
 	};

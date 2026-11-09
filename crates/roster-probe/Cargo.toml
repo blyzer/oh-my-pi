@@ -1,0 +1,28 @@
+[package]
+name = "omp-roster-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Test capability that joins the built-in roster without editing omp-envd"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+futures.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+omp-envd.workspace = true
+omp-ext.workspace = true
+omp-tool.workspace = true
+omp-tools.workspace = true
+schemars.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true
