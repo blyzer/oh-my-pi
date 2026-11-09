@@ -134,7 +134,7 @@ that fix.
 
 ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 
-- **DONE** Phase 0: `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts. Recorded in ADR 0045, section "Build-weight baseline (ADR 0049 Phase 0)".
+- **DONE** Phase 0: `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts. Recorded in ADR 0045, section "Build-weight baseline (ADR 0049 Phase 0)". PR #542.
 - **OPEN** Phase 1 (Phase 0 exit met; not started): ENVD-16 `ExecHost` → `omp-exec`; ENVD-07 `ssh` crate, including the `exec-ssh` edge; ENVD-02 / 0046 item 2 contract crate.
 - **BLOCKED** Phase 2: 0046 item 1 table-driven roster; ENVD-03/04 splits.
 - **BLOCKED** Phase 3: `cap-*` features for computer, browser, tts/media (ENVD-08/09).
