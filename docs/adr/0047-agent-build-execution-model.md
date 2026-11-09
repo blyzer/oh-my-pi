@@ -133,6 +133,10 @@ The ruling changes three parts of this record. None of the changes is implemente
 "Status in omp" still describes the four backends that exist at `230efc0df8`. The ruling's target
 removes `omp-exec-buildbuddy` from the workspace, and that has not happened.
 
+## Amendment (2026-11-09): `omp-exec` holds the `ExecHost` contract
+
+[ADR 0049](0049-tiered-integration-architecture.md) (D3.1, ADR 0045 ENVD-16) moves `ExecError`, `ExecEvent`, `ExecHost` and `ExecRun` from `omp-envd` into `omp-exec`. envd keeps implementing `ExecHost`; `omp-exec-local` stops depending on `omp-envd`. This is a type move. It does not change Decision item 3 (envd keeps its process, filesystem, blob and sandbox authorities) and does not satisfy this record's G1 acceptance gate, which stays open.
+
 ## References
 
 - ADRs 0003, 0006, 0009, 0010, 0011, 0028, 0039, 0040 (and its 2026-10-10 amendment).

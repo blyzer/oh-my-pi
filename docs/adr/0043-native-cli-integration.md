@@ -155,3 +155,15 @@ unverified); and a Claude Agent SDK extension on the embedded free-threaded Pyth
 deferred alternative to the Node bridge.
 
 Task graph: the Kata epic `nkas` (tasks `haza` through `0vgw`).
+
+## Amendment 2026-11-09: placement under ADR 0049
+
+[ADR 0049](0049-tiered-integration-architecture.md) D6 classifies this record's code:
+- `envd/src/acp_client/*`, `app/src/acp_client.rs` and `driver/src/delegated_acp.rs` speak the generic ACP protocol, and their CLI launch profiles are already data (`sv_delegated_<cli>_program`). They stay in core as T1.
+- **Owner ruling (2026-11-09): `envd/src/codex_app_server/*` stays, as a recorded exception to the vendor rule.**
+  - It speaks Codex's own agent-session protocol, not an OpenAI-compatible model API (that API is served by the class B codecs), so adapting it would make nothing generic.
+  - An extension would not deliver the same value. It needs a new delegated-executor surface and adds one IPC hop per streamed event. It saves almost no build weight, because spawn, kill, approval mapping and policy stay in core either way.
+  - **Exit 1:** a maintained Codex ACP route that loses nothing on the gaps above (system prompt on `turn/start`, approval and network policy mapping). The module is then deleted and Codex becomes an ACP launch profile.
+  - **Exit 2:** a delegated-executor extension contract is built for another reason. The module then moves behind it.
+  - The exits are checked at ADR 0049 Phase 4.
+- This ruling decides placement only. This record's own acceptance is still open.

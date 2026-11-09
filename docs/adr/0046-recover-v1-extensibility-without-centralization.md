@@ -1,10 +1,10 @@
 # 0046. Recover v1 extension properties without routing every feature through envd
 
-Status: proposed; requires owner review
+Status: accepted 2026-11-09, with [ADR 0049](0049-tiered-integration-architecture.md)
 Date: 2026-10-11
 Area: extensions/runtime
 
-No implementation is authorized by this ADR.
+Implementation follows the gate below and the sequencing in ADR 0049.
 
 ## Context
 
@@ -96,6 +96,13 @@ Explicitly **not** recovered, per the Locked Deviations:
   - Co-change share of tools, ai and ext commits that touch envd/driver/app/proto/agent, re-measured excluding `de7a1c71a9` and port bulk commits.
 - No regression in the cold `cargo run --bin omp` build gate and no new runtime IPC hop on the tool-call path.
 
+## Owner rulings (2026-11-09)
+
+The owner accepted this record together with ADR 0049.
+1. **Roster composition:** driver owns it through `compose_kernel`. envd iterates the construction table and enumerates no names (AGENTS.md names driver as the composer).
+2. **envd's `omp-agent` dependency:** not intentional. It is removed through the contract crate (item 2; ADR 0045 ENVD-02).
+3. **Catalog-driven default adapter arm:** compatible with typed wire structs, provided payloads stay typed prost/serde structs and only rendering falls back to the default arm.
+
 ## Implementation gate
 
-This ADR does not authorize production changes. Each numbered decision item becomes a separate, reviewable task, and may begin only after owner review accepts this ADR and the baseline measurements above are recorded.
+Owner acceptance is recorded (2026-11-09). Each numbered decision item becomes a separate, reviewable task. A task may begin once the baseline measurements above are recorded (ADR 0049 Phase 0), in the order ADR 0049 sets: item 2 in Phase 1, item 1 in Phase 2, item 4 in Phase 5. Item 6 is realized by ADR 0049's tiers.

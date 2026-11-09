@@ -110,6 +110,14 @@ The performance scores are unmeasured estimates.
 
 The owner accepted Alternative F on 2026-10-28. Implementation is authorized under the sequencing and evidence gates below. Each step then proceeds as one reversible change with its acceptance criterion from audit §14. Hot-path changes additionally need a recorded baseline that meets audit §12.3.
 
+## Amendment (2026-11-09): placement and backlog under ADR 0049
+
+[ADR 0049](0049-tiered-integration-architecture.md) sets the placement rule for the periphery that this record extracts. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors.
+- **ENVD-07 widened.** Moving `ssh` to its own crate also removes `omp-exec-ssh`'s dependency on `omp-envd`.
+- **ENVD-16 (new).** Move the `ExecHost` contract (`ExecError`, `ExecEvent`, `ExecHost`, `ExecRun`) into `omp-exec`, so `omp-exec-local` no longer depends on `omp-envd`.
+- **ENVD-08/09 realized as generic capability crates behind `cap-*` features.** The `github`/`github_url` item is not moved as a crate. It is replaced by the neutral `omp-forge`/`omp-ci` contracts and a `Delegated` adapter, with the GitHub adapter outside core (ADR 0049 Phase 4).
+- Alternative F, the item-7 rulings and the evidence gates are unchanged.
+
 ## Status in omp
 
 **Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction, modularization and peripheral extraction remain open; containment is implemented and accepted by the W8 proofs.
