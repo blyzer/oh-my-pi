@@ -7890,6 +7890,7 @@ dependencies = [
  "omp-session",
  "omp-shell",
  "omp-shell-builtins",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8283,6 +8284,7 @@ dependencies = [
  "omp-secrets",
  "omp-serve",
  "omp-session",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8474,6 +8476,7 @@ dependencies = [
  "omp-session",
  "omp-shell",
  "omp-shell-builtins",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-vcs",
@@ -8488,8 +8491,6 @@ dependencies = [
  "reqwest 0.13.5",
  "ring",
  "rusqlite",
- "russh",
- "russh-sftp",
  "rustix 1.1.5",
  "schemars",
  "serde",
@@ -8600,8 +8601,8 @@ dependencies = [
  "flume",
  "omp-adw",
  "omp-core",
- "omp-envd",
  "omp-exec",
+ "omp-ssh",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -9104,6 +9105,25 @@ dependencies = [
  "png 0.18.1",
  "strum",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "omp-ssh"
+version = "2.0.0"
+dependencies = [
+ "flume",
+ "omp-core",
+ "omp-ext",
+ "parking_lot",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
  "tracing",
 ]
 

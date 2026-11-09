@@ -12,9 +12,9 @@ use omp_core::project_file::Containment;
 use omp_envd::{
 	docserver::lsp_config::discover_native_lsp_sources,
 	mcp::{McpConfigPaths, config_store::McpConfigStore},
-	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
 };
 use omp_ext::workspace_trust::WorkspaceTrust;
+use omp_ssh::{AuthPolicy, HostConfig, HostPaths, HostStore};
 
 use crate::{
 	discovery::{

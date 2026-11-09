@@ -17,14 +17,12 @@ use omp_driver::cleanse::{
 	CleanseArgs, CleanseStatus, TargetChoice,
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
 };
-use omp_envd::{
-	admission::{Provenance, SandboxState, call_approval_mode},
-	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
-};
+use omp_envd::admission::{Provenance, SandboxState, call_approval_mode};
 use omp_ext::workspace_trust::{
 	WorkspaceTrust,
 	inventory::{PROJECT_DIR, SECRETS_FILE},
 };
+use omp_ssh::{AuthPolicy, HostConfig, HostPaths, HostStore};
 use omp_tool::Confinement;
 use tokio_util::sync::CancellationToken;
 

@@ -81,7 +81,6 @@ mod server;
 /// Hidden in-process shell child used by detached named processes.
 pub mod shell_child;
 pub mod site;
-pub mod ssh;
 #[cfg(all(test, unix))]
 mod test_process;
 mod tool_ast_grep;

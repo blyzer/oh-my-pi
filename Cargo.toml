@@ -165,6 +165,7 @@ omp-secrets = { path = "crates/secrets", version = "2.0.0" }
 omp-sandbox = { path = "crates/sandbox", version = "2.0.0" }
 omp-shell-builtins = { path = "crates/shell-builtins", version = "2.0.0" }
 omp-shell = { path = "crates/shell", version = "2.0.0" }
+omp-ssh = { path = "crates/ssh", version = "2.0.0" }
 omp-cache = { path = "crates/cache", version = "2.0.0" }
 omp-observability = { path = "crates/observability", version = "2.0.0" }
 omp-tool = { path = "crates/tool", version = "2.0.0" }

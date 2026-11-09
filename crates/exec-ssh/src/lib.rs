@@ -4,12 +4,12 @@ use std::{future::Future, sync::Arc};
 
 use omp_adw::Posture;
 use omp_core::Str;
-use omp_envd::ssh::SshService;
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRequest, ExecutionResult, ExecutionRun,
 	Outcome, OutputFrame, ReattachHandle, ResumeSupport, Stream, Timing, TransferCounts,
 };
+use omp_ssh::SshService;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

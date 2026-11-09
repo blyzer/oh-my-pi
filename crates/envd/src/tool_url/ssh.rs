@@ -5,6 +5,7 @@
 //! it, and command execution belongs to `bash`.
 
 use omp_core::{CowBytes, Str};
+use omp_ssh::{RemoteMetadata, SshError, SshService};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -12,8 +13,6 @@ use omp_tools::read::{
 	},
 	selector::ParsedSelector,
 };
-
-use crate::ssh::{RemoteMetadata, SshError, SshService};
 
 pub(crate) struct SshResolver {
 	service: SshService,
@@ -276,8 +275,9 @@ fn ssh_fault(error: SshError) -> Fault {
 
 #[cfg(test)]
 mod tests {
+	use omp_ssh::HostStore;
+
 	use super::*;
-	use crate::ssh::HostStore;
 
 	/// A resolver with no configured hosts: any operation that reaches the SSH
 	/// service fails with `SshError::UnknownHost` before opening a connection.
