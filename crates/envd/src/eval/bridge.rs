@@ -1386,9 +1386,12 @@ pub fn install_python_prelude(py: Python<'_>, globals: &Bound<'_, PyDict>) -> Py
 
 #[cfg(test)]
 mod tests {
-	use std::sync::{
-		Arc,
-		atomic::{AtomicUsize, Ordering},
+	use std::{
+		path::PathBuf,
+		sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		},
 	};
 
 	use async_stream::stream;
