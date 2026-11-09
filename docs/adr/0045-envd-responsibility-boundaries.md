@@ -127,3 +127,36 @@ The owner accepted Alternative F on 2026-10-28. Implementation is authorized und
   - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local` passes against the production daemon on macOS.
 - Owner answers in decision item 7 are recorded: host-side admission with envd enforcement, issuing-connection-only approval relay, bounded reflection relay, envd-owned MCP, digest-matched daemon sharing, deferred reconnect and deferred schedules. P8 W1-W9 baselines are complete through PR #450 and workflow run 41070076113.
 - `adr0045-slice-b.md` remains supporting investigation evidence.
+
+## Build-weight baseline (ADR 0049 Phase 0)
+
+P8 W1–W9 evidence in this record is the runtime baseline (PR #450, workflow run 41070076113; the recorder is `crates/e2e/tests/p8_baselines.rs`). ADR 0049 Phase 0 adds the build-weight baseline audit §12.3 rule 5 asks for. HTML reports from `cargo build --timings` are not committed. Each cold build used a fresh `CARGO_TARGET_DIR`. The incremental build reused the cold `omp` directory after one added line in `crates/envd/src/lib.rs` (`//! Phase 0 incremental fingerprint.`), then that line was removed. No code change remains.
+
+Measured 2026-11-09 03:36–04:02 America/Santo_Domingo on this Linux host: Intel Xeon, 4 vCPU (`nproc` 4), kernel 6.12.113+, `x86_64-unknown-linux-gnu`. Toolchain: rustc 1.99.0-nightly (1a98b1e13 2026-08-07), cargo 1.99.0-nightly (c79e8f894 2026-08-04). Profile `dev` (workspace members use the Cranelift backend; `debug = false`). Max concurrency reported by cargo: 6, with `jobs=4` and `ncpu=4`.
+
+| Build | Wall time | Total units | Fresh | Dirty |
+|---|---|---|---|---|
+| `cargo build --timings --bin omp --locked`, cold | 282.2s | 1433 | 0 | 1433 |
+| same, after the one-line `omp-envd` edit | 90.8s | 1433 | 1428 | 5 |
+| `cargo build --timings -p omp-envd --locked`, cold | 259.8s | 1398 | 0 | 1398 |
+| `cargo build --timings -p omp-exec-local --locked`, cold | 251.9s | 1399 | 0 | 1399 |
+| `cargo build --timings -p omp-exec-ssh --locked`, cold | 252.5s | 1399 | 0 | 1399 |
+
+The five dirty units in the incremental build, slowest first: `omp-envd` 53.10s, `omp-app` lib 23.02s, `omp-driver` 21.37s, `omp-app` bin `omp` 4.68s, `omp-exec-local` 0.74s.
+
+Ten slowest units, cold `omp` (1433 units): `omp-envd` 53.04s, `omp-ai` 51.10s, `omp-proto` 27.77s, `omp-app` 22.09s, `omp-driver` 20.93s, `omp-tools` 19.93s, `jj-lib` 17.59s, `tree-sitter-ocaml` build-script run 10.48s, `omp-catalog` 10.27s, `omp-tui` 10.24s.
+
+Ten slowest units, cold `omp-envd` (1398): `omp-ai` 53.18s, `omp-envd` 52.89s, `omp-proto` 29.17s, `jj-lib` 19.05s, `omp-tools` 18.54s, `tree-sitter-ocaml` build-script run 11.29s, `omp-catalog` 11.12s, `omp-shell-builtins` 10.79s, `x11rb-protocol` 8.00s, `anydoc` 7.97s.
+
+Ten slowest units, cold `omp-exec-local` (1399): `omp-ai` 51.51s, `omp-envd` 51.38s, `omp-proto` 27.61s, `jj-lib` 18.68s, `omp-tools` 17.48s, `omp-catalog` 10.67s, `tree-sitter-ocaml` build-script run 10.49s, `omp-shell-builtins` 10.47s, `anydoc` 7.75s, `x11rb-protocol` 7.69s.
+
+Ten slowest units, cold `omp-exec-ssh` (1399): `omp-ai` 51.63s, `omp-envd` 51.18s, `omp-proto` 27.28s, `jj-lib` 18.46s, `omp-tools` 17.50s, `omp-catalog` 10.81s, `tree-sitter-ocaml` build-script run 10.50s, `omp-shell-builtins` 10.32s, `x11rb-protocol` 7.83s, `anydoc` 7.79s.
+
+Closure counts are `cargo tree -p <crate> -e normal --prefix none --locked | sort -u | wc -l`. There is no package `omp`; the `omp` binary is package `omp-app`, and `-p omp` fails with "did not match any packages". On this cargo (1.99 nightly) the workspace `[resolver] feature-unification = "workspace"` makes `cargo tree -p <crate>` print every workspace member, so the command as written returns one number per target for all four crates: 1420 with no `--target`, 1428 with `--target x86_64-unknown-linux-gnu`, 1372 with `--target aarch64-apple-darwin`. The per-crate numbers below pass `--config 'resolver.feature-unification="selected"'` so `-p` selects one crate. This machine is Linux, not macOS. `aarch64-apple-darwin` is not installed; that column is cargo's resolution for the triple, not a count taken on a Mac.
+
+| Crate | Host, no `--target` | `--target x86_64-unknown-linux-gnu` | `--target aarch64-apple-darwin` (resolved, not a Mac) |
+|---|---|---|---|
+| `omp-app` (bin `omp`) | 1327 | 1335 | 1303 |
+| `omp-envd` | 1144 | 1152 | 1120 |
+| `omp-exec-local` | 1146 | 1154 | 1122 |
+| `omp-exec-ssh` | 1146 | 1154 | 1122 |

@@ -200,7 +200,7 @@ Every step is one self-contained, reversible change, with no shims or re-exports
 
 ## Status in omp
 
-**Not started.** No code implements this record at `278d636`.
+**Phase 0 recorded; no implementation code.** The build-weight baseline (cold and one-line incremental timings, closure counts) is in [ADR 0045](0045-envd-responsibility-boundaries.md) under "Build-weight baseline (ADR 0049 Phase 0)". Phases 1–5 have no code at this commit. The evidence table above remains the `278d636` proxy the timings replace.
 
 ## References
 - ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment).
