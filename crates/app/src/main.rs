@@ -162,6 +162,9 @@ async fn main() -> ExitCode {
 				error.downcast_ref::<omp_app::ext_cli::ExtensionInterrupt>()
 			{
 				ExitCode::from(interrupt.exit_code())
+			} else if let Some(interrupt) = error.downcast_ref::<omp_app::jobs_cmd::JobsInterrupted>()
+			{
+				ExitCode::from(interrupt.exit_code())
 			} else {
 				eprintln!("{error:?}");
 				ExitCode::FAILURE
