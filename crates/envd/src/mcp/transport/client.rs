@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::transport::{IncomingMessage, McpTransport, ServerResponseError, TransportError};
+use super::{IncomingMessage, McpTransport, ServerResponseError, TransportError};
 
 /// Preferred MCP revision and the explicit downgrade set accepted by OMP.
 pub const PREFERRED_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -181,7 +181,7 @@ impl McpClient {
 		name: &str,
 		arguments: Value,
 		cancel: CancellationToken,
-	) -> Result<super::transport::TransportResponse, TransportError> {
+	) -> Result<super::TransportResponse, TransportError> {
 		self
 			.transport
 			.request("tools/call", json!({ "name": name, "arguments": arguments }), cancel)

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::transport::{McpTransport, TransportError, TransportFailure};
+use super::{McpTransport, TransportError, TransportFailure};
 
 const MAX_PAGES: usize = 1_024;
 

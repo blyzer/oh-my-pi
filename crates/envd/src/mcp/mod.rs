@@ -4,30 +4,12 @@
 //! invocation, URI resolution, UI, and Python CONTROL therefore observe one
 //! definition epoch without a process-global singleton.
 
-pub mod auth_authority;
-pub mod client;
 pub mod config;
-pub mod config_store;
-pub(crate) mod config_values;
 pub mod control;
 pub mod device;
-pub(crate) mod discovery;
-pub(crate) mod filter;
-pub(crate) mod header_policy;
-pub(crate) mod http;
-pub(crate) mod invoke;
-pub mod json_rpc;
-pub(crate) mod legacy_sse;
 pub mod manager;
-pub mod oauth;
-pub(crate) mod prompts;
-pub(crate) mod resources;
-pub(crate) mod settings;
 pub mod smithery;
-pub(crate) mod stdio;
-pub(crate) mod timeout;
 pub mod transport;
-
 use std::{
 	collections::{BTreeMap, VecDeque},
 	fmt,
@@ -39,6 +21,8 @@ use std::{
 };
 
 use bytes::Bytes;
+pub use config::{auth_authority, config_store, oauth};
+pub(crate) use config::{config_values, discovery, filter, settings};
 use flume::Receiver;
 use futures::future::BoxFuture;
 use omp_cache::mcp_cache::{McpCacheError, McpDefinitionCache};
@@ -52,6 +36,8 @@ use omp_tool::{
 use parking_lot::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
+pub use transport::{client, json_rpc};
+pub(crate) use transport::{http, invoke, legacy_sse, prompts, resources, stdio, timeout};
 
 use self::config::ConfigSourceKind;
 pub use self::settings::{McpSettings, ProjectMcpPolicy};

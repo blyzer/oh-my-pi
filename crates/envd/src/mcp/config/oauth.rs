@@ -27,11 +27,11 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::{
+	super::transport::http::RefreshableHeaders,
+	McpServerConfig, OauthConfig,
 	auth_authority::{
 		AuthAffinity, CombinedAuthAuthority, McpOAuthStoreError, StoredMcpOAuthCredential,
 	},
-	config::{McpServerConfig, OauthConfig},
-	http::RefreshableHeaders,
 };
 
 /// Live Streamable-HTTP header adapter backed by one encrypted renewable

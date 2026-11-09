@@ -26,8 +26,16 @@ use omp_tools::{
 };
 
 use super::{
-	AgentCheckpointControl, ContentResolver, EnvironmentDeclaration, GoalAuthority,
-	GoalControlAdapter, HostResources, SearchInference, TelemetryUpload,
+	bridges::{
+		ContentResolver, GoalAuthority, HostResources, SearchInference, TelemetryUpload,
+		environment_registry, invocation_edit_model, invocation_edit_repair, register_instrumented,
+	},
+	registry::{
+		AgentCheckpointControl, EnvironmentDeclaration, EnvironmentDeclarationInputs,
+		GoalControlAdapter, build_prelude_table, compose_eval_executor,
+		configured_model_edit_revision, configured_model_identity, production_read_policy,
+		production_search_policy, shell_timeout_bounds, state_error,
+	},
 };
 use crate::{
 	EnvdError,
@@ -172,7 +180,7 @@ impl SessionInstall for SessionHost<'_> {
 		row: &BuiltinRosterEntry,
 	) -> Result<(), Self::Error> {
 		let (presentation, claims) = omp_tools::roster::registration(row, self.policy);
-		super::register_instrumented(self.registry, tool, presentation, claims)?;
+		register_instrumented(self.registry, tool, presentation, claims)?;
 		Ok(())
 	}
 
@@ -245,7 +253,7 @@ impl SessionInstall for SessionHost<'_> {
 pub(super) struct DeclarationHost<'a> {
 	tool_settings:   &'a ToolSettings,
 	browser_enabled: bool,
-	inputs:          &'a super::EnvironmentDeclarationInputs,
+	inputs:          &'a EnvironmentDeclarationInputs,
 	py_eval:         bool,
 	policy:          ToolsPolicy,
 	out:             Vec<EnvironmentDeclaration>,
@@ -255,7 +263,7 @@ impl<'a> DeclarationHost<'a> {
 	pub(super) fn collect(
 		tool_settings: &'a ToolSettings,
 		browser_enabled: bool,
-		inputs: &'a super::EnvironmentDeclarationInputs,
+		inputs: &'a EnvironmentDeclarationInputs,
 		py_eval: bool,
 		policy: ToolsPolicy,
 		roster: &omp_tools::roster::SelectedRoster,
@@ -314,7 +322,7 @@ impl EnvironmentDeclare for DeclarationHost<'_> {
 	}
 
 	fn search_policy(&self) -> SearchPolicy {
-		super::production_search_policy(self.tool_settings)
+		production_search_policy(self.tool_settings)
 	}
 
 	fn selected_edit(&self) -> Rev {
@@ -476,13 +484,13 @@ impl<'a> EnvironmentHost<'a> {
 				&omp_ssh::HostPaths::new(&user_config_root, self.workspace.root()),
 				self.workspace_trust,
 			)
-			.map_err(super::state_error)?,
+			.map_err(state_error)?,
 		);
 		let vault = VaultService::load_layered(
 			&VaultPaths::new(&user_config_root, self.workspace.root()),
 			self.workspace_trust,
 		)
-		.map_err(super::state_error)?
+		.map_err(state_error)?
 		.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(self.con));
 		self
 			.documents
@@ -523,7 +531,7 @@ impl<'a> EnvironmentHost<'a> {
 		));
 		let environment_edit_dialect = env::var("OMP_EDIT_DIALECT").ok();
 		let force_hashline = env::var_os("OMP_STRICT_EDIT_MODE").is_some();
-		let model_edit_revision = super::configured_model_edit_revision(self.con)?;
+		let model_edit_revision = configured_model_edit_revision(self.con)?;
 		let selected_edit =
 			omp_tools::edit::resolve_edit_revision(omp_tools::edit::EditRevisionCandidates {
 				environment: environment_edit_dialect.as_deref(),
@@ -534,10 +542,10 @@ impl<'a> EnvironmentHost<'a> {
 			})
 			.map_err(EnvdError::EditDialect)?
 			.revision;
-		self.read_policy = Some(super::production_read_policy(self.tool_settings, &selected_edit));
-		self.search_policy = Some(super::production_search_policy(self.tool_settings));
+		self.read_policy = Some(production_read_policy(self.tool_settings, &selected_edit));
+		self.search_policy = Some(production_search_policy(self.tool_settings));
 		self.selected_edit = Some(selected_edit);
-		self.prelude = Some(Arc::new(super::build_prelude_table(self.workers)?));
+		self.prelude = Some(Arc::new(build_prelude_table(self.workers)?));
 		self.eval_host = Some(Arc::new(SessionBridgeHost::new()));
 		Ok(())
 	}
@@ -567,7 +575,7 @@ impl<'a> EnvironmentHost<'a> {
 
 	fn register<T: Tool>(&mut self, tool: T, row: &BuiltinRosterEntry) -> Result<(), EnvdError> {
 		let (presentation, claims) = omp_tools::roster::registration(row, self.policy);
-		super::environment_registry(self.registry, tool, presentation, claims)?;
+		environment_registry(self.registry, tool, presentation, claims)?;
 		Ok(())
 	}
 
@@ -594,7 +602,7 @@ impl<'a> EnvironmentHost<'a> {
 			.eval_interpreters
 			.get("py")
 			.map(|path| std::path::PathBuf::from(path.as_str()));
-		let eval_exec = super::compose_eval_executor(
+		let eval_exec = compose_eval_executor(
 			ProcessEvalExec::production(
 				self.exec.clone(),
 				eval_host,
@@ -741,8 +749,8 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 			self
 				.edit_repair
 				.clone()
-				.unwrap_or_else(|| EditRepairClient::from_completion(super::invocation_edit_repair))
-				.with_model_identity(super::invocation_edit_model)
+				.unwrap_or_else(|| EditRepairClient::from_completion(invocation_edit_repair))
+				.with_model_identity(invocation_edit_model)
 		});
 		let edit_observer = omp_tools::edit::observer::EditObserver::new(
 			omp_tools::edit::observer::EditBlackboxConfig {
@@ -756,7 +764,7 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 				model: self
 					.edit_model
 					.clone()
-					.or_else(|| super::configured_model_identity(self.con))
+					.or_else(|| configured_model_identity(self.con))
 					.unwrap_or_else(|| sf!("unknown")),
 				..omp_tools::edit::observer::EditBlackboxConfig::default()
 			},
@@ -1008,7 +1016,7 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 				self.shell_settings.clone(),
 				self.sandbox_settings,
 			),
-			super::shell_timeout_bounds(self.tool_settings),
+			shell_timeout_bounds(self.tool_settings),
 			&snapshot,
 		)
 		.with_auto_background(

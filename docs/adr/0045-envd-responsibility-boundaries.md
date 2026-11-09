@@ -120,7 +120,7 @@ The owner accepted Alternative F on 2026-10-28. Implementation is authorized und
 
 ## Status in omp
 
-**Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction (ENVD-02) and the `server.rs` split (ENVD-03) landed. ENVD-03 moved `crates/envd/src/server.rs` to `crates/envd/src/server/` (`dispatch`, `control_factories`, `devices`, `diagnostics`, `connection`, `forward`, `runtime`, `session`, `identity`, `error`) with no public API change and each file under 5k lines. `tools.rs` and `mcp/` (ENVD-04) and peripheral extraction remain open. Containment is implemented and accepted by the W8 proofs.
+**Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction (ENVD-02), the `server.rs` split (ENVD-03), and the `tools.rs` / `mcp/` split (ENVD-04) landed. ENVD-03 moved `crates/envd/src/server.rs` to `crates/envd/src/server/` (`dispatch`, `control_factories`, `devices`, `diagnostics`, `connection`, `forward`, `runtime`, `session`, `identity`, `error`) with no public API change and each file under 5k lines. ENVD-04 moved `crates/envd/src/tools.rs` to `crates/envd/src/tools/` (`bridges`, `hooks`, `registry`, `roster_host`) and grouped `crates/envd/src/mcp/` into `transport/` and `config/`, re-exporting the previous `mcp::` paths. No public API change, no roster-table change, and each new module is under 5k lines. Peripheral extraction remains open. Containment is implemented and accepted by the W8 proofs.
 
 - W8 containment is implemented and verified by the partition and real-daemon proofs:
   - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream` passes in `omp-env`.

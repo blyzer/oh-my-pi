@@ -141,7 +141,8 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 - **OPEN** Phase 1 closure exit: `omp-exec-ssh` remains 456 crates, above ≤300. The vocabulary task ENVD-02 is done. Phases 2–5 follow.
 - **DONE** Phase 2 roster (0046 item 1): `crates/tools/src/roster.rs` is the static construction table. `compose_kernel` selects `SelectedRoster` and puts it on `RegistryBridges`. envd iterates that selection for protect, ensure, session install, environment declare, and environment construct. `task` and `hub` stay composer rows. Exit proof: `cargo test -p omp-roster-probe --locked` registers `roster_probe` through `SelectedRoster::with_extension` and edits no `crates/envd` file. PR #546.
 - **DONE** Phase 2 ENVD-03: `crates/envd/src/server.rs` is `crates/envd/src/server/` (dispatch, control factories, devices, diagnostics, connection, forward, runtime, session, identity, error). No public API change. Each file is under 5k lines. `tools.rs` and `mcp/` were not moved. PR #547.
-- **OPEN** Phase 2 remainder: ENVD-04 (`tools.rs` / `mcp` split).
+- **DONE** Phase 2 ENVD-04: `crates/envd/src/tools.rs` is `crates/envd/src/tools/` (`bridges`, `hooks`, `registry`, `roster_host`). `crates/envd/src/mcp/` is grouped into `transport/` and `config/`, and the previous `mcp::` module paths stay re-exported. No public API change and no roster-table change. Each new module is under 5k lines. PR #548.
+- **DONE** Phase 2 locality exit: roster (#546) + ENVD-03 (#547) + ENVD-04 (#548). Phases 3–5 follow.
 - **BLOCKED** Phase 3: `cap-*` features for computer, browser, tts/media (ENVD-08/09).
 - **BLOCKED** Phase 4: `omp-forge`/`omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, forge-neutral `pr://`/`issue://`; GitLab adapter (extension) first; GitHub adapter parity; remove `envd/src/github*.rs` and `github@3`.
 - **BLOCKED** Phase 5: extensions repository, conformance CI job, manifest effect checks, rescue wave 1; 0046 item 4 UI host arms.

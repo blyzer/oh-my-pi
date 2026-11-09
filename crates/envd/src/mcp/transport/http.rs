@@ -23,13 +23,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-	header_policy,
+	DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
+	TransportFailure, TransportFuture, TransportResponse, header_policy,
 	header_policy::{RedirectPolicy, redirect_location},
 	json_rpc::{RequestId, RequestIdAllocator, RequestIdFormat},
-	transport::{
-		DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
-		TransportFailure, TransportFuture, TransportResponse,
-	},
 };
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;

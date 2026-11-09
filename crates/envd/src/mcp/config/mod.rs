@@ -1,4 +1,15 @@
 //! Native MCP configuration schema, validation, and precedence resolution.
+//!
+//! Persistence, discovery, and credential policy live beside this schema. The
+//! parent re-exports the public modules at their previous paths.
+
+pub mod auth_authority;
+pub mod config_store;
+pub(crate) mod config_values;
+pub(crate) mod discovery;
+pub(crate) mod filter;
+pub mod oauth;
+pub(crate) mod settings;
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -12,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 use url::Url;
 
-use super::{header_policy, header_policy::HeaderPolicyError, settings::ProjectMcpPolicy};
+use self::settings::ProjectMcpPolicy;
+use super::transport::{header_policy, header_policy::HeaderPolicyError};
 
 /// Schema URL written into native OMP MCP configuration files.
 pub const MCP_CONFIG_SCHEMA_URL: &str =

@@ -25,11 +25,8 @@ use omp_ext::{
 use serde::Deserialize;
 
 use super::{
-	McpConfigPaths,
-	config::{
-		ConfigSource, ConfigSourceKind, McpConfigFile, McpServerConfig, RequestIdFormat,
-		TransportKind,
-	},
+	super::McpConfigPaths, ConfigSource, ConfigSourceKind, McpConfigFile, McpServerConfig,
+	RequestIdFormat, TransportKind,
 };
 use crate::plugin_commands::AgentPluginLaunches;
 
@@ -181,7 +178,7 @@ const AGENT_PLUGIN_MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/m
 
 /// Discovers every supported foreign MCP source in deterministic precedence
 /// order. Native sources are loaded by the caller before these rows.
-pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
+pub(in crate::mcp) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	let project = paths.root.parent().unwrap_or(Path::new("."));
 	let home = &paths.home;
 	let mut sources = Vec::new();
@@ -946,7 +943,7 @@ mod tests {
 		);
 		let paths = McpConfigPaths::new(&user_root, &project);
 		let sources = sources(&paths);
-		let resolved = super::super::config::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers["same"].config.command.as_deref(), Some("claude"));
 		assert!(resolved.servers.contains_key("gemini"));
 		assert!(resolved.servers.contains_key("vscode"));
@@ -986,7 +983,7 @@ mod tests {
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
 		let discovered = sources(&paths);
-		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 		let expected = fs::canonicalize(&plugin).unwrap().join("server");
 		assert_eq!(
 			resolved.servers["portable"].config.command.as_deref(),
@@ -1133,7 +1130,7 @@ mod tests {
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
 		assert_eq!(
-			super::super::config::resolve_sources(&sources(&all_approved), ProjectMcpPolicy::Withheld)
+			super::super::resolve_sources(&sources(&all_approved), ProjectMcpPolicy::Withheld)
 				.servers
 				.keys()
 				.map(Str::as_str)
@@ -1141,8 +1138,7 @@ mod tests {
 			["tool"],
 			"the loader agrees with the report"
 		);
-		let resolved =
-			super::super::config::resolve_sources(&sources(&paths), ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources(&paths), ProjectMcpPolicy::Trusted);
 		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
 		assert!(!resolved.servers.contains_key("tool"), "an unapproved server loaded");
 		assert!(resolved.servers.contains_key("remote"), "a remote server needs no approval");
@@ -1153,8 +1149,7 @@ mod tests {
 			(PluginId::new_static("portable"), portable.command_digest(local)),
 			(PluginId::new_static("explicit"), portable.command_digest(&portable.launches[1])),
 		]));
-		let resolved =
-			super::super::config::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
 		assert!(resolved.servers.contains_key("local"));
 		assert!(!resolved.servers.contains_key("other"));
 		assert!(!resolved.servers.contains_key("tool"));
@@ -1165,8 +1160,7 @@ mod tests {
 			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default())
 				.is_empty()
 		);
-		let resolved =
-			super::super::config::resolve_sources(&sources(&all), ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources(&all), ProjectMcpPolicy::Trusted);
 		assert!(
 			["local", "other", "tool", "remote"]
 				.iter()
@@ -1246,7 +1240,7 @@ mod tests {
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
 		let loaded = |project_config: ProjectMcpPolicy| {
-			super::super::config::resolve_sources(&sources(&approved), project_config)
+			super::super::resolve_sources(&sources(&approved), project_config)
 				.servers
 				.keys()
 				.cloned()
@@ -1308,8 +1302,7 @@ mod tests {
 			packages[0].plugin.clone(),
 			packages[0].command_digest(&packages[0].launches[0]),
 		)]));
-		let resolved =
-			super::super::config::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers.keys().map(Str::as_str).collect::<Vec<_>>(), [
 			"docs@official:search"
 		]);
@@ -1392,7 +1385,7 @@ mod tests {
 			&McpConfigPaths::new(&home.join(".o2"), &project)
 				.with_claude_plugins(plugins.plugins.into()),
 		);
-		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 		assert!(!resolved.servers.contains_key("tools@market:db"), "an unapproved server loaded");
 		assert!(resolved.servers.contains_key("tools@market:ok"));
 		assert!(
@@ -1434,7 +1427,7 @@ mod tests {
 			&McpConfigPaths::new(&home.join(".o2"), &project)
 				.with_claude_plugins(plugins.plugins.into()),
 		);
-		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 
 		let files = fs::canonicalize(&files).unwrap();
 		let inline = fs::canonicalize(&inline).unwrap();
@@ -1475,7 +1468,7 @@ mod tests {
 			"[mcp_servers.codex]\ncommand = \"runner\"\nargs = [\"serve\"]\ntool_timeout_sec = 3\n",
 		);
 		let sources = sources(&McpConfigPaths::new(&home.join(".o2"), &project));
-		let resolved = super::super::config::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
+		let resolved = super::super::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers["open"].config.args, [Str::new("serve")]);
 		assert_eq!(resolved.servers["codex"].config.timeout, Some(3_000));
 	}

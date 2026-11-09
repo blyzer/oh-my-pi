@@ -13,7 +13,7 @@ use omp_catalog::ProviderId;
 use omp_core::{ExposeSecret as _, Secret, SecretString, Str};
 use url::Url;
 
-use super::config::{McpServerConfig, ResolvedServer, TransportKind};
+use super::{McpServerConfig, ResolvedServer, TransportKind};
 
 const EXA_HOST_SUFFIX: &str = "mcp.exa.ai";
 const EXA_KEY_QUERY: &str = "exaApiKey";

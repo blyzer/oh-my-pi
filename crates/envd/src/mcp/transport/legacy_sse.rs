@@ -23,17 +23,14 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-	header_policy,
+	DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
+	TransportFailure, TransportFuture, TransportResponse, header_policy,
 	header_policy::{HeaderPolicyError, RedirectPolicy, redirect_location},
 	http::{
 		HttpBody, HttpExchange, HttpExchangeError, HttpRequest, HttpResponse, RefreshableHeaders,
 		SseEvent, is_sse,
 	},
 	json_rpc::{RequestId, RequestIdAllocator, RequestIdFormat},
-	transport::{
-		DispatchState, IncomingMessage, McpTransport, ServerResponseError, TransportError,
-		TransportFailure, TransportFuture, TransportResponse,
-	},
 };
 
 /// Legacy transport configuration.
