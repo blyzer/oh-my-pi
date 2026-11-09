@@ -6,19 +6,24 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Backend-neutral build and test execution domain: build-system adapters, execution requests, pure placement, and typed failure classification"
+description = "Backend-neutral build and test execution domain: build-system adapters, execution requests, pure placement, the ExecHost contract, and typed failure classification"
 readme = "README.md"
 
 [dependencies]
+bytes.workspace = true
 omp-adw.workspace = true
 omp-core.workspace = true
+omp-journal.workspace = true
+omp-proto.workspace = true
+omp-sandbox.workspace = true
+prost.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

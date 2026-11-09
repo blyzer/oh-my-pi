@@ -9,6 +9,7 @@ use std::{
 
 use bytes::Bytes;
 use omp_core::{CowBytes, Str, encoding::hex, sf};
+use omp_exec::{ExecError, ExecEvent};
 use omp_proto::env::{
 	v1,
 	v1::{
@@ -35,7 +36,7 @@ use url::Url;
 use super::{
 	blobs::BlobHost,
 	direnv::DirenvDelta,
-	exec::{ExecError, ExecEvent, ExecHost, ExecRun},
+	exec::{ExecHost, ExecRun},
 	exec_settings::{DirenvMode, SandboxSettings, ShellSettings},
 	tool_url::UrlResolver,
 	tools,
@@ -535,6 +536,7 @@ pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 			}))
 		},
 		ExecEvent::Exit(event) => {
+			let event = *event;
 			let status = event
 				.status
 				.ok_or_else(|| protocol_fault("next_event", "terminal event omitted status"))?;

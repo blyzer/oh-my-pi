@@ -1,6 +1,6 @@
 # 0049. Tiered integration architecture: lean authority core, generic capability crates, neutral provider contracts, vendors as extensions
 
-Status: accepted 2026-11-09. Implementation is gated by Phase 0 (see "Implementation gate").
+Status: accepted 2026-11-09. Phase 0 is recorded. Phase 1 is in progress (ENVD-16 landed).
 Date: 2026-11-09
 Area: runtime/extensions/integrations
 
@@ -200,7 +200,7 @@ Every step is one self-contained, reversible change, with no shims or re-exports
 
 ## Status in omp
 
-**Phase 0 recorded; no implementation code.** The build-weight baseline (cold and one-line incremental timings, closure counts) is in [ADR 0045](0045-envd-responsibility-boundaries.md) under "Build-weight baseline (ADR 0049 Phase 0)". Phases 1–5 have no code at this commit. The evidence table above remains the `278d636` proxy the timings replace.
+**Phase 0 recorded. Phase 1 ENVD-16 landed.** The build-weight baseline (cold and one-line incremental timings, closure counts) is in [ADR 0045](0045-envd-responsibility-boundaries.md) under "Build-weight baseline (ADR 0049 Phase 0)". ENVD-16 moved the `ExecHost` contract into `omp-exec` as traits; envd still implements them and the concrete host stays in `crates/envd/src/exec.rs`. `omp-exec-local` no longer depends on `omp-envd`. ENVD-07, ENVD-02, and Phases 2–5 have no code at this commit. The evidence table above remains the `278d636` proxy the timings replace.
 
 ## References
 - ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment).

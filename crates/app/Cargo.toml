@@ -129,6 +129,7 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
+omp-exec.workspace = true
 flume.workspace = true
 insta.workspace = true
 omp-ai.workspace = true

@@ -9,11 +9,11 @@ use std::{
 
 use omp_adw::Posture;
 use omp_core::{Str, encoding::hex};
-use omp_envd::exec::{ExecError, ExecEvent, ExecHost, ExecRun};
 use omp_exec::{
-	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
-	ExecutionError, ExecutionEvent, ExecutionId, ExecutionRequest, ExecutionResult, ExecutionRun,
-	Outcome, OutputFrame, OutputSpec, ReattachHandle, ResumeSupport, Stream, Timing, TransferCounts,
+	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecError,
+	ExecEvent, ExecHost, ExecRun, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
+	ExecutionRequest, ExecutionResult, ExecutionRun, Outcome, OutputFrame, OutputSpec,
+	ReattachHandle, ResumeSupport, Stream, Timing, TransferCounts,
 };
 use omp_proto::env::v1::{
 	EnvironmentDelta, ExecOutcome, ExecRequest, OpenSessionRequest, OutputRequest, Script,
@@ -23,30 +23,30 @@ use url::Url;
 
 /// Configuration for one local backend.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<H> {
 	/// Operator-visible backend identity.
 	pub id:       BackendId,
 	/// Root used to resolve request-relative working directories.
 	pub root:     PathBuf,
 	/// Environment process authority.
-	pub host:     ExecHost,
+	pub host:     H,
 	/// Platform offered by the host.
 	pub platform: omp_exec::Platform,
 	/// Posture enforced by the host.
 	pub enforced: Posture,
 }
 
-/// Local backend backed by envd's in-process `ExecHost`.
+/// Local backend backed by an environment [`ExecHost`].
 #[derive(Clone)]
-pub struct LocalBackend {
-	config:       Arc<Config>,
+pub struct LocalBackend<H: ExecHost> {
+	config:       Arc<Config<H>>,
 	capabilities: BackendCapabilities,
 }
 
-impl LocalBackend {
+impl<H: ExecHost> LocalBackend<H> {
 	/// Creates a local backend from an already-composed environment host.
 	#[must_use]
-	pub fn new(config: Config) -> Self {
+	pub fn new(config: Config<H>) -> Self {
 		let capabilities = BackendCapabilities {
 			platforms:      Arc::new([config.platform]),
 			needs:          omp_exec::NeedSet::new(),
@@ -62,8 +62,8 @@ impl LocalBackend {
 	}
 }
 
-impl ExecutionBackend for LocalBackend {
-	type Run = LocalRun;
+impl<H: ExecHost> ExecutionBackend for LocalBackend<H> {
+	type Run = LocalRun<H>;
 
 	fn id(&self) -> &BackendId<str> {
 		&self.config.id
@@ -144,11 +144,11 @@ impl ExecutionBackend for LocalBackend {
 	}
 }
 
-/// Local run state mapped from envd events.
-pub struct LocalRun {
-	host:      ExecHost,
+/// Local run state mapped from environment-host events.
+pub struct LocalRun<H: ExecHost> {
+	host:      H,
 	session:   bytes::Bytes,
-	run:       ExecRun,
+	run:       H::Run,
 	backend:   BackendId,
 	id:        ExecutionId,
 	operation: Option<Str>,
@@ -164,7 +164,7 @@ enum RunState {
 	Settled,
 }
 
-impl ExecutionRun for LocalRun {
+impl<H: ExecHost> ExecutionRun for LocalRun<H> {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
 		async move {
 			match self.state {
@@ -220,7 +220,7 @@ impl ExecutionRun for LocalRun {
 	}
 }
 
-impl Drop for LocalRun {
+impl<H: ExecHost> Drop for LocalRun<H> {
 	fn drop(&mut self) {
 		let _ = self.host.close_session(&self.session);
 	}
@@ -335,64 +335,7 @@ enum LocalError {
 
 #[cfg(test)]
 mod tests {
-	use omp_adw::{ApprovalScope, NetworkScope, WriteScope};
-	use omp_exec::{
-		Eligibility, Intent, NeedSet, Platform, PlatformRequirement, ResourceRequirements,
-		ToolchainId,
-	};
-
 	use super::*;
-
-	#[tokio::test]
-	async fn exec_host_run_maps_output_and_exit() {
-		let root = tempfile::tempdir().expect("temporary root");
-		let backend = LocalBackend::new(Config {
-			id:       BackendId::new_static("local"),
-			root:     root.path().to_path_buf(),
-			host:     ExecHost::new(),
-			platform: Platform::LINUX_X86_64,
-			enforced: Posture {
-				write:    WriteScope::WorkspaceWrite,
-				network:  NetworkScope::Unrestricted,
-				approval: ApprovalScope::Yolo,
-			},
-		});
-		let request = ExecutionRequest {
-			id:          ExecutionId::new_static("local-test"),
-			intent:      Intent::Test,
-			argv:        Arc::new([Str::new_static("printf"), Str::new_static("local-ok")]),
-			cwd:         Str::empty(),
-			env:         Arc::new([]),
-			inputs:      None,
-			outputs:     OutputSpec::Logs,
-			toolchain:   ToolchainId::new_static("local"),
-			caches:      Arc::new([]),
-			platform:    PlatformRequirement {
-				os:            Platform::LINUX_X86_64.os,
-				arch:          Platform::LINUX_X86_64.arch,
-				needs_network: false,
-				needs:         NeedSet::new(),
-			},
-			requirement: Default::default(),
-			resources:   ResourceRequirements::default(),
-			eligibility: Eligibility::LocalPreferred,
-			timeout:     Duration::from_secs(10),
-		};
-		let mut run = backend.start(request).await.expect("local start");
-		let mut output = Vec::new();
-		loop {
-			match run.next_event().await.expect("local event") {
-				ExecutionEvent::Output(frame) => output.extend_from_slice(&frame.bytes),
-				ExecutionEvent::Settled(Ok(result)) => {
-					assert_eq!(result.outcome, Outcome::Exited { code: 0 });
-					break;
-				},
-				ExecutionEvent::Settled(Err(error)) => panic!("local execution failed: {error}"),
-				_ => {},
-			}
-		}
-		assert_eq!(output, b"local-ok");
-	}
 
 	#[test]
 	fn argv_quoting_preserves_single_quotes() {
