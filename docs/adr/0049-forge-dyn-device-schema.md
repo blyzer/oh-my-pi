@@ -71,11 +71,16 @@ client is unbound (`Unavailable`, not `Unregistered`).
   `extension_activate`, maps GitLab REST onto `omp_forge` serde shapes, and
   documents adapter-data credentials (`GITLAB_TOKEN` / `GITLAB_HOST` /
   `GITLAB_API_URL`). Live client + `gitlab.com` registration in envd.
+- **Done (write creates):** mounts `forge/change_request_create` and
+  `forge/issue_create`; POST GitLab `/merge_requests` and `/issues` from
+  `ChangeRequestDraft` / `IssueDraft` JSON. Checkout / push stay unmounted
+  (ADR D2.4: repository work stays in core; no honest receipt without local
+  git).
 - **Done (self-hosted host registration):** envd `ForgeDynHosts` registers
   Dyn hosts from always-`gitlab.com`, operator convar `sv_forge_dyn_hosts`, and
   adapter env `GITLAB_HOST`. Checkout / inferred hosts in that set route to Dyn;
   other non-`github.com` hosts still assume GHE on the Github arm. Full
   automatic device-catalog host-claim discovery remains a smaller TODO.
-- **Remaining:** write ops, GitHub T2 parity before deleting
+- **Remaining:** search leaves, GitHub T2 parity before deleting
   `envd/src/github.rs`. SessionHost bound-client threading for `forge@1` is
   DONE. Full contract stability still awaits GitHub T2 parity.

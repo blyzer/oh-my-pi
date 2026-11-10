@@ -21,10 +21,12 @@ from urllib.parse import urlencode
 
 from .errors import ForgeUnavailable
 from .mapping import (
+    issue_create_body,
     map_issue,
     map_merge_request,
     map_notes,
     map_project,
+    merge_request_create_body,
     project_path,
 )
 
@@ -41,26 +43,33 @@ def _api_root(host: str) -> str:
     return f"https://{host}/api/v4"
 
 
-def _token() -> str:
+def _token(*, op: str) -> str:
     token = os.environ.get("GITLAB_TOKEN", "").strip()
     if not token:
         raise ForgeUnavailable(
-            "repo_view",
+            op,
             "GITLAB_TOKEN unset; mint a scoped credential or export adapter data",
         )
     return token
 
 
-def _get_json(url: str, *, op: str) -> Any:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "PRIVATE-TOKEN": _token(),
-            "Accept": "application/json",
-            "User-Agent": "omp-gitlab/0.1",
-        },
-        method="GET",
-    )
+def _request_json(
+    url: str,
+    *,
+    op: str,
+    method: str = "GET",
+    payload: Mapping[str, Any] | None = None,
+) -> Any:
+    headers = {
+        "PRIVATE-TOKEN": _token(op=op),
+        "Accept": "application/json",
+        "User-Agent": "omp-gitlab/0.1",
+    }
+    data: bytes | None = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             body = response.read()
@@ -70,7 +79,17 @@ def _get_json(url: str, *, op: str) -> Any:
         raise ForgeUnavailable(op, f"GitLab HTTP {error.code}") from error
     except urllib.error.URLError as error:
         raise ForgeUnavailable(op, "GitLab host unreachable") from error
+    if not body:
+        return None
     return json.loads(body.decode("utf-8"))
+
+
+def _get_json(url: str, *, op: str) -> Any:
+    return _request_json(url, op=op, method="GET")
+
+
+def _post_json(url: str, payload: Mapping[str, Any], *, op: str) -> Any:
+    return _request_json(url, op=op, method="POST", payload=payload)
 
 
 def _project_url(repo: Mapping[str, Any], *parts: str, query: Mapping[str, str] | None = None) -> str:
@@ -81,6 +100,13 @@ def _project_url(repo: Mapping[str, Any], *parts: str, query: Mapping[str, str] 
     if query:
         url = f"{url}?{urlencode(query)}"
     return url
+
+
+def _draft_repo(draft: Mapping[str, Any], *, op: str) -> dict[str, Any]:
+    repo = draft.get("repo")
+    if not isinstance(repo, dict):
+        raise ForgeUnavailable(op, "draft.repo must be an object")
+    return repo
 
 
 def view_repo(repo: Mapping[str, Any]) -> dict[str, Any]:
@@ -128,3 +154,31 @@ def list_comments(repo: Mapping[str, Any], number: int, kind: str) -> list[dict[
     if not isinstance(payload, list):
         raise ForgeUnavailable(op, "GitLab notes payload was not a list")
     return map_notes(payload)
+
+
+def create_change_request(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """POST a merge request from ``ChangeRequestDraft`` JSON."""
+    op = "change_request_create"
+    repo = _draft_repo(draft, op=op)
+    payload = _post_json(
+        _project_url(repo, "merge_requests"),
+        merge_request_create_body(draft),
+        op=op,
+    )
+    if not isinstance(payload, dict):
+        raise ForgeUnavailable(op, "GitLab merge-request create payload was not an object")
+    return map_merge_request(payload, repo)
+
+
+def create_issue(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """POST an issue from ``IssueDraft`` JSON."""
+    op = "issue_create"
+    repo = _draft_repo(draft, op=op)
+    payload = _post_json(
+        _project_url(repo, "issues"),
+        issue_create_body(draft),
+        op=op,
+    )
+    if not isinstance(payload, dict):
+        raise ForgeUnavailable(op, "GitLab issue create payload was not an object")
+    return map_issue(payload, repo)

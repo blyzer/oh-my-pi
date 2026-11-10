@@ -20,8 +20,12 @@ Python extension under `extensions/` (not a Cargo member). Implements the dyn
   - `forge/change_request_diff`
   - `forge/list_comments`
   - `forge/repo_view`
+- **Extension write creates** (mounted at `extension_activate`):
+  - `forge/change_request_create` — POST `/projects/:id/merge_requests`
+  - `forge/issue_create` — POST `/projects/:id/issues`
 - **Pure mapping** (`omp_gitlab.mapping`): fixture JSON → `ChangeRequest` /
-  `Issue` / `Repository` / `Comment` dicts matching `omp_forge` serde. Unit
+  `Issue` / `Repository` / `Comment` dicts matching `omp_forge` serde, plus
+  `ChangeRequestDraft` / `IssueDraft` → GitLab create request bodies. Unit
   tests under `tests/` (no network).
 
 ## Credentials (adapter data — ADR 0049 D2.7)
@@ -36,11 +40,12 @@ Prefer host-minted scoped creds when available. Local/dev adapter data:
 
 No tokens live in this tree.
 
-## Unsupported / write ops
+## Unsupported / unmounted
 
-Write, search, checkout, and push leaves are **not mounted**. Calls through
-`DynForgeAdapter` for those paths become `ForgeError::Unavailable`. Do not
-invent partial mutations.
+Search, checkout, and push leaves are **not mounted**. Checkout / push need
+honest `CheckoutReceipt` / `PushReceipt` (local worktree + git); ADR D2.4
+keeps repository work in core, so this adapter does not fake them. Calls
+through `DynForgeAdapter` for those paths become `ForgeError::Unavailable`.
 
 ## Remaining gaps
 
@@ -50,7 +55,9 @@ invent partial mutations.
   smaller TODO.
 - **DONE:** SessionHost / URL-resolver `forge_router` share the session’s bound
   `LiveForgeDeviceClient` with CheckoutForge / CONTROL (no second unbound client)
-- Write ops; GitHub T2 parity + deletion of `envd/src/github.rs`
+- **DONE:** Write creates (`forge/change_request_create`, `forge/issue_create`)
+- Checkout / push still unmounted (core-owned; no honest receipt without local git)
+- Search leaves; GitHub T2 parity + deletion of `envd/src/github.rs`
 - Full contract stability still awaits GitHub T2 parity (ADR wording)
 
 ## Proofs

@@ -113,3 +113,35 @@ def map_notes(payloads: list[Mapping[str, Any]]) -> list[dict[str, str]]:
             continue
         out.append(map_note(note))
     return out
+
+
+def merge_request_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a GitLab ``POST …/merge_requests`` body from ``ChangeRequestDraft``.
+
+    Field names follow GitLab REST (``source_branch`` / ``target_branch`` /
+    ``description`` / ``draft``). ``draft.repo`` is used only by the client for
+    the project path — it is not part of the JSON body.
+    """
+    body: dict[str, Any] = {
+        "title": _str(draft.get("title")),
+        "source_branch": _str(draft.get("head")),
+        "target_branch": _str(draft.get("base")),
+    }
+    description = _str(draft.get("body"))
+    if description:
+        body["description"] = description
+    if bool(draft.get("draft")):
+        body["draft"] = True
+    return body
+
+
+def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a GitLab ``POST …/issues`` body from ``IssueDraft``.
+
+    ``draft.repo`` is used only by the client for the project path.
+    """
+    body: dict[str, Any] = {"title": _str(draft.get("title"))}
+    description = _str(draft.get("body"))
+    if description:
+        body["description"] = description
+    return body
