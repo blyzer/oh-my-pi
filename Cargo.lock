@@ -8131,6 +8131,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-ci-delegated"
+version = "2.0.0"
+dependencies = [
+ "futures",
+ "omp-ci",
+ "omp-core",
+ "parking_lot",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "omp-collab"
 version = "2.0.0"
 dependencies = [
