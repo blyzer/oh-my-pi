@@ -9,8 +9,16 @@ pub mod admission;
 /// Approval prompts relayed to the connection that issued a daemon command.
 mod approval_relay;
 pub mod blobs;
+/// Supervised browser automation, fetch, and relay. Compiled only with
+/// `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_daemon;
+/// Ephemeral browser fetch for inference search. Compiled only with
+/// `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_fetch;
+/// Native Chrome-extension CDP relay. Compiled only with `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_relay;
 /// The environment a spawned child process is allowed to see.
 pub mod child_env;
@@ -219,39 +227,6 @@ omp_con::var! {
 			"legacy.path": "skills.includeSkills",
 		},
 	};
-	/// Default HTTP CDP discovery endpoint used when no tool-call endpoint is provided.
-	pub static SV_BROWSER_CDP_URL = sv_browser_cdp_url: Str {
-		default: Str::new_static(""),
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser CDP URL",
-			"legacy.path": "browser.cdpUrl",
-		},
-	};
-	/// Drive the user's Chrome tabs through the omp browser relay.
-	pub static SV_BROWSER_RELAY = sv_browser_relay: bool {
-		default: false,
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser Relay",
-			"legacy.path": "browser.relay",
-		},
-	};
-	/// omp browser relay endpoint.
-	pub static SV_BROWSER_RELAY_URL = sv_browser_relay_url: Str {
-		default: Str::new_static(""),
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser Relay URL",
-			"legacy.path": "browser.relayUrl",
-		},
-	};
 	/// Render non-JSON MCP text results as Markdown in the transcript.
 	pub static SV_MCP_RENDER_MARKDOWN_RESULTS = sv_mcp_render_markdown_results: bool {
 		default: true,
@@ -303,6 +278,47 @@ omp_con::var! {
 			"ui.label": "Tool Call Handler Timeout (ms)",
 			"ui.unit": "ms",
 			"legacy.path": "extensionHandlers.toolCallTimeoutMs",
+		},
+	};
+}
+
+// Browser CDP and relay settings. These convars exist only with `cap-browser`,
+// beside `SV_BROWSER_ENABLED` and `SV_BROWSER_HEADLESS` in `browser_daemon`.
+// With the feature off the construction table has no Browser row, so a setting
+// cannot reinstall it.
+#[cfg(feature = "cap-browser")]
+omp_con::var! {
+	/// Default HTTP CDP discovery endpoint used when no tool-call endpoint is provided.
+	pub static SV_BROWSER_CDP_URL = sv_browser_cdp_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser CDP URL",
+			"legacy.path": "browser.cdpUrl",
+		},
+	};
+	/// Drive the user's Chrome tabs through the omp browser relay.
+	pub static SV_BROWSER_RELAY = sv_browser_relay: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay",
+			"legacy.path": "browser.relay",
+		},
+	};
+	/// omp browser relay endpoint.
+	pub static SV_BROWSER_RELAY_URL = sv_browser_relay_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay URL",
+			"legacy.path": "browser.relayUrl",
 		},
 	};
 }

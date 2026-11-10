@@ -75,6 +75,7 @@ use omp_catalog::{
 	snapshot,
 };
 use omp_core::{Hash32, SecretString, Str, sf};
+#[cfg(feature = "cap-browser")]
 use omp_envd::browser_fetch::BrowserFetchAdapter;
 use omp_serve::inference::InferenceRpc;
 use tokio::time;
@@ -1569,7 +1570,12 @@ async fn production_assembly_with_catalog(
 		sessions.clone(),
 		WebSocketTransport::new(),
 		google_cca,
-		HttpTransport::new().with_browser_fetch(BrowserFetchAdapter),
+		{
+			let http = HttpTransport::new();
+			#[cfg(feature = "cap-browser")]
+			let http = http.with_browser_fetch(BrowserFetchAdapter);
+			http
+		},
 		auth_application,
 		AdmissionController::new(32, 128),
 		Duration::from_secs(60),

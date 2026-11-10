@@ -97,6 +97,8 @@ mod prelude {
 	pub(in crate::server) use tokio_util::sync::CancellationToken;
 	pub(in crate::server) use url::Url;
 
+	#[cfg(feature = "cap-browser")]
+	pub(in crate::server) use crate::browser_daemon::BrowserSettings;
 	#[cfg(any(unix, windows))]
 	pub(in crate::server) use crate::docserver::connection::ConnectionConfig;
 	#[cfg(unix)]
@@ -112,7 +114,6 @@ mod prelude {
 		approval_relay::{ConnectionApprovals, OwnedApprovals},
 		authenticated_runtime_identity,
 		blobs::{BlobError, BlobHost, BlobId, BlobRead},
-		browser_daemon::BrowserSettings,
 		docs::{
 			AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHello,
 			DocumentHost, DocumentLease, EditorCapabilities, EditorIoError, LspEvents,

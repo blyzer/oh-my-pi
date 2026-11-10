@@ -1,6 +1,6 @@
 # ADR 0049 Phase 3 / D3.5 — capability feature plan
 
-Status: PR1 (`cap-computer`) implemented on this branch. Tip at planning: `5173e17090` (ENVD-04 #548).
+Status: PR1 (`cap-computer`, PR #549) and PR2 (`cap-browser`) implemented. Tip at planning: `5173e17090` (ENVD-04 #548).
 Pattern source: ENVD-07 `cap-ssh` (PR #544).
 
 ## Goal

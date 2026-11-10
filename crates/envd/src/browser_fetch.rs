@@ -1,4 +1,8 @@
 //! Application-owned browser escalation adapter for inference search.
+//!
+//! Compiled only with `omp-envd`'s `cap-browser` feature, which links
+//! `omp-webview`. With the feature off, inference is constructed without a
+//! browser fetch adapter.
 
 use std::{future::poll_fn, thread};
 

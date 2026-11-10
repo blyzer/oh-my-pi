@@ -32,13 +32,8 @@ use super::{
 
 pub(in crate::server) fn execution_settings(
 	ctx: &Ctx,
-) -> (HostSettings, BrowserSettings, ShellSettings, SandboxSettings) {
-	(
-		HostSettings::from_con(ctx),
-		BrowserSettings::from_con(ctx),
-		ShellSettings::from_con(ctx),
-		SandboxSettings::from_con(ctx),
-	)
+) -> (HostSettings, ShellSettings, SandboxSettings) {
+	(HostSettings::from_con(ctx), ShellSettings::from_con(ctx), SandboxSettings::from_con(ctx))
 }
 
 pub(in crate::server) async fn start_memory_runtime(
@@ -322,8 +317,9 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
-			execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		#[cfg(feature = "cap-browser")]
+		let browser_settings = BrowserSettings::from_con(con);
 		host_settings.tools = host_settings.tools.with_workspace_trust(workspace_trust);
 		let enforced = crate::daemon_policy::of(
 			&sandbox_settings,
@@ -376,6 +372,7 @@ impl EnvServer {
 			interrupt_grace,
 			py_eval,
 			&host_settings.tools,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&shell_settings,
 			&sandbox_settings,
@@ -617,8 +614,9 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
-			execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		#[cfg(feature = "cap-browser")]
+		let browser_settings = BrowserSettings::from_con(con);
 		let enforced = crate::daemon_policy::of(
 			&sandbox_settings,
 			&host_settings.tools,
@@ -674,6 +672,7 @@ impl EnvServer {
 			interrupt_grace,
 			py_eval,
 			&host_settings.tools,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&shell_settings,
 			&sandbox_settings,
@@ -850,8 +849,9 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
-			execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		#[cfg(feature = "cap-browser")]
+		let browser_settings = BrowserSettings::from_con(con);
 		let enforced = crate::daemon_policy::of(
 			&sandbox_settings,
 			&host_settings.tools,
@@ -905,6 +905,7 @@ impl EnvServer {
 			con,
 			omp_tool::ToolsPolicy::Auto,
 			&host_settings.tools,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&declarations,
 			SessionRegistryBridges {

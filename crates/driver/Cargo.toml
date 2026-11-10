@@ -11,6 +11,9 @@ readme = "README.md"
 
 [features]
 default = []
+# Forwards the environment host's browser capability. Off, inference has no
+# `BrowserFetchAdapter` and envd does not link `omp-webview`.
+cap-browser = ["omp-envd/cap-browser"]
 local = ["omp-ai/local"]
 local-all = [
 	"local-applefm",
