@@ -8666,6 +8666,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-forge"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "omp-core",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "strum",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "omp-gui"
 version = "2.0.0"
 dependencies = [
