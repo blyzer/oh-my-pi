@@ -137,6 +137,7 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 - **OPEN** Phase 0: `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts.
 - **BLOCKED** Phase 1 (needs Phase 0): ENVD-16 `ExecHost` → `omp-exec`; ENVD-07 `ssh` crate, including the `exec-ssh` edge; ENVD-02 / 0046 item 2 contract crate.
 - **BLOCKED** Phase 2: 0046 item 1 table-driven roster; ENVD-03/04 splits.
+- **BLOCKED** Phase 2S (after Phase 2, before Phase 3): extension-declared URL schemes. Tracked under ADR 0050. Blocked on owner acceptance of that record.
 - **BLOCKED** Phase 3: `cap-*` features for computer, browser, tts/media (ENVD-08/09).
 - **BLOCKED** Phase 4: `omp-forge`/`omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, forge-neutral `pr://`/`issue://`; GitLab adapter (extension) first; GitHub adapter parity; remove `envd/src/github*.rs` and `github@3`.
 - **BLOCKED** Phase 5: extensions repository, conformance CI job, manifest effect checks, rescue wave 1; 0046 item 4 UI host arms.
@@ -145,6 +146,19 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 - **BLOCKED** Phase 4: check the `codex_app_server` exits (ADR 0043 ruling 2026-11-09). If a maintained Codex ACP route covers the listed gaps, delete the module and add a Codex ACP profile; otherwise keep it.
 - **OPEN** owner choice: the `local` (candle) default.
 - **OPEN** owner choice: owners and wave-1 list for the extensions repository.
+
+## ADR 0050 — extension-declared URL schemes
+
+ADR status: **proposed; requires owner review**. Placement is ADR 0049 Phase **2S**, after Phase 2 and before Phase 3. Phase 2S does not satisfy a Phase 2 or Phase 3 exit criterion. One PR per slice. Every item below is **BLOCKED** on owner acceptance of ADR 0050.
+
+- **BLOCKED** owner choice: accept ADR 0050.
+- **BLOCKED** owner choice: D1 aliases (one canonical spelling, or extra spellings on a declaration). Recorded before S2.
+- **BLOCKED** owner choice: D7 native MCP URIs (mounted resources stay `mcp://` only, or an extension may also declare a server's native scheme). Recorded before S2.
+- **BLOCKED** S1: manifest field `schemes` and additive `omp.schemes`. Refuse a built-in wire name.
+- **BLOCKED** S2: bind declared schemes onto the existing unknown-scheme fallback (`install_unknown_fallback` → `HostUriResolver`).
+- **BLOCKED** S3: core line selectors and effect judgment for declared schemes. `mcp://` and undeclared unknown URIs stay selector-opaque.
+- **BLOCKED** S4: `/reload-plugins` → `Mutation::ReloadExtensions` → `ExtensionReloadHandle::reload` rebinds the generation; `quarantine_extensions` drops that extension's schemes and keeps static routes.
+- **BLOCKED** S5: model-facing listing without a roster change, plus the conformance read, selector, reload, and quarantine test.
 
 ## ADR 0048 — schema and serialization boundaries
 
