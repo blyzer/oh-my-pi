@@ -13,7 +13,7 @@ pub(super) mod vault;
 
 use std::{fmt::Display, path::PathBuf, sync::Arc};
 
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
 use omp_contract::{SessionAuthority, SessionEndpoint};
 use omp_core::{CowBytes, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
@@ -534,7 +534,7 @@ pub(super) fn production_url_resolvers(
 	session_id: &str,
 	sessions_dir: PathBuf,
 	workspace_root: PathBuf,
-	github_cache: Arc<GithubCache>,
+	forge_cache: Arc<ForgeCache>,
 	github_credentials: Arc<GithubCredentialBridge>,
 	forge: SchemeForge,
 	content: Vec<Arc<dyn ContentResolver>>,
@@ -606,7 +606,7 @@ pub(super) fn production_url_resolvers(
 			UrlResolver::Issue(GithubResolver::new(
 				GithubScheme::Issue,
 				workspace_root.clone(),
-				Arc::clone(&github_cache),
+				Arc::clone(&forge_cache),
 				Arc::clone(&github_credentials),
 				forge.clone(),
 			)),
@@ -618,7 +618,7 @@ pub(super) fn production_url_resolvers(
 			UrlResolver::Pr(GithubResolver::new(
 				GithubScheme::PullRequest,
 				workspace_root,
-				github_cache,
+				forge_cache,
 				github_credentials,
 				forge,
 			)),

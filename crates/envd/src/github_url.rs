@@ -30,7 +30,7 @@ use omp_ai::{
 	},
 	id::{AccountId, PrincipalId},
 };
-use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
+use omp_cache::forge_cache::{ForgeCache, ForgeCacheKey, ForgeCacheStatus, ForgeResourceKind};
 use omp_catalog::AuthSpecId;
 use omp_core::{CowBytes, SecretString, Str, sf};
 use omp_forge::{
@@ -338,7 +338,7 @@ pub(super) enum GithubScheme {
 pub(super) struct GithubResolver<H> {
 	scheme:      GithubScheme,
 	root:        PathBuf,
-	cache:       Arc<GithubCache>,
+	cache:       Arc<ForgeCache>,
 	credentials: Arc<GithubCredentialBridge>,
 	client:      omp_http::Client,
 	forge:       H,
@@ -348,7 +348,7 @@ impl<H> GithubResolver<H> {
 	pub(super) fn new(
 		scheme: GithubScheme,
 		root: PathBuf,
-		cache: Arc<GithubCache>,
+		cache: Arc<ForgeCache>,
 		credentials: Arc<GithubCredentialBridge>,
 		forge: H,
 	) -> Self {
@@ -399,7 +399,7 @@ impl<H> GithubResolver<H> {
 		let cached = self.cache.get(&key, now).map_err(cache_fault)?;
 		if cached
 			.as_ref()
-			.is_some_and(|entry| entry.status == GithubCacheStatus::Fresh)
+			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
 		{
 			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
@@ -590,7 +590,7 @@ impl<H> GithubResolver<H> {
 		};
 		if cached
 			.as_ref()
-			.is_some_and(|entry| entry.status == GithubCacheStatus::Fresh)
+			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
 		{
 			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
@@ -870,12 +870,12 @@ impl Target {
 		Ok(Self { scheme, repo, number, view })
 	}
 
-	fn cache_key(&self) -> Result<GithubCacheKey, Fault> {
-		GithubCacheKey::new(
+	fn cache_key(&self) -> Result<ForgeCacheKey, Fault> {
+		ForgeCacheKey::new(
 			match &self.view {
-				View::Diff { .. } => GithubResourceKind::Diff,
-				_ if self.scheme == GithubScheme::Issue => GithubResourceKind::Issue,
-				_ => GithubResourceKind::PullRequest,
+				View::Diff { .. } => ForgeResourceKind::Diff,
+				_ if self.scheme == GithubScheme::Issue => ForgeResourceKind::Issue,
+				_ => ForgeResourceKind::PullRequest,
 			},
 			self.repo.identity(),
 			self.number,
@@ -1319,7 +1319,7 @@ fn http_fault(error: impl Display) -> Fault {
 mod tests {
 	use std::{future::Future, sync::Arc};
 
-	use omp_cache::github_cache::GithubCachePolicy;
+	use omp_cache::forge_cache::ForgeCachePolicy;
 	use omp_core::ExposeSecret as _;
 	use omp_forge::{
 		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
@@ -1726,11 +1726,11 @@ mod tests {
 		builder.build()
 	}
 
-	fn open_cache(dir: &Path, soft_secs: u64) -> Arc<GithubCache> {
+	fn open_cache(dir: &Path, soft_secs: u64) -> Arc<ForgeCache> {
 		Arc::new(
-			GithubCache::open(
-				dir.join("github.sqlite3"),
-				GithubCachePolicy::new(
+			ForgeCache::open(
+				dir.join("forge.sqlite3"),
+				ForgeCachePolicy::new(
 					true,
 					std::time::Duration::from_secs(soft_secs),
 					std::time::Duration::from_secs(3600),
@@ -1743,7 +1743,7 @@ mod tests {
 	fn resolver(
 		scheme: GithubScheme,
 		root: &Path,
-		cache: Arc<GithubCache>,
+		cache: Arc<ForgeCache>,
 		host: Memory,
 	) -> GithubResolver<Delegated<Memory, PermitAll>> {
 		GithubResolver::new(
@@ -1779,8 +1779,8 @@ mod tests {
 		assert_eq!(seen.owner.as_str(), "acme");
 		assert_eq!(seen.name.as_str(), "widget");
 
-		let key = GithubCacheKey::new(
-			GithubResourceKind::PullRequest,
+		let key = ForgeCacheKey::new(
+			ForgeResourceKind::PullRequest,
 			"acme/widget",
 			Some(7),
 			"Detail { comments: true }",
@@ -1855,8 +1855,8 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 1);
-		let key = GithubCacheKey::new(
-			GithubResourceKind::Issue,
+		let key = ForgeCacheKey::new(
+			ForgeResourceKind::Issue,
 			"acme/widget",
 			Some(3),
 			"Detail { comments: true }",

@@ -551,7 +551,7 @@
 {"crate":"envd","name":"LocalForward","kind":"struct","path":"crates/envd/src/ssh.rs","line":483}
 {"crate":"envd","name":"SshService","kind":"struct","path":"crates/envd/src/ssh.rs","line":537}
 {"crate":"envd","name":"SshError","kind":"enum","path":"crates/envd/src/ssh.rs","line":1050}
-{"crate":"envd","name":"GithubCacheSettings","kind":"struct","path":"crates/envd/src/tool_settings.rs","line":352}
+{"crate":"envd","name":"ForgeCacheSettings","kind":"struct","path":"crates/envd/src/tool_settings.rs","line":350}
 {"crate":"envd","name":"ToolSettings","kind":"struct","path":"crates/envd/src/tool_settings.rs","line":387}
 {"crate":"envd","name":"SHELL_CHILD_ARG","kind":"const","path":"crates/envd/src/shell_child.rs","line":17}
 {"crate":"envd","name":"ShellChildError","kind":"enum","path":"crates/envd/src/shell_child.rs","line":21}

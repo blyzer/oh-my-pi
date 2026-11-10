@@ -25,7 +25,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_cache::github_cache::{GithubCache, GithubCachePolicy};
+use omp_cache::forge_cache::{ForgeCache, ForgeCachePolicy};
 use omp_ci::{
 	ArtifactPage, Capabilities, CiError, CiHost, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline,
 	RunRef, Trigger,
@@ -131,7 +131,7 @@ struct CheckoutForgeInner {
 	state_dir:   PathBuf,
 	credentials: Arc<GithubCredentialBridge>,
 	blobs:       BlobHost,
-	policy:      GithubCachePolicy,
+	policy:      ForgeCachePolicy,
 	built:       Mutex<Option<BuiltForge>>,
 }
 
@@ -151,7 +151,7 @@ impl CheckoutForge {
 		state_dir: PathBuf,
 		credentials: Arc<GithubCredentialBridge>,
 		blobs: BlobHost,
-		policy: GithubCachePolicy,
+		policy: ForgeCachePolicy,
 	) -> Self {
 		Self {
 			inner: Arc::new(CheckoutForgeInner {
@@ -211,7 +211,7 @@ impl CheckoutForge {
 			return Some(built.clone());
 		}
 		let cache =
-			GithubCache::open(self.inner.state_dir.join("github-cache.sqlite3"), self.inner.policy)
+			ForgeCache::open(self.inner.state_dir.join("forge-cache.sqlite3"), self.inner.policy)
 				.ok()?;
 		let service = GithubService::new(
 			self.inner.root.clone(),
@@ -1016,7 +1016,7 @@ async fn one_job_log(service: &GithubService, run: &RunRef) -> Result<LogPage, C
 mod tests {
 	use std::sync::Arc;
 
-	use omp_cache::github_cache::GithubCache;
+	use omp_cache::forge_cache::ForgeCache;
 	use omp_ci::{CiError, CiHost as _, CiOp, CiProvider, CiStatus, RunRef, Trigger};
 	use omp_con::Ctx;
 	use omp_core::Str;
@@ -1026,15 +1026,15 @@ mod tests {
 	use super::{ci_status, forge_router, pipeline_from_actions};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
-		tool_settings::GithubCacheSettings,
+		tool_settings::ForgeCacheSettings,
 	};
 
 	fn service(root: &std::path::Path) -> Arc<GithubService> {
 		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
 		let cache = Arc::new(
-			GithubCache::open(
-				root.join("github-cache.sqlite3"),
-				GithubCacheSettings::from_con(&Ctx::new()).policy(),
+			ForgeCache::open(
+				root.join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
 			)
 			.expect("cache"),
 		);
@@ -1285,7 +1285,7 @@ mod tests {
 			root.to_path_buf(),
 			Arc::new(GithubCredentialBridge::new()),
 			blobs,
-			GithubCacheSettings::from_con(&Ctx::new()).policy(),
+			ForgeCacheSettings::from_con(&Ctx::new()).policy(),
 		);
 		assert!(
 			forge

@@ -6,7 +6,7 @@
 
 use std::{env, mem, path::Path, sync::Arc, time};
 
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
 use omp_con::Ctx;
 use omp_core::{Str, sf};
 use omp_memory::Capabilities;
@@ -96,7 +96,7 @@ pub(super) struct SessionHost<'a> {
 	blobs:              &'a BlobHost,
 	project_root:       &'a Path,
 	state_dir:          &'a Path,
-	github_cache:       Arc<GithubCache>,
+	forge_cache:       Arc<ForgeCache>,
 	#[cfg(feature = "cap-media")]
 	image_config:       media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")]
@@ -122,7 +122,7 @@ impl<'a> SessionHost<'a> {
 		project_root: &'a Path,
 		state_dir: &'a Path,
 		telemetry: &'a Arc<omp_cache::telemetry_cache::TelemetryIndex>,
-		github_cache: Arc<GithubCache>,
+		forge_cache: Arc<ForgeCache>,
 		#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
@@ -144,7 +144,7 @@ impl<'a> SessionHost<'a> {
 			blobs,
 			project_root,
 			state_dir,
-			github_cache,
+			forge_cache,
 			#[cfg(feature = "cap-media")]
 			image_config,
 			#[cfg(feature = "cap-media")]
@@ -163,7 +163,7 @@ impl<'a> SessionHost<'a> {
 				self.project_root.to_path_buf(),
 				self.state_dir,
 				Arc::clone(&self.github_credentials),
-				Arc::clone(&self.github_cache),
+				Arc::clone(&self.forge_cache),
 				self.blobs.clone(),
 			));
 		}
@@ -411,7 +411,7 @@ pub(super) struct EnvironmentHost<'a> {
 	py_eval:             bool,
 	skills:              Option<Arc<ManagedSkills>>,
 	github_credentials:  Arc<GithubCredentialBridge>,
-	github_cache:        Arc<GithubCache>,
+	forge_cache:        Arc<ForgeCache>,
 	url_resolvers:       Vec<Arc<dyn ContentResolver>>,
 	host_resources:      Option<Arc<dyn HostResources>>,
 	session_authority:   Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -465,7 +465,7 @@ impl<'a> EnvironmentHost<'a> {
 		py_eval: bool,
 		skills: Option<Arc<ManagedSkills>>,
 		github_credentials: Arc<GithubCredentialBridge>,
-		github_cache: Arc<GithubCache>,
+		forge_cache: Arc<ForgeCache>,
 		url_resolvers: Vec<Arc<dyn ContentResolver>>,
 		host_resources: Option<Arc<dyn HostResources>>,
 		session_authority: Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -498,7 +498,7 @@ impl<'a> EnvironmentHost<'a> {
 			py_eval,
 			skills,
 			github_credentials,
-			github_cache,
+			forge_cache,
 			url_resolvers,
 			host_resources,
 			session_authority,
@@ -567,7 +567,7 @@ impl<'a> EnvironmentHost<'a> {
 			self.workspace.root().to_path_buf(),
 			self.state_dir,
 			Arc::clone(&self.github_credentials),
-			Arc::clone(&self.github_cache),
+			Arc::clone(&self.forge_cache),
 			self.blobs.clone(),
 		);
 		let forge = crate::github_adapter::forge_router(github);
@@ -577,7 +577,7 @@ impl<'a> EnvironmentHost<'a> {
 			self.session_id,
 			self.state_dir.join("sessions"),
 			self.workspace.root().to_path_buf(),
-			Arc::clone(&self.github_cache),
+			Arc::clone(&self.forge_cache),
 			Arc::clone(&self.github_credentials),
 			forge,
 			mem::take(&mut self.url_resolvers),

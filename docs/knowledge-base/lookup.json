@@ -22795,60 +22795,60 @@
       "path": "crates/tools/src/github.rs"
     }
   ],
-  "GithubCache": [
+  "ForgeCache": [
     {
       "crate": "cache",
       "kind": "struct",
       "line": 116,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
-  "GithubCacheEntry": [
+  "ForgeCacheEntry": [
     {
       "crate": "cache",
       "kind": "struct",
       "line": 68,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
-  "GithubCacheError": [
+  "ForgeCacheError": [
     {
       "crate": "cache",
       "kind": "enum",
       "line": 81,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
-  "GithubCacheKey": [
+  "ForgeCacheKey": [
     {
       "crate": "cache",
       "kind": "struct",
       "line": 25,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
-  "GithubCachePolicy": [
+  "ForgeCachePolicy": [
     {
       "crate": "cache",
       "kind": "struct",
       "line": 101,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
-  "GithubCacheSettings": [
+  "ForgeCacheSettings": [
     {
       "crate": "envd",
       "kind": "struct",
-      "line": 352,
+      "line": 350,
       "path": "crates/envd/src/tool_settings.rs"
     }
   ],
-  "GithubCacheStatus": [
+  "ForgeCacheStatus": [
     {
       "crate": "cache",
       "kind": "enum",
       "line": 59,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
   "GithubCard": [
@@ -22939,12 +22939,12 @@
       "path": "crates/envd/src/github_url.rs"
     }
   ],
-  "GithubResourceKind": [
+  "ForgeResourceKind": [
     {
       "crate": "cache",
       "kind": "enum",
       "line": 14,
-      "path": "crates/cache/src/github_cache.rs"
+      "path": "crates/cache/src/forge_cache.rs"
     }
   ],
   "GithubScheme": [

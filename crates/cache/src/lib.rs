@@ -6,8 +6,8 @@
 pub mod atomic;
 /// User-wide document-conversion cache and daemon-owned collection policy.
 pub mod document_cache;
-/// Rebuildable direct-GitHub response cache.
-pub mod github_cache;
+/// Rebuildable forge issue/change-request response cache.
+pub mod forge_cache;
 /// Persistent MCP definition-cache storage.
 pub mod mcp_cache;
 /// Persistent secret-placeholder key storage.
