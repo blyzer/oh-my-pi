@@ -44,7 +44,7 @@ pub struct RefContext {
 	pub number:    Str,
 }
 
-/// Parses the GitHub reference token ending at `cursor`, if any.
+/// Parses the forge reference token ending at `cursor`, if any.
 #[must_use]
 pub fn ref_context(text: &str, cursor: usize) -> Option<RefContext> {
 	let before = text.get(..cursor)?;
@@ -86,7 +86,7 @@ pub fn ref_context(text: &str, cursor: usize) -> Option<RefContext> {
 	})
 }
 
-/// GitHub reference completion.
+/// Forge reference completion.
 pub struct GithubRefs;
 
 impl EditorCompletion for GithubRefs {

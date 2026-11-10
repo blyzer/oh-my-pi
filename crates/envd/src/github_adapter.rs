@@ -14,9 +14,18 @@
 //! The CI registration advertises `log_stream` only. Status stays allowed
 //! because the contract does not flag it. Cancel, rerun, trigger, artifacts,
 //! and play-manual are `NotCapable` at the router.
+//!
+//! [`CheckoutForge`] is that same router for one checkout. Chat's git watcher
+//! reads the branch's change request through `view_change_request` on it.
 
-use std::{future::Future, sync::Arc};
+use std::{
+	future::Future,
+	path::{Path, PathBuf},
+	sync::Arc,
+	time::Duration,
+};
 
+use omp_cache::github_cache::{GithubCache, GithubCachePolicy};
 use omp_ci::{
 	ArtifactPage, Capabilities, CiError, CiHost, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline,
 	RunRef, Trigger,
@@ -30,13 +39,17 @@ use omp_forge::{
 	SearchHit, SearchKind, SearchPage, SearchQuery,
 };
 use omp_forge_delegated::{Delegated as ForgeDelegated, PermitAll as ForgePermitAll};
+use omp_vcs::git::GitRepo;
+use parking_lot::Mutex;
 use serde_json::Value;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+	blobs::BlobHost,
 	github::GithubService,
 	github_params::{self, Operation, Params, Payload, PrSelector},
-	github_url,
+	github_url::{self, GithubCredentialBridge},
 };
 
 /// GitHub implementation of [`ForgeHost`].
@@ -96,6 +109,156 @@ fn register_checkout_host(service: &GithubService, mut register: impl FnMut(&str
 		return;
 	}
 	register(repo.host());
+}
+
+/// How long a branch change-request read may take before the watcher moves on.
+const BRANCH_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Forge `Delegated` router for one checkout.
+///
+/// This is the same router `forge@1` builds (`forge_router`).
+/// [`Self::view_branch`] resolves the open change-request number for the
+/// branch, then reads the record through [`ForgeHost::view_change_request`]. A
+/// checkout with no `github.com` remote returns `None` without a request.
+/// GitLab stays on the T2 extension.
+#[derive(Clone)]
+pub struct CheckoutForge {
+	inner: Arc<CheckoutForgeInner>,
+}
+
+struct CheckoutForgeInner {
+	root:        PathBuf,
+	state_dir:   PathBuf,
+	credentials: Arc<GithubCredentialBridge>,
+	blobs:       BlobHost,
+	policy:      GithubCachePolicy,
+	built:       Mutex<Option<BuiltForge>>,
+}
+
+#[derive(Clone)]
+struct BuiltForge {
+	service: Arc<GithubService>,
+	router:  ForgeDelegated<GithubForgeAdapter, ForgePermitAll>,
+}
+
+impl CheckoutForge {
+	/// Shares `blobs` and `credentials` with the project environment.
+	///
+	/// The router is built on the first read, against the same GitHub cache
+	/// file the environment host opens.
+	pub(crate) fn new(
+		root: PathBuf,
+		state_dir: PathBuf,
+		credentials: Arc<GithubCredentialBridge>,
+		blobs: BlobHost,
+		policy: GithubCachePolicy,
+	) -> Self {
+		Self {
+			inner: Arc::new(CheckoutForgeInner {
+				root,
+				state_dir,
+				credentials,
+				blobs,
+				policy,
+				built: Mutex::new(None),
+			}),
+		}
+	}
+
+	/// Open change request whose head is `branch`, if the checkout has one.
+	///
+	/// The number comes from the existing open-pull lookup. The title, state,
+	/// and URL come from `view_change_request` on the `Delegated` router.
+	/// `Ok(None)` is a checkout this adapter does not read, or a branch with
+	/// no single open change request. Any other failure is returned so the
+	/// caller can retry.
+	pub async fn view_branch(&self, branch: &str) -> Result<Option<ChangeRequest>, ForgeError> {
+		let branch = branch.trim();
+		if branch.is_empty() || !serves_github(&self.inner.root) {
+			return Ok(None);
+		}
+		let read = async {
+			let op = ForgeOp::ChangeRequestView;
+			let built = self.built().ok_or(ForgeError::Unavailable { op })?;
+			let repo = checkout_repo(&self.inner.root)?;
+			let github = github_repo(op, &repo)?;
+			let token = CancellationToken::new();
+			let _guard = CancelOnDrop(token.clone());
+			let number = match built
+				.service
+				.open_change_request_number(&github, branch, &token)
+				.await
+			{
+				Ok(number) => number,
+				Err(error) if no_single_open_request(&error) => return Ok(None),
+				Err(error) => return Err(map_forge(op, &repo, None, None, error)),
+			};
+			built
+				.router
+				.view_change_request(&repo, number)
+				.await
+				.map(Some)
+		};
+		match time::timeout(BRANCH_READ_TIMEOUT, read).await {
+			Ok(result) => result,
+			Err(_elapsed) => Err(ForgeError::Unavailable { op: ForgeOp::ChangeRequestView }),
+		}
+	}
+
+	fn built(&self) -> Option<BuiltForge> {
+		let mut slot = self.inner.built.lock();
+		if let Some(built) = slot.as_ref() {
+			return Some(built.clone());
+		}
+		let cache =
+			GithubCache::open(self.inner.state_dir.join("github-cache.sqlite3"), self.inner.policy)
+				.ok()?;
+		let service = GithubService::new(
+			self.inner.root.clone(),
+			&self.inner.state_dir,
+			Arc::clone(&self.inner.credentials),
+			Arc::new(cache),
+			self.inner.blobs.clone(),
+		);
+		let built = BuiltForge { router: forge_router(Arc::clone(&service)), service };
+		*slot = Some(built.clone());
+		Some(built)
+	}
+}
+
+/// Repository the checkout's origin (or first remote) names.
+pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
+	let repo =
+		github_url::infer_repo(root).map_err(|_| ForgeError::Unscoped { op: ForgeOp::RepoView })?;
+	let mut parts = repo.slug().split('/');
+	let owner = parts.next().unwrap_or_default();
+	let name = parts.next().unwrap_or_default();
+	RepoRef::try_new(repo.host(), owner, name).map_err(ForgeError::from)
+}
+
+/// `github_invalid_pr` is the lookup's "no single open request" answer:
+/// an empty or unsafe branch, zero matches, or more than one match.
+fn no_single_open_request(error: &github_params::Fault) -> bool {
+	error.code == "github_invalid_pr"
+}
+
+/// A `github.com` remote is the only checkout this adapter reads.
+///
+/// GitHub Enterprise hosts whose URL does not contain `github.com` stay dark,
+/// matching the previous git-watch lookup. GitLab waits on the T2 extension.
+fn serves_github(root: &Path) -> bool {
+	let Ok(Some(repo)) = GitRepo::discover(root) else {
+		return false;
+	};
+	repo.remote_list().ok().is_some_and(|names| {
+		names.into_iter().any(|name| {
+			repo
+				.remote_url(&name)
+				.ok()
+				.flatten()
+				.is_some_and(|url| url.contains("github.com"))
+		})
+	})
 }
 
 struct CancelOnDrop(CancellationToken);
@@ -1084,5 +1247,52 @@ mod tests {
 		assert!(matches!(missing, ForgeError::IssueNotFound { number: 3, .. }), "{missing}");
 		let rejected = super::map_forge(ForgeOp::IssueView, &repo, Some(3), None, http_fault(500));
 		assert!(matches!(rejected, ForgeError::Rejected { status: 500, .. }), "{rejected}");
+	}
+
+	#[test]
+	fn github_remote_gate_requires_a_github_com_remote() {
+		let dir = tempfile::tempdir().expect("temp");
+		let root = dir.path();
+		omp_vcs::git::init(root).expect("init");
+		assert!(!super::serves_github(root));
+		let repo = omp_vcs::git::GitRepo::discover(root)
+			.expect("discover")
+			.expect("repo");
+		repo
+			.remote_add("origin", "https://gitlab.example/acme/widget.git")
+			.expect("gitlab remote");
+		assert!(!super::serves_github(root));
+		repo
+			.remote_add("upstream", "https://github.com/acme/widget.git")
+			.expect("github remote");
+		assert!(super::serves_github(root));
+	}
+
+	#[tokio::test]
+	async fn view_branch_returns_none_without_a_github_remote() {
+		let dir = tempfile::tempdir().expect("temp");
+		let root = dir.path();
+		omp_vcs::git::init(root).expect("init");
+		let repo = omp_vcs::git::GitRepo::discover(root)
+			.expect("discover")
+			.expect("repo");
+		repo
+			.remote_add("origin", "https://gitlab.example/acme/widget.git")
+			.expect("remote");
+		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
+		let forge = super::CheckoutForge::new(
+			root.to_path_buf(),
+			root.to_path_buf(),
+			Arc::new(GithubCredentialBridge::new()),
+			blobs,
+			GithubCacheSettings::from_con(&Ctx::new()).policy(),
+		);
+		assert!(
+			forge
+				.view_branch("main")
+				.await
+				.expect("gitlab stays unread")
+				.is_none()
+		);
 	}
 }

@@ -99,6 +99,9 @@ pub struct ServiceState {
 	pub theme_catalog:     Arc<omp_tui::ThemeCatalog>,
 	/// Runtime the asynchronous feeds spawn onto.
 	pub runtime:           tokio::runtime::Handle,
+	/// Forge `Delegated` router for the checkout. Git watch reads the
+	/// branch's change request through it.
+	pub forge:             omp_envd::CheckoutForge,
 }
 
 /// Cloneable handles into the production authentication and usage stack.
@@ -481,6 +484,25 @@ impl Services for AppServices {
 
 	fn dump_raw_sse(&self) -> ServiceResult<PathBuf> {
 		debug::dump_raw_sse(&self.state)
+	}
+
+	fn branch_change_request(
+		&self,
+		branch: &str,
+	) -> ServiceResult<Pending<Option<omp_chat::status_band::PullRequest>>> {
+		let forge = self.state.forge.clone();
+		let branch = Str::new(branch);
+		let (sender, receiver) = flume::bounded(1);
+		self.state.runtime.spawn(async move {
+			let found = forge.view_branch(branch.as_str()).await.map(|request| {
+				request.map(|request| omp_chat::status_band::PullRequest {
+					number: request.number,
+					url:    request.web_url,
+				})
+			});
+			let _ = sender.send(found.map_err(omp_chat::overlays::services::ServiceError::failed));
+		});
+		Ok(receiver)
 	}
 }
 

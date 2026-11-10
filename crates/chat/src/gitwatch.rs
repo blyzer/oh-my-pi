@@ -15,16 +15,21 @@ use flume::{Receiver, Sender};
 use notify::{RecursiveMode, Watcher as _};
 use omp_core::Str;
 use omp_vcs::git::GitRepo;
-use serde::Deserialize;
-use tokio::{process::Command, task::JoinHandle, time};
+use tokio::{task::JoinHandle, time};
 
-use crate::status_band::{GitStatus, PullRequest, WorktreeLabel};
+use crate::{
+	overlays::services::Services,
+	status_band::{GitStatus, PullRequest, WorktreeLabel},
+};
 
 /// Safety-poll cadence when the head watcher is silent or unavailable.
 pub const GIT_POLL: Duration = Duration::from_secs(5);
 
-/// A PR lookup is never allowed to stall observer-local status refresh.
-const PR_TIMEOUT: Duration = Duration::from_secs(5);
+/// Backstop so a forge read cannot stall observer-local status refresh.
+///
+/// The composed forge host cancels its own read at five seconds.
+/// This wait is longer so that result still arrives.
+const PR_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Coalescing window after a filesystem event before the repository is
 /// re-probed, so one `git checkout` (HEAD, index, ORIG_HEAD) probes once.
@@ -39,7 +44,7 @@ pub struct GitFacts {
 	/// Exact porcelain counts. `None` only for the cheap synchronous launch
 	/// snapshot before the first background probe.
 	pub status:       Option<GitStatus>,
-	/// Pull request associated with the branch, refreshed after HEAD events.
+	/// Change request for the branch. Refreshed when the branch name changes.
 	pub pull_request: Option<PullRequest>,
 	/// Linked-worktree identity for the compact path segment.
 	pub worktree:     Option<WorktreeLabel>,
@@ -64,10 +69,27 @@ impl GitWatch {
 	/// [`Self::start`] with an explicit safety-poll cadence.
 	#[must_use]
 	pub fn start_with(project: &Path, poll: Duration) -> Option<(Self, Receiver<GitFacts>)> {
+		Self::open(project, poll, None)
+	}
+
+	/// [`Self::start`] with the composed forge host that reads change requests.
+	#[must_use]
+	pub fn start_with_services(
+		project: &Path,
+		services: Arc<dyn Services>,
+	) -> Option<(Self, Receiver<GitFacts>)> {
+		Self::open(project, GIT_POLL, Some(services))
+	}
+
+	fn open(
+		project: &Path,
+		poll: Duration,
+		services: Option<Arc<dyn Services>>,
+	) -> Option<(Self, Receiver<GitFacts>)> {
 		let handle = tokio::runtime::Handle::try_current().ok()?;
 		let repo = Arc::new(GitRepo::discover(project).ok().flatten()?);
 		// The branch and linked-worktree identity are metadata reads; porcelain
-		// status and GitHub lookup stay off the launch path.
+		// status and the change-request lookup stay off the launch path.
 		let launch = GitFacts {
 			branch:       branch_of(&repo),
 			status:       None,
@@ -77,7 +99,8 @@ impl GitWatch {
 		let (events, changes) = flume::unbounded::<()>();
 		let watcher = HeadWatcher::install(&repo, events);
 		let (sender, receiver) = flume::unbounded();
-		let task = handle.spawn(watch_loop(repo, watcher, launch.clone(), changes, sender, poll));
+		let task =
+			handle.spawn(watch_loop(repo, watcher, launch.clone(), changes, sender, poll, services));
 		Some((Self { launch, task }, receiver))
 	}
 
@@ -144,10 +167,16 @@ async fn watch_loop(
 	changes: Receiver<()>,
 	sender: Sender<GitFacts>,
 	poll: Duration,
+	services: Option<Arc<dyn Services>>,
 ) {
-	// Deliver the status counts and PR the launch probe skipped.
+	// Deliver the status counts and change request the launch probe skipped.
+	// The forge read follows the branch name. A status probe can wake the
+	// head watch by touching the git directory; that must not read again.
+	// A failed read for one branch waits [`PR_TIMEOUT`] before that same
+	// branch is tried again. A settled answer stays until the branch changes.
 	let mut due = true;
-	let mut refresh_pr = true;
+	let mut looked_up: Option<Option<Str>> = None;
+	let mut hold: Option<(Option<Str>, std::time::Instant)> = None;
 	loop {
 		if !due {
 			tokio::select! {
@@ -158,7 +187,6 @@ async fn watch_loop(
 						if let Some(watcher) = watcher.as_mut() {
 							watcher.rearm();
 						}
-						refresh_pr = true;
 					}
 				},
 				() = time::sleep(poll) => {},
@@ -169,11 +197,23 @@ async fn watch_loop(
 		let Ok(mut facts) = tokio::task::spawn_blocking(move || probe_facts(&probe)).await else {
 			return;
 		};
-		if refresh_pr {
-			facts.pull_request = lookup_pr(&repo).await;
-			refresh_pr = false;
-		} else {
+		let waiting = hold.as_ref().is_some_and(|(branch, until)| {
+			branch == &facts.branch && std::time::Instant::now() < *until
+		});
+		if looked_up.as_ref() == Some(&facts.branch) || waiting {
 			facts.pull_request.clone_from(&last.pull_request);
+		} else {
+			match lookup_change_request(services.as_ref(), facts.branch.as_ref()).await {
+				BranchRead::Settled(pull) => {
+					facts.pull_request = pull;
+					looked_up = Some(facts.branch.clone());
+					hold = None;
+				},
+				BranchRead::Again => {
+					facts.pull_request.clone_from(&last.pull_request);
+					hold = Some((facts.branch.clone(), std::time::Instant::now() + PR_TIMEOUT));
+				},
+			}
 		}
 		if facts != last {
 			last = facts.clone();
@@ -212,39 +252,37 @@ fn worktree_label(repo: &GitRepo) -> Option<WorktreeLabel> {
 	Some(WorktreeLabel { project, worktree })
 }
 
-#[derive(Deserialize)]
-struct GhPullRequest {
-	number: u64,
-	url:    Str,
+/// Outcome of one forge read.
+enum BranchRead {
+	/// The host answered. `None` means this branch has no open change request.
+	Settled(Option<PullRequest>),
+	/// The host did not answer. The watcher retries after [`PR_TIMEOUT`].
+	Again,
 }
 
-/// Bounded, event-driven PR lookup. It runs only at launch and after HEAD
-/// changes, never on animation frames or the five-second safety poll.
-async fn lookup_pr(repo: &GitRepo) -> Option<PullRequest> {
-	let github = repo.remote_list().ok()?.into_iter().any(|name| {
-		repo
-			.remote_url(&name)
-			.ok()
-			.flatten()
-			.is_some_and(|url| url.contains("github.com"))
-	});
-	if !github {
-		return None;
+/// Bounded change-request lookup. It runs when the checked-out branch
+/// changes, including the first probe. A settled answer is not read again
+/// on the safety poll.
+///
+/// The application implements [`Services::branch_change_request`] with the
+/// environment's forge `Delegated` router (`view_change_request`).
+async fn lookup_change_request(
+	services: Option<&Arc<dyn Services>>,
+	branch: Option<&Str>,
+) -> BranchRead {
+	let Some(services) = services else {
+		return BranchRead::Settled(None);
+	};
+	let Some(branch) = branch.filter(|branch| !branch.is_empty()) else {
+		return BranchRead::Settled(None);
+	};
+	let Ok(pending) = services.branch_change_request(branch) else {
+		return BranchRead::Again;
+	};
+	match time::timeout(PR_TIMEOUT, pending.recv_async()).await {
+		Ok(Ok(Ok(pull))) => BranchRead::Settled(pull),
+		_ => BranchRead::Again,
 	}
-	let mut command = Command::new("gh");
-	command
-		.args(["pr", "view", "--json", "number,url"])
-		.current_dir(repo.root())
-		.kill_on_drop(true);
-	let output = time::timeout(PR_TIMEOUT, command.output())
-		.await
-		.ok()?
-		.ok()?;
-	if !output.status.success() {
-		return None;
-	}
-	let pull: GhPullRequest = serde_json::from_slice(&output.stdout).ok()?;
-	Some(PullRequest { number: pull.number, url: pull.url })
 }
 
 #[cfg(test)]
@@ -331,5 +369,97 @@ mod tests {
 	async fn outside_a_checkout_there_is_nothing_to_watch() {
 		let scratch = tempfile::tempdir().expect("tempdir");
 		assert!(GitWatch::start(scratch.path()).is_none());
+	}
+
+	struct FixedRequest {
+		calls: std::sync::atomic::AtomicUsize,
+		pull:  PullRequest,
+	}
+
+	impl crate::overlays::services::Services for FixedRequest {
+		fn branch_change_request(
+			&self,
+			_branch: &str,
+		) -> crate::overlays::services::ServiceResult<
+			crate::overlays::services::Pending<Option<PullRequest>>,
+		> {
+			self
+				.calls
+				.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			let (tx, rx) = flume::bounded(1);
+			let _ = tx.send(Ok(Some(self.pull.clone())));
+			Ok(rx)
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn change_request_arrives_from_the_forge_lookup_and_not_on_the_poll() {
+		let scratch = tempfile::tempdir().expect("tempdir");
+		let root = scratch.path();
+		let (_, seeded) = seeded_repo(root);
+		let pull = PullRequest { number: 7, url: Str::new_static("https://example.test/pull/7") };
+		let services = std::sync::Arc::new(FixedRequest {
+			calls: std::sync::atomic::AtomicUsize::new(0),
+			pull:  pull.clone(),
+		});
+		let poll = Duration::from_millis(200);
+		let (watch, facts) =
+			GitWatch::open(root, poll, Some(services.clone() as std::sync::Arc<dyn Services>))
+				.expect("watch");
+		let first = facts.recv_timeout(WATCHER).expect("initial probe");
+		assert_eq!(first.branch, Some(seeded.clone()));
+		assert_eq!(first.pull_request, Some(pull));
+		assert_eq!(services.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+		fs::write(root.join("again.txt"), "two\n").expect("dirty");
+		let dirty = facts.recv_timeout(poll * 10).expect("dirty probe");
+		assert!(dirty.status.is_some_and(GitStatus::dirty));
+		assert_eq!(dirty.pull_request.as_ref().map(|pull| pull.number), Some(7));
+		assert_eq!(services.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+		let head = root.join(".git/HEAD");
+		fs::write(&head, "ref: refs/heads/other\n").expect("move HEAD");
+		let moved = facts.recv_timeout(WATCHER).expect("branch move");
+		assert_eq!(moved.branch.as_deref(), Some("other"));
+		assert_eq!(moved.pull_request.as_ref().map(|pull| pull.number), Some(7));
+		assert_eq!(services.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+		drop(watch);
+	}
+
+	struct FailingLookup {
+		calls: std::sync::atomic::AtomicUsize,
+	}
+
+	impl crate::overlays::services::Services for FailingLookup {
+		fn branch_change_request(
+			&self,
+			_branch: &str,
+		) -> crate::overlays::services::ServiceResult<
+			crate::overlays::services::Pending<Option<PullRequest>>,
+		> {
+			self
+				.calls
+				.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Err(crate::overlays::services::ServiceError::Unavailable { feed: "change request" })
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_failed_change_request_read_is_not_retried_on_the_safety_poll() {
+		let scratch = tempfile::tempdir().expect("tempdir");
+		let root = scratch.path();
+		let _ = seeded_repo(root);
+		let services =
+			std::sync::Arc::new(FailingLookup { calls: std::sync::atomic::AtomicUsize::new(0) });
+		let poll = Duration::from_millis(200);
+		let (watch, facts) =
+			GitWatch::open(root, poll, Some(services.clone() as std::sync::Arc<dyn Services>))
+				.expect("watch");
+		let first = facts.recv_timeout(WATCHER).expect("initial probe");
+		assert!(first.pull_request.is_none());
+		assert_eq!(services.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+		tokio::time::sleep(poll * 4).await;
+		assert_eq!(services.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+		drop(watch);
 	}
 }

@@ -606,12 +606,12 @@ impl GitStatus {
 	}
 }
 
-/// Pull request associated with the checked-out branch.
+/// Change request associated with the checked-out branch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullRequest {
-	/// GitHub pull request number.
+	/// Change-request number.
 	pub number: u64,
-	/// Target URL used by hyperlink-capable presenters.
+	/// Browser URL used by hyperlink-capable presenters.
 	pub url:    Str,
 }
 

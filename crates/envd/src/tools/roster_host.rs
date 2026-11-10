@@ -287,12 +287,7 @@ impl SessionInstall for SessionHost<'_> {
 }
 
 fn checkout_repo(root: &Path) -> Result<omp_forge::RepoRef, omp_forge::ForgeError> {
-	let repo = crate::github_url::infer_repo(root)
-		.map_err(|_| omp_forge::ForgeError::Unscoped { op: omp_forge::ForgeOp::RepoView })?;
-	let mut parts = repo.slug().split('/');
-	let owner = parts.next().unwrap_or_default();
-	let name = parts.next().unwrap_or_default();
-	omp_forge::RepoRef::try_new(repo.host(), owner, name).map_err(omp_forge::ForgeError::from)
+	crate::github_adapter::checkout_repo(root)
 }
 
 pub(super) struct DeclarationHost<'a> {

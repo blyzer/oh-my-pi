@@ -1275,6 +1275,21 @@ impl EnvServer {
 		Arc::clone(&self.github_credentials)
 	}
 
+	/// Canonical project root this server was opened for.
+	pub(crate) fn project_root(&self) -> PathBuf {
+		self.workspace.root().to_path_buf()
+	}
+
+	/// Project state directory (cache, blobs, sessions).
+	pub(crate) fn state_dir(&self) -> &Path {
+		&self.state_dir
+	}
+
+	/// Blob authority shared with the forge router.
+	pub(crate) fn blob_host(&self) -> crate::blobs::BlobHost {
+		self.blobs.clone()
+	}
+
 	/// Returns the session generation fencing CONTROL connections.
 	pub(crate) fn session_generation(&self) -> u64 {
 		self.ext_hosts.session_generation()

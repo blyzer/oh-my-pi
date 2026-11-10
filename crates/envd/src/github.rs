@@ -868,6 +868,85 @@ impl GithubService {
 		Ok(response)
 	}
 
+	/// Open change-request number whose head is `branch`.
+	///
+	/// [`crate::github_adapter::CheckoutForge`] passes this number to the
+	/// forge router's `view_change_request`. This method does not fetch the
+	/// record.
+	pub(crate) async fn open_change_request_number(
+		&self,
+		repo: &GithubRepo,
+		branch: &str,
+		cancellation: &CancellationToken,
+	) -> Result<u64, Fault> {
+		let branch = branch.trim();
+		if branch.is_empty() || branch.starts_with('-') {
+			return Err(fault(
+				"github_invalid_pr",
+				"pull request must be a positive number, URL, or branch name",
+			));
+		}
+		let owner = repo.slug().split_once('/').expect("validated repository").0;
+		let head = if branch.contains(':') {
+			branch.to_owned()
+		} else {
+			format!("{owner}:{branch}")
+		};
+		let endpoint = pr_branch_endpoint(repo.slug(), &head);
+		let matches = self
+			.request(repo.host(), Method::Get, &endpoint, None, cancellation)
+			.await?;
+		let rows = matches.value.as_array().ok_or_else(|| {
+			fault("github_invalid_response", "GitHub pull request lookup was not a list")
+		})?;
+		let mut numbers = rows
+			.iter()
+			.filter_map(|row| row.get("number").and_then(Value::as_u64))
+			.collect::<Vec<_>>();
+		if numbers.is_empty() {
+			for page in 1..=100u32 {
+				let response = self
+					.request(
+						repo.host(),
+						Method::Get,
+						&pr_list_endpoint(repo.slug(), page),
+						None,
+						cancellation,
+					)
+					.await?;
+				let rows = response.value.as_array().ok_or_else(|| {
+					fault("github_invalid_response", "GitHub pull request lookup was not a list")
+				})?;
+				numbers.extend(rows.iter().filter_map(|row| {
+					let matches_branch = row.pointer("/head/ref").and_then(Value::as_str)
+						== Some(branch)
+						|| row.pointer("/head/label").and_then(Value::as_str) == Some(branch);
+					matches_branch
+						.then(|| row.get("number").and_then(Value::as_u64))
+						.flatten()
+				}));
+				if rows.len() < 100 {
+					break;
+				}
+			}
+		}
+		numbers.sort_unstable();
+		numbers.dedup();
+		let Some(number) = numbers.first().copied() else {
+			return Err(fault(
+				"github_invalid_pr",
+				"no open pull request has the requested head branch",
+			));
+		};
+		if numbers.len() > 1 {
+			return Err(fault(
+				"github_invalid_pr",
+				"multiple open pull requests have the requested head branch",
+			));
+		}
+		Ok(number)
+	}
+
 	async fn resolve_pr(
 		&self,
 		repo: &GithubRepo,
@@ -877,72 +956,9 @@ impl GithubService {
 		let number = if let Some(number) = parse_pr_number(selector, repo)? {
 			number
 		} else {
-			let branch = selector.trim();
-			if branch.is_empty() || branch.starts_with('-') {
-				return Err(fault(
-					"github_invalid_pr",
-					"pull request must be a positive number, URL, or branch name",
-				));
-			}
-			let owner = repo.slug().split_once('/').expect("validated repository").0;
-			let head = if branch.contains(':') {
-				branch.to_owned()
-			} else {
-				format!("{owner}:{branch}")
-			};
-			let endpoint = pr_branch_endpoint(repo.slug(), &head);
-			let matches = self
-				.request(repo.host(), Method::Get, &endpoint, None, cancellation)
-				.await?;
-			let rows = matches.value.as_array().ok_or_else(|| {
-				fault("github_invalid_response", "GitHub pull request lookup was not a list")
-			})?;
-			let mut numbers = rows
-				.iter()
-				.filter_map(|row| row.get("number").and_then(Value::as_u64))
-				.collect::<Vec<_>>();
-			if numbers.is_empty() {
-				for page in 1..=100u32 {
-					let response = self
-						.request(
-							repo.host(),
-							Method::Get,
-							&pr_list_endpoint(repo.slug(), page),
-							None,
-							cancellation,
-						)
-						.await?;
-					let rows = response.value.as_array().ok_or_else(|| {
-						fault("github_invalid_response", "GitHub pull request lookup was not a list")
-					})?;
-					numbers.extend(rows.iter().filter_map(|row| {
-						let matches_branch = row.pointer("/head/ref").and_then(Value::as_str)
-							== Some(branch)
-							|| row.pointer("/head/label").and_then(Value::as_str) == Some(branch);
-						matches_branch
-							.then(|| row.get("number").and_then(Value::as_u64))
-							.flatten()
-					}));
-					if rows.len() < 100 {
-						break;
-					}
-				}
-			}
-			numbers.sort_unstable();
-			numbers.dedup();
-			let Some(number) = numbers.first().copied() else {
-				return Err(fault(
-					"github_invalid_pr",
-					"no open pull request has the requested head branch",
-				));
-			};
-			if numbers.len() > 1 {
-				return Err(fault(
-					"github_invalid_pr",
-					"multiple open pull requests have the requested head branch",
-				));
-			}
-			number
+			self
+				.open_change_request_number(repo, selector, cancellation)
+				.await?
 		};
 		let response = self
 			.request(

@@ -1519,6 +1519,18 @@ pub trait Services: Send + Sync {
 	fn dump_raw_sse(&self) -> ServiceResult<PathBuf> {
 		Err(ServiceError::Unavailable { feed: "raw SSE dump" })
 	}
+
+	/// Open change request for the checked-out `branch`.
+	///
+	/// The production host reads it through the environment's forge
+	/// `Delegated` router (`view_change_request`). `Ok(None)` means the
+	/// branch has no open change request.
+	fn branch_change_request(
+		&self,
+		_branch: &str,
+	) -> ServiceResult<Pending<Option<crate::status_band::PullRequest>>> {
+		Err(ServiceError::Unavailable { feed: "change request" })
+	}
 }
 
 /// A host with no application feeds (tests, `omp render`).

@@ -67,6 +67,7 @@ pub(crate) fn services(
 		trace,
 		theme_catalog: Arc::clone(&launch.theme_catalog),
 		runtime: tokio::runtime::Handle::current(),
+		forge: environment.checkout_forge(&launch.ctx),
 	}));
 	Ok((Arc::clone(&services) as Arc<dyn Services>, services as Arc<dyn Mutations>))
 }
