@@ -3,9 +3,10 @@
 //! Driver selects a [`SelectedRoster`] in `compose_kernel`. The environment
 //! host iterates that selection and fills the host traits below. This module
 //! enumerates every built-in family; the host enumerates none. Capability
-//! rows such as `browser`, `computer`, `image_gen`, and `tts` are rows of
-//! this table only while their `cap-*` feature is on. The `Family` variant
-//! and the contract module stay either way.
+//! rows such as `browser`, `computer`, `image_gen`, `tts`, `forge`, and `ci`
+//! are rows of this table only while their `cap-*` feature is on. The
+//! `Family` variant stays either way. Forge and CI modules compile with
+//! their features so selected unification can drop those crates from envd.
 //!
 //! Constructors are the exhaustive `Family` matches in this file, not function
 //! pointers on the row. Several host traits return `impl Future` and are not
@@ -22,7 +23,9 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "cap-ci")]
 use omp_ci::CiHost;
+#[cfg(feature = "cap-forge")]
 use omp_forge::{ForgeError, ForgeHost, RepoRef};
 use omp_memory::Capabilities;
 use omp_tool::{
@@ -401,6 +404,7 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		false,
 		BridgeNeeds::TELEMETRY,
 	),
+	#[cfg(feature = "cap-forge")]
 	same(
 		Family::Forge,
 		false,
@@ -412,6 +416,7 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		false,
 		BridgeNeeds::GITHUB.or(BridgeNeeds::BLOBS),
 	),
+	#[cfg(feature = "cap-ci")]
 	same(
 		Family::Ci,
 		false,
@@ -1032,8 +1037,16 @@ pub trait SessionInstall: ToolGate {
 	/// Checkpoint and rewind share one control value.
 	type Checkpoint: CheckpointControl;
 	/// Forge router. The host owns the concrete delegated adapter.
+	///
+	/// Absent when `cap-forge` is off. The host does not compile the forge
+	/// adapter in that build.
+	#[cfg(feature = "cap-forge")]
 	type ForgeRouter: ForgeHost;
 	/// CI router. The host owns the concrete delegated adapter.
+	///
+	/// Absent when `cap-ci` is off. The host does not compile the CI adapter
+	/// in that build.
+	#[cfg(feature = "cap-ci")]
 	type CiRouter: CiHost;
 
 	/// Registers one session-locus tool using the row's presentation and claims.
@@ -1062,10 +1075,19 @@ pub trait SessionInstall: ToolGate {
 	fn search_backend(&self) -> Arc<Self::Search>;
 	/// Forge router. Building it starts telemetry upload the first time the
 	/// shared GitHub service is created. `forge` is installed before `ci`.
+	///
+	/// Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter;
 	/// CI router over the same GitHub service as [`Self::forge_router`].
+	///
+	/// Absent when `cap-ci` is off.
+	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter;
 	/// Checkout repository used when a forge call omits `repo`.
+	///
+	/// Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
 	fn current_repo(&self) -> Arc<dyn Fn() -> Result<RepoRef, ForgeError> + Send + Sync>;
 	/// Ask presenter.
 	fn ask_presenter(&self) -> Arc<dyn AskPresenter>;
@@ -1255,15 +1277,21 @@ fn install_session_row<H: SessionInstall>(
 			let tool = host.report_tool();
 			host.register_session(tool, row)
 		},
+		#[cfg(feature = "cap-forge")]
 		Family::Forge => {
 			let router = host.forge_router();
 			let current = host.current_repo();
 			host.register_session(crate::forge::tool(router, current), row)
 		},
+		#[cfg(not(feature = "cap-forge"))]
+		Family::Forge => Ok(()),
+		#[cfg(feature = "cap-ci")]
 		Family::Ci => {
 			let router = host.ci_router();
 			host.register_session(crate::ci::tool(router), row)
 		},
+		#[cfg(not(feature = "cap-ci"))]
+		Family::Ci => Ok(()),
 		Family::WebSearch => {
 			let backend = host.search_backend();
 			host.register_session(crate::web_search::tool(backend), row)
@@ -1675,6 +1703,10 @@ mod tests {
 			Family::Computer => false,
 			#[cfg(not(feature = "cap-media"))]
 			Family::ImageGen | Family::Tts => false,
+			#[cfg(not(feature = "cap-forge"))]
+			Family::Forge => false,
+			#[cfg(not(feature = "cap-ci"))]
+			Family::Ci => false,
 			_ => true,
 		}
 	}
@@ -1714,6 +1746,14 @@ mod tests {
 		assert!(entry(Family::ImageGen).is_none(), "image_gen row is compiled out");
 		#[cfg(not(feature = "cap-media"))]
 		assert!(entry(Family::Tts).is_none(), "tts row is compiled out");
+		#[cfg(feature = "cap-forge")]
+		assert!(entry(Family::Forge).is_some(), "forge row is in the construction table");
+		#[cfg(not(feature = "cap-forge"))]
+		assert!(entry(Family::Forge).is_none(), "forge row is compiled out");
+		#[cfg(feature = "cap-ci")]
+		assert!(entry(Family::Ci).is_some(), "ci row is in the construction table");
+		#[cfg(not(feature = "cap-ci"))]
+		assert!(entry(Family::Ci).is_none(), "ci row is compiled out");
 	}
 
 	#[test]

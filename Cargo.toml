@@ -122,7 +122,7 @@ num-traits = "0.2"
 omp-adw = { path = "crates/adw", version = "2.0.0" }
 omp-agent = { path = "crates/agent", version = "2.0.0" }
 omp-app = { path = "crates/app", version = "2.0.0" }
-omp-chat = { path = "crates/chat", version = "2.0.0" }
+omp-chat = { path = "crates/chat", version = "2.0.0", default-features = false }
 omp-ci = { path = "crates/ci", version = "2.0.0" }
 omp-ci-delegated = { path = "crates/ci-delegated", version = "2.0.0" }
 omp-con = { path = "crates/con", version = "2.0.0" }
@@ -173,7 +173,7 @@ omp-ssh = { path = "crates/ssh", version = "2.0.0" }
 omp-cache = { path = "crates/cache", version = "2.0.0" }
 omp-observability = { path = "crates/observability", version = "2.0.0" }
 omp-tool = { path = "crates/tool", version = "2.0.0" }
-omp-tools = { path = "crates/tools", version = "2.0.0" }
+omp-tools = { path = "crates/tools", version = "2.0.0", default-features = false }
 omp-tui = { path = "crates/tui", version = "2.0.0" }
 omp-vocab = { path = "crates/vocab", version = "2.0.0" }
 omp-vcs = { path = "crates/vcs", version = "2.0.0" }

@@ -15,10 +15,14 @@ use self::{
 	fs::{ReadRenderer, WriteRenderer},
 	hub::HubRenderer,
 	interaction::{AskRenderer, ThinkRenderer, TodoRenderer},
-	misc::{BrowserRenderer, CiRenderer, ComputerRenderer, ForgeRenderer},
+	misc::{BrowserRenderer, ComputerRenderer},
 	search::{GlobRenderer, GrepRenderer},
 	web::WebSearchRenderer,
 };
+#[cfg(feature = "cap-ci")]
+use self::misc::CiRenderer;
+#[cfg(feature = "cap-forge")]
+use self::misc::ForgeRenderer;
 
 /// Native goal renderer views.
 pub mod agentic;
@@ -163,9 +167,11 @@ pub fn register_builtin_renderers(
 	if let Some(identity) = identities.goal {
 		registry.register(identity, GoalRenderer)?;
 	}
+	#[cfg(feature = "cap-forge")]
 	if let Some(identity) = identities.forge {
 		registry.register(identity, ForgeRenderer)?;
 	}
+	#[cfg(feature = "cap-ci")]
 	if let Some(identity) = identities.ci {
 		registry.register(identity, CiRenderer)?;
 	}
@@ -299,8 +305,14 @@ pub(crate) mod test_support {
 			lsp:        Some(identity("lsp", 55)),
 			debug:      Some(identity("debug", 56)),
 			goal:       Some(identity("goal", 57)),
+			#[cfg(feature = "cap-forge")]
 			forge:      Some(identity("forge", 58)),
+			#[cfg(not(feature = "cap-forge"))]
+			forge:      None,
+			#[cfg(feature = "cap-ci")]
 			ci:         Some(identity("ci", 61)),
+			#[cfg(not(feature = "cap-ci"))]
+			ci:         None,
 			browser:    Some(identity("browser", 59)),
 			computer:   Some(identity("computer", 60)),
 		}
@@ -332,29 +344,30 @@ mod tests {
 	#[test]
 	fn registers_every_builtin_at_only_its_exact_revision() {
 		let (registry, identities) = registry(identities());
-		for identity in [
-			identities.edit.as_ref().unwrap(),
-			identities.grep.as_ref().unwrap(),
-			identities.web_search.as_ref().unwrap(),
-			identities.glob.as_ref().unwrap(),
-			identities.shell.as_ref().unwrap(),
-			identities.hub.as_ref().unwrap(),
-			identities.write.as_ref().unwrap(),
-			identities.read.as_ref().unwrap(),
-			identities.eval.as_ref().unwrap(),
-			identities.ast_grep.as_ref().unwrap(),
-			identities.ast_edit.as_ref().unwrap(),
-			identities.ask.as_ref().unwrap(),
-			identities.todo.as_ref().unwrap(),
-			identities.think.as_ref().unwrap(),
-			identities.lsp.as_ref().unwrap(),
-			identities.debug.as_ref().unwrap(),
-			identities.goal.as_ref().unwrap(),
-			identities.forge.as_ref().unwrap(),
-			identities.ci.as_ref().unwrap(),
-			identities.browser.as_ref().unwrap(),
-			identities.computer.as_ref().unwrap(),
-		] {
+		let expected = [
+			identities.edit.as_ref(),
+			identities.grep.as_ref(),
+			identities.web_search.as_ref(),
+			identities.glob.as_ref(),
+			identities.shell.as_ref(),
+			identities.hub.as_ref(),
+			identities.write.as_ref(),
+			identities.read.as_ref(),
+			identities.eval.as_ref(),
+			identities.ast_grep.as_ref(),
+			identities.ast_edit.as_ref(),
+			identities.ask.as_ref(),
+			identities.todo.as_ref(),
+			identities.think.as_ref(),
+			identities.lsp.as_ref(),
+			identities.debug.as_ref(),
+			identities.goal.as_ref(),
+			identities.forge.as_ref(),
+			identities.ci.as_ref(),
+			identities.browser.as_ref(),
+			identities.computer.as_ref(),
+		];
+		for identity in expected.into_iter().flatten() {
 			assert!(
 				registry
 					.get(identity)

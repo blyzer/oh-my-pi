@@ -100,7 +100,8 @@ pub struct ServiceState {
 	/// Runtime the asynchronous feeds spawn onto.
 	pub runtime:           tokio::runtime::Handle,
 	/// Forge `Delegated` router for the checkout. Git watch reads the
-	/// branch's change request through it.
+	/// branch's change request through it. Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
 	pub forge:             omp_envd::CheckoutForge,
 }
 
@@ -490,19 +491,29 @@ impl Services for AppServices {
 		&self,
 		branch: &str,
 	) -> ServiceResult<Pending<Option<omp_chat::status_band::PullRequest>>> {
-		let forge = self.state.forge.clone();
-		let branch = Str::new(branch);
-		let (sender, receiver) = flume::bounded(1);
-		self.state.runtime.spawn(async move {
-			let found = forge.view_branch(branch.as_str()).await.map(|request| {
-				request.map(|request| omp_chat::status_band::PullRequest {
-					number: request.number,
-					url:    request.web_url,
-				})
+		#[cfg(feature = "cap-forge")]
+		{
+			let forge = self.state.forge.clone();
+			let branch = Str::new(branch);
+			let (sender, receiver) = flume::bounded(1);
+			self.state.runtime.spawn(async move {
+				let found = forge.view_branch(branch.as_str()).await.map(|request| {
+					request.map(|request| omp_chat::status_band::PullRequest {
+						number: request.number,
+						url:    request.web_url,
+					})
+				});
+				let _ = sender.send(found.map_err(omp_chat::overlays::services::ServiceError::failed));
 			});
-			let _ = sender.send(found.map_err(omp_chat::overlays::services::ServiceError::failed));
-		});
-		Ok(receiver)
+			Ok(receiver)
+		}
+		#[cfg(not(feature = "cap-forge"))]
+		{
+			let _ = branch;
+			let (sender, receiver) = flume::bounded(1);
+			let _ = sender.send(Ok(None));
+			Ok(receiver)
+		}
 	}
 }
 

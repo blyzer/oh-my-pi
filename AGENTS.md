@@ -81,7 +81,8 @@ all recipes.
   (`check`, `test`, `lint`) after the changed contract passes.
 - ADR 0049 profiles: `just check-minimal-caps` typechecks default `omp-app` and
   `omp-app` with every `cap-*` off, and proves `omp-envd` does not link
-  `omp-desktop`, `omp-webview`, `omp-audio`, or `omp-ssh`. CI runs it in
+  `omp-desktop`, `omp-webview`, `omp-audio`, `omp-ssh`, `omp-forge`,
+  `omp-forge-delegated`, `omp-ci`, or `omp-ci-delegated`. CI runs it in
   `Lint workspace (Linux)`.
 - E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-p11|e2e-p12|e2e-p14|e2e-baseline`;
   `just e2e` runs P1-P7, P9, P10, P11, P12, P14, `tool_sources`, then the P8 recorder test).

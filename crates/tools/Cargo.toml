@@ -13,10 +13,15 @@ readme = "README.md"
 workspace = true
 
 [features]
-# Construction-table gates. Contract modules stay compiled either way.
+# Construction-table gates. `Family` stays either way.
+# Forge/CI also enable the contract crate edges so selected unification can
+# leave those packages out of an `omp-envd` graph that does not enable them.
+# Computer/browser/media stay empty: their host crates live only on envd.
 cap-browser = []
 cap-computer = []
 cap-media = []
+cap-forge = ["dep:omp-forge"]
+cap-ci = ["dep:omp-ci"]
 
 [dependencies]
 anydoc.workspace = true
@@ -37,10 +42,10 @@ libc.workspace = true
 omp-ast.workspace = true
 omp-ar.workspace = true
 omp-con.workspace = true
-omp-ci.workspace = true
+omp-ci = { workspace = true, optional = true }
 omp-core.workspace = true
 omp-env.workspace = true
-omp-forge.workspace = true
+omp-forge = { workspace = true, optional = true }
 omp-edit.workspace = true
 omp-memory.workspace = true
 omp-proto.workspace = true

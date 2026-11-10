@@ -192,11 +192,13 @@ impl ToolGate for SessionHost<'_> {
 
 impl SessionInstall for SessionHost<'_> {
 	type Checkpoint = AgentCheckpointControl;
+	#[cfg(feature = "cap-ci")]
 	type CiRouter = omp_ci_delegated::Delegated<
 		crate::github_adapter::GithubCiAdapter,
 		omp_ci_delegated::PermitAll,
 	>;
 	type Error = EnvdError;
+	#[cfg(feature = "cap-forge")]
 	type ForgeRouter = omp_forge_delegated::Delegated<
 		crate::github_adapter::GithubForgeAdapter,
 		omp_forge_delegated::PermitAll,
@@ -253,14 +255,17 @@ impl SessionInstall for SessionHost<'_> {
 		Arc::clone(&self.search_bridge)
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter {
 		crate::github_adapter::forge_router(self.ensure_github())
 	}
 
+	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter {
 		crate::github_adapter::ci_router(self.ensure_github())
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn current_repo(
 		&self,
 	) -> Arc<dyn Fn() -> Result<omp_forge::RepoRef, omp_forge::ForgeError> + Send + Sync> {
@@ -286,6 +291,7 @@ impl SessionInstall for SessionHost<'_> {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn checkout_repo(root: &Path) -> Result<omp_forge::RepoRef, omp_forge::ForgeError> {
 	crate::github_adapter::checkout_repo(root)
 }
@@ -563,14 +569,17 @@ impl<'a> EnvironmentHost<'a> {
 		self.conflicts = Some(Arc::clone(&conflicts));
 		self.ensure_security_service();
 		let security = self.security.clone().expect("security service");
-		let github = GithubService::new(
-			self.workspace.root().to_path_buf(),
-			self.state_dir,
-			Arc::clone(&self.github_credentials),
-			Arc::clone(&self.forge_cache),
-			self.blobs.clone(),
-		);
-		let forge = crate::github_adapter::forge_router(github);
+		#[cfg(feature = "cap-forge")]
+		let forge = {
+			let github = GithubService::new(
+				self.workspace.root().to_path_buf(),
+				self.state_dir,
+				Arc::clone(&self.github_credentials),
+				Arc::clone(&self.forge_cache),
+				self.blobs.clone(),
+			);
+			crate::github_adapter::forge_router(github)
+		};
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,
 			self.blobs.store().clone(),
@@ -579,6 +588,7 @@ impl<'a> EnvironmentHost<'a> {
 			self.workspace.root().to_path_buf(),
 			Arc::clone(&self.forge_cache),
 			Arc::clone(&self.github_credentials),
+			#[cfg(feature = "cap-forge")]
 			forge,
 			mem::take(&mut self.url_resolvers),
 			self.host_resources.clone(),
