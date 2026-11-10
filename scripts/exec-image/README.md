@@ -58,9 +58,14 @@ sv_exec_remote_image docker://ghcr.io/blyzer/omp-reapi@sha256:<digest>
 
 ## Running the G1 omp-envd measurement
 
-With the image pinned, in an operator config that also sets `sv_exec_remote_endpoint`
-(`grpcs://remote.buildbuddy.io`), `sv_exec_remote_profile buildbuddy` and
-`sv_exec_remote_credential env:BUILDBUDDY_API_KEY`, and a workflow whose phase is
+With the image pinned, in an operator config that also sets
+`sv_exec_remote_endpoint` (`grpcs://remote.buildbuddy.io`),
+`sv_exec_remote_credential env:BUILDBUDDY_API_KEY`, and the former BuildBuddy
+profile facts as operator data
+(`sv_exec_remote_credential_header x-buildbuddy-api-key`,
+`sv_exec_remote_arch_spelling short`,
+`sv_exec_remote_fixed_properties workload-isolation-type=oci`,
+`sv_exec_remote_refuse_action_cache true`), and a workflow whose phase is
 `command = ["just", "test-pkg", "omp-envd"]`:
 
 ```sh

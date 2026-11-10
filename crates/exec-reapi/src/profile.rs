@@ -45,7 +45,7 @@ impl fmt::Debug for Credential {
 pub enum ArchSpelling {
 	/// REAPI's own vocabulary: `ISA` with `x86-64` or `arm64`.
 	Reapi,
-	/// BuildBuddy's vocabulary: `Arch` with `amd64` or `arm64`.
+	/// Short Arch vocabulary: `Arch` with `amd64` or `arm64`.
 	Short,
 }
 
@@ -77,23 +77,6 @@ impl Profile {
 			arch:              ArchSpelling::Reapi,
 			image_property:    Str::new_static("container-image"),
 			fixed:             BTreeMap::new(),
-		}
-	}
-
-	/// BuildBuddy: the API-key header and its platform vocabulary. Runner
-	/// recycling is deliberately absent: the 2026-10-10 probe showed a raw REAPI
-	/// action does not get a warm runner, so no property is sent that implies
-	/// one (ADR 0040, amendment 2026-10-10).
-	pub fn buildbuddy() -> Self {
-		Self {
-			name:              Str::new_static("buildbuddy"),
-			credential_header: Some(Str::new_static("x-buildbuddy-api-key")),
-			arch:              ArchSpelling::Short,
-			image_property:    Str::new_static("container-image"),
-			fixed:             BTreeMap::from([(
-				Str::new_static("workload-isolation-type"),
-				Str::new_static("oci"),
-			)]),
 		}
 	}
 
@@ -139,6 +122,20 @@ fn os_name(os: Os) -> Str {
 mod tests {
 	use super::*;
 
+	/// Former hard-coded BuildBuddy profile values, as operator data.
+	fn short_oci_profile(name: &'static str) -> Profile {
+		Profile {
+			name:              Str::new_static(name),
+			credential_header: Some(Str::new_static("x-buildbuddy-api-key")),
+			arch:              ArchSpelling::Short,
+			image_property:    Str::new_static("container-image"),
+			fixed:             BTreeMap::from([(
+				Str::new_static("workload-isolation-type"),
+				Str::new_static("oci"),
+			)]),
+		}
+	}
+
 	fn props(profile: &Profile, extra: &[(&str, &str)]) -> Vec<(String, String)> {
 		let extra = extra
 			.iter()
@@ -160,15 +157,15 @@ mod tests {
 	}
 
 	#[test]
-	fn the_buildbuddy_profile_spells_the_architecture_its_own_way() {
-		let properties = props(&Profile::buildbuddy(), &[]);
+	fn short_arch_spelling_uses_arch_and_amd64() {
+		let properties = props(&short_oci_profile("operator"), &[]);
 		assert!(properties.contains(&("Arch".to_owned(), "amd64".to_owned())), "{properties:?}");
 		assert!(!properties.iter().any(|(k, _)| k == "ISA"), "{properties:?}");
 	}
 
 	#[test]
 	fn no_profile_sends_a_runner_recycling_property() {
-		for profile in [Profile::reapi(), Profile::buildbuddy()] {
+		for profile in [Profile::reapi(), short_oci_profile("operator")] {
 			let properties = props(&profile, &[]);
 			assert!(
 				!properties
@@ -181,7 +178,7 @@ mod tests {
 
 	#[test]
 	fn operator_properties_override_fixed_ones_and_the_result_is_sorted() {
-		let properties = props(&Profile::buildbuddy(), &[
+		let properties = props(&short_oci_profile("operator"), &[
 			("workload-isolation-type", "oci"),
 			("container-image", "docker://example/image@sha256:abc"),
 		]);
@@ -192,9 +189,12 @@ mod tests {
 	}
 
 	#[test]
-	fn only_the_buildbuddy_profile_names_a_credential_header() {
+	fn only_an_operator_configured_header_names_a_credential_header() {
 		assert_eq!(Profile::reapi().credential_header, None);
-		assert_eq!(Profile::buildbuddy().credential_header.as_deref(), Some("x-buildbuddy-api-key"));
+		assert_eq!(
+			short_oci_profile("operator").credential_header.as_deref(),
+			Some("x-buildbuddy-api-key")
+		);
 	}
 
 	#[test]
@@ -207,7 +207,23 @@ mod tests {
 
 	#[test]
 	fn a_profile_holds_no_credential_so_debug_cannot_leak_one() {
-		let rendered = format!("{:?}", Profile::buildbuddy());
+		let rendered = format!("{:?}", short_oci_profile("operator"));
 		assert!(!rendered.to_lowercase().contains("secret"), "{rendered}");
+	}
+
+	#[test]
+	fn former_hard_coded_short_oci_fields_match_operator_data() {
+		let profile = short_oci_profile("operator");
+		assert_eq!(profile.name.as_str(), "operator");
+		assert_eq!(profile.credential_header.as_deref(), Some("x-buildbuddy-api-key"));
+		assert_eq!(profile.arch, ArchSpelling::Short);
+		assert_eq!(profile.image_property.as_str(), "container-image");
+		assert_eq!(
+			profile
+				.fixed
+				.get("workload-isolation-type")
+				.map(Str::as_str),
+			Some("oci")
+		);
 	}
 }

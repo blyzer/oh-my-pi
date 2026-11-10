@@ -2,11 +2,8 @@
 //! tonic-prost-build, the same pipeline `omp-proto` uses, so no system
 //! `protoc` is needed.
 //!
-//! Two roots are compiled separately:
-//! - `proto/`: REAPI v2, `google.longrunning`, `google.bytestream`,
-//!   `google.rpc` and the annotations they import.
-//! - `proto-buildbuddy/`: BuildBuddy's `BuildBuddyService`, only when the
-//!   `buildbuddy-cancel` feature is on.
+//! The `proto/` root holds REAPI v2, `google.longrunning`, `google.bytestream`,
+//! `google.rpc` and the annotations they import.
 //!
 //! Well-known types (`Any`, `Duration`, `Timestamp`, wrappers) map to
 //! `prost-types` through prost's default extern paths.
@@ -26,13 +23,10 @@ fn main() {
 	let manifest = PathBuf::from(
 		env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not set CARGO_MANIFEST_DIR"),
 	);
-	compile(&manifest.join("proto"), true, false);
-	if env::var_os("CARGO_FEATURE_BUILDBUDDY_CANCEL").is_some() {
-		compile(&manifest.join("proto-buildbuddy"), false, true);
-	}
+	compile(&manifest.join("proto"), true);
 }
 
-fn compile(root: &Path, with_services: bool, client_only: bool) {
+fn compile(root: &Path, with_services: bool) {
 	println!("cargo::rerun-if-changed={}", root.display());
 	let mut protos = Vec::new();
 	collect(root, &mut protos);
@@ -44,9 +38,9 @@ fn compile(root: &Path, with_services: bool, client_only: bool) {
 	let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"))
 		.join(root.file_name().expect("proto root has a name"));
 	fs::create_dir_all(&out).expect("create generated-code directory");
-	let serve = (with_services || client_only) && env::var_os("CARGO_FEATURE_TEST_SERVER").is_some();
+	let serve = with_services && env::var_os("CARGO_FEATURE_TEST_SERVER").is_some();
 	tonic_prost_build::configure()
-		.build_client(with_services || client_only)
+		.build_client(with_services)
 		.build_server(serve)
 		.generate_default_stubs(serve)
 		.bytes(".")

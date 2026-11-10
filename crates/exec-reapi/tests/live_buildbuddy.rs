@@ -22,7 +22,7 @@ use omp_exec_reapi::{
 	ExecuteConfig, ReapiBackend,
 	cas::{BlobSource, InputSource},
 	endpoint::Endpoint,
-	profile::{Credential, Profile},
+	profile::{ArchSpelling, Credential, Profile},
 	proto::build::bazel::remote::execution::v2 as wire,
 	tree::InputFile,
 };
@@ -95,23 +95,36 @@ fn fail_execution(phase: &str, error: ExecutionError) -> ! {
 	panic!("{phase}: {}", redact(&format!("{error:?}")));
 }
 
+/// Former hard-coded BuildBuddy profile values, as operator data for the live
+/// endpoint under test.
+fn live_profile() -> Profile {
+	Profile {
+		name:              Str::new_static("live"),
+		credential_header: Some(Str::new_static("x-buildbuddy-api-key")),
+		arch:              ArchSpelling::Short,
+		image_property:    Str::new_static("container-image"),
+		fixed:             BTreeMap::from([(
+			Str::new_static("workload-isolation-type"),
+			Str::new_static("oci"),
+		)]),
+	}
+}
+
 fn config(credential: Credential) -> ExecuteConfig {
 	ExecuteConfig {
-		id: BackendId::new_static("live-buildbuddy"),
-		instance: Str::empty(),
-		profile: Profile::buildbuddy(),
-		credential: Some(credential),
-		platform: Platform::LINUX_X86_64,
-		enforced: Posture {
+		id:                  BackendId::new_static("live-reapi"),
+		instance:            Str::empty(),
+		profile:             live_profile(),
+		credential:          Some(credential),
+		platform:            Platform::LINUX_X86_64,
+		enforced:            Posture {
 			write:    WriteScope::ReadOnly,
 			network:  NetworkScope::Unrestricted,
 			approval: ApprovalScope::Yolo,
 		},
-		cache: CachePolicy::Off,
+		cache:               CachePolicy::Off,
 		platform_properties: BTreeMap::new(),
-		toolchains: BTreeMap::new(),
-		#[cfg(feature = "buildbuddy-cancel")]
-		buildbuddy_canceller: None,
+		toolchains:          BTreeMap::new(),
 	}
 }
 
