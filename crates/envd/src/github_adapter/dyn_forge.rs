@@ -32,6 +32,12 @@ use super::GithubForgeAdapter;
 /// host-claim discovery remains a smaller TODO.
 pub const GITLAB_HOST: &str = "gitlab.com";
 
+/// Canonical GitHub SaaS host on the dyn forge arm once the T2 extension can
+/// answer (ADR 0049 GitHub T2). Same bound [`LiveForgeDeviceClient`] as
+/// [`GITLAB_HOST`]. In-core [`GithubForgeAdapter`] remains for CI, list-URL
+/// helpers, and GHE checkout hosts that are not in the Dyn set.
+pub const GITHUB_DYN_HOST: &str = "github.com";
+
 /// Device paths under `forge/*`.
 ///
 /// Primary paths match [`ForgeOp`] snake_case. Two [`ForgeHost`] methods share
@@ -588,11 +594,12 @@ impl<C: ForgeDeviceClient> ForgeHost for ForgeBackend<C> {
 /// Registers a dyn-backed forge host on a [`DelegatedBuilder`].
 ///
 /// This is the seam T2 extensions (and tests) use to place a host such as
-/// [`GITLAB_HOST`] beside `github.com`. The production [`super::forge_router`]
-/// registers every host in [`super::ForgeDynHosts`] with a
-/// [`LiveForgeDeviceClient`]. Automatic discovery of additional hosts from the
-/// extension device catalog / host claims is not wired yet (TODO, ADR 0049
-/// D2.8).
+/// [`GITLAB_HOST`] or [`GITHUB_DYN_HOST`] on the Dyn arm. The production
+/// [`super::forge_router`] registers every host in [`super::ForgeDynHosts`]
+/// with a [`LiveForgeDeviceClient`]. Catalog mounts are owned by the
+/// `omp.forge` extension (host-dispatch to `omp_github` / `omp_gitlab`).
+/// Automatic discovery of additional hosts from the extension device catalog /
+/// host claims is not wired yet (TODO, ADR 0049 D2.8).
 ///
 /// # Errors
 ///
@@ -805,8 +812,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn github_arm_still_selected_for_github_com() {
-		// Proves the enum routes by host: github.com stays the Github arm.
-		// The call fails without a live API; Unregistered must not appear.
+		// Enum routing proof: a host registered on ForgeBackend::Github is not
+		// sent to the Dyn client. Production forge_router puts github.com on
+		// Dyn; this keeps the Github arm selectable for unlisted GHE hosts.
+
 		let hits = Arc::new(AtomicUsize::new(0));
 		#[derive(Clone)]
 		struct Counting(Arc<AtomicUsize>);

@@ -1,0 +1,143 @@
+"""Pure GitHub REST JSON → ``omp_forge`` serde shapes.
+
+No network. Unit-tested with fixture payloads under ``tests/fixtures/``.
+Field names match ``crates/forge`` serde (snake_case) and the in-core
+``GithubForgeAdapter`` mappers in ``crates/envd/src/github_adapter``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+from urllib.parse import quote
+
+
+def repo_slug(owner: str, name: str) -> str:
+    """``owner/name`` path segment for ``/repos/:owner/:name``."""
+    return f"{quote(owner, safe='')}/{quote(name, safe='')}"
+
+
+def _str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _repo_ref(repo: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "host": _str(repo.get("host")),
+        "owner": _str(repo.get("owner")),
+        "name": _str(repo.get("name")),
+    }
+
+
+def map_request_state(state: str | None, *, merged: bool = False) -> str:
+    """GitHub PR ``state`` / ``merged`` → ``RequestState``."""
+    if merged:
+        return "merged"
+    raw = (state or "").lower()
+    if raw == "closed":
+        return "closed"
+    return "open"
+
+
+def map_issue_state(state: str | None) -> str:
+    """GitHub issue ``state`` → ``IssueState``."""
+    raw = (state or "").lower()
+    if raw == "closed":
+        return "closed"
+    return "open"
+
+
+def map_pull_request(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map one GitHub pull-request JSON object to ``ChangeRequest``."""
+    base = payload.get("base") or {}
+    head = payload.get("head") or {}
+    return {
+        "repo": _repo_ref(repo),
+        "number": int(payload.get("number") or 0),
+        "title": _str(payload.get("title")),
+        "body": _str(payload.get("body")),
+        "state": map_request_state(
+            _str(payload.get("state")),
+            merged=bool(payload.get("merged")),
+        ),
+        "draft": bool(payload.get("draft")),
+        "base_ref": _str(base.get("ref")),
+        "head_ref": _str(head.get("ref")),
+        "head_commit": _str(head.get("sha")),
+        "base_commit": _str(base.get("sha")),
+        "web_url": _str(payload.get("html_url")),
+    }
+
+
+def map_issue(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one GitHub issue JSON object to ``Issue``."""
+    return {
+        "repo": _repo_ref(repo),
+        "number": int(payload.get("number") or 0),
+        "title": _str(payload.get("title")),
+        "body": _str(payload.get("body")),
+        "state": map_issue_state(_str(payload.get("state"))),
+        "web_url": _str(payload.get("html_url")),
+    }
+
+
+def map_repository(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one GitHub repository JSON object to ``Repository``."""
+    return {
+        "repo": _repo_ref(repo),
+        "default_branch": _str(payload.get("default_branch"), "main"),
+        "clone_url": _str(payload.get("clone_url")),
+        "web_url": _str(payload.get("html_url")),
+        "description": _str(payload.get("description")),
+    }
+
+
+def map_comment(payload: Mapping[str, Any]) -> dict[str, str]:
+    """Map one GitHub issue/PR comment JSON object to ``Comment``."""
+    user = payload.get("user") or {}
+    return {
+        "author": _str(user.get("login")),
+        "created_at": _str(payload.get("created_at")),
+        "body": _str(payload.get("body")),
+    }
+
+
+def map_comments(payloads: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Map a comments array."""
+    return [map_comment(row) for row in payloads]
+
+
+def pull_request_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a GitHub ``POST …/pulls`` body from ``ChangeRequestDraft``.
+
+    Field names follow GitHub REST (``head`` / ``base`` / ``body`` / ``draft``).
+    ``draft.repo`` is used only by the client for the repo path — it is not part
+    of the JSON body.
+    """
+    body: dict[str, Any] = {
+        "title": _str(draft.get("title")),
+        "head": _str(draft.get("head")),
+        "base": _str(draft.get("base")),
+    }
+    description = _str(draft.get("body"))
+    if description:
+        body["body"] = description
+    if bool(draft.get("draft")):
+        body["draft"] = True
+    return body
+
+
+def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a GitHub ``POST …/issues`` body from ``IssueDraft``.
+
+    ``draft.repo`` is used only by the client for the repo path.
+    """
+    body: dict[str, Any] = {"title": _str(draft.get("title"))}
+    description = _str(draft.get("body"))
+    if description:
+        body["body"] = description
+    return body

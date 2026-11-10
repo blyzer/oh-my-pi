@@ -7,25 +7,33 @@ maintainers / this tree.
 
 | Extension | Role | ADR |
 |---|---|---|
-| **gitlab** | GitLab forge adapter proving `omp-forge` (D2.8) via dyn `forge/*` over toolhost | [0049](../docs/adr/0049-tiered-integration-architecture.md), [schema](../docs/adr/0049-forge-dyn-device-schema.md) |
+| **forge** | Sole `forge/*` catalog owner; host-dispatches to GitHub / GitLab backends | [0049](../docs/adr/0049-tiered-integration-architecture.md), [schema](../docs/adr/0049-forge-dyn-device-schema.md) |
+| **github** | GitHub T2 forge backend (`omp_github`) via dyn `forge/*` | same |
+| **gitlab** | GitLab T2 forge backend (`omp_gitlab`) via dyn `forge/*` | same |
 
-**D2.8 progress:** read-path + write-create adapter body + live
-`ForgeDeviceClient` wiring landed under [`gitlab/`](gitlab/). Mapping unit
-tests cover fixture → `ChangeRequest`/`Issue` shapes and draft → GitLab create
-bodies. Mounted creates: `forge/change_request_create`, `forge/issue_create`.
-`gitlab.com` is registered on the dyn forge arm. **DONE:** self-hosted host
-registration via `sv_forge_dyn_hosts` + adapter env `GITLAB_HOST` (checkout
-hosts in that set route to Dyn). SessionHost bound-client threading for
-`forge@1` / numbered `pr://` is DONE (same client as CheckoutForge / CONTROL).
-Checkout / push stay unmounted (ADR D2.4: repository work in core). Remaining:
-full automatic device-catalog host-claim discovery (smaller TODO), search
-leaves, GitHub T2 + delete `github.rs`. Full contract stability still awaits
-GitHub T2 parity. See [`gitlab/README.md`](gitlab/README.md).
+**Mount collision:** `DynForgeAdapter` calls fixed paths `forge/<op>`. Only
+[`forge/`](forge/) (`omp.forge`) declares the `forge` parent and mounts leaves.
+[`github/`](github/) and [`gitlab/`](gitlab/) are backends — no competing
+`forge` parent.
+
+**D2.8 progress:** read-path + write-create adapter bodies for **both** GitLab
+and GitHub, plus live `ForgeDeviceClient` wiring. Mapping unit tests cover
+fixture → `ChangeRequest`/`Issue` shapes and draft → create bodies. Mounted
+creates: `forge/change_request_create`, `forge/issue_create`. **`gitlab.com`
+and `github.com` are registered on the dyn forge arm** (same bound client).
+**DONE:** self-hosted host registration via `sv_forge_dyn_hosts` + adapter env
+`GITLAB_HOST` (checkout hosts in that set route to Dyn; GHE listed there also
+routes to Dyn / `omp_github`). SessionHost bound-client threading for
+`forge@1` / numbered `pr://` is DONE. Checkout / push stay unmounted (ADR
+D2.4). **DONE:** GitHub T2 read+create via dyn. In-core `github.rs` /
+`github_url.rs` **remain** until checkout/push/CI/list-URL Dyn parity allows
+deletion. Remaining: search leaves; full automatic device-catalog host-claim
+discovery (smaller TODO). See package READMEs.
 
 ## May grow
 
-Further wave-1 ports (rescued v1 surfaces, GitHub T2 after GitLab parity, CI
-vendors, BuildBuddy behind execution `Delegated`, …) are TBD. Candidates from
-ADR 0049 D5 remain: `pr-review`, `green-loop`, `workflows`, `remote-approve`,
-`search-provider`, `provider-pack`, `fuzzy-index`, `spec-flow`. UI-bound ports
-wait for ADR 0046 item 4.
+Further wave-1 ports (rescued v1 surfaces, CI vendors, BuildBuddy behind
+execution `Delegated`, …) are TBD. Candidates from ADR 0049 D5 remain:
+`pr-review`, `green-loop`, `workflows`, `remote-approve`, `search-provider`,
+`provider-pack`, `fuzzy-index`, `spec-flow`. UI-bound ports wait for ADR 0046
+item 4.

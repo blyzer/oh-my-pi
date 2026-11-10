@@ -29,5 +29,10 @@ installs package wheels; the registry/lock/signing path stays in `crates/ext`.
 
 ## Wave 1
 
-See [WAVE1.md](WAVE1.md). The first adapter is the GitLab forge host (ADR 0049
-D2.8) under [`gitlab/`](gitlab/). Further ports are TBD.
+See [WAVE1.md](WAVE1.md).
+
+| Path | Role |
+|---|---|
+| [`forge/`](forge/) | Sole `forge/*` mount owner; dispatches by `repo.host` |
+| [`github/`](github/) | GitHub T2 backend (`omp_github`) |
+| [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab`) |

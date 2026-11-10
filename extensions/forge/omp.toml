@@ -1,0 +1,31 @@
+id = "omp.forge"
+name = "Forge catalog"
+version = "0.1.0"
+omp_api = 1
+description = "Host-dispatching dyn forge/* mounts (GitHub + GitLab T2, ADR 0049)"
+entry = "omp_forge_ext"
+capabilities = ["env.net.fetch"]
+
+# Sole forge/* catalog owner. Backends omp.github / omp.gitlab must not declare
+# a competing forge parent (DynForgeAdapter fixed-path collision).
+
+[[declarations]]
+id = "forge"
+kind = "soft"
+module = "omp_forge_ext"
+key = "forge@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "mount_forge_leaves"
+kind = "hook"
+module = "omp_forge_ext"
+key = "extension_activate/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
+
+[requires]
+python = ">=3.14"

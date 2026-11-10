@@ -1,0 +1,12 @@
+{
+  "repo": {
+    "host": "github.com",
+    "owner": "acme",
+    "name": "widget"
+  },
+  "title": "Fix the widget",
+  "body": "details",
+  "base": "main",
+  "head": "topic",
+  "draft": true
+}

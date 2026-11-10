@@ -3,11 +3,13 @@
 Source of truth for the T2 forge device bridge. Rustdoc on
 `omp_envd::github_adapter` (`dyn_forge`) and `omp-forge` point here.
 
-T2 extensions (starting with GitLab under `extensions/gitlab/`) implement
-`ForgeHost` by mounting dyn devices under `forge/<op>` and answering
-`omp.devices.call`. Core holds a `DynForgeAdapter` that dispatches each
-`ForgeHost` method to those paths. The production router keeps an enum
-`ForgeBackend { Github(...), Dyn(...) }` so heterogeneous hosts stay
+T2 forge backends (`extensions/github/`, `extensions/gitlab/`) implement the
+`ForgeHost` leaf set. **One** extension — `extensions/forge/` (`omp.forge`) —
+mounts dyn devices under `forge/<op>` and host-dispatches by `repo.host` to
+`omp_github` vs `omp_gitlab`. A second mount owner would collide:
+`DynForgeAdapter` calls fixed paths. Core holds a `DynForgeAdapter` that
+dispatches each `ForgeHost` method to those paths. The production router keeps
+an enum `ForgeBackend { Github(...), Dyn(...) }` so heterogeneous hosts stay
 unboxed (AGENTS: enums before `dyn`).
 
 A parallel `ci/*` dyn bridge is a follow-up; it is not part of this schema.
@@ -45,42 +47,47 @@ documenting `FileBody.content` as bytes).
 
 `register_dyn_forge_host(builder, host, client)` registers
 `ForgeBackend::Dyn(DynForgeAdapter::new(client))` for an ASCII host name
-(e.g. `gitlab.com`) on the same `Delegated` builder as `github.com`.
+(e.g. `gitlab.com`, `github.com`).
 
 `ForgeDeviceClient` is the injectable invoke surface. Production uses
 `LiveForgeDeviceClient` (late-bound `ForgeDeviceInvoker`);
 `DeviceControlFactory::forge_invoker` looks up mounted leaves and dispatches
 `omp.devices.call` (same destination as `DeviceControlFactory::invoke`, via
 `NestedCallbackDispatcher::dispatch_host`). Tests may inject a fake client or
-a recording invoker. `forge_router` always registers `gitlab.com` on the Dyn
-arm. Automatic discovery of additional hosts from the extension device
-catalog / host claims is **not** wired yet — TODO at that hook point.
+a recording invoker. `forge_router` always registers `gitlab.com` and
+`github.com` on the Dyn arm. Automatic discovery of additional hosts from the
+extension device catalog / host claims is **not** wired yet — TODO at that
+hook point.
 
 ## Evidence
 
 Unit tests in `crates/envd/src/github_adapter/dyn_forge.rs` prove Delegated
 routes dyn hosts through a fake / live client and returns `ChangeRequest` /
-`Issue` for `view_change_request` / `view_issue`. The `github.com` arm still
-wins for that host. `forge_router` registers `ForgeDynHosts` (always
-`gitlab.com`, plus `sv_forge_dyn_hosts` / `GITLAB_HOST`) even when the live
-client is unbound (`Unavailable`, not `Unregistered`).
+`Issue` for `view_change_request` / `view_issue`. `forge_router` registers
+`ForgeDynHosts` (always `gitlab.com` + `github.com`, plus `sv_forge_dyn_hosts`
+/ `GITLAB_HOST`) even when the live client is unbound (`Unavailable`, not
+`Unregistered`). Unlisted checkout hosts still land on the in-core Github arm
+(GHE).
 
-## GitLab T2 (D2.8) status
+## GitLab + GitHub T2 (D2.8) status
 
-- **Done (read path):** `extensions/gitlab/` mounts the read leaves above at
-  `extension_activate`, maps GitLab REST onto `omp_forge` serde shapes, and
-  documents adapter-data credentials (`GITLAB_TOKEN` / `GITLAB_HOST` /
-  `GITLAB_API_URL`). Live client + `gitlab.com` registration in envd.
-- **Done (write creates):** mounts `forge/change_request_create` and
-  `forge/issue_create`; POST GitLab `/merge_requests` and `/issues` from
-  `ChangeRequestDraft` / `IssueDraft` JSON. Checkout / push stay unmounted
-  (ADR D2.4: repository work stays in core; no honest receipt without local
-  git).
-- **Done (self-hosted host registration):** envd `ForgeDynHosts` registers
-  Dyn hosts from always-`gitlab.com`, operator convar `sv_forge_dyn_hosts`, and
-  adapter env `GITLAB_HOST`. Checkout / inferred hosts in that set route to Dyn;
-  other non-`github.com` hosts still assume GHE on the Github arm. Full
-  automatic device-catalog host-claim discovery remains a smaller TODO.
-- **Remaining:** search leaves, GitHub T2 parity before deleting
-  `envd/src/github.rs`. SessionHost bound-client threading for `forge@1` is
-  DONE. Full contract stability still awaits GitHub T2 parity.
+- **Done (catalog mounts):** `extensions/forge/` owns `forge/*` leaves and
+  host-dispatches to `omp_github` / `omp_gitlab`. Backends do not declare a
+  competing `forge` parent.
+- **Done (GitLab read + create):** `extensions/gitlab/` maps GitLab REST onto
+  `omp_forge` shapes; credentials `GITLAB_TOKEN` / `GITLAB_HOST` /
+  `GITLAB_API_URL`.
+- **Done (GitHub read + create):** `extensions/github/` maps GitHub REST onto
+  the same leaf set; credentials `GH_TOKEN` / `GITHUB_TOKEN` / `GITHUB_HOST` /
+  `GITHUB_API_URL`. `github.com` is on the Dyn arm.
+- **Done (self-hosted host registration):** envd `ForgeDynHosts` registers Dyn
+  hosts from always-`gitlab.com` + always-`github.com`, operator convar
+  `sv_forge_dyn_hosts`, and adapter env `GITLAB_HOST`. Checkout / inferred
+  hosts in that set route to Dyn; other unlisted hosts still assume GHE on the
+  Github arm. Full automatic device-catalog host-claim discovery remains a
+  smaller TODO.
+- **Remaining before deleting `envd/src/github.rs`:** Dyn checkout/push (ADR
+  D2.4), `ci/*` dyn bridge, list-URL / `GithubResolver` parity. Search leaves
+  still open. SessionHost bound-client threading for `forge@1` is DONE.
+  In-core `GithubForgeAdapter` / `github.rs` / `github_url.rs` stay for CI,
+  list URLs, and checkout/push via `GithubService`.
