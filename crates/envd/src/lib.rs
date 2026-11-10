@@ -50,6 +50,7 @@ pub mod exthost;
 pub mod fetch_host;
 mod github;
 mod github_adapter;
+pub use github_adapter::CheckoutForge;
 mod github_params;
 pub mod github_url;
 pub mod grep;
@@ -1375,6 +1376,21 @@ impl ProjectEnvironment {
 	/// Returns the Environment's provider credential projection.
 	pub fn github_credentials(&self) -> Arc<GithubCredentialBridge> {
 		Arc::clone(&self.github_credentials)
+	}
+
+	/// Forge `Delegated` router for this checkout.
+	///
+	/// Chat's git watcher reads the branch's change request through
+	/// [`CheckoutForge::view_branch`], which calls `view_change_request` on
+	/// the same router `forge@1` uses. The router is built on the first read.
+	pub fn checkout_forge(&self, con: &Ctx) -> CheckoutForge {
+		CheckoutForge::new(
+			self.lifecycle.server.project_root(),
+			self.lifecycle.server.state_dir().to_path_buf(),
+			Arc::clone(&self.github_credentials),
+			self.lifecycle.server.blob_host(),
+			tool_settings::GithubCacheSettings::from_con(con).policy(),
+		)
 	}
 
 	/// Returns the authenticated session generation fencing CONTROL clients.

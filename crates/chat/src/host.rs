@@ -1130,7 +1130,8 @@ impl Presenter {
 		crate::commands::workspace::register_move_completer(&options.con, &options.services);
 		let mut overlays = Overlays::default();
 		overlays.sync_approval(&replica);
-		let (git_watch, git_facts) = GitWatch::start(&options.project).unzip();
+		let (git_watch, git_facts) =
+			GitWatch::start_with_services(&options.project, Arc::clone(&options.services)).unzip();
 		let mut local = LocalFacts::at_launch(git_watch.as_ref().map(GitWatch::launch));
 		local.sync_con(&options.con, &options.model);
 		local.sync_primary_billing(options.services.as_ref(), &options.model);
