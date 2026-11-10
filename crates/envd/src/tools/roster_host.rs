@@ -263,7 +263,13 @@ impl SessionInstall for SessionHost<'_> {
 
 	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter {
-		crate::github_adapter::forge_router(self.ensure_github(), self.forge_devices.clone())
+		let dyn_hosts =
+			crate::github_adapter::ForgeDynHosts::resolve(self.tool_settings.forge_dyn_hosts.as_str());
+		crate::github_adapter::forge_router(
+			self.ensure_github(),
+			self.forge_devices.clone(),
+			&dyn_hosts,
+		)
 	}
 
 	#[cfg(feature = "cap-ci")]
@@ -591,7 +597,8 @@ impl<'a> EnvironmentHost<'a> {
 				Arc::clone(&self.forge_cache),
 				self.blobs.clone(),
 			);
-			crate::github_adapter::forge_router(github, self.forge_devices.clone())
+			let dyn_hosts = crate::github_adapter::ForgeDynHosts::from_con(self.con);
+			crate::github_adapter::forge_router(github, self.forge_devices.clone(), &dyn_hosts)
 		};
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,

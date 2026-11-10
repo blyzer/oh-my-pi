@@ -12,10 +12,12 @@ maintainers / this tree.
 **D2.8 progress:** read-path adapter body + live `ForgeDeviceClient` wiring
 landed under [`gitlab/`](gitlab/). Mapping unit tests cover fixture →
 `ChangeRequest`/`Issue` shapes. `gitlab.com` is registered on the dyn forge
-arm. SessionHost bound-client threading for `forge@1` / numbered `pr://` is
-DONE (same client as CheckoutForge / CONTROL). Remaining: auto host-claim for
-self-hosted GitLab, write ops, GitHub T2 + delete `github.rs`. Full contract
-stability still awaits GitHub T2 parity. See
+arm. **DONE:** self-hosted host registration via `sv_forge_dyn_hosts` +
+adapter env `GITLAB_HOST` (checkout hosts in that set route to Dyn). SessionHost
+bound-client threading for `forge@1` / numbered `pr://` is DONE (same client as
+CheckoutForge / CONTROL). Remaining: full automatic device-catalog host-claim
+discovery (smaller TODO), write ops, GitHub T2 + delete `github.rs`. Full
+contract stability still awaits GitHub T2 parity. See
 [`gitlab/README.md`](gitlab/README.md).
 
 ## May grow

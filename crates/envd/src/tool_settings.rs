@@ -343,6 +343,22 @@ omp_con::var! {
 			"legacy.path": "forge.cache.hardTtlSec",
 		},
 	};
+	/// Extra ASCII hosts registered on the dyn forge arm (beside `gitlab.com`).
+	///
+	/// Comma- or whitespace-separated. Self-hosted GitLab (and other T2 dyn
+	/// forges) must appear here or in the adapter env `GITLAB_HOST`; otherwise
+	/// a non-`github.com` checkout host still lands on the Github arm (GHE).
+	/// `github.com` is never moved to Dyn even if listed.
+	pub static SV_FORGE_DYN_HOSTS = sv_forge_dyn_hosts: Str {
+		default: Str::default(),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Forge",
+			"ui.label": "Dyn Forge Hosts",
+			"legacy.path": "forge.dynHosts",
+		},
+	};
 }
 
 /// Typed forge cache policy resolved from the control context.
@@ -456,6 +472,13 @@ pub struct ToolSettings {
 	pub abort_on_fabricated_tool_result: bool,
 	/// Maximum repeated equivalent tool calls before the loop guard trips.
 	pub loop_guard_limit: u32,
+	/// Extra dyn-forge hosts from [`SV_FORGE_DYN_HOSTS`] (raw list text).
+	///
+	/// Resolved together with `GITLAB_HOST` by
+	/// [`crate::github_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
+	/// is always registered in core regardless.
+	#[serde(skip_serializing_if = "Str::is_empty")]
+	pub forge_dyn_hosts: Str,
 }
 
 impl Default for ToolSettings {
@@ -496,6 +519,7 @@ impl Default for ToolSettings {
 			intent_tracing: true,
 			abort_on_fabricated_tool_result: true,
 			loop_guard_limit: 8,
+			forge_dyn_hosts: Str::default(),
 		}
 	}
 }
@@ -558,6 +582,7 @@ impl ToolSettings {
 			intent_tracing: SV_TOOLS_INTENT_TRACING.get(ctx),
 			abort_on_fabricated_tool_result: SV_TOOLS_ABORT_ON_FABRICATED_RESULT.get(ctx),
 			loop_guard_limit: SV_TOOLS_LOOP_GUARD_LIMIT.get(ctx),
+			forge_dyn_hosts: SV_FORGE_DYN_HOSTS.get(ctx),
 		}
 	}
 
@@ -977,6 +1002,18 @@ mod tests {
 			soft_ttl_sec: 15,
 			hard_ttl_sec: 90,
 		});
+	}
+
+	#[test]
+	fn forge_dyn_hosts_convar_reaches_tool_settings() {
+		let ctx = Ctx::new();
+		assert!(ToolSettings::from_con(&ctx).forge_dyn_hosts.is_empty());
+		ctx.run("sv_forge_dyn_hosts \"gitlab.example.com, forge.internal\"")
+			.expect("dyn hosts");
+		assert_eq!(
+			ToolSettings::from_con(&ctx).forge_dyn_hosts.as_str(),
+			"gitlab.example.com, forge.internal"
+		);
 	}
 
 	#[test]

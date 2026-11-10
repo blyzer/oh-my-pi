@@ -1395,6 +1395,7 @@ impl ProjectEnvironment {
 			self.lifecycle.server.blob_host(),
 			tool_settings::ForgeCacheSettings::from_con(con).policy(),
 			self.lifecycle.server.forge_devices(),
+			github_adapter::ForgeDynHosts::from_con(con),
 		)
 	}
 

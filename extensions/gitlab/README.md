@@ -9,8 +9,11 @@ Python extension under `extensions/` (not a Cargo member). Implements the dyn
 - **Core (envd, `cap-forge`)**: `LiveForgeDeviceClient` dispatches mounted
   `forge/<op>` leaves through `DeviceControlFactory::call_mounted` →
   `omp.devices.call`. Production `forge_router` registers `github.com` on the
-  Github arm and **`gitlab.com` on the Dyn arm**. `CheckoutForge` uses the
-  same bound client from `EnvServer`.
+  Github arm and **Dyn hosts** on the Dyn arm: always `gitlab.com`, plus
+  operator convar `sv_forge_dyn_hosts` (comma/whitespace-separated) and
+  adapter env `GITLAB_HOST` when set. A non-github checkout host joins Dyn
+  when it is in that set; otherwise it still lands on the Github arm (GHE).
+  `CheckoutForge` uses the same bound client from `EnvServer`.
 - **Extension read surface** (mounted at `extension_activate`):
   - `forge/change_request_view`
   - `forge/issue_view`
@@ -41,8 +44,10 @@ invent partial mutations.
 
 ## Remaining gaps
 
-- Automatic host-claim discovery for self-hosted GitLab (non-`gitlab.com`) from
-  the device catalog — still TODO at `forge_router`
+- **DONE:** Self-hosted host registration via `sv_forge_dyn_hosts` +
+  `GITLAB_HOST` (checkout / inferred hosts in that set route to Dyn; not the
+  Github arm). Full automatic device-catalog host-claim discovery remains a
+  smaller TODO.
 - **DONE:** SessionHost / URL-resolver `forge_router` share the session’s bound
   `LiveForgeDeviceClient` with CheckoutForge / CONTROL (no second unbound client)
 - Write ops; GitHub T2 parity + deletion of `envd/src/github.rs`
@@ -56,7 +61,8 @@ python -m unittest discover -s extensions/gitlab/tests -v
 
 # core
 cargo check -p omp-envd --features cap-forge,cap-ci --locked
-cargo nextest run -p omp-envd --features cap-forge,cap-ci dyn_forge
+cargo nextest run -p omp-envd --features cap-forge,cap-ci \
+  dyn_forge|forge_dyn_hosts|self_hosted_gitlab|checkout_host_in_dyn
 ```
 
 ## Related
