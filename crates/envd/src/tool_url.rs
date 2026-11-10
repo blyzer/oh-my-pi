@@ -38,7 +38,13 @@ use super::{
 	security_scan::SecurityScanService,
 	vault::VaultService,
 };
-use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
+use crate::{ContentResolver, HostResources, fetch_host::FetchHost, github_adapter};
+
+/// Forge router the production `pr://` and `issue://` resolvers read through.
+type SchemeForge = omp_forge_delegated::Delegated<
+	github_adapter::GithubForgeAdapter,
+	omp_forge_delegated::PermitAll,
+>;
 
 #[derive(Clone, Copy, Debug)]
 enum RegistryResource {
@@ -211,10 +217,11 @@ pub(super) enum UrlResolver {
 	Agent(RegistryResolver),
 	/// Read-only agent transcript index and bodies.
 	History(RegistryResolver),
-	/// Direct GitHub issue views.
-	Issue(GithubResolver),
-	/// Direct GitHub pull-request views and diffs.
-	Pr(GithubResolver),
+	/// Cached forge issues. Numbered reads use the delegated forge host.
+	Issue(GithubResolver<SchemeForge>),
+	/// Cached forge change requests and diffs. Numbered reads use the delegated
+	/// forge host.
+	Pr(GithubResolver<SchemeForge>),
 	/// Session-local scratch files.
 	Local(local::LocalResolver),
 	/// Active-session bounded memory projections.
@@ -529,6 +536,7 @@ pub(super) fn production_url_resolvers(
 	workspace_root: PathBuf,
 	github_cache: Arc<GithubCache>,
 	github_credentials: Arc<GithubCredentialBridge>,
+	forge: SchemeForge,
 	content: Vec<Arc<dyn ContentResolver>>,
 	host_resources: Option<Arc<dyn HostResources>>,
 	session_authority: Option<Arc<dyn SessionAuthority>>,
@@ -594,23 +602,25 @@ pub(super) fn production_url_resolvers(
 		.expect("mcp URL resolver is unique");
 	builder
 		.register(
-			SchemeEntry::new(Scheme::Issue, true, false, "direct GitHub issues"),
+			SchemeEntry::new(Scheme::Issue, true, false, "cached forge issues"),
 			UrlResolver::Issue(GithubResolver::new(
 				GithubScheme::Issue,
 				workspace_root.clone(),
 				Arc::clone(&github_cache),
 				Arc::clone(&github_credentials),
+				forge.clone(),
 			)),
 		)
 		.expect("issue URL resolver is unique");
 	builder
 		.register(
-			SchemeEntry::new(Scheme::Pr, true, false, "direct GitHub pull requests and diffs"),
+			SchemeEntry::new(Scheme::Pr, true, false, "cached forge change requests and diffs"),
 			UrlResolver::Pr(GithubResolver::new(
 				GithubScheme::PullRequest,
 				workspace_root,
 				github_cache,
 				github_credentials,
+				forge,
 			)),
 		)
 		.expect("pr URL resolver is unique");

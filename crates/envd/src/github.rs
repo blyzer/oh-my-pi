@@ -32,6 +32,9 @@ use super::{
 };
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// Scheme reads keep the historical 8 MiB ceiling for a diff or a comment page
+/// set.
+const SCHEME_TEXT_LIMIT: usize = 8 * 1024 * 1024;
 const SEARCH_LIMIT_DEFAULT: u32 = 10;
 const SEARCH_LIMIT_MAX: u32 = 50;
 const RUN_WATCH_TAIL_DEFAULT: usize = 15;
@@ -89,9 +92,12 @@ impl GithubService {
 		if method == Method::GetTextMatch {
 			headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github.text-match+json"));
 		}
+		if method == Method::GetDiff {
+			headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github.v3.diff"));
+		}
 		let url = github_url::api_url_for_host(host, path);
 		let request = match method {
-			Method::Get | Method::GetTextMatch => self.client.get(url),
+			Method::Get | Method::GetTextMatch | Method::GetDiff => self.client.get(url),
 			Method::Post => self.client.post(url),
 		};
 		let request = if let Some(body) = body {
@@ -163,6 +169,19 @@ impl GithubService {
 				rate_limit_remaining: remaining,
 				rate_limit_reset: reset,
 				retry_after_seconds: retry_after,
+			});
+		}
+		if method == Method::GetDiff {
+			if bytes.len() > SCHEME_TEXT_LIMIT {
+				return Err(fault("github_response_too_large", "GitHub response exceeds 8 MiB"));
+			}
+			let text = std::str::from_utf8(&bytes)
+				.map_err(|_| fault("github_invalid_response", "GitHub diff is not UTF-8"))?;
+			return Ok(ApiResponse {
+				value: Value::String(text.to_owned()),
+				remaining,
+				reset,
+				artifact: None,
 			});
 		}
 		let value = if bytes.is_empty() {
@@ -325,6 +344,104 @@ impl GithubService {
 		cancellation: &CancellationToken,
 	) -> Result<Option<String>, Fault> {
 		self.job_log(repo, job_id, cancellation).await
+	}
+
+	/// JSON body of one pull request. HTTP 404 stays a fault with that status.
+	pub(crate) async fn pr_view(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<ApiResponse, Fault> {
+		self
+			.request(
+				repo.host(),
+				Method::Get,
+				&format!("/repos/{}/pulls/{number}", repo.slug()),
+				None,
+				cancellation,
+			)
+			.await
+	}
+
+	/// JSON body of one issue. HTTP 404 stays a fault with that status.
+	pub(crate) async fn issue_view(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<ApiResponse, Fault> {
+		self
+			.request(
+				repo.host(),
+				Method::Get,
+				&format!("/repos/{}/issues/{number}", repo.slug()),
+				None,
+				cancellation,
+			)
+			.await
+	}
+
+	/// Unified diff text of one pull request (`application/vnd.github.v3.diff`).
+	pub(crate) async fn pr_diff(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<String, Fault> {
+		let response = self
+			.request(
+				repo.host(),
+				Method::GetDiff,
+				&format!("/repos/{}/pulls/{number}", repo.slug()),
+				None,
+				cancellation,
+			)
+			.await?;
+		Ok(response.value.as_str().unwrap_or_default().to_owned())
+	}
+
+	/// Conversation comments for an issue or a pull request.
+	///
+	/// GitHub serves both from the issue-comment list. Pages stop at 100
+	/// comments or 100 pages, and the retained JSON stays under 8 MiB.
+	pub(crate) async fn list_comments(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<Vec<Value>, Fault> {
+		let mut comments = Vec::new();
+		let mut retained = 0usize;
+		for page in 1..=100u32 {
+			let response = self
+				.request(
+					repo.host(),
+					Method::Get,
+					&format!("/repos/{}/issues/{number}/comments?per_page=100&page={page}", repo.slug()),
+					None,
+					cancellation,
+				)
+				.await?;
+			let page_comments = match response.value {
+				Value::Array(rows) => rows,
+				_ => {
+					return Err(fault("github_invalid_response", "GitHub comments were not a list"));
+				},
+			};
+			let complete = page_comments.len() < 100;
+			for comment in &page_comments {
+				retained = retained.saturating_add(comment.to_string().len());
+			}
+			comments.extend(page_comments);
+			if retained > SCHEME_TEXT_LIMIT {
+				return Err(fault("github_response_too_large", "GitHub comments exceed 8 MiB"));
+			}
+			if complete {
+				return Ok(comments);
+			}
+		}
+		Err(fault("github_response_too_large", "GitHub comments exceed 100 pages"))
 	}
 
 	/// Bytes previously spilled for a file-read artifact.
@@ -1381,6 +1498,7 @@ impl GithubService {
 enum Method {
 	Get,
 	GetTextMatch,
+	GetDiff,
 	Post,
 }
 fn api_path(path: &str) -> &str {

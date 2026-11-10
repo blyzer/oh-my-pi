@@ -3,7 +3,9 @@
 //! [`Delegated`] maps a forge host to one [`omp_forge::ForgeHost`] and
 //! forwards every method to that adapter. Writes consult an
 //! [`ApprovalGate`] first. The operation is the one the method names, and
-//! [`omp_forge::ForgeOp::mutates`] comes from the contract.
+//! [`omp_forge::ForgeOp::mutates`] comes from the contract. The unified diff
+//! and the comment list are reads: the router classifies them as
+//! `change_request_view` or `issue_view`.
 //!
 //! The crate performs no I/O and names no vendor. It is not a stable
 //! contract until a second real extension host exists (ADR 0049 D2.8).

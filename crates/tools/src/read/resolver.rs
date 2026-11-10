@@ -202,9 +202,9 @@ pub enum Scheme {
 	Rule,
 	/// Bundled harness documentation.
 	Omp,
-	/// A cached GitHub issue.
+	/// A cached forge issue (`issue://`).
 	Issue,
-	/// A cached GitHub pull request.
+	/// A cached forge change request (`pr://`), including diffs.
 	Pr,
 	/// A remote SSH resource.
 	Ssh,

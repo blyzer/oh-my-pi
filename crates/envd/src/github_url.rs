@@ -1,4 +1,12 @@
-//! Direct GitHub REST resolver for issue:// and pr:// resources.
+//! Resolver for `issue://` and `pr://`.
+//!
+//! A numbered resource is parsed with [`omp_forge::parse_resource_url`]. A
+//! bare number uses [`infer_repo`]. A missing host is `github.com`. The body
+//! comes from the forge [`omp_forge::ForgeHost`] (`view_change_request`,
+//! `view_issue`, the unified diff, and the comment list) and is rendered as
+//! `# title`, a blank line, and the body. The cache stores that markdown
+//! with no etag. List URLs such as `issue://owner/repo?state=open` stay on
+//! this resolver's REST client.
 
 use std::{
 	collections::BTreeMap,
@@ -25,6 +33,10 @@ use omp_ai::{
 use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
 use omp_catalog::AuthSpecId;
 use omp_core::{CowBytes, SecretString, Str, sf};
+use omp_forge::{
+	Comment, DiffSelector, ForgeError, ForgeHost, RepoRef, ResourceKind, ResourceSelector,
+	SchemeError, SchemeRef, parse_resource_url,
+};
 use omp_tool::{Diag, DiagKind};
 use omp_tools::read::{
 	Fault,
@@ -323,22 +335,24 @@ pub(super) enum GithubScheme {
 	PullRequest,
 }
 
-pub(super) struct GithubResolver {
+pub(super) struct GithubResolver<H> {
 	scheme:      GithubScheme,
 	root:        PathBuf,
 	cache:       Arc<GithubCache>,
 	credentials: Arc<GithubCredentialBridge>,
 	client:      omp_http::Client,
+	forge:       H,
 }
 
-impl GithubResolver {
+impl<H> GithubResolver<H> {
 	pub(super) fn new(
 		scheme: GithubScheme,
 		root: PathBuf,
 		cache: Arc<GithubCache>,
 		credentials: Arc<GithubCredentialBridge>,
+		forge: H,
 	) -> Self {
-		Self { scheme, root, cache, credentials, client: omp_http::no_redirect_client() }
+		Self { scheme, root, cache, credentials, client: omp_http::no_redirect_client(), forge }
 	}
 
 	/// Names the GitHub host a read of `resource` reaches, as a read resolves
@@ -346,8 +360,17 @@ impl GithubResolver {
 	/// remote, in ASCII lowercase. `None` when neither names one, which fails
 	/// the read the same way.
 	pub(crate) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<Str> {
-		let target = Target::parse(self.scheme, resource, query, &self.root).ok()?;
-		Some(Str::new(target.repo.host().to_ascii_lowercase()))
+		match numbered_ref(self.scheme, resource, query, &self.root) {
+			Ok(Some(parsed)) => parsed
+				.host
+				.as_deref()
+				.map(|host| Str::new(host.to_ascii_lowercase())),
+			Ok(None) => {
+				let target = Target::parse(self.scheme, resource, query, &self.root).ok()?;
+				Some(Str::new(target.repo.host().to_ascii_lowercase()))
+			},
+			Err(_) => None,
+		}
 	}
 
 	#[tracing::instrument(
@@ -356,7 +379,16 @@ impl GithubResolver {
 		skip_all,
 		fields(scheme = ?self.scheme, repo = tracing::field::Empty, number = tracing::field::Empty),
 	)]
-	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<GithubRead, Fault> {
+	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<GithubRead, Fault>
+	where
+		H: ForgeHost,
+	{
+		if let Some(parsed) = numbered_ref(self.scheme, resource, query, &self.root)? {
+			tracing::Span::current()
+				.record("repo", tracing::field::display(format!("{}/{}", parsed.owner, parsed.name)));
+			tracing::Span::current().record("number", parsed.number);
+			return self.resolve_numbered(parsed).await;
+		}
 		let target = Target::parse(self.scheme, resource, query, &self.root)?;
 		tracing::Span::current().record("repo", target.repo.identity());
 		if let Some(number) = target.number {
@@ -543,9 +575,112 @@ impl GithubResolver {
 		}
 		Err(invalid("GitHub comments exceed 100 pages."))
 	}
+
+	async fn resolve_numbered(&self, parsed: SchemeRef) -> Result<GithubRead, Fault>
+	where
+		H: ForgeHost,
+	{
+		let cached_key = target_for_scheme(&parsed)
+			.ok()
+			.and_then(|target| target.cache_key().ok());
+		let now = now_ms();
+		let cached = match &cached_key {
+			Some(key) => self.cache.get(key, now).map_err(cache_fault)?,
+			None => None,
+		};
+		if cached
+			.as_ref()
+			.is_some_and(|entry| entry.status == GithubCacheStatus::Fresh)
+		{
+			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
+		}
+		match self.fetch_numbered(&parsed).await {
+			Ok(rendered) => {
+				if let Some(key) = &cached_key {
+					self
+						.cache
+						.put(key, &rendered, None, now)
+						.map_err(cache_fault)?;
+				}
+				Ok(GithubRead { data: rendered, stale: false })
+			},
+			Err(error) => {
+				tracing::warn!(
+					error = ?error,
+					cached = cached.is_some(),
+					"forge resource refresh failed",
+				);
+				if let Some(cached) = cached {
+					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
+				} else {
+					Err(error)
+				}
+			},
+		}
+	}
+
+	async fn fetch_numbered(&self, parsed: &SchemeRef) -> Result<Vec<u8>, Fault>
+	where
+		H: ForgeHost,
+	{
+		let repo = parsed
+			.repo()
+			.ok_or_else(|| invalid("Forge resource is missing a host."))?;
+		let comments_enabled = parsed.comments.unwrap_or(true);
+		match parsed.selector {
+			ResourceSelector::Diff(selector) => {
+				let text = self
+					.forge
+					.change_request_diff(&repo, parsed.number)
+					.await
+					.map_err(forge_fault)?;
+				if text.len() > MAX_BODY {
+					return Err(invalid("GitHub response exceeds 8 MiB."));
+				}
+				render_diff(text.as_str(), &diff_mode(selector), &diff_repo_label(&repo), parsed.number)
+			},
+			ResourceSelector::None => {
+				let (title, body) = match parsed.kind {
+					ResourceKind::ChangeRequest => {
+						let value = self
+							.forge
+							.view_change_request(&repo, parsed.number)
+							.await
+							.map_err(forge_fault)?;
+						(value.title, value.body)
+					},
+					ResourceKind::Issue => {
+						let value = self
+							.forge
+							.view_issue(&repo, parsed.number)
+							.await
+							.map_err(forge_fault)?;
+						(value.title, value.body)
+					},
+				};
+				let comments = if comments_enabled {
+					Some(
+						self
+							.forge
+							.list_comments(&repo, parsed.number, parsed.kind)
+							.await
+							.map_err(forge_fault)?,
+					)
+				} else {
+					None
+				};
+				Ok(render_numbered(
+					title.as_str(),
+					body.as_str(),
+					comments_enabled,
+					comments.as_deref(),
+				))
+			},
+		}
+	}
 }
 
-impl Resolve for GithubResolver {
+impl<H: ForgeHost> Resolve for GithubResolver<H> {
 	async fn read<'a>(
 		&'a self,
 		resource: &'a str,
@@ -611,7 +746,7 @@ fn selected_read(
 	Ok(ResolvedRead { data, diags })
 }
 
-impl fmt::Debug for GithubResolver {
+impl<H> fmt::Debug for GithubResolver<H> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str("GithubResolver(..)")
 	}
@@ -857,6 +992,56 @@ impl Target {
 	}
 }
 
+fn render_numbered(
+	title: &str,
+	body: &str,
+	comments_enabled: bool,
+	comments: Option<&[Comment]>,
+) -> Vec<u8> {
+	let mut out = String::new();
+	out.push_str("# ");
+	out.push_str(if title.is_empty() {
+		"(no title)"
+	} else {
+		title
+	});
+	out.push_str("\n\n");
+	out.push_str(body);
+	if !comments_enabled {
+		out.push_str("\n\n_Comments disabled._");
+	} else if let Some(comments) = comments {
+		render_comment_page(&mut out, comments);
+	}
+	out.into_bytes()
+}
+
+fn render_comment_page(out: &mut String, comments: &[Comment]) {
+	out.push_str("\n\n## Comments\n");
+	if comments.is_empty() {
+		out.push_str("\n_No comments._\n");
+		return;
+	}
+	for comment in comments {
+		let author = if comment.author.is_empty() {
+			"unknown"
+		} else {
+			comment.author.as_str()
+		};
+		let created = if comment.created_at.is_empty() {
+			"unknown time"
+		} else {
+			comment.created_at.as_str()
+		};
+		out.push_str("\n### @");
+		out.push_str(author);
+		out.push_str(" — ");
+		out.push_str(created);
+		out.push_str("\n\n");
+		out.push_str(comment.body.as_str());
+		out.push('\n');
+	}
+}
+
 fn render_comments(out: &mut String, comments: &[Value]) {
 	out.push_str("\n\n## Comments\n");
 	if comments.is_empty() {
@@ -930,6 +1115,119 @@ fn render_diff(text: &str, mode: &DiffMode, repo: &str, number: u64) -> Result<V
 	}
 	Ok(out.into_bytes())
 }
+fn numbered_ref(
+	scheme: GithubScheme,
+	resource: &str,
+	query: Option<&str>,
+	root: &Path,
+) -> Result<Option<SchemeRef>, Fault> {
+	if is_list_resource(resource) {
+		return Ok(None);
+	}
+	let expanded = expand_shorthand(scheme, resource, root)?;
+	let url = append_query(expanded, query);
+	match parse_resource_url(&url) {
+		Ok(mut parsed) => {
+			if parsed.host.is_none() {
+				parsed.host = Some(Str::new_static(GITHUB_HOST));
+			}
+			Ok(Some(parsed))
+		},
+		Err(SchemeError::MissingNumber) => Ok(None),
+		Err(error) => Err(Fault::Invalid { message: Str::new(error.to_string()) }),
+	}
+}
+
+fn is_list_resource(resource: &str) -> bool {
+	let parts = resource
+		.split('/')
+		.filter(|part| !part.is_empty())
+		.collect::<Vec<_>>();
+	match parts.as_slice() {
+		[] => true,
+		[owner, name] => !(all_digits(owner) && *name == "diff"),
+		[host, _, name] if host.contains('.') && !all_digits(name) => true,
+		_ => false,
+	}
+}
+
+fn expand_shorthand(scheme: GithubScheme, resource: &str, root: &Path) -> Result<String, Fault> {
+	let name = scheme_name(scheme);
+	if let Some(tail) = shorthand_tail(resource) {
+		let repo = infer_repo(root)?;
+		return Ok(format!("{name}://{}/{}/{}", repo.host(), repo.slug(), tail));
+	}
+	Ok(format!("{name}://{resource}"))
+}
+
+fn shorthand_tail(resource: &str) -> Option<String> {
+	let parts = resource
+		.split('/')
+		.filter(|part| !part.is_empty())
+		.collect::<Vec<_>>();
+	match parts.as_slice() {
+		[number] if all_digits(number) => Some((*number).to_owned()),
+		[number, "diff"] if all_digits(number) => Some(format!("{number}/diff")),
+		[number, "diff", index] if all_digits(number) => Some(format!("{number}/diff/{index}")),
+		_ => None,
+	}
+}
+
+fn append_query(url: String, query: Option<&str>) -> String {
+	match query.map(str::trim).filter(|query| !query.is_empty()) {
+		Some(query) => format!("{url}?{query}"),
+		None => url,
+	}
+}
+
+const fn scheme_name(scheme: GithubScheme) -> &'static str {
+	match scheme {
+		GithubScheme::Issue => "issue",
+		GithubScheme::PullRequest => "pr",
+	}
+}
+
+fn all_digits(text: &str) -> bool {
+	!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn target_for_scheme(parsed: &SchemeRef) -> Result<Target, Fault> {
+	let host = parsed
+		.host
+		.as_deref()
+		.ok_or_else(|| invalid("Forge resource is missing a host."))?;
+	let repo = GithubRepo::new(host, parsed.owner.as_str(), parsed.name.as_str())?;
+	let scheme = match parsed.kind {
+		ResourceKind::ChangeRequest => GithubScheme::PullRequest,
+		ResourceKind::Issue => GithubScheme::Issue,
+	};
+	let view = match parsed.selector {
+		ResourceSelector::None => View::Detail { comments: parsed.comments.unwrap_or(true) },
+		ResourceSelector::Diff(selector) => View::Diff { mode: diff_mode(selector) },
+	};
+	Ok(Target { scheme, repo, number: Some(parsed.number), view })
+}
+
+fn diff_mode(selector: DiffSelector) -> DiffMode {
+	match selector {
+		DiffSelector::Index => DiffMode::Index,
+		DiffSelector::All => DiffMode::All,
+		DiffSelector::Slice(index) => DiffMode::Slice(usize::try_from(index).unwrap_or(usize::MAX)),
+	}
+}
+
+fn diff_repo_label(repo: &RepoRef) -> String {
+	if repo.host.eq_ignore_ascii_case(GITHUB_HOST) {
+		format!("{}/{}", repo.owner, repo.name)
+	} else {
+		format!("{}/{}/{}", repo.host, repo.owner, repo.name)
+	}
+}
+
+fn forge_fault(error: ForgeError) -> Fault {
+	Fault::Source { message: Str::new(error.to_string()) }
+}
+
 pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
 	let repo = GitRepo::require(root)
 		.map_err(|_| invalid("Cannot infer GitHub repo; use [host/]owner/repo explicitly."))?;
@@ -1019,7 +1317,18 @@ fn http_fault(error: impl Display) -> Fault {
 }
 #[cfg(test)]
 mod tests {
+	use std::{future::Future, sync::Arc};
+
+	use omp_cache::github_cache::GithubCachePolicy;
 	use omp_core::ExposeSecret as _;
+	use omp_forge::{
+		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+		FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
+		IssueState, PushReceipt, PushRequest, Repository, RequestState, ResourceKind, SearchPage,
+		SearchQuery,
+	};
+	use omp_forge_delegated::{Delegated, PermitAll};
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -1187,5 +1496,386 @@ mod tests {
 		.expect("git config");
 		let inferred = infer_repo(workspace.path()).expect("origin repo");
 		assert_eq!(inferred.identity(), "ghe/Owner/Repo");
+	}
+
+	#[test]
+	fn list_urls_stay_outside_the_numbered_parser() {
+		let root = Path::new("/unused");
+		let list =
+			numbered_ref(GithubScheme::Issue, "acme/widget", Some("state=open"), root).expect("list");
+		assert!(list.is_none());
+		let enterprise = numbered_ref(
+			GithubScheme::Issue,
+			"ghe.example.com/acme/widget",
+			Some("state=closed"),
+			root,
+		)
+		.expect("enterprise list");
+		assert!(enterprise.is_none());
+		let numbered = numbered_ref(GithubScheme::PullRequest, "acme/widget/7", None, root)
+			.expect("numbered")
+			.expect("change request");
+		assert_eq!(numbered.host.as_deref(), Some(GITHUB_HOST));
+		assert_eq!(numbered.owner.as_str(), "acme");
+		assert_eq!(numbered.number, 7);
+		assert_eq!(numbered.selector, ResourceSelector::None);
+	}
+
+	#[test]
+	fn shorthand_number_uses_the_checkout_and_keeps_a_diff_selector() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		std::fs::create_dir(workspace.path().join(".git")).expect("git directory");
+		std::fs::write(
+			workspace.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = https://github.com/acme/widget.git\n",
+		)
+		.expect("git config");
+		let parsed = numbered_ref(GithubScheme::PullRequest, "7/diff/2", None, workspace.path())
+			.expect("shorthand")
+			.expect("change request");
+		assert_eq!(parsed.host.as_deref(), Some(GITHUB_HOST));
+		assert_eq!(parsed.owner.as_str(), "acme");
+		assert_eq!(parsed.name.as_str(), "widget");
+		assert_eq!(parsed.number, 7);
+		assert_eq!(parsed.selector, ResourceSelector::Diff(DiffSelector::Slice(2)));
+	}
+
+	#[derive(Clone)]
+	struct Memory {
+		calls: Arc<Mutex<Vec<&'static str>>>,
+		fail:  Arc<Mutex<bool>>,
+		repo:  Arc<Mutex<Option<RepoRef>>>,
+	}
+
+	impl Memory {
+		fn new() -> Self {
+			Self {
+				calls: Arc::new(Mutex::new(Vec::new())),
+				fail:  Arc::new(Mutex::new(false)),
+				repo:  Arc::new(Mutex::new(None)),
+			}
+		}
+
+		fn calls(&self) -> Vec<&'static str> {
+			self.calls.lock().clone()
+		}
+
+		fn note(&self, name: &'static str, repo: &RepoRef) {
+			self.calls.lock().push(name);
+			*self.repo.lock() = Some(repo.clone());
+		}
+	}
+
+	impl ForgeHost for Memory {
+		fn view_repo(
+			&self,
+			repo: &RepoRef,
+		) -> impl Future<Output = Result<Repository, ForgeError>> + Send {
+			let repo = repo.clone();
+			async move {
+				Ok(Repository {
+					repo,
+					default_branch: Str::empty(),
+					clone_url: Str::empty(),
+					web_url: Str::empty(),
+					description: Str::empty(),
+				})
+			}
+		}
+
+		fn read_file(
+			&self,
+			query: &FileQuery,
+		) -> impl Future<Output = Result<FileBody, ForgeError>> + Send {
+			let query = query.clone();
+			async move { Ok(FileBody { query, content: bytes::Bytes::new() }) }
+		}
+
+		fn view_change_request(
+			&self,
+			repo: &RepoRef,
+			number: u64,
+		) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+			self.note("change", repo);
+			let repo = repo.clone();
+			let fail = Arc::clone(&self.fail);
+			async move {
+				if *fail.lock() {
+					return Err(ForgeError::Unavailable { op: ForgeOp::ChangeRequestView });
+				}
+				Ok(ChangeRequest {
+					repo,
+					number,
+					title: Str::new_static("Fix the widget"),
+					body: Str::new_static("details"),
+					state: RequestState::Open,
+					draft: false,
+					base_ref: Str::new_static("main"),
+					head_ref: Str::new_static("topic"),
+					head_commit: Str::empty(),
+					base_commit: Str::empty(),
+					web_url: Str::empty(),
+				})
+			}
+		}
+
+		fn view_issue(
+			&self,
+			repo: &RepoRef,
+			number: u64,
+		) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+			self.note("issue", repo);
+			let repo = repo.clone();
+			let fail = Arc::clone(&self.fail);
+			async move {
+				if *fail.lock() {
+					return Err(ForgeError::Unavailable { op: ForgeOp::IssueView });
+				}
+				Ok(Issue {
+					repo,
+					number,
+					title: Str::new_static("Bug"),
+					body: Str::new_static("steps"),
+					state: IssueState::Open,
+					web_url: Str::empty(),
+				})
+			}
+		}
+
+		fn change_request_diff(
+			&self,
+			repo: &RepoRef,
+			_number: u64,
+		) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+			self.note("diff", repo);
+			async move {
+				Ok(Str::new_static(
+					"diff --git a/a.txt b/a.txt\n--- a/a.txt\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n",
+				))
+			}
+		}
+
+		fn list_comments(
+			&self,
+			repo: &RepoRef,
+			_number: u64,
+			kind: ResourceKind,
+		) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+			let name = match kind {
+				ResourceKind::ChangeRequest => "pr-comments",
+				ResourceKind::Issue => "issue-comments",
+			};
+			self.note(name, repo);
+			async move {
+				Ok(Arc::from([Comment {
+					author:     Str::new_static("octocat"),
+					created_at: Str::new_static("2026-11-10T00:00:00Z"),
+					body:       Str::new_static("looks good"),
+				}]))
+			}
+		}
+
+		fn list_checks(
+			&self,
+			_repo: &RepoRef,
+			_target: &CheckTarget,
+		) -> impl Future<Output = Result<ForgeChecks, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::ListChecks }) }
+		}
+
+		fn search(
+			&self,
+			query: SearchQuery,
+		) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
+			let kind = query.kind;
+			async move { Ok(SearchPage::new(kind, [])) }
+		}
+
+		fn create_change_request(
+			&self,
+			_draft: ChangeRequestDraft,
+		) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestCreate }) }
+		}
+
+		fn checkout_change_request(
+			&self,
+			_request: &CheckoutRequest,
+		) -> impl Future<Output = Result<CheckoutReceipt, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestCheckout }) }
+		}
+
+		fn push_change_request(
+			&self,
+			_request: &PushRequest,
+		) -> impl Future<Output = Result<PushReceipt, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestPush }) }
+		}
+
+		fn create_issue(
+			&self,
+			_draft: IssueDraft,
+		) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::IssueCreate }) }
+		}
+	}
+
+	fn router(host: Memory) -> Delegated<Memory, PermitAll> {
+		let mut builder = Delegated::builder(PermitAll);
+		builder.register(GITHUB_HOST, host).expect("github.com");
+		builder.build()
+	}
+
+	fn open_cache(dir: &Path, soft_secs: u64) -> Arc<GithubCache> {
+		Arc::new(
+			GithubCache::open(
+				dir.join("github.sqlite3"),
+				GithubCachePolicy::new(
+					true,
+					std::time::Duration::from_secs(soft_secs),
+					std::time::Duration::from_secs(3600),
+				),
+			)
+			.expect("cache"),
+		)
+	}
+
+	fn resolver(
+		scheme: GithubScheme,
+		root: &Path,
+		cache: Arc<GithubCache>,
+		host: Memory,
+	) -> GithubResolver<Delegated<Memory, PermitAll>> {
+		GithubResolver::new(
+			scheme,
+			root.to_path_buf(),
+			cache,
+			Arc::new(GithubCredentialBridge::new()),
+			router(host),
+		)
+	}
+
+	#[tokio::test]
+	async fn numbered_reads_render_title_and_body_and_cache_without_an_etag() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 300);
+		let resolver =
+			resolver(GithubScheme::PullRequest, dir.path(), Arc::clone(&cache), host.clone());
+		let resolved = resolver
+			.read_with_diags("acme/widget/7", &ParsedSelector::None)
+			.await
+			.expect("read");
+		let text = std::str::from_utf8(resolved.data.as_ref()).expect("utf-8");
+		assert_eq!(
+			text,
+			"# Fix the widget\n\ndetails\n\n## Comments\n\n### @octocat — \
+			 2026-11-10T00:00:00Z\n\nlooks good\n"
+		);
+		assert!(resolved.diags.is_empty());
+		assert_eq!(host.calls(), ["change", "pr-comments"]);
+		let seen = host.repo.lock().clone().expect("repo");
+		assert_eq!(seen.host.as_str(), GITHUB_HOST);
+		assert_eq!(seen.owner.as_str(), "acme");
+		assert_eq!(seen.name.as_str(), "widget");
+
+		let key = GithubCacheKey::new(
+			GithubResourceKind::PullRequest,
+			"acme/widget",
+			Some(7),
+			"Detail { comments: true }",
+		)
+		.expect("key");
+		let entry = cache.get(&key, now_ms()).expect("get").expect("cached");
+		assert!(entry.etag.is_none());
+		assert_eq!(entry.body.as_ref(), resolved.data.as_ref());
+
+		let again = resolver
+			.read_with_diags("acme/widget/7", &ParsedSelector::None)
+			.await
+			.expect("fresh");
+		assert_eq!(again.data.as_ref(), resolved.data.as_ref());
+		assert_eq!(host.calls(), ["change", "pr-comments"]);
+	}
+
+	#[tokio::test]
+	async fn issue_comments_can_be_disabled_and_an_unregistered_host_is_not_github() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 300);
+		let resolver = resolver(GithubScheme::Issue, dir.path(), cache, host.clone());
+		let resolved = resolver
+			.read_query_with_diags("acme/widget/3", Some("comments=false"), &ParsedSelector::None)
+			.await
+			.expect("issue");
+		let text = std::str::from_utf8(resolved.data.as_ref()).expect("utf-8");
+		assert_eq!(text, "# Bug\n\nsteps\n\n_Comments disabled._");
+		assert_eq!(host.calls(), ["issue"]);
+		assert!(!text.contains("Open #"));
+
+		let missing = resolver
+			.read_with_diags("gitlab.example/acme/widget/4", &ParsedSelector::None)
+			.await
+			.expect_err("unregistered");
+		assert!(missing.message().as_str().contains("gitlab.example"), "{}", missing.message());
+		assert_eq!(host.calls(), ["issue"]);
+	}
+
+	#[tokio::test]
+	async fn diff_selectors_slice_the_host_text() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 300);
+		let resolver = resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
+		let index = resolver
+			.read_with_diags("acme/widget/7/diff", &ParsedSelector::None)
+			.await
+			.expect("index");
+		let index_text = std::str::from_utf8(index.data.as_ref()).expect("utf-8");
+		assert!(index_text.contains("pr://acme/widget/7/diff/1"), "{index_text}");
+		assert!(index_text.contains("pr://acme/widget/7/diff/2"), "{index_text}");
+		let slice = resolver
+			.read_with_diags("acme/widget/7/diff/2", &ParsedSelector::None)
+			.await
+			.expect("slice");
+		let slice_text = std::str::from_utf8(slice.data.as_ref()).expect("utf-8");
+		assert!(slice_text.contains("b.txt"), "{slice_text}");
+		assert!(!slice_text.contains("a.txt"), "{slice_text}");
+		let all = resolver
+			.read_with_diags("acme/widget/7/diff/all", &ParsedSelector::None)
+			.await
+			.expect("all");
+		let all_text = std::str::from_utf8(all.data.as_ref()).expect("utf-8");
+		assert!(all_text.starts_with("diff --git a/a.txt"), "{all_text}");
+		assert!(host.calls().iter().all(|call| *call == "diff"));
+	}
+
+	#[tokio::test]
+	async fn a_failed_refresh_returns_the_cached_body_and_a_stale_diag() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 1);
+		let key = GithubCacheKey::new(
+			GithubResourceKind::Issue,
+			"acme/widget",
+			Some(3),
+			"Detail { comments: true }",
+		)
+		.expect("key");
+		let cached =
+			"# Bug\n\nsteps\n\n## Comments\n\n### @octocat — 2026-11-10T00:00:00Z\n\nlooks good\n";
+		cache
+			.put(&key, cached.as_bytes(), Some("W/\"old\""), now_ms().saturating_sub(5_000))
+			.expect("seed");
+		*host.fail.lock() = true;
+		let resolver = resolver(GithubScheme::Issue, dir.path(), cache, host.clone());
+		let resolved = resolver
+			.read_with_diags("acme/widget/3", &ParsedSelector::None)
+			.await
+			.expect("stale");
+		assert_eq!(resolved.data.as_ref(), cached.as_bytes());
+		assert_eq!(resolved.diags.len(), 1);
+		assert_eq!(resolved.diags[0].native_kind(), Some(DiagKind::StaleCache));
+		assert_eq!(host.calls(), ["issue"]);
 	}
 }

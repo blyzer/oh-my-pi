@@ -45,7 +45,7 @@ mod repo;
 mod scheme;
 
 pub use change::{
-	ChangeRequest, ChangeRequestDraft, CheckoutReceipt, CheckoutRequest, Issue, IssueDraft,
+	ChangeRequest, ChangeRequestDraft, CheckoutReceipt, CheckoutRequest, Comment, Issue, IssueDraft,
 	IssueState, PushReceipt, PushRequest, RequestState,
 };
 pub use check::{
