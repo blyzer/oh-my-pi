@@ -77,7 +77,9 @@ area/ci:
 
 area/forge:
   - changed-files:
-      - any-glob-to-any-file: 'crates/forge/**'
+      - any-glob-to-any-file:
+          - 'crates/forge/**'
+          - 'crates/forge-delegated/**'
 
 area/shell:
   - changed-files:

@@ -54,6 +54,7 @@ pub use check::{
 };
 pub use component::{
 	ComponentError, MAX_COMMIT_LEN, MAX_COMPONENT_LEN, MAX_OWNER_LEN, MAX_SEGMENTS, PathComponent,
+	check_host,
 };
 pub use error::ForgeError;
 pub use host::ForgeHost;
