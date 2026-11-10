@@ -28,8 +28,8 @@ Accepted and proposed decisions point the same way, but none says **where a new 
 | `russh`/`russh-sftp` are used only by envd and add 30 crates | `Cargo.lock` |
 | `candle` adds 29 crates through `omp-ai`, enabled by `app`'s `default = ["local"]` | `crates/app/Cargo.toml` |
 | `omp-ai/realtime` (WebRTC/DTLS/Opus) is used by `app` voice, so it earns its weight | `crates/app/src/{chat_voice.rs,voice/synth.rs}` |
-| GitHub vendor code sits in core: `envd/src/github.rs`, `github_url.rs` (later neutralized to `forge_url.rs`), the `github@3` tool contract, and the `Issue`/`Pr` schemes documented as "a cached GitHub issue/pull request" | `crates/{envd,tools}/src`, `crates/tools/src/read/resolver.rs` |
-| The scheme vocabulary is closed at compile time: a `Scheme` enum plus `url-vocab.json`, frozen into Python. Unknown schemes cannot be registered; Python can parse and read, not register | `crates/tools/src/read/resolver.rs`, `crates/py/build.rs`, `omp/urls.py` |
+| GitHub vendor code sat in core (`envd/src/github.rs`, historically `github_url.rs`, `github@3`); Phase 4–5 moved forge/CI to Dyn T2 extensions and neutralized schemes/credentials to `forge_url.rs` | `crates/{envd,tools}/src`, `extensions/{forge,ci,github,gitlab}/` |
+| Built-ins are closed at compile time (`Scheme` + `url-vocab.json`); the unknown-scheme fallback (`install_unknown_fallback` → `HostUriResolver`) already resolves schemes declared by the RPC host, with selectors in core; extensions cannot declare schemes today | `crates/tools/src/read/resolver.rs`, `crates/tools/url-vocab.json`, `crates/py/build.rs`, `crates/envd/src/tool_url.rs`, `omp/urls.py`; [ADR 0050](0050-extension-declared-url-schemes.md) |
 | A Python extension can mount an MCP server (`omp.mcp.mount`), whose resources are readable as `mcp://` | `crates/py/python/omp/mcp.py`, ADR 0027 |
 | 120 Python ports (113 v1 extensions plus 7 probes) were written 2026-08-20..24 to measure API gaps and deleted 2026-09-03 (`00611047`). 58 have no native equivalent today | `00611047c1^:examples/` |
 | The gaps that blocked those ports are closed: `omp.Device.subtool`, `Device.mount` and `omp.creds.mint_scoped` exist | `crates/py/python/omp/{devices,creds}.py` |
@@ -67,7 +67,7 @@ This follows the execution precedent (ADR 0040 Part A.1 as amended: `Local | Rea
 5. **Schemes are generalized, not added.**
    - `pr://` and `issue://` keep their names. Their meaning changes from "a cached GitHub pull request/issue" to "a forge change request/issue".
    - They are resolved by the `Delegated` resolver to the adapter owning the host, with core-side caching and selectors (`/diff`, comments).
-   - The scheme vocabulary does not grow. A GitLab merge request is `pr://gitlab.example.com/group/project/42`.
+   - The built-in vocabulary does not grow. A GitLab merge request is `pr://gitlab.example.com/group/project/42`. Extension-declared schemes follow [ADR 0050](0050-extension-declared-url-schemes.md).
 6. **Tools become neutral.** `github@3` is replaced by neutral `forge@1` and `ci@1` contracts, served by the `Delegated` adapters. `run_watch`, checks, rerun, cancel, dispatch and artifacts move to `ci@1`. ADR 0024 roster review applies.
 7. **Credentials are host-scoped.**
    - The resolution order (stored credential for the canonical host only → host-family env vars → git credential helper) stays in core.
@@ -141,6 +141,7 @@ Class A items move in Phase 4. Cards render `forge@1` data. `gitwatch` reads the
 | 0 Baseline | `cargo build --timings` (cold and one-line incremental) for `omp`, `omp-envd`, `omp-exec-local`, `omp-exec-ssh`; per-platform closure counts | ENVD-01 extension | Recorded in P8 |
 | 1 Decouple | D3.1, D3.2, D3.3 | ENVD-16 (new), ENVD-07, ENVD-02 | `exec-*` closures ≤ 300 crates with no `omp-envd`; envd without `omp-agent` |
 | 2 Locality | D3.4; `server.rs`/`tools.rs`/`mcp` splits | 0046 item 1, ENVD-03/04 | Adding a test capability edits 0 envd files |
+| 2S Extension schemes | Extension-declared URL schemes ([ADR 0050](0050-extension-declared-url-schemes.md)): manifest `schemes`, additive `omp.schemes`, served by the existing unknown-scheme fallback. One PR per S1–S5 | ADR 0050 S1–S5 | Blocked on owner acceptance of ADR 0050 |
 | 3 Generic capabilities | D3.5, one capability per change | ENVD-08/09 | Each removes an envd dependency edge; the minimal profile builds |
 | 4 Neutral forge/CI/exec | `omp-forge`, `omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, generalized `pr://`/`issue://`; GitLab adapter (T2) proves the contract; GitHub adapter (T2) reaches parity; then remove every D6 class A forge item; BuildBuddy behind the execution `Delegated` adapter, then remove the D6 class A execution items | ENVD-09 (github item), ADR 0040 amendment | Parity suite green on the GitHub adapter; no D6 class A code in any `omp2` crate |
 | 5 Extensions | In-repo `extensions/` home, conformance CI, rescue wave 1, GitLab T2 (D2.8), ADR 0046 item 4 UI host arms + UI ports | 0046 item 4 DONE | Wave-1 + UI ports green against the frozen API; Phase 5 remainder empty |
@@ -150,7 +151,7 @@ Every step is one self-contained, reversible change, with no shims or re-exports
 ## Non-goals
 - No new daemons, no event bus, no thin supervisor (ADR 0045 alternatives C, D and E stay rejected).
 - No JS/TS runtime, no dynamic tool schemas, no runtime roster mutation (Locked Deviations).
-- No new URL schemes.
+- No new built-in schemes for vendor concepts. Extension-declared schemes follow [ADR 0050](0050-extension-declared-url-schemes.md).
 - Document authority never leaves envd.
 - No bulk restore of the 2026-08 ports.
 
@@ -161,7 +162,7 @@ Every step is one self-contained, reversible change, with no shims or re-exports
 | Keep adding capabilities natively in envd | Repeats the weight and inversion costs ADR 0045 classifies as defects |
 | Everything as extensions, including repository work | Loses worktree, lock and precise-effect guarantees; weakens security |
 | Bulk-restore all ports | Unowned code against a moving API; repeats the 2026-09-03 deletion |
-| Vendor-specific tools and schemes (`gitlab@1`, `mr://`) | N parallel contracts and prompt surfaces; grows the closed vocabulary; lock-in by shape |
+| Vendor-specific tools and built-in schemes (`gitlab@1`, `mr://`) | N parallel contracts and prompt surfaces; grows the closed built-in vocabulary; lock-in by shape. An adapter may document merge requests as `pr://…` |
 
 ## Consequences
 **Easier:**
@@ -170,7 +171,7 @@ Every step is one self-contained, reversible change, with no shims or re-exports
 - `exec-*`, envd tests and headless profiles build much smaller graphs.
 - The extension API gains maintained first-party users and a CI guard.
 
-**Prohibited:** vendor integration code (D6 class A) in any `omp2` crate; new schemes for vendor concepts; extension-held raw provider tokens.
+**Prohibited:** vendor integration code (D6 class A) in any `omp2` crate; new built-in schemes for vendor concepts; extension-held raw provider tokens.
 
 **Costs accepted:**
 - Two contract crates and two `Delegated` adapters.
@@ -230,7 +231,7 @@ Consequences of this amendment:
 - **DONE (ADR 0046 item 4):** chat-host slot/overlay/`dynamic_mount` arms; UI-bound ports `sidebar`, `hover-cards`, `welcome-chrome` restored. Phase 5 remainder is empty.
 
 ## References
-- ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment).
+- ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment), 0050 (proposed; Phase 2S).
 - `docs/research/envd-responsibility-audit.md`; `docs/research/exec-out-of-core.md`; `docs/research/omp-v1-vs-omp2-architecture.md`.
 - Deleted ports: `00611047c1^:examples/`.
 - First-party extensions home: `extensions/` (scaffold; owner decision 2026-11-10).

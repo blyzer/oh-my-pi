@@ -78,8 +78,9 @@ New resource kinds are added as projections behind `Read`, NEVER as new roster t
 
 Under [ADR 0049](0049-tiered-integration-architecture.md) D2.5:
 - `pr://` and `issue://` mean "a forge change request/issue", not "a cached GitHub pull request/issue". A `Delegated` resolver serves them, keeping core-side caching and selectors, from the extension that owns the host.
-- The scheme vocabulary does not grow, and vendor concepts get no new schemes.
-- Extensions that need readable resources use `mcp://`, by mounting an MCP server with `omp.mcp.mount`, or expose devices.
+- The built-in scheme vocabulary does not grow, and vendor concepts get no new built-in schemes.
+- Beyond `mcp://`, an installed extension may declare its own schemes per [ADR 0050](0050-extension-declared-url-schemes.md), served through the existing unknown-scheme fallback.
+- Extensions that need readable resources use `mcp://`, by mounting an MCP server with `omp.mcp.mount`, expose devices, or declare a scheme under ADR 0050.
 
 ## Status in omp
 
