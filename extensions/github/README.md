@@ -50,7 +50,8 @@ work in core). In-core `github.rs` still performs checkout/push through
 ## Remaining gaps (blocks deleting `github.rs`)
 
 - Checkout / push on Dyn (honest `CheckoutReceipt` / `PushReceipt`)
-- `ci/*` dyn bridge (Actions still via `GithubCiAdapter`)
+- T2 CI extension body + flipping `github.com` CI to Dyn (`ci/*` bridge is
+  DONE — Actions still via in-core `GithubCiAdapter` for `github.com`)
 - List-URL helpers / `GithubResolver` REST client still in-core
 - Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay
 
@@ -63,6 +64,7 @@ python3 -m unittest discover -s extensions/github/tests -v
 ## Related
 
 - Mount owner: [`../forge/`](../forge/)
-- Schema: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
-- Bridge: `crates/envd/src/github_adapter/dyn_forge.rs`
+- Forge schema: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
+- CI schema: [`docs/adr/0049-ci-dyn-device-schema.md`](../../docs/adr/0049-ci-dyn-device-schema.md)
+- Bridges: `crates/envd/src/github_adapter/dyn_forge.rs`, `dyn_ci.rs`
 - In-core (kept): `crates/envd/src/github.rs`, `github_url.rs`

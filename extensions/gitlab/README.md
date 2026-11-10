@@ -52,7 +52,9 @@ through `DynForgeAdapter` for those paths become `ForgeError::Unavailable`.
 - Full automatic device-catalog host-claim discovery remains a smaller TODO
 - Checkout / push still unmounted (core-owned)
 - Search leaves
-- In-core `github.rs` remains until checkout/push/CI/list-URL Dyn parity
+- T2 CI extension body (core `ci/*` dyn bridge DONE; `gitlab.com` is on the
+  Dyn CI arm, Unavailable until mounts exist)
+- In-core `github.rs` remains until checkout/push + T2 CI + list-URL Dyn parity
 
 ## Proofs
 
@@ -62,12 +64,13 @@ python3 -m unittest discover -s extensions/gitlab/tests -v
 # core
 cargo check -p omp-envd --features cap-forge,cap-ci --locked
 cargo nextest run -p omp-envd --features cap-forge,cap-ci \
-  dyn_forge|forge_dyn_hosts|self_hosted_gitlab|checkout_host_in_dyn|github_com_is_registered_dyn
+  dyn_forge|dyn_ci|forge_dyn_hosts|self_hosted_gitlab|checkout_host_in_dyn|github_com_is_registered_dyn
 ```
 
 ## Related
 
 - Mount owner: [`../forge/`](../forge/)
-- Schema: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
-- Bridge: `crates/envd/src/github_adapter/dyn_forge.rs`
+- Forge schema: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
+- CI schema: [`docs/adr/0049-ci-dyn-device-schema.md`](../../docs/adr/0049-ci-dyn-device-schema.md)
+- Bridges: `crates/envd/src/github_adapter/dyn_forge.rs`, `dyn_ci.rs`
 - Contract: `crates/forge`

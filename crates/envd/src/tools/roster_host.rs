@@ -100,6 +100,9 @@ pub(super) struct SessionHost<'a> {
 	/// Session-bound forge device client (same slot as CheckoutForge / CONTROL).
 	#[cfg(feature = "cap-forge")]
 	forge_devices:      crate::github_adapter::LiveForgeDeviceClient,
+	/// Session-bound CI device client (dyn `ci/*` bridge).
+	#[cfg(feature = "cap-ci")]
+	ci_devices:         crate::github_adapter::LiveCiDeviceClient,
 	#[cfg(feature = "cap-media")]
 	image_config:       media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")]
@@ -127,6 +130,7 @@ impl<'a> SessionHost<'a> {
 		telemetry: &'a Arc<omp_cache::telemetry_cache::TelemetryIndex>,
 		forge_cache: Arc<ForgeCache>,
 		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
 		#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
@@ -151,6 +155,8 @@ impl<'a> SessionHost<'a> {
 			forge_cache,
 			#[cfg(feature = "cap-forge")]
 			forge_devices,
+			#[cfg(feature = "cap-ci")]
+			ci_devices,
 			#[cfg(feature = "cap-media")]
 			image_config,
 			#[cfg(feature = "cap-media")]
@@ -199,10 +205,8 @@ impl ToolGate for SessionHost<'_> {
 impl SessionInstall for SessionHost<'_> {
 	type Checkpoint = AgentCheckpointControl;
 	#[cfg(feature = "cap-ci")]
-	type CiRouter = omp_ci_delegated::Delegated<
-		crate::github_adapter::GithubCiAdapter,
-		omp_ci_delegated::PermitAll,
-	>;
+	type CiRouter =
+		omp_ci_delegated::Delegated<crate::github_adapter::CiBackend, omp_ci_delegated::PermitAll>;
 	type Error = EnvdError;
 	#[cfg(feature = "cap-forge")]
 	type ForgeRouter = omp_forge_delegated::Delegated<
@@ -274,7 +278,7 @@ impl SessionInstall for SessionHost<'_> {
 
 	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter {
-		crate::github_adapter::ci_router(self.ensure_github())
+		crate::github_adapter::ci_router(self.ensure_github(), self.ci_devices.clone())
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -1223,6 +1227,8 @@ mod forge_bind_tests {
 			&telemetry,
 			forge_cache,
 			devices.clone(),
+			#[cfg(feature = "cap-ci")]
+			crate::github_adapter::LiveCiDeviceClient::default(),
 			#[cfg(feature = "cap-media")]
 			crate::media_devices::ImageConfig::default(),
 			#[cfg(feature = "cap-media")]

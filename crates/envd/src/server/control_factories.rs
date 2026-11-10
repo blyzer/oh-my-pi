@@ -17,6 +17,9 @@ pub(in crate::server) struct ProductionControlBindings {
 	/// Live forge device client bound to the device catalog (cap-forge).
 	#[cfg(feature = "cap-forge")]
 	pub(in crate::server) forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+	/// Live CI device client bound to the device catalog (cap-ci).
+	#[cfg(feature = "cap-ci")]
+	pub(in crate::server) ci_devices:    crate::github_adapter::LiveCiDeviceClient,
 }
 
 pub(in crate::server) struct WeakExtensionCallbackDispatcher {
@@ -928,6 +931,12 @@ pub(in crate::server) fn production_control_authorities(
 		client.bind(device_factory.forge_invoker());
 		client
 	};
+	#[cfg(feature = "cap-ci")]
+	let ci_devices = {
+		let client = crate::github_adapter::LiveCiDeviceClient::default();
+		client.bind(device_factory.ci_invoker());
+		client
+	};
 	let devices: Arc<dyn ControlAuthorityFactory> = device_factory;
 	let extension_settings = extensions
 		.iter()
@@ -1011,5 +1020,7 @@ pub(in crate::server) fn production_control_authorities(
 		hooks,
 		#[cfg(feature = "cap-forge")]
 		forge_devices,
+		#[cfg(feature = "cap-ci")]
+		ci_devices,
 	}
 }
