@@ -19,12 +19,16 @@ collision).
 - **Backend write creates**:
   - `change_request_create` — POST `/projects/:id/merge_requests`
   - `issue_create` — POST `/projects/:id/issues`
+- **Backend search / list** (`search` → `SearchPage`):
+  - `search_change_requests` / `search_issues` — project list REST with
+    neutral `state:` / `author:` / `label:` filters (and optional free-text
+    `search=`). Other kinds stay Unavailable.
 - **CI backend** (`omp_gitlab.ci`, served when `omp.ci` mounts):
   - `status` — pipeline + jobs → `Pipeline`
   - `log_stream` — job trace (or concatenated failed-job traces) → `LogPage`
   - `capabilities` — `log_stream` only
 - **Pure mapping** (`omp_gitlab.mapping` / `omp_gitlab.ci_mapping`): fixture
-  JSON → forge / CI shapes. Unit tests under `tests/` (no network).
+  JSON → forge / CI / `SearchPage` shapes. Unit tests under `tests/` (no network).
 
 ## Credentials (adapter data — ADR 0049 D2.7)
 
@@ -41,15 +45,15 @@ No tokens live in this tree.
 
 ## Unsupported / unmounted
 
-Search, checkout, and push leaves are **not mounted**. CI write ops and
-`artifacts` stay unmounted; registration ceilings remain `log_stream` only.
+`search_code` / `search_commits` / `search_repos`, checkout, and push are
+**not mounted**. CI write ops and `artifacts` stay unmounted; registration
+ceilings remain `log_stream` only.
 
 ## Remaining gaps
 
 - Full automatic device-catalog host-claim discovery remains a smaller TODO
-- Checkout / push still unmounted (core-owned)
-- Search leaves
-- In-core `github.rs` remains until checkout/push + list-URL Dyn parity
+- Checkout / push still unmounted (core-owned, ADR D2.4)
+- In-core `github.rs` remains until Dyn checkout/push parity
 
 ## Proofs
 

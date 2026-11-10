@@ -141,3 +141,78 @@ def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
     if description:
         body["body"] = description
     return body
+
+
+_LIST_FILTER_KEYS = frozenset({"state", "author", "label"})
+
+
+def split_list_filters(text: str) -> tuple[dict[str, str], str]:
+    """Split neutral list-URL tokens from free-text search.
+
+    List URLs encode filters as ``state:open author:alice label:bug``. Remaining
+    tokens are free-text search. Empty free-text with a repo scope means "list
+    the scope" (REST list endpoints).
+    """
+    filters: dict[str, str] = {}
+    rest: list[str] = []
+    for token in (text or "").split():
+        key, sep, value = token.partition(":")
+        if sep and key in _LIST_FILTER_KEYS and value:
+            filters[key] = value
+            continue
+        rest.append(token)
+    return filters, " ".join(rest)
+
+
+def map_issue_hit(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Map one GitHub issue JSON object to a ``SearchHit`` (skip PRs)."""
+    if payload.get("pull_request") is not None:
+        return None
+    return {
+        "repo": _repo_ref(repo),
+        "title": _str(payload.get("title")),
+        "web_url": _str(payload.get("html_url")),
+        "number": int(payload.get("number") or 0) or None,
+        "commit": None,
+        "state": map_issue_state(_str(payload.get("state"))),
+    }
+
+
+def map_pull_request_hit(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map one GitHub pull-request JSON object to a ``SearchHit``."""
+    return {
+        "repo": _repo_ref(repo),
+        "title": _str(payload.get("title")),
+        "web_url": _str(payload.get("html_url")),
+        "number": int(payload.get("number") or 0) or None,
+        "commit": None,
+        "state": map_request_state(
+            _str(payload.get("state")),
+            merged=bool(payload.get("merged")),
+        ),
+    }
+
+
+def map_search_page(
+    kind: str,
+    payloads: list[Mapping[str, Any]],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map a GitHub issues/pulls list (or search ``items``) to ``SearchPage``."""
+    hits: list[dict[str, Any]] = []
+    if kind in {"change_requests", "search_change_requests"}:
+        for row in payloads:
+            hits.append(map_pull_request_hit(row, repo))
+        page_kind = "change_requests"
+    elif kind in {"issues", "search_issues"}:
+        for row in payloads:
+            hit = map_issue_hit(row, repo)
+            if hit is not None:
+                hits.append(hit)
+        page_kind = "issues"
+    else:
+        page_kind = kind
+    return {"kind": page_kind, "hits": hits}

@@ -203,6 +203,11 @@ pub struct SearchHit {
 	pub number:  Option<u64>,
 	/// Commit identity, when the hit has one.
 	pub commit:  Option<Str>,
+	/// Issue / change-request state when the hit has one (`open`, `closed`,
+	/// `merged`, …). Empty for code / commit / repository hits and when the
+	/// forge omitted it. List-URL markdown uses this for `- [state] #N`.
+	#[serde(default)]
+	pub state:   Str,
 }
 
 /// One page of search hits.

@@ -5,8 +5,16 @@
 //! comes from the forge [`omp_forge::ForgeHost`] (`view_change_request`,
 //! `view_issue`, the unified diff, and the comment list) and is rendered as
 //! `# title`, a blank line, and the body. The cache stores that markdown
-//! with no etag. List URLs such as `issue://owner/repo?state=open` stay on
-//! this resolver's REST client.
+//! with no etag.
+//!
+//! List URLs such as `issue://owner/repo?state=open` and `pr://…` also go
+//! through [`ForgeHost::search`] (Dyn for `github.com` / `gitlab.com`, in-core
+//! GitHub adapter for remaining GHE hosts). Neutral filter tokens
+//! (`state:` / `author:` / `label:`) ride `SearchQuery.text`. The search path
+//! has no HTTP etag, so list bodies are cached without one (same honesty as
+//! numbered reads). The private GitHub REST client in this module remains for
+//! legacy detail/diff fetch paths that still need it; checkout/push still
+//! need `github.rs`.
 
 use std::{
 	collections::BTreeMap,
@@ -39,7 +47,7 @@ use omp_core::{SecretString, Str, sf};
 #[cfg(feature = "cap-forge")]
 use omp_forge::{
 	Comment, DiffSelector, ForgeError, ForgeHost, RepoRef, ResourceKind, ResourceSelector,
-	SchemeError, SchemeRef, parse_resource_url,
+	SchemeError, SchemeRef, SearchHit, SearchKind, SearchPage, SearchQuery, parse_resource_url,
 };
 #[cfg(feature = "cap-forge")]
 use omp_tool::{Diag, DiagKind};
@@ -405,6 +413,9 @@ impl<H> GithubResolver<H> {
 		if let Some(number) = target.number {
 			tracing::Span::current().record("number", number);
 		}
+		if matches!(target.view, View::List { .. }) {
+			return self.resolve_list(target).await;
+		}
 		let key = target.cache_key()?;
 		let now = now_ms();
 		let cached = self.cache.get(&key, now).map_err(cache_fault)?;
@@ -464,6 +475,56 @@ impl<H> GithubResolver<H> {
 				}
 			},
 		}
+	}
+
+	/// List URLs via [`ForgeHost::search`]. No etag — cache the rendered
+	/// markdown only (same contract as numbered forge reads).
+	async fn resolve_list(&self, target: Target) -> Result<GithubRead, Fault>
+	where
+		H: ForgeHost,
+	{
+		let key = target.cache_key()?;
+		let now = now_ms();
+		let cached = self.cache.get(&key, now).map_err(cache_fault)?;
+		if cached
+			.as_ref()
+			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
+		{
+			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
+		}
+		match self.fetch_list(&target).await {
+			Ok(rendered) => {
+				self
+					.cache
+					.put(&key, &rendered, None, now)
+					.map_err(cache_fault)?;
+				Ok(GithubRead { data: rendered, stale: false })
+			},
+			Err(error) => {
+				tracing::warn!(
+					error = ?error,
+					cached = cached.is_some(),
+					"forge list refresh failed",
+				);
+				if let Some(cached) = cached {
+					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
+				} else {
+					Err(error)
+				}
+			},
+		}
+	}
+
+	async fn fetch_list(&self, target: &Target) -> Result<Vec<u8>, Fault>
+	where
+		H: ForgeHost,
+	{
+		let query = list_search_query(target)?;
+		let page = self.forge.search(query).await.map_err(forge_fault)?;
+		if page.hits.len() > MAX_BODY {
+			return Err(invalid("GitHub response exceeds 8 MiB."));
+		}
+		Ok(render_search_list(target.scheme, &target.repo, &page))
 	}
 
 	#[tracing::instrument(
@@ -1264,6 +1325,83 @@ fn forge_fault(error: ForgeError) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }
 }
 
+/// Builds a [`SearchQuery`] for a list URL, encoding filters as neutral
+/// `state:` / `author:` / `label:` tokens in `text`.
+#[cfg(feature = "cap-forge")]
+fn list_search_query(target: &Target) -> Result<SearchQuery, Fault> {
+	let View::List { state, limit, author, label } = &target.view else {
+		return Err(invalid("Expected a forge list view."));
+	};
+	let repo = repo_ref_from_github(&target.repo)?;
+	let mut text = format!("state:{state}");
+	if let Some(author) = author {
+		text.push_str(" author:");
+		text.push_str(author.as_str());
+	}
+	if let Some(label) = label {
+		text.push_str(" label:");
+		text.push_str(label.as_str());
+	}
+	Ok(SearchQuery {
+		kind: match target.scheme {
+			GithubScheme::Issue => SearchKind::Issues,
+			GithubScheme::PullRequest => SearchKind::ChangeRequests,
+		},
+		repo: Some(repo),
+		text: Str::new(text),
+		limit: *limit,
+	})
+}
+
+#[cfg(feature = "cap-forge")]
+fn repo_ref_from_github(repo: &GithubRepo) -> Result<RepoRef, Fault> {
+	let (owner, name) = repo
+		.slug()
+		.split_once('/')
+		.ok_or_else(|| invalid("GitHub repository must be [host/]owner/repo."))?;
+	RepoRef::try_new(repo.host().to_owned(), owner, name)
+		.map_err(|_| invalid("GitHub repository must be [host/]owner/repo."))
+}
+
+/// Renders a [`SearchPage`] into the historical list-URL markdown contract:
+/// `# Issues` / `# Pull Requests` plus `- [state] #N title` / scheme link lines.
+#[cfg(feature = "cap-forge")]
+fn render_search_list(scheme: GithubScheme, repo: &GithubRepo, page: &SearchPage) -> Vec<u8> {
+	let mut out = String::new();
+	out.push_str(if scheme == GithubScheme::Issue {
+		"# Issues\n\n"
+	} else {
+		"# Pull Requests\n\n"
+	});
+	for hit in page.as_slice() {
+		render_search_hit(&mut out, hit, repo.identity(), scheme);
+	}
+	out.into_bytes()
+}
+
+#[cfg(feature = "cap-forge")]
+fn render_search_hit(out: &mut String, hit: &SearchHit, repo: &str, scheme: GithubScheme) {
+	let number = hit.number.unwrap_or_default();
+	let state = if hit.state.is_empty() {
+		"?"
+	} else {
+		hit.state.as_str()
+	};
+	let title = if hit.title.is_empty() {
+		"(no title)"
+	} else {
+		hit.title.as_str()
+	};
+	out.push_str(&format!(
+		"- [{state}] #{number} {title}\n  {}://{repo}/{number}\n",
+		if scheme == GithubScheme::Issue {
+			"issue"
+		} else {
+			"pr"
+		}
+	));
+}
+
 pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
 	let repo = GitRepo::require(root)
 		.map_err(|_| invalid("Cannot infer GitHub repo; use [host/]owner/repo explicitly."))?;
@@ -1369,8 +1507,8 @@ mod tests {
 	use omp_forge::{
 		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
 		FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
-		IssueState, PushReceipt, PushRequest, Repository, RequestState, ResourceKind, SearchPage,
-		SearchQuery,
+		IssueState, PushReceipt, PushRequest, Repository, RequestState, ResourceKind, SearchHit,
+		SearchKind, SearchPage, SearchQuery,
 	};
 	#[cfg(feature = "cap-forge")]
 	use omp_forge_delegated::{Delegated, PermitAll};
@@ -1743,7 +1881,45 @@ mod tests {
 			query: SearchQuery,
 		) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
 			let kind = query.kind;
-			async move { Ok(SearchPage::new(kind, [])) }
+			let repo = query.repo.clone();
+			if let Some(repo) = &repo {
+				self.note("search", repo);
+			} else {
+				self.calls.lock().push("search");
+			}
+			let fail = Arc::clone(&self.fail);
+			let text = query.text.clone();
+			async move {
+				if *fail.lock() {
+					return Err(ForgeError::Unavailable { op: kind.op() });
+				}
+				let Some(repo) = repo else {
+					return Ok(SearchPage::new(kind, []));
+				};
+				let (number, title, state) = match kind {
+					SearchKind::Issues => (3_u64, "Bug", "open"),
+					SearchKind::ChangeRequests => (7_u64, "Fix the widget", "open"),
+					_ => (1_u64, "hit", "open"),
+				};
+				// Echo state filter into the hit when present (list-URL parity).
+				let state = text
+					.as_str()
+					.split_whitespace()
+					.find_map(|token| token.strip_prefix("state:"))
+					.filter(|value| *value != "all")
+					.unwrap_or(state);
+				Ok(SearchPage::new(
+					kind,
+					[SearchHit {
+						repo,
+						title: Str::new_static(title),
+						web_url: Str::empty(),
+						number: Some(number),
+						commit: None,
+						state: Str::new(state),
+					}],
+				))
+			}
 		}
 
 		fn create_change_request(
@@ -1778,7 +1954,8 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	fn router(host: Memory) -> Delegated<Memory, PermitAll> {
 		let mut builder = Delegated::builder(PermitAll);
-		builder.register(GITHUB_HOST, host).expect("github.com");
+		builder.register(GITHUB_HOST, host.clone()).expect("github.com");
+		builder.register("gitlab.com", host).expect("gitlab.com");
 		builder.build()
 	}
 
@@ -1909,6 +2086,76 @@ mod tests {
 		let all_text = std::str::from_utf8(all.data.as_ref()).expect("utf-8");
 		assert!(all_text.starts_with("diff --git a/a.txt"), "{all_text}");
 		assert!(host.calls().iter().all(|call| *call == "diff"));
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[tokio::test]
+	async fn list_urls_resolve_through_forge_search_and_cache_without_an_etag() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 300);
+		let resolver =
+			resolver(GithubScheme::Issue, dir.path(), Arc::clone(&cache), host.clone());
+		let resolved = resolver
+			.read_query_with_diags("acme/widget", Some("state=open"), &ParsedSelector::None)
+			.await
+			.expect("list");
+		let text = std::str::from_utf8(resolved.data.as_ref()).expect("utf-8");
+		assert_eq!(
+			text,
+			"# Issues\n\n- [open] #3 Bug\n  issue://acme/widget/3\n"
+		);
+		assert_eq!(host.calls(), ["search"]);
+		let seen = host.repo.lock().clone().expect("repo");
+		assert_eq!(seen.host.as_str(), GITHUB_HOST);
+		assert_eq!(seen.owner.as_str(), "acme");
+		assert_eq!(seen.name.as_str(), "widget");
+
+		let key = ForgeCacheKey::new(
+			ForgeResourceKind::Issue,
+			"acme/widget",
+			None,
+			"List { state: \"open\", limit: 30, author: None, label: None }",
+		)
+		.expect("key");
+		let entry = cache.get(&key, now_ms()).expect("get").expect("cached");
+		assert!(entry.etag.is_none());
+		assert_eq!(entry.body.as_ref(), resolved.data.as_ref());
+
+		let again = resolver
+			.read_query_with_diags("acme/widget", Some("state=open"), &ParsedSelector::None)
+			.await
+			.expect("fresh");
+		assert_eq!(again.data.as_ref(), resolved.data.as_ref());
+		assert_eq!(host.calls(), ["search"]);
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[tokio::test]
+	async fn gitlab_list_urls_route_through_the_registered_forge_host() {
+		let dir = tempfile::tempdir().expect("dir");
+		let host = Memory::new();
+		let cache = open_cache(dir.path(), 300);
+		let resolver =
+			resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
+		let resolved = resolver
+			.read_query_with_diags(
+				"gitlab.com/acme/widget",
+				Some("state=open&limit=10"),
+				&ParsedSelector::None,
+			)
+			.await
+			.expect("gitlab list");
+		let text = std::str::from_utf8(resolved.data.as_ref()).expect("utf-8");
+		assert_eq!(
+			text,
+			"# Pull Requests\n\n- [open] #7 Fix the widget\n  pr://gitlab.com/acme/widget/7\n"
+		);
+		assert_eq!(host.calls(), ["search"]);
+		let seen = host.repo.lock().clone().expect("repo");
+		assert_eq!(seen.host.as_str(), "gitlab.com");
+		assert_eq!(seen.owner.as_str(), "acme");
+		assert_eq!(seen.name.as_str(), "widget");
 	}
 
 	#[cfg(feature = "cap-forge")]

@@ -19,7 +19,10 @@ Reads: `repo_view`, `change_request_view`, `issue_view`, `change_request_diff`,
 
 Creates: `change_request_create`, `issue_create`.
 
-Search / checkout / push stay unmounted (ADR D2.4).
+Search: `search_change_requests`, `search_issues` (list-URL + tool search).
+`search_code` / `search_commits` / `search_repos` stay unmounted → Unavailable.
+
+Checkout / push stay unmounted (ADR D2.4).
 
 ## Proofs
 

@@ -19,16 +19,20 @@ mounting the same leaves would collide. Mount owners:
 - **Backend write creates**:
   - `change_request_create` — POST `/repos/:owner/:repo/pulls`
   - `issue_create` — POST `/repos/:owner/:repo/issues`
+- **Backend search / list** (`search` → `SearchPage`):
+  - `search_change_requests` / `search_issues` — repo list REST when filters
+    are only `state:` / `author:` / `label:` (list-URL path); Search API when
+    free-text remains. Other kinds stay Unavailable.
 - **CI backend** (`omp_github.ci`, served when `omp.ci` mounts):
   - `status` — Actions run + jobs → `Pipeline`
   - `log_stream` — job logs (or concatenated failed-job logs) → `LogPage`
   - `capabilities` — `log_stream` only
 - **Pure mapping** (`omp_github.mapping` / `omp_github.ci_mapping`): fixture
-  JSON → forge / CI shapes. Unit tests under `tests/` (no network).
+  JSON → forge / CI / `SearchPage` shapes. Unit tests under `tests/` (no network).
 - **Core (envd)**: production `forge_router` and `ci_router` register
-  `github.com` on the **Dyn** arm (shared bound live clients). In-core
-  `GithubForgeAdapter` / `GithubCiAdapter` / `github.rs` remain for list-URL
-  helpers, checkout/push, and unlisted GHE CI checkout hosts.
+  `github.com` on the **Dyn** arm (shared bound live clients). List URLs go
+  through `ForgeHost::search`. In-core `GithubForgeAdapter` / `GithubCiAdapter`
+  / `github.rs` remain for checkout/push and unlisted GHE CI checkout hosts.
 
 ## Credentials (adapter data — ADR 0049 D2.7)
 
@@ -48,14 +52,14 @@ this tree.
 
 ## Unsupported / unmounted
 
-Search, checkout, and push leaves stay unmounted on Dyn (ADR D2.4). CI write
-ops (`cancel`, `rerun_*`, `trigger`, `play_manual`) and `artifacts` stay
-unmounted; registration ceilings remain `log_stream` only.
+`search_code` / `search_commits` / `search_repos`, checkout, and push stay
+unmounted on Dyn (ADR D2.4 for checkout/push). CI write ops (`cancel`,
+`rerun_*`, `trigger`, `play_manual`) and `artifacts` stay unmounted;
+registration ceilings remain `log_stream` only.
 
 ## Remaining gaps (blocks deleting `github.rs`)
 
-- Checkout / push on Dyn (honest `CheckoutReceipt` / `PushReceipt`)
-- List-URL helpers / `GithubResolver` REST client still in-core
+- Checkout / push on Dyn (honest `CheckoutReceipt` / `PushReceipt`) — D2.4
 - Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay
 
 ## Proofs

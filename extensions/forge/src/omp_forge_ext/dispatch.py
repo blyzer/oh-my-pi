@@ -45,6 +45,8 @@ class ForgeBackend(Protocol):
 
     def create_issue(self, draft: Mapping[str, Any]) -> dict[str, Any]: ...
 
+    def search(self, query: Mapping[str, Any]) -> dict[str, Any]: ...
+
 
 def _norm(host: str) -> str:
     return host.strip().rstrip("/").lower()
@@ -80,6 +82,16 @@ def host_from_args(args: Mapping[str, Any], *, op: str) -> str:
         if isinstance(nested, dict):
             return str(nested.get("host") or "")
     raise ForgeUnavailable(op, "args.repo (or draft.repo) must supply host")
+
+
+def host_from_search_args(args: Mapping[str, Any], *, op: str) -> str:
+    """Extract ``query.repo.host`` for ``forge/search_*`` leaves."""
+    query = args.get("query")
+    if isinstance(query, dict):
+        repo = query.get("repo")
+        if isinstance(repo, dict):
+            return str(repo.get("host") or "")
+    raise ForgeUnavailable(op, "args.query.repo must supply host")
 
 
 def client_for(host: str) -> ForgeBackend:
