@@ -94,4 +94,6 @@ GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
 - **DONE:** T2 CI extension body (`extensions/ci/` + GitHub Actions /
   GitLab CI backends) and flipping `github.com` CI to Dyn.
 - **DONE:** D2.4 forge checkout/push and deletion of in-core `github.rs` /
-  `GithubCiAdapter`. Residue: `github_url.rs`, Class C, `GithubRefs`.
+  `GithubCiAdapter`. Residue: Class C, `GithubRefs`.
+- **DONE:** `github_url.rs` neutralized to `forge_url.rs`. Follow-up:
+  `github_adapter` → `forge_adapter`.

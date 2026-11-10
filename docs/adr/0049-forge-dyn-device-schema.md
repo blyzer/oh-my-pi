@@ -114,5 +114,7 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   `gitlab.com` mounts are live.
 - **DONE (delete `github.rs`):** `ForgeBackend` is Dyn-only; in-core
   `GithubForgeAdapter` / `GithubService` removed. Intentional residue:
-  `github_url.rs` (credentials / `pr://` / `issue://` / `infer_repo`), Class C,
-  autocomplete `GithubRefs`.
+  Class C, autocomplete `GithubRefs`.
+- **DONE (neutralize `github_url.rs`):** renamed+moved to `forge_url.rs`
+  (`ForgeResolver` / `ForgeCredentialBridge` / `DEFAULT_FORGE_HOST`); no
+  shims. Follow-up: `github_adapter` → `forge_adapter`.

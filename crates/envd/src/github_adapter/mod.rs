@@ -78,7 +78,7 @@ use smallvec::SmallVec;
 #[cfg(feature = "cap-forge")]
 use tokio::time;
 
-use crate::github_url;
+use crate::forge_url;
 #[cfg(feature = "cap-forge")]
 use crate::tool_settings::SV_FORGE_DYN_HOSTS;
 
@@ -259,10 +259,10 @@ fn dyn_ci_capabilities() -> Capabilities {
 }
 
 fn register_checkout_host(project_root: &Path, mut register: impl FnMut(&str)) {
-	let Ok(repo) = github_url::infer_repo(project_root) else {
+	let Ok(repo) = forge_url::infer_repo(project_root) else {
 		return;
 	};
-	if repo.host().eq_ignore_ascii_case(github_url::GITHUB_HOST) {
+	if repo.host().eq_ignore_ascii_case(forge_url::DEFAULT_FORGE_HOST) {
 		return;
 	}
 	register(repo.host());
@@ -398,7 +398,7 @@ impl CheckoutForge {
 #[cfg(feature = "cap-forge")]
 pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 	let repo =
-		github_url::infer_repo(root).map_err(|_| ForgeError::Unscoped { op: ForgeOp::RepoView })?;
+		forge_url::infer_repo(root).map_err(|_| ForgeError::Unscoped { op: ForgeOp::RepoView })?;
 	let mut parts = repo.slug().split('/');
 	let owner = parts.next().unwrap_or_default();
 	let name = parts.next().unwrap_or_default();
@@ -411,7 +411,7 @@ pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 /// via `sv_forge_dyn_hosts` / `GITLAB_HOST`. Unlisted remotes stay dark.
 #[cfg(feature = "cap-forge")]
 fn serves_forge_checkout(root: &Path, dyn_hosts: &ForgeDynHosts) -> bool {
-	let Ok(repo) = github_url::infer_repo(root) else {
+	let Ok(repo) = forge_url::infer_repo(root) else {
 		return false;
 	};
 	dyn_hosts.contains(repo.host())

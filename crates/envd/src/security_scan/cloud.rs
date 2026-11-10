@@ -18,7 +18,7 @@ use super::{
 	model::{Evidence, Finding, Location, Producer, Provenance, Scan, Validation},
 	now_stamp,
 };
-use crate::github_url::GithubCredentialBridge;
+use crate::forge_url::ForgeCredentialBridge;
 
 const DEFAULT_BASE: &str = "https://chatgpt.com/backend-api/aardvark";
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
@@ -32,7 +32,7 @@ pub(super) struct CloudClient {
 	access_token:  Option<Arc<Zeroizing<String>>>,
 	account_id:    Option<Str>,
 	credential_id: Option<u64>,
-	authority:     Option<Arc<GithubCredentialBridge>>,
+	authority:     Option<Arc<ForgeCredentialBridge>>,
 }
 
 impl CloudClient {
@@ -81,7 +81,7 @@ impl CloudClient {
 		}
 	}
 
-	pub fn from_authority(authority: Arc<GithubCredentialBridge>) -> Option<Self> {
+	pub fn from_authority(authority: Arc<ForgeCredentialBridge>) -> Option<Self> {
 		let client = omp_http::client_builder()
 			.timeout(Duration::from_secs(120))
 			.build()

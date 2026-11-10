@@ -274,7 +274,7 @@ pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult
 		SHARE_JSON_BUDGET,
 	);
 	let sealed = omp_driver::share::seal(&projection).map_err(failed)?;
-	let bridge = Arc::new(omp_envd::github_url::GithubCredentialBridge::new());
+	let bridge = Arc::new(omp_envd::forge_url::ForgeCredentialBridge::new());
 	let _ = bridge.bind(Arc::clone(&stack.credential_authority));
 	let store = omp_driver::share::DirectShareStore::new(&settings.share.server_url, bridge)
 		.map_err(failed)?;

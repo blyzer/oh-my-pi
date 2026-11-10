@@ -108,7 +108,7 @@ impl SecurityScanService {
 	/// leases.
 	pub(crate) fn with_credentials(
 		mut self,
-		credentials: Arc<crate::github_url::GithubCredentialBridge>,
+		credentials: Arc<crate::forge_url::ForgeCredentialBridge>,
 	) -> Self {
 		if let Some(cloud) = CloudClient::from_authority(credentials) {
 			self.cloud = Some(cloud);

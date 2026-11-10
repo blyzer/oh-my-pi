@@ -1048,7 +1048,7 @@ async fn test_connection_scoped(
 		Arc::new(ReflectionBridgeHost::new()),
 		EvalSessionControl::default(),
 		Arc::new(SearchBridgeHost::new(None)),
-		Arc::new(GithubCredentialBridge::new()),
+		Arc::new(ForgeCredentialBridge::new()),
 		omp_ai::operation::usage::UsageFetcherRegistry::default(),
 		omp_ai::ProviderResponseHooks::default(),
 		Arc::new(HookGate::channel().0),

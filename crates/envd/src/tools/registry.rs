@@ -87,7 +87,7 @@ use crate::{
 		extensions::{SealedRegistryEvidence, SealedRegistryEvidenceError, seal_registry_evidence},
 	},
 	fetch_host::FetchHostNamer,
-	github_url::GithubCredentialBridge,
+	forge_url::ForgeCredentialBridge,
 	managed_skills::ManagedSkills,
 	mcp::{McpService, manager::McpManager},
 	memory::ReflectionBridgeHost,
@@ -1122,7 +1122,7 @@ fn tool_name(family: omp_tools::roster::Family) -> &'static str {
 
 struct SessionBaseOutput {
 	search_bridge:      Arc<SearchBridgeHost>,
-	github_credentials: Arc<GithubCredentialBridge>,
+	github_credentials: Arc<ForgeCredentialBridge>,
 	ask_presenter:      PresenterSlot,
 	checkpoint_control: AgentCheckpointControl,
 }
@@ -1488,7 +1488,7 @@ pub(crate) struct SessionRegistryBridges {
 pub(crate) struct SessionRegistryOutput {
 	pub registry:           Arc<Registry>,
 	pub search_bridge:      Arc<SearchBridgeHost>,
-	pub github_credentials: Arc<GithubCredentialBridge>,
+	pub github_credentials: Arc<ForgeCredentialBridge>,
 	pub ask_presenter:      PresenterSlot,
 	pub checkpoint_control: AgentCheckpointControl,
 }
@@ -1659,7 +1659,7 @@ pub(crate) fn production_registry<
 		StagedProposalRegistry,
 		Arc<ResolverTable<UrlResolver>>,
 		Arc<SearchBridgeHost>,
-		Arc<GithubCredentialBridge>,
+		Arc<ForgeCredentialBridge>,
 		PresenterSlot,
 	),
 	EnvdError,

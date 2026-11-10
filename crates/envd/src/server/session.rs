@@ -141,7 +141,7 @@ impl EnvServer {
 		reflection_bridge: Arc<ReflectionBridgeHost>,
 		eval_control: EvalSessionControl,
 		search_bridge: Arc<SearchBridgeHost>,
-		github_credentials: Arc<GithubCredentialBridge>,
+		github_credentials: Arc<ForgeCredentialBridge>,
 		usage_fetchers: omp_ai::operation::usage::UsageFetcherRegistry,
 		provider_response_hooks: omp_ai::ProviderResponseHooks,
 		admission_gate: Arc<HookGate>,
@@ -1301,7 +1301,7 @@ impl EnvServer {
 	}
 
 	/// Returns the late-bound GitHub credential projection.
-	pub(crate) fn github_credentials(&self) -> Arc<GithubCredentialBridge> {
+	pub(crate) fn github_credentials(&self) -> Arc<ForgeCredentialBridge> {
 		Arc::clone(&self.github_credentials)
 	}
 

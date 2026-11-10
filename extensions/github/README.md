@@ -59,8 +59,9 @@ registration ceilings remain `log_stream` only.
 
 ## Intentional residue (not blocking)
 
-- `crates/envd/src/github_url.rs` — `pr://`/`issue://`, credentials, `infer_repo`
 - Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay by design
+- `crates/envd/src/github_adapter/` — Dyn forge/CI bridge module name still
+  GitHub-branded; follow-up rename to `forge_adapter`
 
 ## Proofs
 
@@ -74,4 +75,5 @@ python3 -m unittest discover -s extensions/github/tests -v
 - Schemas: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md),
   [`docs/adr/0049-ci-dyn-device-schema.md`](../../docs/adr/0049-ci-dyn-device-schema.md)
 - Bridges: `crates/envd/src/github_adapter/dyn_forge.rs`, `dyn_ci.rs`
-- In-core residue: `crates/envd/src/github_url.rs`
+- Scheme/credential surface: `crates/envd/src/forge_url.rs` (historically
+  `github_url.rs`)

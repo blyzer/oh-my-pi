@@ -33,9 +33,9 @@ use omp_tools::read::{
 };
 
 #[cfg(feature = "cap-forge")]
-use super::github_url::{GithubResolver, GithubScheme};
+use super::forge_url::{ForgeResolver, ForgeScheme};
 use super::{
-	github_url::GithubCredentialBridge, mcp::McpService, security_scan::SecurityScanService,
+	forge_url::ForgeCredentialBridge, mcp::McpService, security_scan::SecurityScanService,
 	vault::VaultService,
 };
 #[cfg(feature = "cap-forge")]
@@ -220,11 +220,11 @@ pub(super) enum UrlResolver {
 	History(RegistryResolver),
 	/// Cached forge issues. Numbered reads use the delegated forge host.
 	#[cfg(feature = "cap-forge")]
-	Issue(GithubResolver<SchemeForge>),
+	Issue(ForgeResolver<SchemeForge>),
 	/// Cached forge change requests and diffs. Numbered reads use the delegated
 	/// forge host.
 	#[cfg(feature = "cap-forge")]
-	Pr(GithubResolver<SchemeForge>),
+	Pr(ForgeResolver<SchemeForge>),
 	/// Session-local scratch files.
 	Local(local::LocalResolver),
 	/// Active-session bounded memory projections.
@@ -545,7 +545,7 @@ pub(super) fn production_url_resolvers(
 	sessions_dir: PathBuf,
 	workspace_root: PathBuf,
 	forge_cache: Arc<ForgeCache>,
-	github_credentials: Arc<GithubCredentialBridge>,
+	github_credentials: Arc<ForgeCredentialBridge>,
 	#[cfg(feature = "cap-forge")] forge: SchemeForge,
 	content: Vec<Arc<dyn ContentResolver>>,
 	host_resources: Option<Arc<dyn HostResources>>,
@@ -615,8 +615,8 @@ pub(super) fn production_url_resolvers(
 		builder
 			.register(
 				SchemeEntry::new(Scheme::Issue, true, false, "cached forge issues"),
-				UrlResolver::Issue(GithubResolver::new(
-					GithubScheme::Issue,
+				UrlResolver::Issue(ForgeResolver::new(
+					ForgeScheme::Issue,
 					workspace_root.clone(),
 					Arc::clone(&forge_cache),
 					Arc::clone(&github_credentials),
@@ -627,8 +627,8 @@ pub(super) fn production_url_resolvers(
 		builder
 			.register(
 				SchemeEntry::new(Scheme::Pr, true, false, "cached forge change requests and diffs"),
-				UrlResolver::Pr(GithubResolver::new(
-					GithubScheme::PullRequest,
+				UrlResolver::Pr(ForgeResolver::new(
+					ForgeScheme::PullRequest,
 					workspace_root.clone(),
 					forge_cache,
 					github_credentials,

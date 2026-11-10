@@ -29,7 +29,7 @@ use omp_tools::{
 use serde_json::Value as JsonValue;
 
 use crate::{
-	approval_relay::OwnedApprovals, github_url::GithubCredentialBridge,
+	approval_relay::OwnedApprovals, forge_url::ForgeCredentialBridge,
 	reflection_relay::OwnedReflection,
 };
 
@@ -434,7 +434,7 @@ pub trait HostResources: Send + Sync + 'static {
 /// Starts background telemetry delivery once the credential bridge exists.
 pub trait TelemetryUpload: Send + Sync + 'static {
 	/// Starts delivery for one Environment telemetry index.
-	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<GithubCredentialBridge>);
+	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<ForgeCredentialBridge>);
 }
 
 /// Runs one native tool stream under its authenticated invocation restrictions.

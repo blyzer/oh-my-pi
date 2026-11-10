@@ -11,7 +11,7 @@ use omp_ai::auth::command::CommandCredentialExecutor;
 use omp_cache::telemetry_cache::TelemetryIndex;
 use omp_core::{EnvPath, Str, sf};
 use omp_env::EnvClient;
-use omp_envd::github_url::GithubCredentialBridge;
+use omp_envd::forge_url::ForgeCredentialBridge;
 use omp_proto::{
 	inference::v1::{
 		self as pb, image_event, inference_client::InferenceClient,
@@ -203,7 +203,7 @@ impl omp_envd::CommandCredentialExecutorFactory for CommandCredentials {
 pub struct TelemetryDelivery;
 
 impl omp_envd::TelemetryUpload for TelemetryDelivery {
-	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<GithubCredentialBridge>) {
+	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<ForgeCredentialBridge>) {
 		crate::telemetry_upload::start(index, credentials);
 	}
 }

@@ -53,7 +53,7 @@ mod github_adapter;
 #[cfg(feature = "cap-forge")]
 pub use github_adapter::CheckoutForge;
 mod forge_worktree;
-pub mod github_url;
+pub mod forge_url;
 pub mod grep;
 pub mod host_info;
 pub mod host_settings;
@@ -152,7 +152,7 @@ use exthost::{
 	control::{ControlAuthority, ControlCompositionError, ControlConnectionIdentity},
 	dispatch::CallbackDispatcher,
 };
-use github_url::GithubCredentialBridge;
+use forge_url::ForgeCredentialBridge;
 use miette::IntoDiagnostic as _;
 #[cfg(unix)]
 use nix::{
@@ -686,7 +686,7 @@ pub struct ProjectEnvironment {
 	reflection_bridge:   Arc<memory::ReflectionBridgeHost>,
 	eval_control:        EvalSessionControl,
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
-	github_credentials:  Arc<GithubCredentialBridge>,
+	github_credentials:  Arc<ForgeCredentialBridge>,
 	acp_documents:       AcpDocumentsBinding,
 	/// The route an attached session answers the daemon's relayed approval
 	/// prompts with; `None` for embedded and isolated compositions, whose host
@@ -1375,7 +1375,7 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the Environment's provider credential projection.
-	pub fn github_credentials(&self) -> Arc<GithubCredentialBridge> {
+	pub fn github_credentials(&self) -> Arc<ForgeCredentialBridge> {
 		Arc::clone(&self.github_credentials)
 	}
 

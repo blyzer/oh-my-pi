@@ -267,7 +267,7 @@ const BARE_NAMES: &[&str] = &[
 	"FixedControlAuthorityFactory",
 	"GetPropertyReply",
 	"ForgeCache",
-	"GithubCredentialBridge",
+	"ForgeCredentialBridge",
 	"Gitignore",
 	"GrantedContextRoot",
 	"GuestInputDisposition",
