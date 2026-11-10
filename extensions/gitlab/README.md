@@ -52,7 +52,7 @@ ceilings remain `log_stream` only.
 ## Remaining gaps
 
 - Full automatic device-catalog host-claim discovery remains a smaller TODO
-- Checkout / push still unmounted (core-owned, ADR D2.4)
+- Checkout / push return plan / push-prep via `extensions/forge/` mounts (ADR D2.4; no local git here)
 - In-core `github.rs` remains until Dyn checkout/push parity
 
 ## Proofs

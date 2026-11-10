@@ -93,7 +93,6 @@ GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
   `register_dyn_ci_host`, production invoker under `cap-ci`).
 - **DONE:** T2 CI extension body (`extensions/ci/` + GitHub Actions /
   GitLab CI backends) and flipping `github.com` CI to Dyn.
-- **Remaining before deleting `envd/src/github.rs`:** Dyn forge checkout/push
-  (ADR D2.4). List-URL / search-leaf parity is DONE. In-core
-  `GithubCiAdapter` / `GithubForgeAdapter` / `github.rs` / `github_url.rs`
-  stay until checkout/push land.
+- **D2.4 forge checkout/push is DONE.** `github.rs` still remains for the GHE
+  CI arm, credential bridge, and residual `GithubService` Operations
+  (list-URL / search-leaf parity is DONE).

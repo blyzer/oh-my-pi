@@ -1,7 +1,9 @@
 //! GitHub-backed [`ForgeHost`] and [`CiHost`] adapters.
 //!
-//! `GithubService` still performs the HTTP and git I/O. These wrappers speak
-//! the neutral contracts and are installed behind `Delegated` routers.
+//! `GithubService` still performs GitHub HTTP for the in-core arm. Forge@1
+//! checkout/push obtain vendor plan data then run
+//! [`crate::forge_worktree`] (ADR 0049 D2.4). These wrappers speak the neutral
+//! contracts and are installed behind `Delegated` routers.
 //! `view_change_request`, `view_issue`, the unified diff, and the comment
 //! list are reads. Numbered `pr://` and `issue://` resources call them.
 //! `PermitAll` is intentional: the desk gate is the tool commit, and the
@@ -17,8 +19,8 @@
 //! (host-dispatch to `omp_github` / `omp_gitlab`). Catalog mounts for
 //! `ci/<op>` are owned by the `omp.ci` extension (host-dispatch to
 //! `omp_github.ci` / `omp_gitlab.ci`). In-core [`GithubForgeAdapter`] /
-//! [`GithubCiAdapter`] / `github.rs` remain for list-URL helpers, checkout /
-//! push, and unlisted GHE CI checkout hosts until Dyn parity allows deletion.
+//! [`GithubCiAdapter`] / `github.rs` remain for list-URL helpers and unlisted
+//! GHE CI checkout hosts; forge checkout/push git is no longer in `github.rs`.
 //!
 //! The CI registration advertises `log_stream` only. Status stays allowed
 //! because the contract does not flag it. Cancel, rerun, trigger, artifacts,
@@ -98,7 +100,7 @@ use crate::tool_settings::SV_FORGE_DYN_HOSTS;
 use crate::{
 	blobs::BlobHost,
 	github::GithubService,
-	github_params::{self, Operation, Params, Payload, PrSelector},
+	github_params::{self, Operation, Params, Payload},
 	github_url::{self, GithubCredentialBridge},
 };
 
@@ -227,8 +229,17 @@ pub(crate) fn forge_router(
 ) -> ForgeDelegated<ForgeBackend, ForgePermitAll> {
 	let adapter = ForgeBackend::Github(GithubForgeAdapter { service: Arc::clone(&service) });
 	let mut builder = ForgeDelegated::builder(ForgePermitAll);
+	let project_root = service.root().to_path_buf();
+	let worktree_root = service.worktree_root().to_path_buf();
 	for host in dyn_hosts.iter() {
-		register_dyn_forge_host(&mut builder, host, devices.clone()).expect("dyn forge host");
+		register_dyn_forge_host(
+			&mut builder,
+			host,
+			devices.clone(),
+			project_root.clone(),
+			worktree_root.clone(),
+		)
+		.expect("dyn forge host");
 	}
 	register_checkout_host(&service, |host| {
 		if dyn_hosts.contains(host) {
@@ -265,13 +276,8 @@ pub(crate) fn ci_router(
 	let adapter = GithubCiAdapter { service: Arc::clone(&service) };
 	let caps = github_capabilities();
 	let mut builder = CiDelegated::builder(CiPermitAll);
-	register_dyn_ci_host(
-		&mut builder,
-		CI_GITHUB_HOST,
-		devices.clone(),
-		caps,
-	)
-	.expect("github.com dyn ci host");
+	register_dyn_ci_host(&mut builder, CI_GITHUB_HOST, devices.clone(), caps)
+		.expect("github.com dyn ci host");
 	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices, caps).expect("gitlab.com dyn ci host");
 	register_checkout_host(&service, |host| {
 		if host.eq_ignore_ascii_case(CI_DYN_HOST) || host.eq_ignore_ascii_case(CI_GITHUB_HOST) {
@@ -659,39 +665,13 @@ fn comment_from(value: &Value) -> Comment {
 }
 
 #[cfg(feature = "cap-forge")]
-fn checkout_from(repo: &RepoRef, value: &Value) -> Result<CheckoutReceipt, ForgeError> {
-	let row = value
-		.pointer("/checkouts/0")
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::ChangeRequestCheckout })?;
-	let number = row
-		.get("pr")
-		.and_then(Value::as_u64)
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::ChangeRequestCheckout })?;
-	let sha = row
-		.get("head_sha")
-		.and_then(Value::as_str)
-		.unwrap_or_default();
-	let head = CommitRef::try_new(repo.clone(), sha)?;
-	Ok(CheckoutReceipt {
-		repo: repo.clone(),
-		number,
-		head,
-		base_ref: json_str(row, "base_ref"),
-		head_ref: json_str(row, "remote_branch"),
-		worktree: json_str(row, "path"),
-	})
-}
-
-#[cfg(feature = "cap-forge")]
-fn push_from(repo: &RepoRef, value: &Value) -> Result<PushReceipt, ForgeError> {
-	let row = value
-		.pointer("/pushed/0")
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::ChangeRequestPush })?;
-	let number = row
-		.get("pr")
-		.and_then(Value::as_u64)
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::ChangeRequestPush })?;
-	Ok(PushReceipt { repo: repo.clone(), number, head_commit: json_str(row, "head_sha") })
+fn map_worktree(op: ForgeOp, error: crate::forge_worktree::Error) -> ForgeError {
+	match error {
+		crate::forge_worktree::Error::Cancelled
+		| crate::forge_worktree::Error::CheckoutMissing
+		| crate::forge_worktree::Error::IncompletePlan
+		| crate::forge_worktree::Error::GitFailed => ForgeError::Unavailable { op },
+	}
 }
 
 #[cfg(feature = "cap-forge")]
@@ -740,14 +720,7 @@ fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Opti
 		),
 		SearchKind::Repositories => (json_str(row, "full_name"), None, None, Str::empty()),
 	};
-	Some(SearchHit {
-		repo,
-		title,
-		web_url: json_str(row, "html_url"),
-		number,
-		commit,
-		state,
-	})
+	Some(SearchHit { repo, title, web_url: json_str(row, "html_url"), number, commit, state })
 }
 
 #[cfg(feature = "cap-forge")]
@@ -1022,20 +995,32 @@ impl ForgeHost for GithubForgeAdapter {
 		let service = Arc::clone(&self.service);
 		let request = request.clone();
 		async move {
-			let mut params = blank(Operation::PrCheckout);
-			params.repo = Some(repo_arg(ForgeOp::ChangeRequestCheckout, &request.repo)?);
-			params.pr = Some(PrSelector::One(sf!("{}", request.number)));
-			params.force = request.force;
-			let payload = execute(&service, params).await.map_err(|fault| {
-				map_forge(
-					ForgeOp::ChangeRequestCheckout,
-					&request.repo,
-					Some(request.number),
-					None,
-					fault,
-				)
-			})?;
-			checkout_from(&request.repo, &payload.result)
+			let op = ForgeOp::ChangeRequestCheckout;
+			let gh = github_repo(op, &request.repo)?;
+			let cancel = CancellationToken::new();
+			let _guard = CancelOnDrop(cancel.clone());
+			let mut plan = service
+				.change_request_checkout_plan(&gh, request.number, &cancel)
+				.await
+				.map_err(|fault| map_forge(op, &request.repo, Some(request.number), None, fault))?;
+			plan.force = request.force;
+			let out = crate::forge_worktree::checkout(
+				service.root(),
+				service.worktree_root(),
+				&plan,
+				&cancel,
+			)
+			.await
+			.map_err(|error| map_worktree(op, error))?;
+			let head = CommitRef::try_new(request.repo.clone(), out.head_sha)?;
+			Ok(CheckoutReceipt {
+				repo: request.repo,
+				number: out.number,
+				head,
+				base_ref: Str::new(out.base_ref),
+				head_ref: Str::new(out.head_ref),
+				worktree: Str::new(out.worktree.to_string_lossy().as_ref()),
+			})
 		}
 	}
 
@@ -1046,17 +1031,26 @@ impl ForgeHost for GithubForgeAdapter {
 		let service = Arc::clone(&self.service);
 		let request = request.clone();
 		async move {
-			let mut params = blank(Operation::PrPush);
-			params.repo = Some(repo_arg(ForgeOp::ChangeRequestPush, &request.repo)?);
-			params.pr = Some(PrSelector::One(sf!("{}", request.number)));
-			params.force_with_lease = request.force_with_lease;
+			let op = ForgeOp::ChangeRequestPush;
+			let gh = github_repo(op, &request.repo)?;
+			let cancel = CancellationToken::new();
+			let _guard = CancelOnDrop(cancel.clone());
+			let mut prep = service
+				.change_request_push_prep(&gh, request.number, &cancel)
+				.await
+				.map_err(|fault| map_forge(op, &request.repo, Some(request.number), None, fault))?;
 			if !request.head_ref.is_empty() {
-				params.head = Some(request.head_ref.clone());
+				prep.head_ref = request.head_ref.to_string();
 			}
-			let payload = execute(&service, params).await.map_err(|fault| {
-				map_forge(ForgeOp::ChangeRequestPush, &request.repo, Some(request.number), None, fault)
-			})?;
-			push_from(&request.repo, &payload.result)
+			prep.force_with_lease = request.force_with_lease;
+			let out = crate::forge_worktree::push(service.worktree_root(), &prep, &cancel)
+				.await
+				.map_err(|error| map_worktree(op, error))?;
+			Ok(PushReceipt {
+				repo:        request.repo,
+				number:      out.number,
+				head_commit: out.head_commit,
+			})
 		}
 	}
 
@@ -1311,14 +1305,12 @@ mod tests {
 	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, IssueState, RepoRef, RequestState};
 	use serde_json::json;
 
+	#[cfg(feature = "cap-ci")]
+	use super::{CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions};
 	#[cfg(feature = "cap-forge")]
 	use super::{
 		ForgeDeviceInvoker, ForgeDynHosts, GITHUB_DYN_HOST, GITLAB_HOST, LiveForgeDeviceClient,
 		forge_device_paths, forge_router,
-	};
-	#[cfg(feature = "cap-ci")]
-	use super::{
-		CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions,
 	};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
@@ -1654,14 +1646,11 @@ mod tests {
 		> {
 			use omp_ci::Capabilities;
 			let result = match path {
-				"ci/capabilities" => Ok(serde_json::to_value(Capabilities {
-					log_stream: true,
-					..Capabilities::none()
-				})
-				.expect("caps")),
-				other => Err(CiError::Unavailable {
-					op: super::ci_op_for_path(other),
-				}),
+				"ci/capabilities" => {
+					Ok(serde_json::to_value(Capabilities { log_stream: true, ..Capabilities::none() })
+						.expect("caps"))
+				},
+				other => Err(CiError::Unavailable { op: super::ci_op_for_path(other) }),
 			};
 			Box::pin(std::future::ready(result))
 		}
@@ -1674,8 +1663,7 @@ mod tests {
 			service(tempfile::tempdir().expect("temp").path()),
 			LiveCiDeviceClient::default(),
 		);
-		let run =
-			RunRef::try_new(CiProvider::try_new(CI_DYN_HOST).unwrap(), "1", None).unwrap();
+		let run = RunRef::try_new(CiProvider::try_new(CI_DYN_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
 			matches!(error, CiError::Unavailable { op: CiOp::Status }),
@@ -1690,8 +1678,7 @@ mod tests {
 			service(tempfile::tempdir().expect("temp").path()),
 			LiveCiDeviceClient::default(),
 		);
-		let run =
-			RunRef::try_new(CiProvider::try_new(CI_GITHUB_HOST).unwrap(), "1", None).unwrap();
+		let run = RunRef::try_new(CiProvider::try_new(CI_GITHUB_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
 			matches!(error, CiError::Unavailable { op: CiOp::Status }),
@@ -1706,8 +1693,9 @@ mod tests {
 	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn github_com_ci_status_and_log_via_bound_client() {
-		use parking_lot::Mutex;
 		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		use parking_lot::Mutex;
 
 		struct Recording {
 			calls: Arc<Mutex<Vec<String>>>,
@@ -1720,9 +1708,7 @@ mod tests {
 				path: &str,
 				_args: serde_json::Value,
 			) -> std::pin::Pin<
-				Box<
-					dyn std::future::Future<Output = Result<serde_json::Value, CiError>> + Send + '_,
-				>,
+				Box<dyn std::future::Future<Output = Result<serde_json::Value, CiError>> + Send + '_>,
 			> {
 				self.hits.fetch_add(1, Ordering::SeqCst);
 				self.calls.lock().push(path.to_owned());
@@ -1740,20 +1726,14 @@ mod tests {
 					},
 					"ci/log_stream" => {
 						let page = LogPage::new(
-							RunRef::try_new(
-								CiProvider::try_new(host).unwrap(),
-								"42",
-								Some(Str::new("7")),
-							)
-							.unwrap(),
+							RunRef::try_new(CiProvider::try_new(host).unwrap(), "42", Some(Str::new("7")))
+								.unwrap(),
 							"boom\n",
 							true,
 						);
 						Ok(serde_json::to_value(page).expect("log"))
 					},
-					other => Err(CiError::Unavailable {
-						op: super::ci_op_for_path(other),
-					}),
+					other => Err(CiError::Unavailable { op: super::ci_op_for_path(other) }),
 				};
 				Box::pin(std::future::ready(result))
 			}
@@ -1762,14 +1742,8 @@ mod tests {
 		let calls = Arc::new(Mutex::new(Vec::new()));
 		let hits = Arc::new(AtomicUsize::new(0));
 		let client = LiveCiDeviceClient::default();
-		client.bind(Arc::new(Recording {
-			calls: Arc::clone(&calls),
-			hits:  Arc::clone(&hits),
-		}));
-		let router = super::ci_router(
-			service(tempfile::tempdir().expect("temp").path()),
-			client,
-		);
+		client.bind(Arc::new(Recording { calls: Arc::clone(&calls), hits: Arc::clone(&hits) }));
+		let router = super::ci_router(service(tempfile::tempdir().expect("temp").path()), client);
 		let run = run("42");
 		let pipeline = router.status(&run).await.expect("status via dyn");
 		assert_eq!(pipeline.id.as_str(), "42");
@@ -1999,13 +1973,7 @@ mod tests {
 			super::github_search_text(&Str::new_static("state:all label:bug")).as_str(),
 			"label:bug"
 		);
-		assert_eq!(
-			super::github_search_text(&Str::new_static("")).as_str(),
-			"is:open"
-		);
-		assert_eq!(
-			super::github_search_text(&Str::new_static("state:merged")).as_str(),
-			"is:merged"
-		);
+		assert_eq!(super::github_search_text(&Str::new_static("")).as_str(), "is:open");
+		assert_eq!(super::github_search_text(&Str::new_static("state:merged")).as_str(), "is:merged");
 	}
 }

@@ -71,6 +71,52 @@ def map_merge_request(
     }
 
 
+def map_checkout_plan(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+    *,
+    project: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map a GitLab MR (+ optional project) to ``CheckoutPlan`` (vendor data only).
+
+    ``clone_url`` comes from the project ``http_url_to_repo`` when provided,
+    else a constructed HTTPS URL. Core fills the worktree path (ADR 0049 D2.4).
+    """
+    diff_refs = payload.get("diff_refs") or {}
+    clone_url = ""
+    if project is not None:
+        clone_url = _str(project.get("http_url_to_repo") or project.get("ssh_url_to_repo"))
+    if not clone_url:
+        host = _str(repo.get("host"), "gitlab.com")
+        owner = _str(repo.get("owner"))
+        name = _str(repo.get("name"))
+        clone_url = f"https://{host}/{owner}/{name}.git"
+    return {
+        "repo": _repo_ref(repo),
+        "number": int(payload.get("iid") or payload.get("id") or 0),
+        "clone_url": clone_url,
+        "base_ref": _str(payload.get("target_branch")),
+        "head_ref": _str(payload.get("source_branch")),
+        "head_sha": _str(payload.get("sha") or diff_refs.get("head_sha")),
+    }
+
+
+def map_push_prep(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+    *,
+    project: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map a GitLab MR (+ optional project) to ``PushPrep`` (vendor data only)."""
+    plan = map_checkout_plan(payload, repo, project=project)
+    return {
+        "repo": plan["repo"],
+        "number": plan["number"],
+        "clone_url": plan["clone_url"],
+        "head_ref": plan["head_ref"],
+    }
+
+
 def map_issue(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any]:
     """Map one GitLab issue JSON object to ``Issue``."""
     return {

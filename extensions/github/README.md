@@ -52,14 +52,15 @@ this tree.
 
 ## Unsupported / unmounted
 
-`search_code` / `search_commits` / `search_repos`, checkout, and push stay
-unmounted on Dyn (ADR D2.4 for checkout/push). CI write ops (`cancel`,
+`search_code` / `search_commits` / `search_repos` stay unmounted.
+Checkout / push return plan / push-prep JSON via the forge catalog mounts
+(ADR 0049 D2.4); no local git in this package. CI write ops (`cancel`,
 `rerun_*`, `trigger`, `play_manual`) and `artifacts` stay unmounted;
 registration ceilings remain `log_stream` only.
 
 ## Remaining gaps (blocks deleting `github.rs`)
 
-- Checkout / push on Dyn (honest `CheckoutReceipt` / `PushReceipt`) — D2.4
+- GHE CI arm, credential bridge, list-URL helpers, residual `GithubService` ops
 - Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay
 
 ## Proofs

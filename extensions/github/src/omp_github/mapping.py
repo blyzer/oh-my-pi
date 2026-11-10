@@ -73,6 +73,49 @@ def map_pull_request(
     }
 
 
+def map_checkout_plan(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map a GitHub pull-request JSON object to ``CheckoutPlan`` (vendor data only).
+
+    Core fills the worktree path after fetch (ADR 0049 D2.4). Prefers
+    ``head.repo.clone_url``; falls back to constructing an HTTPS URL from
+    ``repo``.
+    """
+    base = payload.get("base") or {}
+    head = payload.get("head") or {}
+    head_repo = head.get("repo") or {}
+    clone_url = _str(head_repo.get("clone_url"))
+    if not clone_url:
+        host = _str(repo.get("host"), "github.com")
+        owner = _str(repo.get("owner"))
+        name = _str(repo.get("name"))
+        clone_url = f"https://{host}/{owner}/{name}.git"
+    return {
+        "repo": _repo_ref(repo),
+        "number": int(payload.get("number") or 0),
+        "clone_url": clone_url,
+        "base_ref": _str(base.get("ref")),
+        "head_ref": _str(head.get("ref")),
+        "head_sha": _str(head.get("sha")),
+    }
+
+
+def map_push_prep(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map a GitHub pull-request JSON object to ``PushPrep`` (vendor data only)."""
+    plan = map_checkout_plan(payload, repo)
+    return {
+        "repo": plan["repo"],
+        "number": plan["number"],
+        "clone_url": plan["clone_url"],
+        "head_ref": plan["head_ref"],
+    }
+
+
 def map_issue(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any]:
     """Map one GitHub issue JSON object to ``Issue``."""
     return {

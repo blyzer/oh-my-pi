@@ -23,9 +23,11 @@ from urllib.parse import urlencode
 from .errors import ForgeUnavailable
 from .mapping import (
     issue_create_body,
+    map_checkout_plan,
     map_comments,
     map_issue,
     map_pull_request,
+    map_push_prep,
     map_repository,
     map_search_page,
     pull_request_create_body,
@@ -123,6 +125,22 @@ def view_repo(repo: Mapping[str, Any]) -> dict[str, Any]:
 def view_change_request(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
     payload = _get_json(_repo_url(repo, "pulls", str(number)), op="change_request_view")
     return map_pull_request(payload, repo)
+
+
+def checkout_change_request_plan(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
+    """REST → ``CheckoutPlan`` JSON (no local git; core owns the worktree)."""
+    payload = _get_json(_repo_url(repo, "pulls", str(number)), op="change_request_checkout")
+    if not isinstance(payload, dict):
+        raise ForgeUnavailable("change_request_checkout", "GitHub pull payload was not an object")
+    return map_checkout_plan(payload, repo)
+
+
+def push_change_request_prep(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
+    """REST → ``PushPrep`` JSON (no local git; core owns the push)."""
+    payload = _get_json(_repo_url(repo, "pulls", str(number)), op="change_request_push")
+    if not isinstance(payload, dict):
+        raise ForgeUnavailable("change_request_push", "GitHub pull payload was not an object")
+    return map_push_prep(payload, repo)
 
 
 def view_issue(repo: Mapping[str, Any], number: int) -> dict[str, Any]:

@@ -14,9 +14,11 @@ if str(SRC) not in sys.path:
 
 from omp_github.mapping import (  # noqa: E402
     issue_create_body,
+    map_checkout_plan,
     map_comments,
     map_issue,
     map_pull_request,
+    map_push_prep,
     map_repository,
     map_request_state,
     map_search_page,
@@ -59,6 +61,29 @@ class PullRequestMappingTests(unittest.TestCase):
         self.assertEqual(map_request_state("closed", merged=True), "merged")
         self.assertEqual(map_request_state("closed", merged=False), "closed")
         self.assertEqual(map_request_state("open"), "open")
+
+
+class CheckoutPlanMappingTests(unittest.TestCase):
+    def test_fixture_matches_checkout_plan_shape(self) -> None:
+        payload = _load("pull_request.json")
+        assert isinstance(payload, dict)
+        plan = map_checkout_plan(payload, REPO)
+        self.assertEqual(plan["repo"], REPO)
+        self.assertEqual(plan["number"], 7)
+        self.assertEqual(plan["clone_url"], "https://github.com/acme/widget.git")
+        self.assertEqual(plan["base_ref"], "main")
+        self.assertEqual(plan["head_ref"], "topic")
+        self.assertEqual(plan["head_sha"], "bbb222")
+        self.assertNotIn("worktree", plan)
+
+    def test_push_prep_omits_worktree(self) -> None:
+        payload = _load("pull_request.json")
+        assert isinstance(payload, dict)
+        prep = map_push_prep(payload, REPO)
+        self.assertEqual(prep["clone_url"], "https://github.com/acme/widget.git")
+        self.assertEqual(prep["head_ref"], "topic")
+        self.assertNotIn("worktree", prep)
+        self.assertNotIn("head_sha", prep)
 
 
 class IssueMappingTests(unittest.TestCase):

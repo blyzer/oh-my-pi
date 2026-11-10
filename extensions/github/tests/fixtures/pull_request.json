@@ -6,6 +6,12 @@
   "draft": false,
   "merged": false,
   "base": {"ref": "main", "sha": "aaa111"},
-  "head": {"ref": "topic", "sha": "bbb222"},
+  "head": {
+    "ref": "topic",
+    "sha": "bbb222",
+    "repo": {
+      "clone_url": "https://github.com/acme/widget.git"
+    }
+  },
   "html_url": "https://github.com/acme/widget/pull/7"
 }

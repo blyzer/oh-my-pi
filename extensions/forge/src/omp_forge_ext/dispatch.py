@@ -47,6 +47,14 @@ class ForgeBackend(Protocol):
 
     def search(self, query: Mapping[str, Any]) -> dict[str, Any]: ...
 
+    def checkout_change_request_plan(
+        self, repo: Mapping[str, Any], number: int
+    ) -> dict[str, Any]: ...
+
+    def push_change_request_prep(
+        self, repo: Mapping[str, Any], number: int
+    ) -> dict[str, Any]: ...
+
 
 def _norm(host: str) -> str:
     return host.strip().rstrip("/").lower()
@@ -72,7 +80,7 @@ def select_backend(host: str) -> Backend:
 
 
 def host_from_args(args: Mapping[str, Any], *, op: str) -> str:
-    """Extract ``repo.host`` (or ``draft.repo.host`` for creates)."""
+    """Extract ``repo.host`` (or ``draft.repo`` / ``request.repo`` for writes)."""
     repo = args.get("repo")
     if isinstance(repo, dict):
         return str(repo.get("host") or "")
@@ -81,7 +89,12 @@ def host_from_args(args: Mapping[str, Any], *, op: str) -> str:
         nested = draft.get("repo")
         if isinstance(nested, dict):
             return str(nested.get("host") or "")
-    raise ForgeUnavailable(op, "args.repo (or draft.repo) must supply host")
+    request = args.get("request")
+    if isinstance(request, dict):
+        nested = request.get("repo")
+        if isinstance(nested, dict):
+            return str(nested.get("host") or "")
+    raise ForgeUnavailable(op, "args.repo (or draft.repo / request.repo) must supply host")
 
 
 def host_from_search_args(args: Mapping[str, Any], *, op: str) -> str:

@@ -81,11 +81,7 @@ pub trait CiDeviceClient: Clone + Send + Sync + 'static {
 	///
 	/// Success payloads are the serde form of the matching `omp_ci` result
 	/// type. Failures are typed [`CiError`] values from the client.
-	fn call(
-		&self,
-		path: &str,
-		args: Value,
-	) -> impl Future<Output = Result<Value, CiError>> + Send;
+	fn call(&self, path: &str, args: Value) -> impl Future<Output = Result<Value, CiError>> + Send;
 }
 
 /// Object-safe invoker behind [`LiveCiDeviceClient`].
@@ -152,11 +148,7 @@ impl LiveCiDeviceClient {
 }
 
 impl CiDeviceClient for LiveCiDeviceClient {
-	fn call(
-		&self,
-		path: &str,
-		args: Value,
-	) -> impl Future<Output = Result<Value, CiError>> + Send {
+	fn call(&self, path: &str, args: Value) -> impl Future<Output = Result<Value, CiError>> + Send {
 		let invoker = self.invoker.read().clone();
 		let path = path.to_owned();
 		async move {
@@ -176,11 +168,7 @@ impl CiDeviceClient for LiveCiDeviceClient {
 pub struct UnavailableCiClient;
 
 impl CiDeviceClient for UnavailableCiClient {
-	fn call(
-		&self,
-		path: &str,
-		_args: Value,
-	) -> impl Future<Output = Result<Value, CiError>> + Send {
+	fn call(&self, path: &str, _args: Value) -> impl Future<Output = Result<Value, CiError>> + Send {
 		std::future::ready(Err(CiError::Unavailable { op: ci_op_for_path(path) }))
 	}
 }
@@ -220,11 +208,7 @@ impl<C: CiDeviceClient> CiHost for DynCiAdapter<C> {
 		let provider = provider.clone();
 		async move {
 			this
-				.invoke_decode(
-					CiOp::Status,
-					paths::CAPABILITIES,
-					json!({ "provider": provider }),
-				)
+				.invoke_decode(CiOp::Status, paths::CAPABILITIES, json!({ "provider": provider }))
 				.await
 		}
 	}
@@ -239,10 +223,7 @@ impl<C: CiDeviceClient> CiHost for DynCiAdapter<C> {
 		}
 	}
 
-	fn artifacts(
-		&self,
-		run: &RunRef,
-	) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
+	fn artifacts(&self, run: &RunRef) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
 		let this = self.clone();
 		let run = run.clone();
 		async move {
@@ -347,10 +328,7 @@ impl<C: CiDeviceClient> CiHost for CiBackend<C> {
 		}
 	}
 
-	fn artifacts(
-		&self,
-		run: &RunRef,
-	) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
+	fn artifacts(&self, run: &RunRef) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
 		async move {
 			match self {
 				Self::Github(host) => host.artifacts(run).await,
@@ -507,23 +485,16 @@ mod tests {
 	}
 
 	fn sample_run(host: &str, pipeline: &str, job: Option<&str>) -> RunRef {
-		RunRef::try_new(
-			sample_provider(host),
-			pipeline,
-			job.map(|job| Str::new(job)),
-		)
-		.unwrap()
+		RunRef::try_new(sample_provider(host), pipeline, job.map(|job| Str::new(job))).unwrap()
 	}
 
 	fn sample_pipeline(host: &str) -> Pipeline {
-		Pipeline::new(
-			sample_provider(host),
-			"42",
-			"ci",
+		Pipeline::new(sample_provider(host), "42", "ci", CiStatus::Failure, [Job::new(
+			"7",
+			"test",
 			CiStatus::Failure,
-			[Job::new("7", "test", CiStatus::Failure)
-				.with_web_url("https://gitlab.example/acme/widget/-/jobs/7")],
 		)
+		.with_web_url("https://gitlab.example/acme/widget/-/jobs/7")])
 		.with_web_url("https://gitlab.example/acme/widget/-/pipelines/42")
 		.with_revision("abc123")
 	}
@@ -767,10 +738,7 @@ mod tests {
 		let router = builder.build();
 
 		let run = sample_run(host, "42", None);
-		let pipeline = router
-			.status(&run)
-			.await
-			.expect("status via live client");
+		let pipeline = router.status(&run).await.expect("status via live client");
 		assert_eq!(pipeline.id.as_str(), "42");
 		assert_eq!(pipeline.status, CiStatus::Failure);
 

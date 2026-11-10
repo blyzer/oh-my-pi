@@ -53,6 +53,7 @@ mod github;
 mod github_adapter;
 #[cfg(feature = "cap-forge")]
 pub use github_adapter::CheckoutForge;
+mod forge_worktree;
 mod github_params;
 pub mod github_url;
 pub mod grep;

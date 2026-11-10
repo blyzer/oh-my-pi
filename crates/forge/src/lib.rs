@@ -45,8 +45,8 @@ mod repo;
 mod scheme;
 
 pub use change::{
-	ChangeRequest, ChangeRequestDraft, CheckoutReceipt, CheckoutRequest, Comment, Issue, IssueDraft,
-	IssueState, PushReceipt, PushRequest, RequestState,
+	ChangeRequest, ChangeRequestDraft, CheckoutPlan, CheckoutReceipt, CheckoutRequest, Comment,
+	Issue, IssueDraft, IssueState, PushPrep, PushReceipt, PushRequest, RequestState,
 };
 pub use check::{
 	Check, CheckState, CheckTarget, ForgeChecks, required_checks, required_satisfied,
