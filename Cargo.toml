@@ -145,6 +145,7 @@ omp-exec-local = { path = "crates/exec-local", version = "2.0.0" }
 omp-exec-ssh = { path = "crates/exec-ssh", version = "2.0.0" }
 omp-ext = { path = "crates/ext", version = "2.0.0" }
 omp-forge = { path = "crates/forge", version = "2.0.0" }
+omp-forge-delegated = { path = "crates/forge-delegated", version = "2.0.0" }
 omp-gui = { path = "crates/gui", version = "2.0.0" }
 omp-edit = { path = "crates/edit", version = "2.0.0" }
 omp-http = { path = "crates/http", version = "2.0.0" }

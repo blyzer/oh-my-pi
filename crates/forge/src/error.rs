@@ -91,6 +91,34 @@ pub enum ForgeError {
 		/// The operation that could not be started.
 		op: ForgeOp,
 	},
+	/// No adapter is registered for the host.
+	///
+	/// The in-core host router returns this when the request's host is
+	/// absent from its registry. The host string is ASCII-lowercased.
+	#[error("forge host {host} has no adapter for {op}")]
+	Unregistered {
+		/// ASCII-lowercased host that was requested.
+		host: Str,
+		/// Operation the router was performing.
+		op:   ForgeOp,
+	},
+	/// A mutating operation was refused before it reached an adapter.
+	///
+	/// The router selects `op` from the method it implements. An adapter
+	/// does not choose it.
+	#[error("forge operation {op} on {host} was not approved")]
+	NotApproved {
+		/// Operation that was refused.
+		op:   ForgeOp,
+		/// ASCII-lowercased host the operation targeted.
+		host: Str,
+	},
+	/// The operation named no repository, so a host could not be selected.
+	#[error("forge operation {op} has no repository host")]
+	Unscoped {
+		/// Operation that could not be routed.
+		op: ForgeOp,
+	},
 	/// A `pr://` or `issue://` URL could not be parsed.
 	#[error(transparent)]
 	Scheme(#[from] SchemeError),

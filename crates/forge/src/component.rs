@@ -71,6 +71,11 @@ pub enum ComponentError {
 	Undecodable,
 }
 
+/// Rejects an empty host, a host longer than [`MAX_COMPONENT_LEN`], or a
+/// byte outside the ASCII host charset.
+///
+/// The check preserves the caller's case. Callers that compare hosts
+/// without regard to ASCII case fold the string themselves.
 pub fn check_host(text: &str) -> Result<(), ComponentError> {
 	check_charset(text, PathComponent::Host, MAX_COMPONENT_LEN, is_host_byte)
 }

@@ -8690,6 +8690,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-forge-delegated"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "omp-core",
+ "omp-forge",
+ "parking_lot",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "omp-gui"
 version = "2.0.0"
 dependencies = [

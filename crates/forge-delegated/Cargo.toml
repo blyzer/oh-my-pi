@@ -1,0 +1,23 @@
+[package]
+name = "omp-forge-delegated"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "In-core forge host router: registry by host, ForgeHost forwarding, and approval gates on mutating operations"
+readme = "README.md"
+
+[dependencies]
+omp-core.workspace = true
+omp-forge.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+
+[lints]
+workspace = true
