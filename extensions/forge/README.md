@@ -8,9 +8,11 @@ dispatches each call by `repo.host` (and known dyn hosts) to:
 | [`omp_github`](../github/) | `github.com`, `GITHUB_HOST`, other Dyn hosts (GHE default) |
 | [`omp_gitlab`](../gitlab/) | `gitlab.com`, `GITLAB_HOST`, hostnames containing `gitlab` |
 
-`DynForgeAdapter` calls fixed paths (`forge/change_request_view`, …). A second
-extension must **not** also mount those leaves — that is why mounts moved here
-out of `omp.gitlab`, and `omp.github` never declares a `forge` parent.
+Adapter env `GITHUB_HOST` / `GITLAB_HOST` join the Dyn arm automatically via
+envd `ForgeDynHosts` (shared with CI). `DynForgeAdapter` calls fixed paths
+(`forge/change_request_view`, …). A second extension must **not** also mount
+those leaves — that is why mounts moved here out of `omp.gitlab`, and
+`omp.github` never declares a `forge` parent.
 
 ## Mounted leaves
 

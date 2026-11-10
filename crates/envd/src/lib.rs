@@ -52,8 +52,8 @@ pub mod fetch_host;
 mod forge_adapter;
 #[cfg(feature = "cap-forge")]
 pub use forge_adapter::CheckoutForge;
-mod forge_worktree;
 pub mod forge_url;
+mod forge_worktree;
 pub mod grep;
 pub mod host_info;
 pub mod host_settings;

@@ -7,13 +7,16 @@
 //! `PermitAll` is intentional: the desk gate is the tool commit, and the
 //! routers are not exported, so a second approval would only repeat that gate.
 //!
-//! Hosts are registered explicitly. Dyn hosts come from [`ForgeDynHosts`]:
-//! always `gitlab.com` and `github.com`, plus `sv_forge_dyn_hosts` and adapter
-//! env `GITLAB_HOST`. The checkout host from `infer_repo` joins the Dyn arm
-//! when it differs (same live client), so GHE / self-hosted listed via remote
+//! Hosts are registered explicitly. Dyn hosts come from [`ForgeDynHosts`] —
+//! adapter host-claim discovery (ADR 0049 D2.7/D2.8): always `gitlab.com` and
+//! `github.com`, plus `sv_forge_dyn_hosts`, adapter env `GITLAB_HOST` /
+//! `GITHUB_HOST`, and optional catalog claims via
+//! [`ForgeDynHosts::with_catalog_claims`]. The checkout host from `infer_repo`
+//! joins the Dyn arm when it differs (same live client), so GHE / self-hosted
 //! still works when extensions answer; unlisted hosts without mounts →
 //! [`omp_forge::ForgeError::Unavailable`] (honest). There is no in-core
-//! Github fallback arm.
+//! Github fallback arm. Catalog leaf late-registration is out of scope
+//! (Delegated stays immutable; checkout + these claims cover the Dyn arm).
 //!
 //! Catalog mounts for `forge/<op>` are owned by the `omp.forge` extension
 //! (host-dispatch to `omp_github` / `omp_gitlab`). Catalog mounts for
@@ -29,14 +32,12 @@
 //! after a forge-neutral [`ForgeHost::search`] for the open head branch.
 //!
 //! Under `cap-forge`, the router holds a [`ForgeBackend`] type alias over
-//! [`DynForgeAdapter`] (ADR 0049 D2.3). Production registers Dyn hosts via
-//! [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog host-claim
-//! discovery remains a smaller TODO.
+//! [`DynForgeAdapter`] (ADR 0049 D2.3). Production registers every host in
+//! [`ForgeDynHosts`] via [`LiveForgeDeviceClient`] (D2.8).
 //!
 //! Under `cap-ci`, the CI router holds a [`CiBackend`] type alias the same way.
-//! Production registers [`CI_GITHUB_HOST`] (`github.com`) and [`CI_DYN_HOST`]
-//! (`gitlab.com`) on Dyn via a shared [`LiveCiDeviceClient`], plus the
-//! checkout host when it differs.
+//! Production registers the same [`ForgeDynHosts`] claim set on Dyn via a
+//! shared [`LiveCiDeviceClient`], plus the checkout host when it differs.
 
 #[cfg(feature = "cap-ci")]
 mod dyn_ci;
@@ -64,7 +65,7 @@ pub(crate) use dyn_forge::{
 use omp_ci::Capabilities;
 #[cfg(feature = "cap-ci")]
 use omp_ci_delegated::{Delegated as CiDelegated, PermitAll as CiPermitAll};
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 use omp_con::Ctx;
 use omp_core::{Str, sf};
 #[cfg(feature = "cap-forge")]
@@ -73,59 +74,93 @@ use omp_forge::{ChangeRequest, ForgeError, ForgeHost, ForgeOp, RepoRef, SearchKi
 use omp_forge_delegated::{Delegated as ForgeDelegated, PermitAll as ForgePermitAll};
 #[cfg(feature = "cap-forge")]
 use parking_lot::Mutex;
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 use smallvec::SmallVec;
 #[cfg(feature = "cap-forge")]
 use tokio::time;
 
 use crate::forge_url;
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 use crate::tool_settings::SV_FORGE_DYN_HOSTS;
 
-/// Hosts registered on the dyn forge arm (ADR 0049 D2.8).
+/// Hosts registered on the dyn forge / CI arms (ADR 0049 D2.7 / D2.8).
 ///
-/// Always includes [`GITLAB_HOST`] and [`GITHUB_DYN_HOST`]. Additional hosts
-/// come from the `sv_forge_dyn_hosts` convar (comma/whitespace-separated ASCII
-/// hosts) and from adapter env `GITLAB_HOST` when set and non-empty.
+/// This is adapter host-claim discovery: env-var names and canonical SaaS
+/// hosts are adapter data. Always includes `gitlab.com` and `github.com`.
+/// Additional hosts come from the `sv_forge_dyn_hosts` convar
+/// (comma/whitespace-separated ASCII hosts), adapter env `GITLAB_HOST` /
+/// `GITHUB_HOST` when set and non-empty, and optional catalog claims merged
+/// via [`Self::with_catalog_claims`].
 ///
-/// Self-hosted GitLab or GHE must appear via the convar (or `GITLAB_HOST` for
-/// GitLab) to be pre-registered; an unlisted checkout host is still placed on
+/// Self-hosted GitLab or GHE must appear via the convar or those adapter env
+/// claims to be pre-registered; an unlisted checkout host is still placed on
 /// Dyn at router build so a remote that extensions answer can work without a
-/// second registration path.
-#[cfg(feature = "cap-forge")]
+/// second registration path. Catalog leaf late-registration is out of scope
+/// (Delegated stays immutable).
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ForgeDynHosts {
 	hosts: SmallVec<Str, 4>,
 }
 
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 impl ForgeDynHosts {
-	/// Resolves dyn hosts from archived convars plus `GITLAB_HOST`.
+	/// Resolves dyn hosts from archived convars plus adapter host-claim env.
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self::resolve(SV_FORGE_DYN_HOSTS.get(ctx).as_str())
 	}
 
-	/// Resolves dyn hosts from a raw `sv_forge_dyn_hosts` list plus env.
+	/// Resolves dyn hosts from a raw `sv_forge_dyn_hosts` list plus env claims.
+	///
+	/// Reads both `GITLAB_HOST` and `GITHUB_HOST` from the process environment.
 	#[must_use]
 	pub fn resolve(convar: &str) -> Self {
-		let env = std::env::var("GITLAB_HOST").ok();
-		Self::from_sources(convar, env.as_deref())
+		let gitlab = std::env::var("GITLAB_HOST").ok();
+		let github = std::env::var("GITHUB_HOST").ok();
+		Self::from_sources(convar, gitlab.as_deref(), github.as_deref())
 	}
 
-	/// Resolves dyn hosts from operator list text and an optional `GITLAB_HOST`.
+	/// Resolves dyn hosts from operator list text and adapter env claims.
+	///
+	/// Push order: always `gitlab.com`, always `github.com`, then convar
+	/// tokens, then `GITLAB_HOST`, then `GITHUB_HOST` (case-insensitive
+	/// dedupe). Empty / whitespace-only claims are ignored.
 	#[must_use]
-	pub fn from_sources(convar: &str, gitlab_host_env: Option<&str>) -> Self {
+	pub fn from_sources(
+		convar: &str,
+		gitlab_host_env: Option<&str>,
+		github_host_env: Option<&str>,
+	) -> Self {
 		let mut hosts = SmallVec::<Str, 4>::new();
-		push_dyn_host(&mut hosts, GITLAB_HOST);
-		push_dyn_host(&mut hosts, GITHUB_DYN_HOST);
+		push_dyn_host(&mut hosts, dyn_saas_gitlab());
+		push_dyn_host(&mut hosts, dyn_saas_github());
 		for host in split_dyn_hosts(convar) {
 			push_dyn_host(&mut hosts, host);
 		}
 		if let Some(env_host) = gitlab_host_env {
 			push_dyn_host(&mut hosts, env_host.trim());
 		}
+		if let Some(env_host) = github_host_env {
+			push_dyn_host(&mut hosts, env_host.trim());
+		}
 		Self { hosts }
+	}
+
+	/// Merges additional ASCII hosts from a device-catalog / host-claim feed.
+	///
+	/// Same case-insensitive dedupe as [`Self::from_sources`]. Intended for
+	/// tests and future catalog-fed claims; production today resolves adapter
+	/// env + convar via [`Self::resolve`].
+	#[must_use]
+	pub fn with_catalog_claims<'a, I>(mut self, claims: I) -> Self
+	where
+		I: IntoIterator<Item = &'a str>,
+	{
+		for host in claims {
+			push_dyn_host(&mut self.hosts, host);
+		}
+		self
 	}
 
 	/// Whether `host` is registered on the Dyn arm (ASCII case-insensitive).
@@ -144,15 +179,41 @@ impl ForgeDynHosts {
 	}
 }
 
+/// Canonical GitLab SaaS host shared by forge and CI Dyn registration.
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+fn dyn_saas_gitlab() -> &'static str {
+	#[cfg(feature = "cap-forge")]
+	{
+		GITLAB_HOST
+	}
+	#[cfg(all(feature = "cap-ci", not(feature = "cap-forge")))]
+	{
+		CI_DYN_HOST
+	}
+}
+
+/// Canonical GitHub SaaS host shared by forge and CI Dyn registration.
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+fn dyn_saas_github() -> &'static str {
+	#[cfg(feature = "cap-forge")]
+	{
+		GITHUB_DYN_HOST
+	}
+	#[cfg(all(feature = "cap-ci", not(feature = "cap-forge")))]
+	{
+		CI_GITHUB_HOST
+	}
+}
+
 /// Comma- or whitespace-separated ASCII host tokens from `sv_forge_dyn_hosts`.
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 fn split_dyn_hosts(raw: &str) -> impl Iterator<Item = &str> + '_ {
 	raw.split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
 		.map(str::trim)
 		.filter(|host| !host.is_empty())
 }
 
-#[cfg(feature = "cap-forge")]
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 fn push_dyn_host(hosts: &mut SmallVec<Str, 4>, host: &str) {
 	let host = host.trim();
 	if host.is_empty() {
@@ -173,17 +234,17 @@ fn push_dyn_host(hosts: &mut SmallVec<Str, 4>, host: &str) {
 ///
 /// # Host registration
 ///
-/// - every host in [`ForgeDynHosts`] (always [`GITLAB_HOST`] +
-///   [`GITHUB_DYN_HOST`], plus `sv_forge_dyn_hosts` / `GITLAB_HOST`) →
-///   [`ForgeBackend`] over `devices`
+/// - every host in [`ForgeDynHosts`] (always SaaS `gitlab.com` + `github.com`,
+///   plus `sv_forge_dyn_hosts` / `GITLAB_HOST` / `GITHUB_HOST` / catalog
+///   claims) → [`ForgeBackend`] over `devices`
 /// - checkout host from `infer_repo` when it differs → same Dyn arm (GHE /
 ///   self-hosted still works when extensions answer; otherwise Unavailable)
 ///
 /// `devices` may be unbound ([`LiveForgeDeviceClient`] returns
 /// [`omp_forge::ForgeError::Unavailable`] until
 /// [`LiveForgeDeviceClient::bind`]); registration still happens so Delegated
-/// can reach the dyn arm. Automatic discovery of additional dyn hosts from
-/// the device catalog / extension host claims remains TODO (ADR 0049 D2.8).
+/// can reach the dyn arm. Adapter host-claim discovery is
+/// [`ForgeDynHosts`] (ADR 0049 D2.7 / D2.8).
 #[cfg(feature = "cap-forge")]
 pub(crate) fn forge_router(
 	devices: LiveForgeDeviceClient,
@@ -225,27 +286,27 @@ pub(crate) fn forge_router(
 ///
 /// # Host registration
 ///
-/// - [`CI_GITHUB_HOST`] (`github.com`) → Dyn over `devices`
-/// - [`CI_DYN_HOST`] (`gitlab.com`) → Dyn over the same client
+/// - every host in [`ForgeDynHosts`] (same adapter host-claim set as
+///   [`forge_router`]) → Dyn over `devices`
 /// - checkout host from `infer_repo` when it differs → same Dyn arm
 ///
 /// `devices` may be unbound ([`LiveCiDeviceClient`] returns
 /// [`omp_ci::CiError::Unavailable`] until [`LiveCiDeviceClient::bind`]);
-/// both SaaS hosts are still registered so Delegated can reach the dyn arm.
+/// claimed hosts are still registered so Delegated can reach the dyn arm.
 /// Catalog mounts are owned by `extensions/ci/` (`omp.ci`).
 #[cfg(feature = "cap-ci")]
 pub(crate) fn ci_router(
 	devices: LiveCiDeviceClient,
+	dyn_hosts: &ForgeDynHosts,
 	project_root: &Path,
 ) -> CiDelegated<CiBackend, CiPermitAll> {
 	let caps = dyn_ci_capabilities();
 	let mut builder = CiDelegated::builder(CiPermitAll);
-	register_dyn_ci_host(&mut builder, CI_GITHUB_HOST, devices.clone(), caps)
-		.expect("github.com dyn ci host");
-	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices.clone(), caps)
-		.expect("gitlab.com dyn ci host");
+	for host in dyn_hosts.iter() {
+		register_dyn_ci_host(&mut builder, host, devices.clone(), caps).expect("dyn ci host");
+	}
 	register_checkout_host(project_root, |host| {
-		if host.eq_ignore_ascii_case(CI_DYN_HOST) || host.eq_ignore_ascii_case(CI_GITHUB_HOST) {
+		if dyn_hosts.contains(host) {
 			return;
 		}
 		let _ = register_dyn_ci_host(&mut builder, host, devices.clone(), caps);
@@ -262,7 +323,10 @@ fn register_checkout_host(project_root: &Path, mut register: impl FnMut(&str)) {
 	let Ok(repo) = forge_url::infer_repo(project_root) else {
 		return;
 	};
-	if repo.host().eq_ignore_ascii_case(forge_url::DEFAULT_FORGE_HOST) {
+	if repo
+		.host()
+		.eq_ignore_ascii_case(forge_url::DEFAULT_FORGE_HOST)
+	{
 		return;
 	}
 	register(repo.host());
@@ -408,7 +472,8 @@ pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 /// Whether the checkout's inferred host is on the Dyn forge set.
 ///
 /// Lights the branch chip for `github.com`, `gitlab.com`, and any host listed
-/// via `sv_forge_dyn_hosts` / `GITLAB_HOST`. Unlisted remotes stay dark.
+/// via `sv_forge_dyn_hosts` / `GITLAB_HOST` / `GITHUB_HOST` / catalog claims.
+/// Unlisted remotes stay dark.
 #[cfg(feature = "cap-forge")]
 fn serves_forge_checkout(root: &Path, dyn_hosts: &ForgeDynHosts) -> bool {
 	let Ok(repo) = forge_url::infer_repo(root) else {
@@ -431,12 +496,14 @@ mod tests {
 		ForgeError, ForgeHost as _, ForgeOp, RepoRef, SearchKind, SearchPage, SearchQuery,
 	};
 
+	#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+	use super::ForgeDynHosts;
 	#[cfg(feature = "cap-ci")]
 	use super::{CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient};
 	#[cfg(feature = "cap-forge")]
 	use super::{
-		ForgeDeviceInvoker, ForgeDynHosts, GITHUB_DYN_HOST, GITLAB_HOST, LiveForgeDeviceClient,
-		forge_device_paths, forge_router,
+		ForgeDeviceInvoker, GITHUB_DYN_HOST, GITLAB_HOST, LiveForgeDeviceClient, forge_device_paths,
+		forge_router,
 	};
 
 	#[cfg(feature = "cap-ci")]
@@ -444,15 +511,15 @@ mod tests {
 		RunRef::try_new(CiProvider::try_new("github.com").unwrap(), pipeline, None).unwrap()
 	}
 
-	#[cfg(feature = "cap-forge")]
+	#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 	fn default_dyn_hosts() -> ForgeDynHosts {
-		ForgeDynHosts::from_sources("", None)
+		ForgeDynHosts::from_sources("", None, None)
 	}
 
 	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn forge_dyn_hosts_always_includes_gitlab_and_github_com() {
-		let hosts = ForgeDynHosts::from_sources("", None);
+		let hosts = ForgeDynHosts::from_sources("", None, None);
 		assert!(hosts.contains(GITLAB_HOST));
 		assert!(hosts.contains(GITHUB_DYN_HOST));
 		assert_eq!(hosts.iter().next(), Some(GITLAB_HOST));
@@ -463,7 +530,7 @@ mod tests {
 	#[test]
 	fn forge_dyn_hosts_parses_convar_and_keeps_github() {
 		let hosts =
-			ForgeDynHosts::from_sources("gitlab.example.com, github.com forge.internal", None);
+			ForgeDynHosts::from_sources("gitlab.example.com, github.com forge.internal", None, None);
 		assert!(hosts.contains("gitlab.example.com"));
 		assert!(hosts.contains("forge.internal"));
 		assert!(hosts.contains(GITHUB_DYN_HOST));
@@ -480,14 +547,85 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn forge_dyn_hosts_treats_gitlab_host_env_as_dyn() {
-		let hosts = ForgeDynHosts::from_sources("", Some("gitlab.example.com"));
+		let hosts = ForgeDynHosts::from_sources("", Some("gitlab.example.com"), None);
 		assert!(hosts.contains("gitlab.example.com"));
 		assert!(hosts.contains(GITLAB_HOST));
 		assert!(hosts.contains(GITHUB_DYN_HOST));
-		let ignored = ForgeDynHosts::from_sources("", Some(""));
+		let ignored = ForgeDynHosts::from_sources("", Some(""), None);
 		assert!(!ignored.contains("gitlab.example.com"));
-		let listed = ForgeDynHosts::from_sources("", Some("github.com"));
+		let listed = ForgeDynHosts::from_sources("", Some("github.com"), None);
 		assert!(listed.contains(GITHUB_DYN_HOST));
+	}
+
+	#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+	#[test]
+	fn forge_dyn_hosts_treats_github_host_env_as_dyn() {
+		let hosts = ForgeDynHosts::from_sources("", None, Some("ghe.example.com"));
+		assert!(hosts.contains("ghe.example.com"));
+		assert!(hosts.contains("gitlab.com"));
+		assert!(hosts.contains("github.com"));
+		let ignored = ForgeDynHosts::from_sources("", None, Some("  "));
+		assert!(!ignored.contains("ghe.example.com"));
+	}
+
+	#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+	#[test]
+	fn forge_dyn_hosts_registers_both_adapter_env_claims() {
+		let hosts = ForgeDynHosts::from_sources(
+			"gitlab.example.com",
+			Some("gitlab.internal"),
+			Some("ghe.example.com"),
+		);
+		assert!(hosts.contains("gitlab.example.com"));
+		assert!(hosts.contains("gitlab.internal"));
+		assert!(hosts.contains("ghe.example.com"));
+		assert!(hosts.contains("gitlab.com"));
+		assert!(hosts.contains("github.com"));
+		// Duplicates with SaaS / convar collapse case-insensitively.
+		let collapsed = ForgeDynHosts::from_sources(
+			"GitHub.COM, GHE.Example.Com",
+			Some("gitlab.com"),
+			Some("ghe.example.com"),
+		);
+		assert_eq!(
+			collapsed
+				.iter()
+				.filter(|host| host.eq_ignore_ascii_case("github.com"))
+				.count(),
+			1
+		);
+		assert_eq!(
+			collapsed
+				.iter()
+				.filter(|host| host.eq_ignore_ascii_case("ghe.example.com"))
+				.count(),
+			1
+		);
+		assert_eq!(
+			collapsed
+				.iter()
+				.filter(|host| host.eq_ignore_ascii_case("gitlab.com"))
+				.count(),
+			1
+		);
+	}
+
+	#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+	#[test]
+	fn forge_dyn_hosts_with_catalog_claims_merges_hosts() {
+		let hosts = ForgeDynHosts::from_sources("", None, None).with_catalog_claims([
+			"forge.catalog",
+			" github.com ",
+			"",
+		]);
+		assert!(hosts.contains("forge.catalog"));
+		assert_eq!(
+			hosts
+				.iter()
+				.filter(|host| host.eq_ignore_ascii_case("github.com"))
+				.count(),
+			1
+		);
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -587,7 +725,7 @@ mod tests {
 		}
 
 		let host = "gitlab.example.com";
-		let dyn_hosts = ForgeDynHosts::from_sources(host, None);
+		let dyn_hosts = ForgeDynHosts::from_sources(host, None, None);
 		assert!(dyn_hosts.contains(host));
 
 		let devices = LiveForgeDeviceClient::default();
@@ -689,13 +827,39 @@ mod tests {
 		assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 	}
 
+	#[cfg(feature = "cap-forge")]
+	#[tokio::test]
+	async fn forge_router_github_host_claim_is_not_unregistered() {
+		let dir = tempfile::tempdir().expect("temp");
+		let dyn_hosts = ForgeDynHosts::from_sources("", None, Some("ghe.example.com"));
+		let router = forge_router(
+			LiveForgeDeviceClient::default(),
+			&dyn_hosts,
+			dir.path().to_path_buf(),
+			crate::forge_worktree::worktree_root(dir.path()),
+		);
+		let repo = RepoRef::try_new("ghe.example.com", "acme", "widget").unwrap();
+		let error = router
+			.view_repo(&repo)
+			.await
+			.expect_err("unbound live client");
+		assert!(
+			matches!(error, ForgeError::Unavailable { op: ForgeOp::RepoView }),
+			"GITHUB_HOST claim must register on dyn: {error}"
+		);
+		assert!(
+			!matches!(error, ForgeError::Unregistered { .. }),
+			"GITHUB_HOST claim must not stay Unregistered: {error}"
+		);
+	}
+
 	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn ci_writes_and_artifacts_are_not_capable() {
 		let dir = tempfile::tempdir().expect("temp");
 		let client = LiveCiDeviceClient::default();
 		client.bind(Arc::new(RecordingCiCapsInvoker));
-		let router = super::ci_router(client, dir.path());
+		let router = super::ci_router(client, &default_dyn_hosts(), dir.path());
 		let run = run("42");
 		let provider = run.provider.clone();
 		for op in [
@@ -758,7 +922,8 @@ mod tests {
 	#[tokio::test]
 	async fn gitlab_com_ci_is_registered_dyn_even_when_unbound() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router = super::ci_router(LiveCiDeviceClient::default(), dir.path());
+		let router =
+			super::ci_router(LiveCiDeviceClient::default(), &default_dyn_hosts(), dir.path());
 		let run = RunRef::try_new(CiProvider::try_new(CI_DYN_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
@@ -771,7 +936,8 @@ mod tests {
 	#[tokio::test]
 	async fn github_com_ci_is_registered_dyn_even_when_unbound() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router = super::ci_router(LiveCiDeviceClient::default(), dir.path());
+		let router =
+			super::ci_router(LiveCiDeviceClient::default(), &default_dyn_hosts(), dir.path());
 		let run = RunRef::try_new(CiProvider::try_new(CI_GITHUB_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
@@ -782,6 +948,27 @@ mod tests {
 			!matches!(error, CiError::Unregistered { .. }),
 			"github.com must not fall off the router: {error}"
 		);
+	}
+
+	#[cfg(feature = "cap-ci")]
+	#[tokio::test]
+	async fn ci_router_registers_adapter_host_claims() {
+		let dir = tempfile::tempdir().expect("temp");
+		let dyn_hosts =
+			ForgeDynHosts::from_sources("", Some("gitlab.internal"), Some("ghe.example.com"));
+		let router = super::ci_router(LiveCiDeviceClient::default(), &dyn_hosts, dir.path());
+		for host in ["ghe.example.com", "gitlab.internal"] {
+			let run = RunRef::try_new(CiProvider::try_new(host).unwrap(), "1", None).unwrap();
+			let error = router.status(&run).await.expect_err("unbound live client");
+			assert!(
+				matches!(error, CiError::Unavailable { op: CiOp::Status }),
+				"{host} host claim must register on dyn CI: {error}"
+			);
+			assert!(
+				!matches!(error, CiError::Unregistered { .. }),
+				"{host} host claim must not stay Unregistered: {error}"
+			);
+		}
 	}
 
 	#[cfg(feature = "cap-ci")]
@@ -838,7 +1025,7 @@ mod tests {
 		let client = LiveCiDeviceClient::default();
 		client.bind(Arc::new(Recording { calls: Arc::clone(&calls), hits: Arc::clone(&hits) }));
 		let dir = tempfile::tempdir().expect("temp");
-		let router = super::ci_router(client, dir.path());
+		let router = super::ci_router(client, &default_dyn_hosts(), dir.path());
 		let run = run("42");
 		let pipeline = router.status(&run).await.expect("status via dyn");
 		assert_eq!(pipeline.id.as_str(), "42");
@@ -887,6 +1074,23 @@ mod tests {
 			.remote_add("origin", "https://github.com/acme/widget.git")
 			.expect("github remote");
 		assert!(super::serves_forge_checkout(github.path(), &hosts));
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[test]
+	fn serves_forge_checkout_lights_for_github_host_claim() {
+		let hosts = ForgeDynHosts::from_sources("", None, Some("ghe.example.com"));
+		let ghe = tempfile::tempdir().expect("temp");
+		omp_vcs::git::init(ghe.path()).expect("init");
+		omp_vcs::git::GitRepo::discover(ghe.path())
+			.expect("discover")
+			.expect("repo")
+			.remote_add("origin", "https://ghe.example.com/acme/widget.git")
+			.expect("ghe remote");
+		assert!(
+			super::serves_forge_checkout(ghe.path(), &hosts),
+			"GITHUB_HOST claim must light the checkout gate"
+		);
 	}
 
 	#[cfg(feature = "cap-forge")]

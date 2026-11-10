@@ -274,7 +274,9 @@ impl SessionInstall for SessionHost<'_> {
 	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter {
 		self.ensure_telemetry();
-		crate::forge_adapter::ci_router(self.ci_devices.clone(), self.project_root)
+		let dyn_hosts =
+			crate::forge_adapter::ForgeDynHosts::resolve(self.tool_settings.forge_dyn_hosts.as_str());
+		crate::forge_adapter::ci_router(self.ci_devices.clone(), &dyn_hosts, self.project_root)
 	}
 
 	#[cfg(feature = "cap-forge")]
