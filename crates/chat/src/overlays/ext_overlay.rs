@@ -5,9 +5,11 @@
 //! panel never writes terminal escapes: the host composites its frame like
 //! every other [`Panel`].
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+	collections::BTreeMap,
+	sync::{Arc, Mutex},
+	time::Duration,
+};
 
 use omp_core::Str;
 use omp_tui::{Frame, Key, Size, Ui, UiContext, UiEvent};
@@ -173,10 +175,9 @@ impl ExtOverlay {
 
 	fn settle(&mut self, cancelled: bool) -> PanelEvent {
 		self.state.capture_values(self.ui.values());
-		self.state.close(
-			cancelled,
-			cancelled.then_some(Str::new_static("dismissed")),
-		);
+		self
+			.state
+			.close(cancelled, cancelled.then_some(Str::new_static("dismissed")));
 		PanelEvent::Close
 	}
 }
@@ -220,9 +221,7 @@ impl Panel for ExtOverlay {
 
 	fn frame(&mut self, viewport: Size) -> &Frame {
 		let width = match self.anchor {
-			PanelAnchor::Center | PanelAnchor::BottomCenter => {
-				viewport.width.saturating_mul(80) / 100
-			},
+			PanelAnchor::Center | PanelAnchor::BottomCenter => viewport.width.saturating_mul(80) / 100,
 			_ => viewport.width,
 		}
 		.max(20)
@@ -261,10 +260,7 @@ mod tests {
 		assert!(state.closed());
 		assert_eq!(
 			state.outcome(),
-			Some(OverlayOutcome {
-				cancelled: true,
-				reason:    Some(Str::new_static("dismissed")),
-			})
+			Some(OverlayOutcome { cancelled: true, reason: Some(Str::new_static("dismissed")) })
 		);
 	}
 

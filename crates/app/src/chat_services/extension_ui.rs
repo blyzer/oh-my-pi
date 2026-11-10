@@ -13,8 +13,7 @@ use std::{future::Future, pin::Pin, sync::Arc, task::Poll};
 
 use async_trait::async_trait;
 use omp_chat::{
-	ExtensionSlot, ExtensionStatus, HostAction, HostMailbox,
-	extension_slots,
+	ExtensionSlot, ExtensionStatus, HostAction, HostMailbox, extension_slots,
 	overlays::{
 		CancelledPanel, PanelCall, PanelEvent, PanelOpener,
 		ask::AskDialog,
@@ -114,7 +113,7 @@ impl ChatUiOwner {
 			ask,
 			collab,
 			dialog_gate: tokio::sync::Mutex::new(()),
-			overlays:    parking_lot::Mutex::new(std::collections::HashMap::new()),
+			overlays: parking_lot::Mutex::new(std::collections::HashMap::new()),
 		}
 	}
 
@@ -326,17 +325,19 @@ impl ChatUiOwner {
 		let panel_id = id.clone();
 		let panel_source = source;
 		let panel_watch = watch;
-		self.mailbox()?.post(HostAction::Open(PanelOpener::new(move |cx| {
-			Ok(Box::new(ExtOverlay::open(
-				panel_id.clone(),
-				panel_source.as_str(),
-				cx.viewport,
-				cx.ui,
-				state.clone(),
-				panel_watch.clone(),
-				modal,
-			)) as Box<dyn omp_chat::overlays::Panel>)
-		})));
+		self
+			.mailbox()?
+			.post(HostAction::Open(PanelOpener::new(move |cx| {
+				Ok(Box::new(ExtOverlay::open(
+					panel_id.clone(),
+					panel_source.as_str(),
+					cx.viewport,
+					cx.ui,
+					state.clone(),
+					panel_watch.clone(),
+					modal,
+				)) as Box<dyn omp_chat::overlays::Panel>)
+			})));
 		Ok(UiControlResult::Value(json!({ "id": id })))
 	}
 
@@ -590,10 +591,13 @@ impl UiControlOwner for ChatUiOwner {
 				while !state.closed() {
 					tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 				}
-				let outcome = state.outcome().unwrap_or(omp_chat::overlays::ext_overlay::OverlayOutcome {
-					cancelled: true,
-					reason:    Some(Str::new_static("dismissed")),
-				});
+				let outcome =
+					state
+						.outcome()
+						.unwrap_or(omp_chat::overlays::ext_overlay::OverlayOutcome {
+							cancelled: true,
+							reason:    Some(Str::new_static("dismissed")),
+						});
 				Ok(UiControlResult::Value(json!({
 					"accepted": !outcome.cancelled,
 					"value": null,
@@ -750,11 +754,9 @@ impl UiControlOwner for ChatUiOwner {
 					.get("body")
 					.and_then(Value::as_object)
 					.ok_or_else(|| protocol("invalid_effect", "mount requires an object body"))?;
-				let event = extension_slots::mount_from_effect(
-					context.connection.extension.as_str(),
-					body,
-				)
-				.map_err(|message| protocol("invalid_effect", message))?;
+				let event =
+					extension_slots::mount_from_effect(context.connection.extension.as_str(), body)
+						.map_err(|message| protocol("invalid_effect", message))?;
 				self.mailbox()?.post(HostAction::ExtensionSlot(event));
 				Ok(())
 			},
@@ -770,10 +772,12 @@ impl UiControlOwner for ChatUiOwner {
 					.ok_or_else(|| {
 						protocol("invalid_effect", "unmount requires a non-empty body.key")
 					})?;
-				self.mailbox()?.post(HostAction::ExtensionSlot(ExtensionSlot::Unmount {
-					extension: context.connection.extension.clone(),
-					key:       Str::new(key),
-				}));
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Unmount {
+						extension: context.connection.extension.clone(),
+						key:       Str::new(key),
+					}));
 				Ok(())
 			},
 			"patch" => {
@@ -781,11 +785,9 @@ impl UiControlOwner for ChatUiOwner {
 					.get("body")
 					.and_then(Value::as_object)
 					.ok_or_else(|| protocol("invalid_effect", "patch requires an object body"))?;
-				let event = extension_slots::patch_from_effect(
-					context.connection.extension.as_str(),
-					body,
-				)
-				.map_err(|message| protocol("invalid_effect", message))?;
+				let event =
+					extension_slots::patch_from_effect(context.connection.extension.as_str(), body)
+						.map_err(|message| protocol("invalid_effect", message))?;
 				self.mailbox()?.post(HostAction::ExtensionSlot(event));
 				Ok(())
 			},
@@ -798,14 +800,18 @@ impl UiControlOwner for ChatUiOwner {
 					.ok_or_else(|| {
 						protocol("invalid_effect", "focus_slot requires a non-empty body.key")
 					})?;
-				self.mailbox()?.post(HostAction::ExtensionSlot(ExtensionSlot::Focus {
-					extension: context.connection.extension.clone(),
-					key:       Str::new(key),
-				}));
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Focus {
+						extension: context.connection.extension.clone(),
+						key:       Str::new(key),
+					}));
 				Ok(())
 			},
 			"blur_slot" => {
-				self.mailbox()?.post(HostAction::ExtensionSlot(ExtensionSlot::Blur));
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Blur));
 				Ok(())
 			},
 			other => Err(protocol(
@@ -1496,10 +1502,7 @@ mod tests {
 			.await
 			.expect("mount");
 		owner
-			.effect(
-				context(),
-				json!({ "kind": "unmount", "body": { "key": "welcome" } }),
-			)
+			.effect(context(), json!({ "kind": "unmount", "body": { "key": "welcome" } }))
 			.await
 			.expect("unmount");
 		let actions = ctx

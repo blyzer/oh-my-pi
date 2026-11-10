@@ -17,6 +17,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum BridgeHostError {
 	/// Model-facing failure message produced by the host-side operation.
+	// lintx-allow: error-str-payload model-facing bridge message; rendered once here
 	#[error("{0}")]
 	Message(Str),
 	/// Canonical policy denial produced before a child session exists.

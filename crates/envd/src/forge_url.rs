@@ -1223,7 +1223,7 @@ fn numbered_ref(
 			Ok(Some(parsed))
 		},
 		Err(SchemeError::MissingNumber) => Ok(None),
-		Err(error) => Err(Fault::Invalid { message: Str::new(error.to_string()) }),
+		Err(error) => Err(scheme_fault(error)),
 	}
 }
 
@@ -1325,6 +1325,12 @@ fn diff_repo_label(repo: &RepoRef) -> String {
 #[cfg(feature = "cap-forge")]
 fn forge_fault(error: ForgeError) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }
+}
+
+/// Renders a scheme parse failure once at this model-facing fault boundary.
+#[cfg(feature = "cap-forge")]
+fn scheme_fault(error: SchemeError) -> Fault {
+	Fault::Invalid { message: Str::new(error.to_string()) }
 }
 
 /// Builds a [`SearchQuery`] for a list URL, encoding filters as neutral

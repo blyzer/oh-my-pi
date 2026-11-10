@@ -9,9 +9,7 @@
 use std::collections::BTreeMap;
 
 use omp_core::Str;
-use omp_tui::{
-	CellContent, Frame, Prop, PropValue, Size, Ui, UiContext,
-};
+use omp_tui::{CellContent, Frame, Prop, PropValue, Size, Ui, UiContext};
 use strum::{Display, EnumString, IntoStaticStr};
 use xutf::IntoAnsiStripped as _;
 
@@ -63,7 +61,17 @@ impl SlotPlacement {
 
 /// Collapse policy when a mount does not fit the live region.
 #[derive(
-	Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Display, EnumString,
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	Ord,
+	PartialOrd,
+	Hash,
+	Display,
+	EnumString,
 	IntoStaticStr,
 )]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
@@ -339,9 +347,7 @@ impl ExtensionSlots {
 			.by_key
 			.iter()
 			.filter(|(_, mount)| {
-				mount.placement == placement
-					&& mount.visible
-					&& fits(mount, viewport)
+				mount.placement == placement && mount.visible && fits(mount, viewport)
 			})
 			.map(|(key, mount)| (mount.options.order, key, mount))
 			.collect::<Vec<_>>();
@@ -399,10 +405,7 @@ impl ExtensionSlots {
 	/// Focused rail identity, when one owns keyboard focus.
 	#[must_use]
 	pub fn focused(&self) -> Option<(&Str, &Str)> {
-		self
-			.focused
-			.as_ref()
-			.map(|key| (&key.extension, &key.key))
+		self.focused.as_ref().map(|key| (&key.extension, &key.key))
 	}
 
 	/// Relays each visible mount in `placement` at `viewport` width and
@@ -451,13 +454,16 @@ impl ExtensionSlots {
 				.min(viewport.width);
 			let mut frame = Frame::new(Size::new(width, viewport.height));
 			let mut y = 0u16;
-			for (_, key, _, _, _, _) in &ordered {
+			for (_, key, ..) in &ordered {
 				let Some(mount) = self.by_key.get_mut(key) else {
 					continue;
 				};
 				mount.ui.resize(width);
 				let rendered = mount.ui.frame();
-				let rows = rendered.size().height.min(viewport.height.saturating_sub(y));
+				let rows = rendered
+					.size()
+					.height
+					.min(viewport.height.saturating_sub(y));
 				if rows == 0 {
 					break;
 				}
@@ -468,7 +474,7 @@ impl ExtensionSlots {
 		}
 		let width = viewport.width;
 		let mut parts = Vec::new();
-		for (_, key, _, max_height, _, _) in &ordered {
+		for (_, key, _, max_height, ..) in &ordered {
 			let Some(mount) = self.by_key.get_mut(key) else {
 				continue;
 			};
@@ -480,7 +486,10 @@ impl ExtensionSlots {
 			};
 			parts.push((rendered, rows));
 		}
-		let height = parts.iter().map(|(_, rows)| *rows).fold(0u16, u16::saturating_add);
+		let height = parts
+			.iter()
+			.map(|(_, rows)| *rows)
+			.fold(0u16, u16::saturating_add);
 		if height == 0 {
 			return None;
 		}
@@ -621,9 +630,9 @@ pub fn mount_from_effect(
 		.map_err(|_| Str::new_static("mount body.content.source is invalid TML"))?;
 	Ok(ExtensionSlot::Mount {
 		extension: Str::new(extension),
-		key:       Str::new(key),
+		key: Str::new(key),
 		placement,
-		source:    Str::new(source),
+		source: Str::new(source),
 		options,
 	})
 }
@@ -668,15 +677,17 @@ pub fn patch_from_effect(
 		Some(serde_json::Value::Object(object)) => object
 			.iter()
 			.filter_map(|(name, value)| {
-				value.as_str().map(|text| (Str::new(name.as_str()), Str::new(text)))
+				value
+					.as_str()
+					.map(|text| (Str::new(name.as_str()), Str::new(text)))
 			})
 			.collect(),
 		_ => return Err(Str::new_static("patch body.props must be an object")),
 	};
 	Ok(ExtensionSlot::Patch {
 		extension: Str::new(extension),
-		key:       Str::new(key),
-		id:        Str::new(id),
+		key: Str::new(key),
+		id: Str::new(id),
 		text,
 		props,
 	})
@@ -730,10 +741,10 @@ mod tests {
 	fn mount(placement: SlotPlacement, key: &str, source: &str) -> ExtensionSlot {
 		ExtensionSlot::Mount {
 			extension: Str::new_static("demo"),
-			key:       Str::new(key),
+			key: Str::new(key),
 			placement,
-			source:    Str::new(source),
-			options:   SlotOptions::default(),
+			source: Str::new(source),
+			options: SlotOptions::default(),
 		}
 	}
 
@@ -741,19 +752,13 @@ mod tests {
 	fn mount_is_visible_and_remount_replaces() {
 		let mut slots = ExtensionSlots::default();
 		let ctx = UiContext::default();
-		assert!(slots.apply(
-			mount(SlotPlacement::Header, "welcome", "<text>hello</text>"),
-			&ctx,
-		));
+		assert!(slots.apply(mount(SlotPlacement::Header, "welcome", "<text>hello</text>"), &ctx,));
 		let texts = slots
 			.visible(SlotPlacement::Header, viewport())
 			.map(|view| view.text.as_str().to_owned())
 			.collect::<Vec<_>>();
 		assert_eq!(texts, ["hello"]);
-		assert!(slots.apply(
-			mount(SlotPlacement::Header, "welcome", "<text>replaced</text>"),
-			&ctx,
-		));
+		assert!(slots.apply(mount(SlotPlacement::Header, "welcome", "<text>replaced</text>"), &ctx,));
 		let texts = slots
 			.visible(SlotPlacement::Header, viewport())
 			.map(|view| view.text.as_str().to_owned())
@@ -796,10 +801,7 @@ mod tests {
 			),
 			&ctx,
 		));
-		assert!(slots.apply(
-			mount(SlotPlacement::StatusRight, "hook", "<text>ready</text>"),
-			&ctx,
-		));
+		assert!(slots.apply(mount(SlotPlacement::StatusRight, "hook", "<text>ready</text>"), &ctx,));
 		assert_eq!(
 			slots
 				.status_texts(viewport())
@@ -814,12 +816,8 @@ mod tests {
 	fn rails_reserve_columns_and_hide_under_min_width() {
 		let mut slots = ExtensionSlots::default();
 		let ctx = UiContext::default();
-		let mut options = SlotOptions {
-			width: Some(34),
-			min_width: 120,
-			min_height: 20,
-			..SlotOptions::default()
-		};
+		let mut options =
+			SlotOptions { width: Some(34), min_width: 120, min_height: 20, ..SlotOptions::default() };
 		assert!(slots.apply(
 			ExtensionSlot::Mount {
 				extension: Str::new_static("demo"),
@@ -830,10 +828,10 @@ mod tests {
 			},
 			&ctx,
 		));
-		assert_eq!(
-			slots.reserved(Size { width: 130, height: 40 }),
-			RailReservation { left: 0, right: 34 }
-		);
+		assert_eq!(slots.reserved(Size { width: 130, height: 40 }), RailReservation {
+			left:  0,
+			right: 34,
+		});
 		assert_eq!(
 			slots.reserved(Size { width: 80, height: 40 }).total(),
 			0,
@@ -843,9 +841,9 @@ mod tests {
 		slots.apply(
 			ExtensionSlot::Mount {
 				extension: Str::new_static("demo"),
-				key:       Str::new_static("rail"),
+				key: Str::new_static("rail"),
 				placement: SlotPlacement::SidebarRight,
-				source:    Str::new_static("<text>rail</text>"),
+				source: Str::new_static("<text>rail</text>"),
 				options,
 			},
 			&ctx,
@@ -878,10 +876,7 @@ mod tests {
 			},
 			&ctx,
 		));
-		assert_eq!(
-			slots.focused().map(|(e, k)| (e.as_str(), k.as_str())),
-			Some(("demo", "rail"))
-		);
+		assert_eq!(slots.focused().map(|(e, k)| (e.as_str(), k.as_str())), Some(("demo", "rail")));
 		assert!(slots.apply(ExtensionSlot::Blur, &ctx));
 		assert!(slots.focused().is_none());
 	}

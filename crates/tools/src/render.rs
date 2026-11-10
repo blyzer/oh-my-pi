@@ -6,6 +6,10 @@ use omp_tool::{
 	render::{RenderRegistry, RenderRegistryError},
 };
 
+#[cfg(feature = "cap-ci")]
+use self::misc::CiRenderer;
+#[cfg(feature = "cap-forge")]
+use self::misc::ForgeRenderer;
 use self::{
 	agentic::GoalRenderer,
 	ast::{AstEditRenderer, AstGrepRenderer},
@@ -19,10 +23,6 @@ use self::{
 	search::{GlobRenderer, GrepRenderer},
 	web::WebSearchRenderer,
 };
-#[cfg(feature = "cap-ci")]
-use self::misc::CiRenderer;
-#[cfg(feature = "cap-forge")]
-use self::misc::ForgeRenderer;
 
 /// Native goal renderer views.
 pub mod agentic;
@@ -288,33 +288,33 @@ pub(crate) mod test_support {
 	/// Full identity set covering every built-in renderer.
 	pub(crate) fn identities() -> BuiltinRendererIdentities {
 		BuiltinRendererIdentities {
-			edit:       Some(identity("edit", 41)),
-			grep:       Some(identity("grep", 42)),
+			edit: Some(identity("edit", 41)),
+			grep: Some(identity("grep", 42)),
 			web_search: Some(identity("web_search", 48)),
-			glob:       Some(identity("glob", 43)),
-			shell:      Some(identity("bash", 44)),
-			hub:        Some(identity("hub", 45)),
-			write:      Some(identity("write", 45)),
-			read:       Some(identity("read", 46)),
-			eval:       Some(identity("eval", 47)),
-			ast_grep:   Some(identity("ast_grep", 50)),
-			ast_edit:   Some(identity("ast_edit", 51)),
-			ask:        Some(identity("ask", 52)),
-			todo:       Some(identity("todo", 53)),
-			think:      Some(identity("think", 54)),
-			lsp:        Some(identity("lsp", 55)),
-			debug:      Some(identity("debug", 56)),
-			goal:       Some(identity("goal", 57)),
+			glob: Some(identity("glob", 43)),
+			shell: Some(identity("bash", 44)),
+			hub: Some(identity("hub", 45)),
+			write: Some(identity("write", 45)),
+			read: Some(identity("read", 46)),
+			eval: Some(identity("eval", 47)),
+			ast_grep: Some(identity("ast_grep", 50)),
+			ast_edit: Some(identity("ast_edit", 51)),
+			ask: Some(identity("ask", 52)),
+			todo: Some(identity("todo", 53)),
+			think: Some(identity("think", 54)),
+			lsp: Some(identity("lsp", 55)),
+			debug: Some(identity("debug", 56)),
+			goal: Some(identity("goal", 57)),
 			#[cfg(feature = "cap-forge")]
-			forge:      Some(identity("forge", 58)),
+			forge: Some(identity("forge", 58)),
 			#[cfg(not(feature = "cap-forge"))]
-			forge:      None,
+			forge: None,
 			#[cfg(feature = "cap-ci")]
-			ci:         Some(identity("ci", 61)),
+			ci: Some(identity("ci", 61)),
 			#[cfg(not(feature = "cap-ci"))]
-			ci:         None,
-			browser:    Some(identity("browser", 59)),
-			computer:   Some(identity("computer", 60)),
+			ci: None,
+			browser: Some(identity("browser", 59)),
+			computer: Some(identity("computer", 60)),
 		}
 	}
 

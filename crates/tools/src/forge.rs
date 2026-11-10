@@ -13,7 +13,7 @@ use omp_core::{Str, sf};
 use omp_forge::{
 	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest,
 	ComponentError, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue,
-	IssueDraft, PathComponent, PushReceipt, PushRequest, RepoRef, Repository, SearchKind,
+	IssueDraft, PathComponent, PathError, PushReceipt, PushRequest, RepoRef, Repository, SearchKind,
 	SearchPage, SearchQuery,
 };
 use omp_tool::{
@@ -220,10 +220,7 @@ async fn dispatch<H: ForgeHost>(
 				.map(str::trim)
 				.filter(|rev| !rev.is_empty())
 				.unwrap_or("HEAD");
-			let query = FileQuery::try_new(repo, path, rev).map_err(|error| Fault {
-				code:    sf!("invalid_path"),
-				message: Str::new(error.to_string()),
-			})?;
+			let query = FileQuery::try_new(repo, path, rev).map_err(path_fault)?;
 			let body = host.read_file(&query).await.map_err(host_fault)?;
 			let output = render_file(&body);
 			let result = serde_json::json!({
@@ -487,6 +484,11 @@ fn host_fault(error: ForgeError) -> Fault {
 		ForgeError::Component(_) => "component",
 	};
 	Fault { code: Str::new_static(code), message: Str::new(error.to_string()) }
+}
+
+/// Renders a [`PathError`] once at this model-facing fault boundary.
+fn path_fault(error: PathError) -> Fault {
+	Fault { code: sf!("invalid_path"), message: Str::new(error.to_string()) }
 }
 
 const fn static_fault(code: &'static str, message: &'static str) -> Fault {

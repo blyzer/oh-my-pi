@@ -5198,7 +5198,9 @@ impl Host {
 		let reserved = self.presenter.extension_slots.reserved(size);
 		// The editor band: the pinned error banner (when any) over the
 		// composer, retired against and anchored as one chrome block.
-		let chrome = self.presenter.chrome_frame(size.width.saturating_sub(reserved.total()));
+		let chrome = self
+			.presenter
+			.chrome_frame(size.width.saturating_sub(reserved.total()));
 		let chrome_rows = chrome.size().height;
 		let composer = &self.presenter.composer;
 		let projection = self
@@ -5206,10 +5208,8 @@ impl Host {
 			.as_mut()
 			.expect("projection initialized before presentation");
 		projection.retire_under_pressure(chrome_rows, size.height);
-		let content_size = Size {
-			width:  size.width.saturating_sub(reserved.total()),
-			height: size.height,
-		};
+		let content_size =
+			Size { width: size.width.saturating_sub(reserved.total()), height: size.height };
 		let document = projection.document(&chrome, content_size);
 		//  status row sits directly above the editor and collapses the
 		// editor top gap (`EditorTopGap`): here the retry loader / notice /
@@ -5225,10 +5225,7 @@ impl Host {
 		let document_options = OverlayOptions::default()
 			.width(Dim::Cells(content_size.width))
 			.anchor(OverlayAnchor::TopLeft)
-			.margin(omp_tui::OverlayMargin {
-				left: reserved.left,
-				..Default::default()
-			})
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
 			.non_modal()
 			.z(10);
 		let approval_options = OverlayOptions::default()
@@ -5254,19 +5251,13 @@ impl Host {
 		let header_options = OverlayOptions::default()
 			.width(Dim::Cells(content_size.width))
 			.anchor(OverlayAnchor::TopLeft)
-			.margin(omp_tui::OverlayMargin {
-				left: reserved.left,
-				..Default::default()
-			})
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
 			.non_modal()
 			.z(12);
 		let footer_options = OverlayOptions::default()
 			.width(Dim::Cells(content_size.width))
 			.anchor(OverlayAnchor::BottomLeft)
-			.margin(omp_tui::OverlayMargin {
-				left: reserved.left,
-				..Default::default()
-			})
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
 			.non_modal()
 			.z(12);
 		let left_rail_options = OverlayOptions::default()

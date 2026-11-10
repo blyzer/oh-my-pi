@@ -11,6 +11,10 @@ use omp_tool::{CallOutcome, ToolIdentity, render::RenderFold};
 use serde_json::Value;
 
 use super::{live_view, view::El};
+#[cfg(feature = "cap-ci")]
+use crate::ci::{Fault as CiFault, Payload as CiPayload, Update as CiUpdate};
+#[cfg(feature = "cap-forge")]
+use crate::forge::{Fault as ForgeFault, Payload as ForgePayload, Update as ForgeUpdate};
 use crate::{
 	browser::{
 		Action as BrowserAction, Fault as BrowserFault, Payload as BrowserPayload,
@@ -20,10 +24,6 @@ use crate::{
 	gallery::RendererGalleryFixture,
 	view,
 };
-#[cfg(feature = "cap-ci")]
-use crate::ci::{Fault as CiFault, Payload as CiPayload, Update as CiUpdate};
-#[cfg(feature = "cap-forge")]
-use crate::forge::{Fault as ForgeFault, Payload as ForgePayload, Update as ForgeUpdate};
 
 #[cfg(feature = "cap-forge")]
 #[derive(Default)]

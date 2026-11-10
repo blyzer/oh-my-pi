@@ -53,7 +53,12 @@ fn main() {
 		std::process::exit(1);
 	}
 
-	if let Some(output) = env::args_os().nth(1) {
+	// `cargo -Zscript path.rs -- out.json` leaves a literal `--` in `args`, so
+	// take the first non-separator operand as the optional output path.
+	if let Some(output) = env::args_os()
+		.skip(1)
+		.find(|arg| arg.as_os_str() != "--")
+	{
 		let output = root.join(output);
 		if let Some(parent) = output.parent() {
 			fs::create_dir_all(parent).unwrap_or_else(|error| {
@@ -162,8 +167,9 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	// malformed request gets refused Unsupported — not a gap to be filled.
 	const DISPATCH_SENTINELS: &[&str] = &["omp.env.mcp.invalid"];
 
-	let server = fs::read_to_string(root.join("crates/envd/src/server.rs"))
-		.expect("environment dispatch source is unreadable");
+	// ENVD-03 split `server.rs` into `crates/envd/src/server/`; dispatch strings
+	// live across those modules (mainly `dispatch.rs` and `forward.rs`).
+	let server = read_envd_server_sources(root);
 	let mut reported = BTreeSet::new();
 	for operation in server.split('"').filter(|token| {
 		token.starts_with("omp.env.")
@@ -404,6 +410,35 @@ fn parse_toml(path: &Path) -> TomlValue {
 	// entry point.
 	toml::from_str(&text)
 		.unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
+}
+
+/// Concatenates production sources under `crates/envd/src/server/` for the
+/// DATA-dispatch string scan. Skips the `tests/` subtree and `tests.rs`.
+fn read_envd_server_sources(root: &Path) -> String {
+	let dir = root.join("crates/envd/src/server");
+	let mut entries = fs::read_dir(&dir)
+		.unwrap_or_else(|error| panic!("environment dispatch source is unreadable: {error}"))
+		.filter_map(|entry| entry.ok())
+		.map(|entry| entry.path())
+		.filter(|path| {
+			path.extension().is_some_and(|ext| ext == "rs")
+				&& path
+					.file_name()
+					.is_some_and(|name| name != "tests.rs")
+		})
+		.collect::<Vec<_>>();
+	entries.sort();
+	let mut server = String::new();
+	for path in entries {
+		let text = fs::read_to_string(&path)
+			.unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()));
+		server.push_str(&text);
+		server.push('\n');
+	}
+	if server.is_empty() {
+		panic!("environment dispatch source is unreadable: no .rs modules under {}", dir.display());
+	}
+	server
 }
 
 fn generated_spec_json() -> String {

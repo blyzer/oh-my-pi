@@ -120,10 +120,7 @@ pub struct ForgeCache {
 
 impl ForgeCache {
 	/// Opens a cache database and creates its schema when absent.
-	pub fn open(
-		path: impl AsRef<Path>,
-		policy: ForgeCachePolicy,
-	) -> Result<Self, ForgeCacheError> {
+	pub fn open(path: impl AsRef<Path>, policy: ForgeCachePolicy) -> Result<Self, ForgeCacheError> {
 		let connection = Connection::open(path)?;
 		connection.execute_batch(
 			"PRAGMA journal_mode=WAL;
@@ -323,11 +320,7 @@ mod tests {
 	use super::*;
 
 	fn policy(enabled: bool, soft_secs: u64, hard_secs: u64) -> ForgeCachePolicy {
-		ForgeCachePolicy::new(
-			enabled,
-			Duration::from_secs(soft_secs),
-			Duration::from_secs(hard_secs),
-		)
+		ForgeCachePolicy::new(enabled, Duration::from_secs(soft_secs), Duration::from_secs(hard_secs))
 	}
 
 	#[test]
