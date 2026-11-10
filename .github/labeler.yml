@@ -71,10 +71,6 @@ area/env:
           - 'crates/ssh/**'
           - 'crates/sandbox/**'
 
-area/ci:
-  - changed-files:
-      - any-glob-to-any-file: 'crates/ci/**'
-
 area/forge:
   - changed-files:
       - any-glob-to-any-file:
@@ -133,6 +129,8 @@ area/e2e:
 area/ci:
   - changed-files:
       - any-glob-to-any-file:
+          - 'crates/ci/**'
+          - 'crates/ci-delegated/**'
           - '.github/**'
           - '.cargo/**'
           - '.config/**'
