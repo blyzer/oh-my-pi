@@ -57,13 +57,14 @@ use super::{
 	},
 	roster_host,
 };
+#[cfg(feature = "cap-browser")]
+use crate::browser_daemon::BrowserSettings;
 #[cfg(test)]
 use crate::eval::ProcessEvalExec;
 use crate::{
 	EnvdError,
 	admission::DynamicAdmission,
 	blobs::BlobHost,
-	browser_daemon::BrowserSettings,
 	devices_host::DynHost,
 	docs::DocumentHost,
 	eval::{
@@ -1237,13 +1238,14 @@ pub(super) struct EnvironmentDeclaration {
 #[cfg(test)]
 fn environment_declarations(
 	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
+	#[cfg(feature = "cap-browser")] browser_settings: &BrowserSettings,
 	inputs: &EnvironmentDeclarationInputs,
 	py_eval: bool,
 	policy: ToolsPolicy,
 ) -> Vec<EnvironmentDeclaration> {
 	declare_environment_rows(
 		tool_settings,
+		#[cfg(feature = "cap-browser")]
 		browser_settings,
 		inputs,
 		py_eval,
@@ -1254,7 +1256,7 @@ fn environment_declarations(
 
 fn declare_environment_rows(
 	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
+	#[cfg(feature = "cap-browser")] browser_settings: &BrowserSettings,
 	inputs: &EnvironmentDeclarationInputs,
 	py_eval: bool,
 	policy: ToolsPolicy,
@@ -1262,6 +1264,7 @@ fn declare_environment_rows(
 ) -> Vec<EnvironmentDeclaration> {
 	roster_host::DeclarationHost::collect(
 		tool_settings,
+		#[cfg(feature = "cap-browser")]
 		browser_settings.enabled,
 		inputs,
 		py_eval,
@@ -1277,15 +1280,21 @@ fn declare_environment_rows(
 fn declare_remote_environment(
 	registry: &mut Registry,
 	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
+	#[cfg(feature = "cap-browser")] browser_settings: &BrowserSettings,
 	inputs: &EnvironmentDeclarationInputs,
 	py_eval: bool,
 	policy: ToolsPolicy,
 	roster: &omp_tools::roster::SelectedRoster,
 ) -> Result<(), EnvdError> {
-	for declaration in
-		declare_environment_rows(tool_settings, browser_settings, inputs, py_eval, policy, roster)
-	{
+	for declaration in declare_environment_rows(
+		tool_settings,
+		#[cfg(feature = "cap-browser")]
+		browser_settings,
+		inputs,
+		py_eval,
+		policy,
+		roster,
+	) {
 		registry.declare_remote(
 			declaration.spec,
 			declaration.presentation,
@@ -1331,7 +1340,7 @@ pub(crate) fn session_registry(
 	con: &Ctx,
 	policy: ToolsPolicy,
 	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
+	#[cfg(feature = "cap-browser")] browser_settings: &BrowserSettings,
 	environment: &EnvironmentDeclarationInputs,
 	bridges: SessionRegistryBridges,
 ) -> Result<SessionRegistryOutput, EnvdError> {
@@ -1370,6 +1379,7 @@ pub(crate) fn session_registry(
 	declare_remote_environment(
 		&mut registry,
 		tool_settings,
+		#[cfg(feature = "cap-browser")]
 		browser_settings,
 		&declarations,
 		py_eval,
@@ -1450,7 +1460,7 @@ pub(crate) fn production_registry<
 	interrupt_grace: Duration,
 	py_eval: bool,
 	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
+	#[cfg(feature = "cap-browser")] browser_settings: &BrowserSettings,
 	shell_settings: &ShellSettings,
 	sandbox_settings: &SandboxSettings,
 	autolearn_settings: &omp_memory::config::AutolearnSettings,
@@ -1526,6 +1536,7 @@ pub(crate) fn production_registry<
 		&mut registry,
 		policy,
 		tool_settings,
+		#[cfg(feature = "cap-browser")]
 		browser_settings,
 		shell_settings,
 		sandbox_settings,
@@ -2973,9 +2984,11 @@ mod tests {
 		tool_settings
 			.enabled
 			.insert(Str::new_static("ast_grep"), true);
+		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings::default();
 		let py_eval_declaration = environment_declarations(
 			&tool_settings,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&inputs,
 			true,
@@ -2988,6 +3001,7 @@ mod tests {
 
 		let declarations = environment_declarations(
 			&tool_settings,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&inputs,
 			false,
@@ -3075,6 +3089,9 @@ mod tests {
 		] {
 			tool_settings.enabled.insert(Str::new_static(name), true);
 		}
+		// Enabled in settings on purpose. With `cap-browser` off the row is
+		// absent, so this map cannot reinstall it.
+		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings { enabled: true, ..BrowserSettings::default() };
 		let inputs = EnvironmentDeclarationInputs {
 			read_policy:      omp_tools::read::ReadPolicy::default(),
@@ -3100,6 +3117,7 @@ mod tests {
 		};
 		let mut specs = environment_declarations(
 			&tool_settings,
+			#[cfg(feature = "cap-browser")]
 			&browser_settings,
 			&inputs,
 			true,
@@ -3161,6 +3179,7 @@ mod tests {
 			.collect::<BTreeSet<_>>();
 		for expected in [
 			"bash",
+			#[cfg(feature = "cap-browser")]
 			"browser",
 			#[cfg(feature = "cap-computer")]
 			"computer",
@@ -3176,6 +3195,11 @@ mod tests {
 		] {
 			assert!(names.contains(expected), "{expected} must be covered");
 		}
+		#[cfg(not(feature = "cap-browser"))]
+		assert!(
+			!names.contains("browser"),
+			"browser is absent from the construction table when cap-browser is off"
+		);
 		#[cfg(not(feature = "cap-computer"))]
 		assert!(
 			!names.contains("computer"),

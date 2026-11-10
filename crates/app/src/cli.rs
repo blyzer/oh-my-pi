@@ -3208,7 +3208,17 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		return Err(miette!("--gui is only supported by interactive chat"));
 	}
 	match command {
-		Command::BrowserRelay(args) => crate::browser_relay_cmd::run(args).await,
+		Command::BrowserRelay(args) => {
+			#[cfg(feature = "cap-browser")]
+			{
+				crate::browser_relay_cmd::run(args).await
+			}
+			#[cfg(not(feature = "cap-browser"))]
+			{
+				let _ = args;
+				Err(miette!("the browser relay is not compiled into this build"))
+			}
+		},
 		Command::Commit(args) => crate::commit_cmd::run(args).await,
 		Command::Serve(args) => serve(args).await,
 		Command::Envd(args) => {

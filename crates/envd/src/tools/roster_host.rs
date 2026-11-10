@@ -37,12 +37,13 @@ use super::{
 		production_search_policy, shell_timeout_bounds, state_error,
 	},
 };
+#[cfg(feature = "cap-browser")]
+use crate::browser_daemon::{BrowserDaemon, BrowserSettings};
 #[cfg(feature = "cap-computer")]
 use crate::computer::ComputerSessionHost;
 use crate::{
 	EnvdError,
 	blobs::BlobHost,
-	browser_daemon::{BrowserDaemon, BrowserSettings},
 	docs::{DocumentHost, ResourceMutationServices},
 	document_cache,
 	eval::{PreludeTable, ProcessEvalExec, SessionBridgeHost},
@@ -253,6 +254,7 @@ impl SessionInstall for SessionHost<'_> {
 
 pub(super) struct DeclarationHost<'a> {
 	tool_settings:   &'a ToolSettings,
+	#[cfg(feature = "cap-browser")]
 	browser_enabled: bool,
 	inputs:          &'a EnvironmentDeclarationInputs,
 	py_eval:         bool,
@@ -263,14 +265,21 @@ pub(super) struct DeclarationHost<'a> {
 impl<'a> DeclarationHost<'a> {
 	pub(super) fn collect(
 		tool_settings: &'a ToolSettings,
-		browser_enabled: bool,
+		#[cfg(feature = "cap-browser")] browser_enabled: bool,
 		inputs: &'a EnvironmentDeclarationInputs,
 		py_eval: bool,
 		policy: ToolsPolicy,
 		roster: &omp_tools::roster::SelectedRoster,
 	) -> Vec<EnvironmentDeclaration> {
-		let mut host =
-			Self { tool_settings, browser_enabled, inputs, py_eval, policy, out: Vec::new() };
+		let mut host = Self {
+			tool_settings,
+			#[cfg(feature = "cap-browser")]
+			browser_enabled,
+			inputs,
+			py_eval,
+			policy,
+			out: Vec::new(),
+		};
 		omp_tools::roster::declare_environment(&mut host, roster);
 		host.out
 	}
@@ -294,6 +303,7 @@ impl EnvironmentDeclare for DeclarationHost<'_> {
 			.push(EnvironmentDeclaration { spec, presentation, claims });
 	}
 
+	#[cfg(feature = "cap-browser")]
 	fn browser_enabled(&self) -> bool {
 		self.browser_enabled
 	}
@@ -344,6 +354,7 @@ pub(super) struct EnvironmentHost<'a> {
 	registry:            &'a mut Registry,
 	policy:              ToolsPolicy,
 	tool_settings:       &'a ToolSettings,
+	#[cfg(feature = "cap-browser")]
 	browser_settings:    &'a BrowserSettings,
 	shell_settings:      &'a ShellSettings,
 	sandbox_settings:    &'a SandboxSettings,
@@ -399,7 +410,7 @@ impl<'a> EnvironmentHost<'a> {
 		registry: &'a mut Registry,
 		policy: ToolsPolicy,
 		tool_settings: &'a ToolSettings,
-		browser_settings: &'a BrowserSettings,
+		#[cfg(feature = "cap-browser")] browser_settings: &'a BrowserSettings,
 		shell_settings: &'a ShellSettings,
 		sandbox_settings: &'a SandboxSettings,
 		con: &'a Ctx,
@@ -430,6 +441,7 @@ impl<'a> EnvironmentHost<'a> {
 			registry,
 			policy,
 			tool_settings,
+			#[cfg(feature = "cap-browser")]
 			browser_settings,
 			shell_settings,
 			sandbox_settings,
@@ -665,6 +677,7 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 		}
 	}
 
+	#[cfg(feature = "cap-browser")]
 	fn browser_enabled(&self) -> bool {
 		self.browser_settings.enabled
 	}
@@ -685,6 +698,7 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 		self.shell_settings.enabled
 	}
 
+	#[cfg(feature = "cap-browser")]
 	fn install_browser(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error> {
 		let daemon = BrowserDaemon::start(self.blobs.clone(), self.browser_settings.clone());
 		self.register(omp_tools::browser::tool(daemon), row)

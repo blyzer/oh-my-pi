@@ -1,5 +1,8 @@
 //! Native Chrome-extension browser relay and CDP façade.
 //!
+//! Compiled only with `omp-envd`'s `cap-browser` feature. That feature also
+//! links `tokio-tungstenite`, which this relay is the only envd user of.
+//!
 //! The relay binds loopback, exposes Chrome-compatible discovery endpoints,
 //! and multiplexes downstream CDP clients over one `chrome.debugger`
 //! attachment per tab owned by the companion extension.

@@ -3,8 +3,9 @@
 //! Driver selects a [`SelectedRoster`] in `compose_kernel`. The environment
 //! host iterates that selection and fills the host traits below. This module
 //! enumerates every built-in family; the host enumerates none. Capability
-//! rows such as `computer` are rows of this table only while their `cap-*`
-//! feature is on. The `Family` variant and the contract module stay either way.
+//! rows such as `browser` and `computer` are rows of this table only while
+//! their `cap-*` feature is on. The `Family` variant and the contract module
+//! stay either way.
 //!
 //! Constructors are the exhaustive `Family` matches in this file, not function
 //! pointers on the row. Several host traits return `impl Future` and are not
@@ -519,6 +520,7 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		false,
 		BridgeNeeds::SUBAGENT,
 	),
+	#[cfg(feature = "cap-browser")]
 	same(
 		Family::Browser,
 		false,
@@ -795,7 +797,7 @@ const IDENTITIES: [BuiltinToolIdentity; IDENTITY_COUNT] = {
 /// Returns the stable native builtin and hidden identity set.
 ///
 /// Derived from [`ROSTER`]. `py_eval` is constructed with `eval` and is not
-/// listed. `browser` and `lsp` are listed.
+/// listed. `lsp` is listed. `browser` is listed while `cap-browser` is on.
 pub const fn builtin_tool_identities() -> &'static [BuiltinToolIdentity] {
 	&IDENTITIES
 }
@@ -1059,6 +1061,10 @@ pub trait EnvironmentDeclare: ToolGate {
 	/// Records one remote declaration using the row's declaration class.
 	fn declare(&mut self, spec: ToolSpec, row: &BuiltinRosterEntry);
 	/// Browser settings enabled the daemon.
+	///
+	/// Absent when `cap-browser` is off. `SV_BROWSER_ENABLED` is not compiled
+	/// in that build, and a setting cannot reinstall a row the table omitted.
+	#[cfg(feature = "cap-browser")]
 	fn browser_enabled(&self) -> bool;
 	/// Memory capability advertisement.
 	fn memory_capabilities(&self) -> Capabilities;
@@ -1094,8 +1100,6 @@ pub trait EnvironmentInstall: ToolGate {
 	///
 	/// Resolvers read the same service the tool uses.
 	fn ensure_security_service(&mut self);
-	/// Browser settings enabled the daemon.
-	fn browser_enabled(&self) -> bool;
 	/// Memory capability advertisement.
 	fn memory_capabilities(&self) -> Capabilities;
 	/// Managed skills may be constructed. Stricter than the declaration
@@ -1106,7 +1110,17 @@ pub trait EnvironmentInstall: ToolGate {
 	/// Shell execution is enabled in addition to the `bash` tool setting.
 	fn shell_enabled(&self) -> bool;
 
+	/// Browser settings enabled the daemon.
+	///
+	/// Absent when `cap-browser` is off. The host does not compile the browser
+	/// daemon in that build.
+	#[cfg(feature = "cap-browser")]
+	fn browser_enabled(&self) -> bool;
+
 	/// Registers `browser` when the daemon is enabled.
+	///
+	/// Absent when `cap-browser` is off.
+	#[cfg(feature = "cap-browser")]
 	fn install_browser(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error>;
 	/// Registers `computer`.
 	///
@@ -1318,12 +1332,17 @@ pub fn declare_environment<H: EnvironmentDeclare>(host: &mut H, roster: &Selecte
 
 fn declare_row<H: EnvironmentDeclare>(host: &mut H, row: &BuiltinRosterEntry) {
 	match row.family {
+		#[cfg(feature = "cap-browser")]
 		Family::Browser => {
 			if host.browser_enabled() {
 				let spec = crate::browser::spec();
 				host.declare(spec, row);
 			}
 		},
+		// The variant stays so chat cards keep a stable `Family`. The row is
+		// not in `ROSTER` in this build, so declaration never reaches here.
+		#[cfg(not(feature = "cap-browser"))]
+		Family::Browser => {},
 		#[cfg(feature = "cap-computer")]
 		Family::Computer => {
 			let spec = crate::computer::spec();
@@ -1486,12 +1505,15 @@ fn construct_row<H: EnvironmentInstall>(
 		return Ok(());
 	}
 	match row.family {
+		#[cfg(feature = "cap-browser")]
 		Family::Browser => {
 			if host.browser_enabled() {
 				host.install_browser(row)?;
 			}
 			Ok(())
 		},
+		#[cfg(not(feature = "cap-browser"))]
+		Family::Browser => Ok(()),
 		#[cfg(feature = "cap-computer")]
 		Family::Computer => host.install_computer(row),
 		#[cfg(not(feature = "cap-computer"))]
@@ -1582,6 +1604,8 @@ mod tests {
 
 	fn family_in_construction_table(family: Family) -> bool {
 		match family {
+			#[cfg(not(feature = "cap-browser"))]
+			Family::Browser => false,
 			#[cfg(not(feature = "cap-computer"))]
 			Family::Computer => false,
 			_ => true,
@@ -1607,6 +1631,10 @@ mod tests {
 				assert_eq!(key, row.name);
 			}
 		}
+		#[cfg(feature = "cap-browser")]
+		assert!(entry(Family::Browser).is_some(), "browser row is in the construction table");
+		#[cfg(not(feature = "cap-browser"))]
+		assert!(entry(Family::Browser).is_none(), "browser row is compiled out");
 		#[cfg(feature = "cap-computer")]
 		assert!(entry(Family::Computer).is_some(), "computer row is in the construction table");
 		#[cfg(not(feature = "cap-computer"))]
@@ -1621,10 +1649,18 @@ mod tests {
 			.map(|row| BuiltinToolIdentity { name: row.name, hidden: row.hidden })
 			.collect::<Vec<_>>();
 		assert_eq!(builtin_tool_identities(), listed.as_slice());
+		#[cfg(feature = "cap-browser")]
 		assert!(
 			builtin_tool_identities()
 				.iter()
 				.any(|identity| identity.name == "browser")
+		);
+		#[cfg(not(feature = "cap-browser"))]
+		assert!(
+			builtin_tool_identities()
+				.iter()
+				.all(|identity| identity.name != "browser"),
+			"browser is compiled out of the construction table"
 		);
 		assert!(
 			builtin_tool_identities()
@@ -1662,6 +1698,7 @@ mod tests {
 			"eval",
 			"task",
 			"hub",
+			#[cfg(feature = "cap-browser")]
 			"browser",
 			"learn",
 			"manage_skill",
@@ -1679,6 +1716,8 @@ mod tests {
 		for name in ["think", "goal", "yield", "py_eval"] {
 			assert!(!protect.contains(name), "{name} stays unprotected");
 		}
+		#[cfg(not(feature = "cap-browser"))]
+		assert!(!protect.contains("browser"), "browser is compiled out of the construction table");
 		#[cfg(not(feature = "cap-computer"))]
 		assert!(!protect.contains("computer"), "computer is compiled out of the construction table");
 		let phases = ROSTER.iter().map(|row| row.phase).collect::<BTreeSet<_>>();
