@@ -64,7 +64,14 @@ pub mod lsp_settings;
 mod managed_skills;
 pub mod managed_skills_domain;
 pub mod mcp;
+/// Image generation, speech synthesis, and ask playback. Compiled only with
+/// `cap-media`, which links `omp-audio`.
+#[cfg(feature = "cap-media")]
 mod media_devices;
+/// Text-to-speech producer for the `tts` device. Compiled only with
+/// `cap-media`. `local-tts` selects Kokoro inside this module and does not
+/// compile it on its own.
+#[cfg(feature = "cap-media")]
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;

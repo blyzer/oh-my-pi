@@ -3,9 +3,9 @@
 //! Driver selects a [`SelectedRoster`] in `compose_kernel`. The environment
 //! host iterates that selection and fills the host traits below. This module
 //! enumerates every built-in family; the host enumerates none. Capability
-//! rows such as `browser` and `computer` are rows of this table only while
-//! their `cap-*` feature is on. The `Family` variant and the contract module
-//! stay either way.
+//! rows such as `browser`, `computer`, `image_gen`, and `tts` are rows of
+//! this table only while their `cap-*` feature is on. The `Family` variant
+//! and the contract module stay either way.
 //!
 //! Constructors are the exhaustive `Family` matches in this file, not function
 //! pointers on the row. Several host traits return `impl Future` and are not
@@ -28,15 +28,11 @@ use omp_tool::{
 };
 use strum::{EnumIter, IntoStaticStr};
 
+#[cfg(feature = "cap-media")]
+use crate::ask::AskVocalizer;
 use crate::{
-	ask::{AskPresenter, AskVocalizer},
-	checkpoint::CheckpointControl,
-	github::GithubHost,
-	goal::GoalControl,
-	grep::SearchPolicy,
-	read::ReadPolicy,
-	shell::ShellPromptSnapshot,
-	web_search::SearchBackend,
+	ask::AskPresenter, checkpoint::CheckpointControl, github::GithubHost, goal::GoalControl,
+	grep::SearchPolicy, read::ReadPolicy, shell::ShellPromptSnapshot, web_search::SearchBackend,
 };
 
 /// Stable identity of one production native tool family.
@@ -364,6 +360,7 @@ use PresentationClass as Present;
 /// and [`InstallPhase::Environment`], and `bash` is last so its sibling list
 /// sees the slots registered before it.
 pub static ROSTER: &[BuiltinRosterEntry] = &[
+	#[cfg(feature = "cap-media")]
 	same(
 		Family::ImageGen,
 		false,
@@ -375,6 +372,7 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		false,
 		BridgeNeeds::SEARCH.or(BridgeNeeds::BLOBS),
 	),
+	#[cfg(feature = "cap-media")]
 	same(
 		Family::Tts,
 		false,
@@ -798,6 +796,7 @@ const IDENTITIES: [BuiltinToolIdentity; IDENTITY_COUNT] = {
 ///
 /// Derived from [`ROSTER`]. `py_eval` is constructed with `eval` and is not
 /// listed. `lsp` is listed. `browser` is listed while `cap-browser` is on.
+/// `image_gen` and `tts` are listed while `cap-media` is on.
 pub const fn builtin_tool_identities() -> &'static [BuiltinToolIdentity] {
 	&IDENTITIES
 }
@@ -997,8 +996,16 @@ pub trait SessionInstall: ToolGate {
 	/// Error returned by registration. Registry failures convert into it.
 	type Error: From<RegistryError>;
 	/// Image device. The host owns the concrete tool type.
+	///
+	/// Absent when `cap-media` is off. The host does not compile `image_gen`
+	/// in that build.
+	#[cfg(feature = "cap-media")]
 	type Image: Tool;
 	/// Speech device. The host owns the concrete tool type.
+	///
+	/// Absent when `cap-media` is off. The host does not compile `tts` in
+	/// that build.
+	#[cfg(feature = "cap-media")]
 	type Speech: Tool;
 	/// Issue recorder. The host owns the concrete tool type.
 	type Report: Tool;
@@ -1020,8 +1027,14 @@ pub trait SessionInstall: ToolGate {
 	fn register_extension(&mut self, extension: RosterExtension) -> Result<(), Self::Error>;
 
 	/// Builds the image device, consuming the session image configuration.
+	///
+	/// Absent when `cap-media` is off.
+	#[cfg(feature = "cap-media")]
 	fn image_tool(&mut self) -> Self::Image;
 	/// Builds the speech device, consuming the session speech configuration.
+	///
+	/// Absent when `cap-media` is off.
+	#[cfg(feature = "cap-media")]
 	fn speech_tool(&mut self) -> Self::Speech;
 	/// Builds the issue recorder.
 	fn report_tool(&mut self) -> Self::Report;
@@ -1032,6 +1045,10 @@ pub trait SessionInstall: ToolGate {
 	/// Ask presenter.
 	fn ask_presenter(&self) -> Arc<dyn AskPresenter>;
 	/// Ask speech vocalizer.
+	///
+	/// Absent when `cap-media` is off. Ask still registers and does not play
+	/// audio, so the host does not link `omp-audio` for this path.
+	#[cfg(feature = "cap-media")]
 	fn ask_vocalizer(&self) -> Arc<dyn AskVocalizer>;
 	/// Goal control, when the composition supplied one.
 	fn goal_control(&self) -> Option<Self::Goal>;
@@ -1193,14 +1210,22 @@ fn install_session_row<H: SessionInstall>(
 	row: &BuiltinRosterEntry,
 ) -> Result<(), H::Error> {
 	match row.family {
+		#[cfg(feature = "cap-media")]
 		Family::ImageGen => {
 			let tool = host.image_tool();
 			host.register_session(tool, row)
 		},
+		// The variant stays so chat cards keep a stable `Family`. The row is
+		// not in `ROSTER` in this build, so installation never reaches here.
+		#[cfg(not(feature = "cap-media"))]
+		Family::ImageGen => Ok(()),
+		#[cfg(feature = "cap-media")]
 		Family::Tts => {
 			let tool = host.speech_tool();
 			host.register_session(tool, row)
 		},
+		#[cfg(not(feature = "cap-media"))]
+		Family::Tts => Ok(()),
 		Family::ReportIssue => {
 			let tool = host.report_tool();
 			host.register_session(tool, row)
@@ -1216,8 +1241,15 @@ fn install_session_row<H: SessionInstall>(
 		Family::Todo => host.register_session(crate::todo::tool(), row),
 		Family::Ask => {
 			let presenter = host.ask_presenter();
-			let vocalizer = host.ask_vocalizer();
-			host.register_session(crate::ask::tool_with_vocalizer(presenter, vocalizer), row)
+			#[cfg(feature = "cap-media")]
+			{
+				let vocalizer = host.ask_vocalizer();
+				host.register_session(crate::ask::tool_with_vocalizer(presenter, vocalizer), row)
+			}
+			#[cfg(not(feature = "cap-media"))]
+			{
+				host.register_session(crate::ask::tool(presenter), row)
+			}
 		},
 		Family::Think => host.register_session(crate::think::tool(), row),
 		Family::Goal => {
@@ -1608,6 +1640,8 @@ mod tests {
 			Family::Browser => false,
 			#[cfg(not(feature = "cap-computer"))]
 			Family::Computer => false,
+			#[cfg(not(feature = "cap-media"))]
+			Family::ImageGen | Family::Tts => false,
 			_ => true,
 		}
 	}
@@ -1639,6 +1673,14 @@ mod tests {
 		assert!(entry(Family::Computer).is_some(), "computer row is in the construction table");
 		#[cfg(not(feature = "cap-computer"))]
 		assert!(entry(Family::Computer).is_none(), "computer row is compiled out");
+		#[cfg(feature = "cap-media")]
+		assert!(entry(Family::ImageGen).is_some(), "image_gen row is in the construction table");
+		#[cfg(feature = "cap-media")]
+		assert!(entry(Family::Tts).is_some(), "tts row is in the construction table");
+		#[cfg(not(feature = "cap-media"))]
+		assert!(entry(Family::ImageGen).is_none(), "image_gen row is compiled out");
+		#[cfg(not(feature = "cap-media"))]
+		assert!(entry(Family::Tts).is_none(), "tts row is compiled out");
 	}
 
 	#[test]
@@ -1661,6 +1703,25 @@ mod tests {
 				.iter()
 				.all(|identity| identity.name != "browser"),
 			"browser is compiled out of the construction table"
+		);
+		#[cfg(feature = "cap-media")]
+		assert!(
+			builtin_tool_identities()
+				.iter()
+				.any(|identity| identity.name == "image_gen")
+		);
+		#[cfg(feature = "cap-media")]
+		assert!(
+			builtin_tool_identities()
+				.iter()
+				.any(|identity| identity.name == "tts")
+		);
+		#[cfg(not(feature = "cap-media"))]
+		assert!(
+			builtin_tool_identities()
+				.iter()
+				.all(|identity| identity.name != "image_gen" && identity.name != "tts"),
+			"image_gen and tts are compiled out of the construction table"
 		);
 		assert!(
 			builtin_tool_identities()
