@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use omp_cache::github_cache::GithubCachePolicy;
+use omp_cache::forge_cache::ForgeCachePolicy;
 use omp_con::{Ctx, Kv, Span, Value};
 use omp_core::{Duration, Str};
 use omp_tool::{Confinement, Effects};
@@ -306,48 +306,48 @@ omp_con::var! {
 		min: 1,
 		flags: archive,
 	};
-	/// Cache rendered issue and pull-request views so repeated reads are free.
-	pub static SV_GITHUB_CACHE_ENABLED = sv_github_cache_enabled: bool {
+	/// Cache rendered issue and change-request views so repeated reads are free.
+	pub static SV_FORGE_CACHE_ENABLED = sv_forge_cache_enabled: bool {
 		default: true,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub View Cache",
-			"legacy.path": "github.cache.enabled",
+			"ui.group": "Forge",
+			"ui.label": "Forge View Cache",
+			"legacy.path": "forge.cache.enabled",
 		},
 	};
-	/// Within this window, cached issue and pull-request views are returned without a network refresh.
-	pub static SV_GITHUB_CACHE_SOFT_TTL_SEC = sv_github_cache_soft_ttl_sec: i64 {
+	/// Within this window, cached issue and change-request views are returned without a network refresh.
+	pub static SV_FORGE_CACHE_SOFT_TTL_SEC = sv_forge_cache_soft_ttl_sec: i64 {
 		default: 300,
 		min: 0,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub Cache Soft TTL",
+			"ui.group": "Forge",
+			"ui.label": "Forge Cache Soft TTL",
 			"ui.unit": "s",
-			"legacy.path": "github.cache.softTtlSec",
+			"legacy.path": "forge.cache.softTtlSec",
 		},
 	};
-	/// Past this window, a cached issue or pull-request view is discarded instead of used as stale fallback.
-	pub static SV_GITHUB_CACHE_HARD_TTL_SEC = sv_github_cache_hard_ttl_sec: i64 {
+	/// Past this window, a cached issue or change-request view is discarded instead of used as stale fallback.
+	pub static SV_FORGE_CACHE_HARD_TTL_SEC = sv_forge_cache_hard_ttl_sec: i64 {
 		default: 604800,
 		min: 0,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub Cache Hard TTL",
+			"ui.group": "Forge",
+			"ui.label": "Forge Cache Hard TTL",
 			"ui.unit": "s",
-			"legacy.path": "github.cache.hardTtlSec",
+			"legacy.path": "forge.cache.hardTtlSec",
 		},
 	};
 }
 
-/// Typed GitHub cache policy resolved from the control context.
+/// Typed forge cache policy resolved from the control context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GithubCacheSettings {
+pub struct ForgeCacheSettings {
 	/// Whether reads and writes may use the persistent cache.
 	pub enabled:      bool,
 	/// Fresh-hit window in seconds.
@@ -356,21 +356,21 @@ pub struct GithubCacheSettings {
 	pub hard_ttl_sec: u64,
 }
 
-impl GithubCacheSettings {
-	/// Resolves the GitHub cache policy from archived convars.
+impl ForgeCacheSettings {
+	/// Resolves the forge cache policy from archived convars.
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self {
-			enabled:      SV_GITHUB_CACHE_ENABLED.get(ctx),
-			soft_ttl_sec: SV_GITHUB_CACHE_SOFT_TTL_SEC.get(ctx) as u64,
-			hard_ttl_sec: SV_GITHUB_CACHE_HARD_TTL_SEC.get(ctx) as u64,
+			enabled:      SV_FORGE_CACHE_ENABLED.get(ctx),
+			soft_ttl_sec: SV_FORGE_CACHE_SOFT_TTL_SEC.get(ctx) as u64,
+			hard_ttl_sec: SV_FORGE_CACHE_HARD_TTL_SEC.get(ctx) as u64,
 		}
 	}
 
 	/// Converts the resolved settings into the cache engine's typed policy.
 	#[must_use]
-	pub fn policy(self) -> GithubCachePolicy {
-		GithubCachePolicy::new(
+	pub fn policy(self) -> ForgeCachePolicy {
+		ForgeCachePolicy::new(
 			self.enabled,
 			std::time::Duration::from_secs(self.soft_ttl_sec),
 			std::time::Duration::from_secs(self.hard_ttl_sec),
@@ -961,20 +961,20 @@ mod tests {
 	}
 
 	#[test]
-	fn github_cache_group_convars_reach_the_runtime_projection() {
+	fn forge_cache_group_convars_reach_the_runtime_projection() {
 		let ctx = Ctx::new();
-		assert_eq!(GithubCacheSettings::from_con(&ctx), GithubCacheSettings {
+		assert_eq!(ForgeCacheSettings::from_con(&ctx), ForgeCacheSettings {
 			enabled:      true,
 			soft_ttl_sec: 300,
 			hard_ttl_sec: 604_800,
 		});
-		ctx.run("sv_github_cache_enabled false")
+		ctx.run("sv_forge_cache_enabled false")
 			.expect("cache enablement");
-		ctx.run("sv_github_cache_soft_ttl_sec 15")
+		ctx.run("sv_forge_cache_soft_ttl_sec 15")
 			.expect("soft TTL");
-		ctx.run("sv_github_cache_hard_ttl_sec 90")
+		ctx.run("sv_forge_cache_hard_ttl_sec 90")
 			.expect("hard TTL");
-		assert_eq!(GithubCacheSettings::from_con(&ctx), GithubCacheSettings {
+		assert_eq!(ForgeCacheSettings::from_con(&ctx), ForgeCacheSettings {
 			enabled:      false,
 			soft_ttl_sec: 15,
 			hard_ttl_sec: 90,

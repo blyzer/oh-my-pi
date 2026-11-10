@@ -22,7 +22,7 @@ use bytes::{Buf as _, Bytes, BytesMut};
 use flume::Receiver;
 use futures::future::try_join_all;
 use nix::errno::Errno;
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
 use omp_contract::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
 use omp_core::{Hash32, Str, sf};
 use omp_exec::{ExecError, ExecEvent, IdentityError, LeaseError};
@@ -228,7 +228,7 @@ struct HostInner {
 	processes:              Mutex<HashMap<Str, Arc<NamedProcess>>>,
 	starting:               Mutex<HashSet<Str>>,
 	environment:            Mutex<WorkspaceEnvironment>,
-	github_cache:           Mutex<Option<Arc<GithubCache>>>,
+	forge_cache:            Mutex<Option<Arc<ForgeCache>>>,
 	devices:                Mutex<Option<Arc<crate::devices_host::DynHost>>>,
 	output_store:           Mutex<Option<BlobStore>>,
 	persistence:            Mutex<Option<ProcessPersistence>>,
@@ -463,7 +463,7 @@ impl ExecHost {
 				processes:              Mutex::new(HashMap::new()),
 				starting:               Mutex::new(HashSet::new()),
 				environment:            Mutex::new(read_workspace_environment()),
-				github_cache:           Mutex::new(None),
+				forge_cache:            Mutex::new(None),
 				devices:                Mutex::new(None),
 				output_store:           Mutex::new(None),
 				persistence:            Mutex::new(None),
@@ -769,8 +769,8 @@ impl ExecHost {
 	}
 
 	/// Injects the production GitHub resource cache owned by the Environment.
-	pub fn with_github_cache(self, cache: Arc<GithubCache>) -> Self {
-		*self.inner.github_cache.lock() = Some(cache);
+	pub fn with_forge_cache(self, cache: Arc<ForgeCache>) -> Self {
+		*self.inner.forge_cache.lock() = Some(cache);
 		self
 	}
 
@@ -2841,7 +2841,7 @@ async fn finish_session_command(
 	if result == RunTerminal::Exited(0)
 		&& !command.github_targets.is_empty()
 		&& let Some(host) = command.host.upgrade()
-		&& let Some(cache) = host.github_cache.lock().clone()
+		&& let Some(cache) = host.forge_cache.lock().clone()
 	{
 		let active_repo = github_repository(working_dir);
 		let repos = command

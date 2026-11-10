@@ -29,7 +29,7 @@ mod prelude {
 	pub(in crate::server) use flume::Receiver;
 	pub(in crate::server) use futures::StreamExt as _;
 	pub(in crate::server) use omp_cache::{
-		github_cache::GithubCache, telemetry_cache::TelemetryIndex,
+		forge_cache::ForgeCache, telemetry_cache::TelemetryIndex,
 	};
 	pub(in crate::server) use omp_con::Ctx;
 	pub(in crate::server) use omp_contract::{
@@ -167,7 +167,7 @@ mod prelude {
 		search_backend::SearchBridgeHost,
 		site::{SiteError, SiteMaterializer, record_modules},
 		tool_document::{PrivilegedMutationFault, privileged_unlink, privileged_write},
-		tool_settings::{ApprovalMode, GithubCacheSettings, ToolSettings},
+		tool_settings::{ApprovalMode, ForgeCacheSettings, ToolSettings},
 		tool_url::UrlResolver,
 		tools::{
 			AgentCheckpointControl, DeviceCatalogObserver, DeviceControlFactory,

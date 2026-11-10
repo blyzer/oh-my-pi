@@ -1389,7 +1389,7 @@ impl ProjectEnvironment {
 			self.lifecycle.server.state_dir().to_path_buf(),
 			Arc::clone(&self.github_credentials),
 			self.lifecycle.server.blob_host(),
-			tool_settings::GithubCacheSettings::from_con(con).policy(),
+			tool_settings::ForgeCacheSettings::from_con(con).policy(),
 		)
 	}
 

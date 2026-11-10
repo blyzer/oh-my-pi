@@ -12,7 +12,7 @@ use std::{
 #[cfg(test)]
 use std::{path::PathBuf, sync::LazyLock};
 
-use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
+use omp_cache::{forge_cache::ForgeCache, telemetry_cache::TelemetryIndex};
 use omp_catalog::{ModelKey, snapshot::Catalog};
 use omp_con::Ctx;
 use omp_contract::{HookGate, KernelSender};
@@ -986,7 +986,7 @@ fn register_session_base(
 	project_root: &Path,
 	state_dir: &Path,
 	telemetry: &Arc<TelemetryIndex>,
-	github_cache: Arc<GithubCache>,
+	forge_cache: Arc<ForgeCache>,
 	tool_settings: &ToolSettings,
 	#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
@@ -1011,7 +1011,7 @@ fn register_session_base(
 		project_root,
 		state_dir,
 		telemetry,
-		github_cache,
+		forge_cache,
 		#[cfg(feature = "cap-media")]
 		image_config,
 		#[cfg(feature = "cap-media")]
@@ -1340,7 +1340,7 @@ pub(crate) fn session_registry(
 	project_root: &Path,
 	state_dir: &Path,
 	telemetry: &Arc<TelemetryIndex>,
-	github_cache: Arc<GithubCache>,
+	forge_cache: Arc<ForgeCache>,
 	workers: &ExtHostSupervisor,
 	py_eval: bool,
 	con: &Ctx,
@@ -1373,7 +1373,7 @@ pub(crate) fn session_registry(
 		project_root,
 		state_dir,
 		telemetry,
-		github_cache,
+		forge_cache,
 		tool_settings,
 		#[cfg(feature = "cap-media")]
 		image_config(con),
@@ -1457,7 +1457,7 @@ pub(crate) fn production_registry<
 	state_dir: &Path,
 	con: &Ctx,
 	session_id: &str,
-	github_cache: Arc<GithubCache>,
+	forge_cache: Arc<ForgeCache>,
 	mcp: &Arc<McpService>,
 	mcp_manager: Arc<McpManager>,
 	workspace: &WorkspaceHost,
@@ -1526,7 +1526,7 @@ pub(crate) fn production_registry<
 			workspace.root(),
 			state_dir,
 			telemetry,
-			Arc::clone(&github_cache),
+			Arc::clone(&forge_cache),
 			tool_settings,
 			#[cfg(feature = "cap-media")]
 			image_config(con),
@@ -1564,7 +1564,7 @@ pub(crate) fn production_registry<
 		py_eval,
 		skills,
 		Arc::clone(&github_credentials),
-		github_cache,
+		forge_cache,
 		url_resolvers,
 		host_resources,
 		session_authority,
@@ -3158,11 +3158,11 @@ mod tests {
 				.expect("telemetry index"),
 			),
 			Arc::new(
-				GithubCache::open(
-					scratch.path().join("github-cache.sqlite3"),
-					crate::tool_settings::GithubCacheSettings::from_con(&con).policy(),
+				ForgeCache::open(
+					scratch.path().join("forge-cache.sqlite3"),
+					crate::tool_settings::ForgeCacheSettings::from_con(&con).policy(),
 				)
-				.expect("GitHub cache"),
+				.expect("forge cache"),
 			),
 			&tool_settings,
 			#[cfg(feature = "cap-media")]

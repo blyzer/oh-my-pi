@@ -15,7 +15,7 @@ use http::{
 	header::{ACCEPT, LOCATION, RETRY_AFTER, USER_AGENT},
 };
 use omp_ai::auth::HeaderPlacement;
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
 use omp_core::{Str, sf};
 use omp_journal::blob::BlobRef;
 use omp_vcs::{PushOptions, git::GitRepo};
@@ -48,7 +48,7 @@ pub(crate) struct GithubService {
 	root:        PathBuf,
 	worktrees:   PathBuf,
 	credentials: Arc<GithubCredentialBridge>,
-	cache:       Arc<GithubCache>,
+	cache:       Arc<ForgeCache>,
 	blobs:       BlobHost,
 	client:      omp_http::Client,
 }
@@ -58,7 +58,7 @@ impl GithubService {
 		root: PathBuf,
 		state_dir: &Path,
 		credentials: Arc<GithubCredentialBridge>,
-		cache: Arc<GithubCache>,
+		cache: Arc<ForgeCache>,
 		blobs: BlobHost,
 	) -> Arc<Self> {
 		Arc::new(Self {
@@ -309,7 +309,7 @@ impl GithubService {
 			.invalidate_repo(repo.identity())
 			.map(|_| ())
 			.map_err(|_| {
-				fault("github_cache_failed", "GitHub cache invalidation failed after mutation")
+				fault("forge_cache_failed", "forge cache invalidation failed after mutation")
 			})
 	}
 

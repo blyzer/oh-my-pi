@@ -257,10 +257,10 @@ impl EnvServer {
 			workspace.root(),
 			bridges.session_authority.as_ref(),
 		);
-		let github_cache = Arc::new(
-			GithubCache::open(
-				state_dir.join("github-cache.sqlite3"),
-				GithubCacheSettings::from_con(con).policy(),
+		let forge_cache = Arc::new(
+			ForgeCache::open(
+				state_dir.join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(con).policy(),
 			)
 			.map_err(EnvdError::state)?,
 		);
@@ -271,7 +271,7 @@ impl EnvServer {
 		ext_host_config.bind_result_store(blobs.clone());
 		let exec = ExecHost::new()
 			.with_process_store(ProcessStore::new(state_dir.join("processes").join("meta.json")))?
-			.with_github_cache(Arc::clone(&github_cache))
+			.with_forge_cache(Arc::clone(&forge_cache))
 			.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
@@ -361,7 +361,7 @@ impl EnvServer {
 			state_dir,
 			con,
 			session_id.as_str(),
-			Arc::clone(&github_cache),
+			Arc::clone(&forge_cache),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -550,10 +550,10 @@ impl EnvServer {
 			&root,
 			bridges.session_authority.as_ref(),
 		);
-		let github_cache = Arc::new(
-			GithubCache::open(
-				state_dir.join("github-cache.sqlite3"),
-				GithubCacheSettings::from_con(con).policy(),
+		let forge_cache = Arc::new(
+			ForgeCache::open(
+				state_dir.join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(con).policy(),
 			)
 			.map_err(EnvdError::state)?,
 		);
@@ -568,7 +568,7 @@ impl EnvServer {
 		} else {
 			ExecHost::new()
 		}
-		.with_github_cache(Arc::clone(&github_cache))
+		.with_forge_cache(Arc::clone(&forge_cache))
 		.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
@@ -661,7 +661,7 @@ impl EnvServer {
 			state_dir,
 			con,
 			session_id.as_str(),
-			Arc::clone(&github_cache),
+			Arc::clone(&forge_cache),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -781,10 +781,10 @@ impl EnvServer {
 				.with_claude_plugins(Arc::clone(&bridges.content.claude_plugins))
 				.with_command_approvals(bridges.content.command_approvals.clone()),
 		);
-		let github_cache = Arc::new(
-			GithubCache::open(
-				state_dir.join("github-cache.sqlite3"),
-				GithubCacheSettings::from_con(con).policy(),
+		let forge_cache = Arc::new(
+			ForgeCache::open(
+				state_dir.join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(con).policy(),
 			)
 			.map_err(EnvdError::state)?,
 		);
@@ -794,7 +794,7 @@ impl EnvServer {
 		)?;
 		ext_host_config.bind_result_store(blobs.clone());
 		let exec = ExecHost::new()
-			.with_github_cache(Arc::clone(&github_cache))
+			.with_forge_cache(Arc::clone(&forge_cache))
 			.with_output_store(blobs.store().clone());
 		let telemetry = Arc::new(
 			TelemetryIndex::open(&state_dir.join("telemetry"), &state_dir.join("telemetry.sqlite3"))
@@ -899,7 +899,7 @@ impl EnvServer {
 			&root,
 			state_dir,
 			&telemetry,
-			Arc::clone(&github_cache),
+			Arc::clone(&forge_cache),
 			ext_hosts.as_ref(),
 			py_eval,
 			con,

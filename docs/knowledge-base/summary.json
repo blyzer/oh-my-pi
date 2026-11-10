@@ -1601,7 +1601,7 @@
         "path": "crates/cache/src/lib.rs"
       },
       {
-        "name": "github_cache",
+        "name": "forge_cache",
         "line": 10,
         "public": true,
         "path": "crates/cache/src/lib.rs"

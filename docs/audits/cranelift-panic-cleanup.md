@@ -1317,7 +1317,7 @@ Every K (tempfile constructor) and G (tokio spawn) site, by file. Classification
 - `crates/app/tests/worktree_query.rs`: 41, 42
 - `crates/cache/src/atomic.rs`: 110, 119
 - `crates/cache/src/document_cache.rs`: 479, 497
-- `crates/cache/src/github_cache.rs`: 335, 400, 432
+- `crates/cache/src/forge_cache.rs`: 335, 400, 432
 - `crates/cache/src/mcp_cache.rs`: 231, 262, 286
 - `crates/cache/src/secret_key.rs`: 235, 263
 - `crates/cache/src/telemetry_cache.rs`: 792, 831, 890
