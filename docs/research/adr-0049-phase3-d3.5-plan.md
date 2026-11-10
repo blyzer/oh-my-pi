@@ -1,6 +1,6 @@
 # ADR 0049 Phase 3 / D3.5 — capability feature plan
 
-Status: PR1 (`cap-computer`, PR #549), PR2 (`cap-browser`, PR #550), and PR3 (`cap-media`) implemented on this branch. Tip at planning: `5173e17090` (ENVD-04 #548).
+Status: PR1 (`cap-computer`, PR #549), PR2 (`cap-browser`, PR #550), PR3 (`cap-media`, PR #551), and PR4 (`just check-minimal-caps` on `Lint workspace (Linux)`, PR #552). Tip at planning: `5173e17090` (ENVD-04 #548).
 Pattern source: ENVD-07 `cap-ssh` (PR #544).
 
 ## Goal
@@ -264,6 +264,7 @@ After PR1 this command still enables no `cap-computer`; as more caps join `defau
 - Formalize minimal check in `justfile` (e.g. `check-minimal-caps`) and a non-gating or required CI job: default `omp-app` **and** all `cap-*` off.
 - Document feature matrix in ADR 0049 status / TASKS.
 - **Exit:** one command proves minimal profile; default profile still green.
+- **Done on this branch:** `just check-minimal-caps`. `Lint workspace (Linux)` runs it, so the default profile and the minimal profile both gate on that required check.
 
 ### PR5 (optional Phase 3 hygiene) — `cap-security`
 
@@ -280,9 +281,14 @@ After PR1 this command still enables no `cap-computer`; as more caps join `defau
 
 ## Minimal-profile check command (canonical)
 
-Until a `just` recipe exists:
+```bash
+just check-minimal-caps
+```
+
+Equivalent pieces:
 
 ```bash
+cargo check -p omp-app --locked
 cargo check -p omp-app --no-default-features --features local --locked \
   --config 'resolver.feature-unification="selected"'
 ```
@@ -290,8 +296,10 @@ cargo check -p omp-app --no-default-features --features local --locked \
 Per-edge proof template:
 
 ```bash
-cargo tree -p omp-envd -i <omp-desktop|omp-webview|omp-audio> -e normal \
+cargo tree -p omp-envd -i <omp-desktop|omp-webview|omp-audio|omp-ssh> \
+  --locked --no-default-features \
   --config 'resolver.feature-unification="selected"'
+# expect exit 101: did not match any packages
 ```
 
 Default (caps on) smoke:

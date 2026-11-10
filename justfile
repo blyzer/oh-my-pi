@@ -180,6 +180,33 @@ check:
 check-pkg pkg:
     cargo check -p {{ pkg }} --locked
 
+# ADR 0049 Phase 3: default `omp` (`omp-app`, every `cap-*` on) and the
+# minimal profile (`local` only). Selected unification is required so the
+# workspace resolver cannot turn a cap back on through another member.
+# Each capability crate must be absent from `omp-envd` (cargo exit 101,
+# "did not match any packages"). Any other cargo failure fails the recipe.
+[group('build & check')]
+check-minimal-caps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    selected=(--locked --no-default-features --config 'resolver.feature-unification="selected"')
+    for pkg in omp-desktop omp-webview omp-audio omp-ssh; do
+        status=0
+        out=$(cargo tree -p omp-envd -i "$pkg" "${selected[@]}" 2>&1) || status=$?
+        if [[ "$status" -eq 0 ]]; then
+            printf 'error: %s is in the omp-envd graph with cap features off\n%s\n' "$pkg" "$out" >&2
+            exit 1
+        fi
+        if [[ "$status" -ne 101 || "$out" != *"did not match any packages"* ]]; then
+            printf 'error: unexpected cargo tree result for %s (exit %s)\n%s\n' "$pkg" "$status" "$out" >&2
+            exit 1
+        fi
+        printf 'absent from omp-envd (caps off): %s\n' "$pkg"
+    done
+    cargo check -p omp-app --locked
+    cargo check -p omp-app --no-default-features --features local --locked \
+        --config 'resolver.feature-unification="selected"'
+
 # Build the `omp` CLI/daemon binary (dev profile).
 [group('build & check')]
 build:
