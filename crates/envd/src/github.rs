@@ -1,8 +1,13 @@
-//! Direct GitHub API and isolated pull-request worktree host.
+//! Direct GitHub API host.
+//!
+//! Change-request worktree checkout/push for `forge@1` runs through
+//! [`crate::forge_worktree`] (ADR 0049 D2.4). This module still owns GitHub
+//! REST, Actions watch, credentialed HTTP, and residual Operations used by
+//! the in-core GHE CI / list-URL paths.
 
 use std::{
 	fmt::Write as _,
-	fs, io,
+	io,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -19,7 +24,6 @@ use omp_cache::forge_cache::ForgeCache;
 use omp_core::{Str, sf};
 use omp_journal::blob::BlobRef;
 use omp_vcs::{PushOptions, git::GitRepo};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use strum::EnumMessage as _;
 use tokio::{task, time};
@@ -63,12 +67,17 @@ impl GithubService {
 	) -> Arc<Self> {
 		Arc::new(Self {
 			root,
-			worktrees: state_dir.join("github-worktrees"),
+			worktrees: crate::forge_worktree::worktree_root(state_dir),
 			credentials,
 			cache,
 			blobs,
 			client: omp_http::no_redirect_client(),
 		})
+	}
+
+	/// Isolated change-request worktree root (`forge-worktrees/`).
+	pub(crate) fn worktree_root(&self) -> &Path {
+		&self.worktrees
 	}
 
 	#[tracing::instrument(
@@ -970,6 +979,89 @@ impl GithubService {
 		Ok((number, response))
 	}
 
+	/// Vendor plan fields for a pull request (API only; no local git).
+	///
+	/// Used by [`crate::github_adapter::GithubForgeAdapter`] before core
+	/// [`crate::forge_worktree`] runs the checkout (ADR 0049 D2.4).
+	pub(crate) async fn change_request_checkout_plan(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<crate::forge_worktree::CheckoutInput, Fault> {
+		let (_, api) = self
+			.resolve_pr(repo, &number.to_string(), cancellation)
+			.await?;
+		let clone_url = api
+			.value
+			.pointer("/head/repo/clone_url")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head repository is unavailable")
+			})?;
+		let head_ref = api
+			.value
+			.pointer("/head/ref")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head branch is unavailable")
+			})?;
+		let head_sha = api
+			.value
+			.pointer("/head/sha")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head commit is unavailable")
+			})?;
+		let base_ref = api
+			.value
+			.pointer("/base/ref")
+			.and_then(Value::as_str)
+			.unwrap_or_default();
+		Ok(crate::forge_worktree::CheckoutInput {
+			repo_identity: repo.identity().to_owned(),
+			number,
+			clone_url: clone_url.to_owned(),
+			base_ref: base_ref.to_owned(),
+			head_ref: head_ref.to_owned(),
+			head_sha: head_sha.to_owned(),
+			force: false,
+		})
+	}
+
+	/// Vendor push-prep fields for a pull request (API only; no local git).
+	pub(crate) async fn change_request_push_prep(
+		&self,
+		repo: &GithubRepo,
+		number: u64,
+		cancellation: &CancellationToken,
+	) -> Result<crate::forge_worktree::PushInput, Fault> {
+		let (_, api) = self
+			.resolve_pr(repo, &number.to_string(), cancellation)
+			.await?;
+		let clone_url = api
+			.value
+			.pointer("/head/repo/clone_url")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head repository is unavailable")
+			})?;
+		let head_ref = api
+			.value
+			.pointer("/head/ref")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head branch is unavailable")
+			})?;
+		Ok(crate::forge_worktree::PushInput {
+			repo_identity: repo.identity().to_owned(),
+			number,
+			clone_url: clone_url.to_owned(),
+			head_ref: head_ref.to_owned(),
+			force_with_lease: false,
+		})
+	}
+
 	async fn checkout(
 		&self,
 		params: &Params,
@@ -1047,41 +1139,38 @@ impl GithubService {
 			.ok_or_else(|| {
 				fault("github_invalid_response", "pull request head commit is unavailable")
 			})?;
-		let path = self.worktrees.join(format!("pr-{number}"));
+		let base_ref = api
+			.value
+			.pointer("/base/ref")
+			.and_then(Value::as_str)
+			.unwrap_or_default();
+		let path = crate::forge_worktree::worktree_path(&self.worktrees, number);
 		let reused = path.exists();
-		tokio::select! {
-			result = checkout_git(
-				&self.root,
-				&path,
+		let out = crate::forge_worktree::checkout(
+			&self.root,
+			&self.worktrees,
+			&crate::forge_worktree::CheckoutInput {
+				repo_identity: repo.identity().to_owned(),
 				number,
-				clone_url,
-				head,
+				clone_url: clone_url.to_owned(),
+				base_ref: base_ref.to_owned(),
+				head_ref: head.to_owned(),
+				head_sha: expected_head.to_owned(),
 				force,
-				cancellation.clone(),
-			) => result?,
-			() = cancellation.cancelled() => return Err(cancelled_fault()),
-		}
-		fs::create_dir_all(&path).map_err(io_fault)?;
-		let metadata = CheckoutMetadata {
-			repo:          repo.identity().to_owned(),
-			clone_url:     clone_url.to_owned(),
-			head:          head.to_owned(),
-			expected_head: expected_head.to_owned(),
-		};
-		fs::write(
-			self.worktrees.join(format!("pr-{number}.json")),
-			serde_json::to_vec(&metadata).expect("metadata serializes"),
+			},
+			cancellation,
 		)
-		.map_err(io_fault)?;
+		.await
+		.map_err(forge_worktree_fault)?;
 		Ok(json!({
 			"pr": number,
 			"url": api.value.get("html_url").and_then(Value::as_str),
-			"branch": format!("pr-{number}"),
-			"path": path,
+			"branch": format!("cr-{number}"),
+			"path": out.worktree,
 			"remote": clone_url,
 			"remote_branch": head,
 			"head_sha": expected_head,
-			"base_ref": api.value.pointer("/base/ref").and_then(Value::as_str),
+			"base_ref": base_ref,
 			"reused": reused,
 		}))
 	}
@@ -1143,38 +1232,41 @@ impl GithubService {
 		force: bool,
 		cancellation: &CancellationToken,
 	) -> Result<Value, Fault> {
-		let number = if let Some(number) = parse_pr_number(value, repo)? {
-			number
-		} else {
-			self.resolve_pr(repo, value, cancellation).await?.0
-		};
-		let path = self.worktrees.join(format!("pr-{number}"));
-		let mut metadata: CheckoutMetadata = serde_json::from_slice(
-			&fs::read(self.worktrees.join(format!("pr-{number}.json"))).map_err(io_fault)?,
+		let (number, api) = self.resolve_pr(repo, value, cancellation).await?;
+		let clone_url = api
+			.value
+			.pointer("/head/repo/clone_url")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head repository is unavailable")
+			})?;
+		let head_ref = api
+			.value
+			.pointer("/head/ref")
+			.and_then(Value::as_str)
+			.ok_or_else(|| {
+				fault("github_invalid_response", "pull request head branch is unavailable")
+			})?;
+		let path = crate::forge_worktree::worktree_path(&self.worktrees, number);
+		let out = crate::forge_worktree::push(
+			&self.worktrees,
+			&crate::forge_worktree::PushInput {
+				repo_identity: repo.identity().to_owned(),
+				number,
+				clone_url: clone_url.to_owned(),
+				head_ref: head_ref.to_owned(),
+				force_with_lease: force,
+			},
+			cancellation,
 		)
-		.map_err(|_| fault("github_checkout_missing", "pull request checkout metadata is invalid"))?;
-		if !metadata.repo.eq_ignore_ascii_case(repo.identity()) {
-			return Err(fault(
-				"github_repo_mismatch",
-				"pull request checkout belongs to a different repository",
-			));
-		}
-		let pushed_head = tokio::select! {
-			result = push_git(path.clone(), &metadata, force, cancellation.clone()) => result?,
-			() = cancellation.cancelled() => return Err(cancelled_fault()),
-		};
-		metadata.expected_head = pushed_head.to_string();
-		fs::write(
-			self.worktrees.join(format!("pr-{number}.json")),
-			serde_json::to_vec(&metadata).expect("metadata serializes"),
-		)
-		.map_err(io_fault)?;
+		.await
+		.map_err(forge_worktree_fault)?;
 		self.invalidate_repo(repo)?;
 		Ok(json!({
 			"pr": number,
 			"path": path,
-			"remote_branch": metadata.head,
-			"head_sha": metadata.expected_head,
+			"remote_branch": head_ref,
+			"head_sha": out.head_commit.as_str(),
 			"force_with_lease": force,
 		}))
 	}
@@ -1545,144 +1637,19 @@ struct FailedLogs {
 	rows:     Vec<Value>,
 	artifact: Option<Artifact>,
 }
-#[derive(Deserialize, Serialize)]
-struct CheckoutMetadata {
-	repo:          String,
-	clone_url:     String,
-	head:          String,
-	#[serde(default)]
-	expected_head: String,
-}
-
-async fn checkout_git(
-	root: &Path,
-	path: &Path,
-	number: u64,
-	remote: &str,
-	head: &str,
-	force: bool,
-	cancel: CancellationToken,
-) -> Result<(), Fault> {
-	let parent = path
-		.parent()
-		.ok_or_else(|| fault("github_git_failed", "invalid worktree path"))?;
-	fs::create_dir_all(parent).map_err(io_fault)?;
-
-	let root = root.to_owned();
-	let repo = task::spawn_blocking(move || GitRepo::require(&root).map(Arc::new))
-		.await
-		.map_err(|_| fault("github_git_failed", "GitHub checkout worker failed"))?
-		.map_err(git_fault)?;
-	let repository = crate::vcs::git::repo::Repository::from_handle(Arc::clone(&repo));
-	let _guard = crate::vcs::git::lock::write(&repository, &cancel)
-		.await
-		.map_err(|_| fault("github_git_failed", "Git repository mutation lock failed"))?;
-	let fetch_branch = format!("omp/github-fetch/pr-{number}");
-	let fetch_ref = format!("refs/heads/{fetch_branch}");
-	repo
-		.fetch(remote, head, &fetch_ref, None, Some(cancel))
-		.await
-		.map_err(git_fault)?;
-
-	let path = path.to_owned();
-	task::spawn_blocking(move || finish_checkout_git(repo, &path, number, &fetch_branch, force))
-		.await
-		.map_err(|_| fault("github_git_failed", "GitHub checkout worker failed"))?
-}
-
-fn finish_checkout_git(
-	repo: Arc<GitRepo>,
-	path: &Path,
-	number: u64,
-	fetch_branch: &str,
-	force: bool,
-) -> Result<(), Fault> {
-	let branch = format!("pr-{number}");
-	let fetch_ref = format!("refs/heads/{fetch_branch}");
-	let fetched = repo
-		.resolve_ref(&fetch_ref)
-		.map_err(git_fault)?
-		.ok_or_else(|| git_fault(omp_vcs::Error::RefNotFound { name: fetch_ref }))?;
-	repo.delete_branch(fetch_branch, true).map_err(git_fault)?;
-
-	if path.exists() {
-		let active = GitRepo::require(path)
-			.map_err(git_fault)?
-			.current_branch()
-			.map_err(git_fault)?;
-		if active.as_deref() != Some(branch.as_str()) {
-			return Err(fault(
-				"github_git_failed",
-				"existing pull-request worktree has an unexpected branch",
-			));
-		}
-		return Ok(());
-	}
-
-	match repo
-		.resolve_ref(&format!("refs/heads/{branch}"))
-		.map_err(git_fault)?
-	{
-		Some(existing) if existing != fetched => {
-			if !force {
-				return Err(fault(
-					"github_git_failed",
-					"local pull-request branch differs from the remote head; pass force=true to reset \
-					 it",
-				));
-			}
-			repo
-				.create_branch(&branch, &fetched, true)
-				.map_err(git_fault)?;
+fn forge_worktree_fault(error: crate::forge_worktree::Error) -> Fault {
+	match error {
+		crate::forge_worktree::Error::Cancelled => cancelled_fault(),
+		crate::forge_worktree::Error::CheckoutMissing => {
+			fault("github_checkout_missing", "pull request checkout metadata is missing")
 		},
-		None => repo
-			.create_branch(&branch, &fetched, false)
-			.map_err(git_fault)?,
-		_ => {},
+		crate::forge_worktree::Error::IncompletePlan => {
+			fault("github_invalid_response", "pull request checkout plan is incomplete")
+		},
+		crate::forge_worktree::Error::GitFailed => {
+			fault("github_git_failed", "forge worktree git operation failed")
+		},
 	}
-	repo.worktree_add(path, &branch, false).map_err(git_fault)
-}
-
-async fn push_git(
-	path: PathBuf,
-	metadata: &CheckoutMetadata,
-	force: bool,
-	cancel: CancellationToken,
-) -> Result<Str, Fault> {
-	let repo = task::spawn_blocking(move || GitRepo::require(&path).map(Arc::new))
-		.await
-		.map_err(|_| fault("github_git_failed", "GitHub push worker failed"))?
-		.map_err(git_fault)?;
-	let repository = crate::vcs::git::repo::Repository::from_handle(Arc::clone(&repo));
-	let _guard = crate::vcs::git::lock::write(&repository, &cancel)
-		.await
-		.map_err(|_| fault("github_git_failed", "Git repository mutation lock failed"))?;
-	let pushed_head = repo
-		.head_sha()
-		.map_err(git_fault)?
-		.ok_or_else(|| fault("github_git_failed", "pull request worktree has no HEAD commit"))?;
-	repo
-		.push(
-			&PushOptions {
-				remote:           Some(metadata.clone_url.clone()),
-				refspec:          Some(format!("HEAD:refs/heads/{}", metadata.head)),
-				force_with_lease: if force {
-					if metadata.expected_head.is_empty() {
-						return Err(fault(
-							"github_checkout_missing",
-							"checkout metadata has no remote head for force-with-lease",
-						));
-					}
-					Some(format!("refs/heads/{}:{}", metadata.head, metadata.expected_head))
-				} else {
-					None
-				},
-			},
-			Some(cancel),
-		)
-		.await
-		.map_err(git_fault)?;
-	Ok(Str::new(pushed_head))
 }
 
 /// Evidence that `pr_create` published its head branch first.
@@ -2965,9 +2932,6 @@ fn http_fault(_: reqwest::Error) -> Fault {
 }
 fn git_fault(_: omp_vcs::Error) -> Fault {
 	fault("github_git_failed", "Git operation failed")
-}
-fn io_fault(_: io::Error) -> Fault {
-	fault("github_io_failed", "Local GitHub worktree operation failed")
 }
 fn sanitize_remote_message(message: &str) -> String {
 	message

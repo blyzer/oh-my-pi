@@ -22,7 +22,9 @@ Creates: `change_request_create`, `issue_create`.
 Search: `search_change_requests`, `search_issues` (list-URL + tool search).
 `search_code` / `search_commits` / `search_repos` stay unmounted → Unavailable.
 
-Checkout / push stay unmounted (ADR D2.4).
+Checkout / push plans: `change_request_checkout` → `CheckoutPlan`,
+`change_request_push` → `PushPrep` (ADR 0049 D2.4). Core fills the worktree /
+runs the push; devices never invent a worktree path.
 
 ## Proofs
 

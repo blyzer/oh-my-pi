@@ -210,7 +210,35 @@ impl CheckoutRequest {
 	}
 }
 
+/// Vendor data a forge adapter returns before core runs the checkout.
+///
+/// Dyn `forge/change_request_checkout` devices serialize this shape. Core
+/// fills [`CheckoutReceipt::worktree`] after fetch + worktree creation under
+/// the repository mutation lock (ADR 0049 D2.4). This plan never carries a
+/// worktree path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CheckoutPlan {
+	/// Repository that owns the change request.
+	pub repo:      RepoRef,
+	/// Change-request number.
+	pub number:    u64,
+	/// HTTPS (or other git) clone URL for the head repository.
+	pub clone_url: Str,
+	/// Base branch name on the forge.
+	pub base_ref:  Str,
+	/// Head branch name on the forge.
+	pub head_ref:  Str,
+	/// Head commit identity to check out.
+	pub head_sha:  Str,
+}
+
+const _: () =
+	assert!(size_of::<CheckoutPlan>() <= 200, "CheckoutPlan must stay a compact vendor handoff");
+
 /// Result of checking a change request out.
+///
+/// Produced by core after it applies a [`CheckoutPlan`]. Adapters and dyn
+/// devices do not invent the worktree path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CheckoutReceipt {
 	/// Repository that was checked out.
@@ -240,7 +268,29 @@ pub struct PushRequest {
 	pub force_with_lease: bool,
 }
 
+/// Vendor data a forge adapter returns before core pushes.
+///
+/// Dyn `forge/change_request_push` devices serialize this shape. Core still
+/// owns the worktree, mutation lock, and `omp-vcs` push. Lease expected-head
+/// comes from core's checkout metadata when `force_with_lease` is set.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PushPrep {
+	/// Repository that owns the change request.
+	pub repo:      RepoRef,
+	/// Change-request number.
+	pub number:    u64,
+	/// HTTPS (or other git) clone URL of the head repository.
+	pub clone_url: Str,
+	/// Remote branch name to update.
+	pub head_ref:  Str,
+}
+
+const _: () = assert!(size_of::<PushPrep>() <= 160, "PushPrep must stay a compact vendor handoff");
+
 /// Result of pushing a change-request branch.
+///
+/// Produced by core after it applies a [`PushPrep`] against the checked-out
+/// worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PushReceipt {
 	/// Repository that was pushed.

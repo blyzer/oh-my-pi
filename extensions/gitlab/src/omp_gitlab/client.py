@@ -23,10 +23,12 @@ from .errors import ForgeUnavailable
 from .mapping import (
     issue_create_body,
     list_state_param,
+    map_checkout_plan,
     map_issue,
     map_merge_request,
     map_notes,
     map_project,
+    map_push_prep,
     map_search_page,
     merge_request_create_body,
     project_path,
@@ -123,6 +125,34 @@ def view_change_request(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
         op="change_request_view",
     )
     return map_merge_request(payload, repo)
+
+
+def checkout_change_request_plan(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
+    """REST → ``CheckoutPlan`` JSON (no local git; core owns the worktree)."""
+    mr = _get_json(
+        _project_url(repo, "merge_requests", str(number)),
+        op="change_request_checkout",
+    )
+    if not isinstance(mr, dict):
+        raise ForgeUnavailable("change_request_checkout", "GitLab MR payload was not an object")
+    project = _get_json(_project_url(repo), op="change_request_checkout")
+    if not isinstance(project, dict):
+        raise ForgeUnavailable("change_request_checkout", "GitLab project payload was not an object")
+    return map_checkout_plan(mr, repo, project=project)
+
+
+def push_change_request_prep(repo: Mapping[str, Any], number: int) -> dict[str, Any]:
+    """REST → ``PushPrep`` JSON (no local git; core owns the push)."""
+    mr = _get_json(
+        _project_url(repo, "merge_requests", str(number)),
+        op="change_request_push",
+    )
+    if not isinstance(mr, dict):
+        raise ForgeUnavailable("change_request_push", "GitLab MR payload was not an object")
+    project = _get_json(_project_url(repo), op="change_request_push")
+    if not isinstance(project, dict):
+        raise ForgeUnavailable("change_request_push", "GitLab project payload was not an object")
+    return map_push_prep(mr, repo, project=project)
 
 
 def view_issue(repo: Mapping[str, Any], number: int) -> dict[str, Any]:

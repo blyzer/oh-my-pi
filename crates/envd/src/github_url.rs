@@ -1343,12 +1343,12 @@ fn list_search_query(target: &Target) -> Result<SearchQuery, Fault> {
 		text.push_str(label.as_str());
 	}
 	Ok(SearchQuery {
-		kind: match target.scheme {
+		kind:  match target.scheme {
 			GithubScheme::Issue => SearchKind::Issues,
 			GithubScheme::PullRequest => SearchKind::ChangeRequests,
 		},
-		repo: Some(repo),
-		text: Str::new(text),
+		repo:  Some(repo),
+		text:  Str::new(text),
 		limit: *limit,
 	})
 }
@@ -1364,7 +1364,8 @@ fn repo_ref_from_github(repo: &GithubRepo) -> Result<RepoRef, Fault> {
 }
 
 /// Renders a [`SearchPage`] into the historical list-URL markdown contract:
-/// `# Issues` / `# Pull Requests` plus `- [state] #N title` / scheme link lines.
+/// `# Issues` / `# Pull Requests` plus `- [state] #N title` / scheme link
+/// lines.
 #[cfg(feature = "cap-forge")]
 fn render_search_list(scheme: GithubScheme, repo: &GithubRepo, page: &SearchPage) -> Vec<u8> {
 	let mut out = String::new();
@@ -1908,17 +1909,14 @@ mod tests {
 					.find_map(|token| token.strip_prefix("state:"))
 					.filter(|value| *value != "all")
 					.unwrap_or(state);
-				Ok(SearchPage::new(
-					kind,
-					[SearchHit {
-						repo,
-						title: Str::new_static(title),
-						web_url: Str::empty(),
-						number: Some(number),
-						commit: None,
-						state: Str::new(state),
-					}],
-				))
+				Ok(SearchPage::new(kind, [SearchHit {
+					repo,
+					title: Str::new_static(title),
+					web_url: Str::empty(),
+					number: Some(number),
+					commit: None,
+					state: Str::new(state),
+				}]))
 			}
 		}
 
@@ -1954,7 +1952,9 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	fn router(host: Memory) -> Delegated<Memory, PermitAll> {
 		let mut builder = Delegated::builder(PermitAll);
-		builder.register(GITHUB_HOST, host.clone()).expect("github.com");
+		builder
+			.register(GITHUB_HOST, host.clone())
+			.expect("github.com");
 		builder.register("gitlab.com", host).expect("gitlab.com");
 		builder.build()
 	}
@@ -2094,17 +2094,13 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver =
-			resolver(GithubScheme::Issue, dir.path(), Arc::clone(&cache), host.clone());
+		let resolver = resolver(GithubScheme::Issue, dir.path(), Arc::clone(&cache), host.clone());
 		let resolved = resolver
 			.read_query_with_diags("acme/widget", Some("state=open"), &ParsedSelector::None)
 			.await
 			.expect("list");
 		let text = std::str::from_utf8(resolved.data.as_ref()).expect("utf-8");
-		assert_eq!(
-			text,
-			"# Issues\n\n- [open] #3 Bug\n  issue://acme/widget/3\n"
-		);
+		assert_eq!(text, "# Issues\n\n- [open] #3 Bug\n  issue://acme/widget/3\n");
 		assert_eq!(host.calls(), ["search"]);
 		let seen = host.repo.lock().clone().expect("repo");
 		assert_eq!(seen.host.as_str(), GITHUB_HOST);
@@ -2136,8 +2132,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver =
-			resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
+		let resolver = resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
 		let resolved = resolver
 			.read_query_with_diags(
 				"gitlab.com/acme/widget",

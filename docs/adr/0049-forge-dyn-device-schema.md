@@ -36,19 +36,31 @@ distinct paths so an extension can implement them separately.
 | `forge/search_commits` | `search_commits` | `search` | `{ "query": SearchQuery }` | `SearchPage` |
 | `forge/search_repos` | `search_repos` | `search` | `{ "query": SearchQuery }` | `SearchPage` |
 | `forge/change_request_create` | `change_request_create` | `create_change_request` | `{ "draft": ChangeRequestDraft }` | `ChangeRequest` |
-| `forge/change_request_checkout` | `change_request_checkout` | `checkout_change_request` | `{ "request": CheckoutRequest }` | `CheckoutReceipt` |
-| `forge/change_request_push` | `change_request_push` | `push_change_request` | `{ "request": PushRequest }` | `PushReceipt` |
+| `forge/change_request_checkout` | `change_request_checkout` | `checkout_change_request` | `{ "request": CheckoutRequest }` | `CheckoutPlan` (vendor data only: `repo`, `number`, `clone_url`, `base_ref`, `head_ref`, `head_sha` — **no** `worktree`) |
+| `forge/change_request_push` | `change_request_push` | `push_change_request` | `{ "request": PushRequest }` | `PushPrep` (vendor data only: `repo`, `number`, `clone_url`, `head_ref` — **no** worktree) |
 | `forge/issue_create` | `issue_create` | `create_issue` | `{ "draft": IssueDraft }` | `Issue` |
 
 Types are the serde shapes of `omp_forge`. Prefer those structs; do not invent
 a parallel DTO vocabulary unless a field cannot serialize (none today except
 documenting `FileBody.content` as bytes).
 
+### Checkout / push handoff (ADR 0049 D2.4)
+
+Dyn devices return **plan / push-prep** JSON only. `DynForgeAdapter` (and the
+in-core `GithubForgeAdapter` arm) then call forge-neutral
+`crates/envd/src/forge_worktree.rs`, which performs fetch, worktree creation
+under the repository mutation lock, and push via `omp-vcs`.
+[`ForgeHost::checkout_change_request`](../../crates/forge/src/host.rs) /
+[`push_change_request`](../../crates/forge/src/host.rs) still return
+`CheckoutReceipt` / `PushReceipt` after core runs — those receipts carry the
+`worktree` path core created. Vendor adapters never invent a worktree path.
+
 ## Registration seam
 
-`register_dyn_forge_host(builder, host, client)` registers
-`ForgeBackend::Dyn(DynForgeAdapter::new(client))` for an ASCII host name
-(e.g. `gitlab.com`, `github.com`).
+`register_dyn_forge_host(builder, host, client, project_root, worktree_root)`
+registers `ForgeBackend::Dyn(DynForgeAdapter::new(…))` for an ASCII host name
+(e.g. `gitlab.com`, `github.com`). The roots are required so checkout/push can
+run core `forge_worktree` after the device returns a plan.
 
 `ForgeDeviceClient` is the injectable invoke surface. Production uses
 `LiveForgeDeviceClient` (late-bound `ForgeDeviceInvoker`);
@@ -97,7 +109,11 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   `github.com` CI on Dyn is DONE (see
   [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)). SessionHost
   bound-client threading for `forge@1` is DONE.
-- **Remaining before deleting `envd/src/github.rs`:** Dyn checkout/push (ADR
-  D2.4). In-core `GithubForgeAdapter` / `GithubCiAdapter` / `github.rs` /
-  `github_url.rs` stay for checkout/push via `GithubService` and unlisted
-  GHE CI.
+- **DONE (D2.4 checkout/push):** Dyn devices return `CheckoutPlan` /
+  `PushPrep`; core `forge_worktree` fills receipts. `github.com` /
+  `gitlab.com` mounts are live. **`github.rs` is not deletable yet:** residual
+  GHE CI arm (`GithubCiAdapter` / Actions watch), credential bridge /
+  `github_url.rs` helpers, list-URL resolver support, and non-forge
+  `GithubService` Operations (search, file read, `pr_create`, run watch) still
+  live there. Forge@1 checkout/push no longer depends on vendor git inside
+  `github.rs` (git I/O is `forge_worktree`).

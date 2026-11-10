@@ -113,6 +113,37 @@ async def search_issues(args: dict[str, Any]) -> dict[str, Any]:
     return dispatch.client_for(host).search(payload)
 
 
+def _request(args: dict[str, Any], *, op: str) -> dict[str, Any]:
+    request = args.get("request")
+    if not isinstance(request, dict):
+        raise ForgeUnavailable(op, "args.request must be an object")
+    return request
+
+
+async def change_request_checkout(args: dict[str, Any]) -> dict[str, Any]:
+    """Return ``CheckoutPlan`` JSON — core owns the worktree (ADR 0049 D2.4)."""
+    request = _request(args, op="change_request_checkout")
+    repo = request.get("repo")
+    if not isinstance(repo, dict):
+        raise ForgeUnavailable("change_request_checkout", "request.repo must be an object")
+    number = request.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ForgeUnavailable("change_request_checkout", "request.number must be an integer")
+    return _client(args, op="change_request_checkout").checkout_change_request_plan(repo, number)
+
+
+async def change_request_push(args: dict[str, Any]) -> dict[str, Any]:
+    """Return ``PushPrep`` JSON — core owns the push (ADR 0049 D2.4)."""
+    request = _request(args, op="change_request_push")
+    repo = request.get("repo")
+    if not isinstance(repo, dict):
+        raise ForgeUnavailable("change_request_push", "request.repo must be an object")
+    number = request.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ForgeUnavailable("change_request_push", "request.number must be an integer")
+    return _client(args, op="change_request_push").push_change_request_prep(repo, number)
+
+
 _LEAVES: tuple[MountSpec, ...] = (
     MountSpec(
         subpath="repo_view",
@@ -168,14 +199,25 @@ _LEAVES: tuple[MountSpec, ...] = (
         schema=_ARGS_SCHEMA,
         summary="Search or list issues (SearchQuery → SearchPage)",
     ),
+    MountSpec(
+        subpath="change_request_checkout",
+        body=change_request_checkout,
+        schema=_ARGS_SCHEMA,
+        summary="Vendor CheckoutPlan for a change request (core creates the worktree)",
+    ),
+    MountSpec(
+        subpath="change_request_push",
+        body=change_request_push,
+        schema=_ARGS_SCHEMA,
+        summary="Vendor PushPrep for a change request (core performs the push)",
+    ),
 )
 
 
 @omp.hook("extension_activate")
 async def mount_forge_leaves(_event: object) -> None:
-    """Mount the read + create + search surface into the host dynamic device catalog."""
+    """Mount the read + create + search + plan surface into the host catalog."""
     await FORGE_PARENT.mount_many(*_LEAVES)
 
 
 # search_code / search_commits / search_repos stay unmounted (Unavailable).
-# Checkout / push stay unmounted (ADR D2.4).

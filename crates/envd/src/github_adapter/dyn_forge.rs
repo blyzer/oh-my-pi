@@ -9,21 +9,24 @@
 //!
 //! Schema source of truth: `docs/adr/0049-forge-dyn-device-schema.md`.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use omp_core::Str;
 use omp_forge::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
-	FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
-	PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage, SearchQuery,
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutPlan, CheckoutReceipt, CheckoutRequest,
+	Comment, CommitRef, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue,
+	IssueDraft, PushPrep, PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage,
+	SearchQuery,
 };
 use omp_forge_delegated::{DelegatedBuilder, PermitAll, RegisterError};
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use strum::IntoStaticStr as _;
+use tokio_util::sync::CancellationToken;
 
 use super::GithubForgeAdapter;
+use crate::forge_worktree;
 
 /// Canonical GitLab SaaS host always registered on the dyn forge arm (D2.8).
 ///
@@ -200,16 +203,22 @@ impl ForgeDeviceClient for UnavailableForgeClient {
 }
 
 /// [`ForgeHost`] that dispatches each method to a `forge/<op>` dyn device.
+///
+/// Checkout and push obtain a vendor [`CheckoutPlan`] / [`PushPrep`] from the
+/// device, then run forge-neutral git in core ([`forge_worktree`]).
 #[derive(Clone)]
 pub struct DynForgeAdapter<C> {
-	client: C,
+	client:        C,
+	project_root:  PathBuf,
+	worktree_root: PathBuf,
 }
 
 impl<C> DynForgeAdapter<C> {
-	/// Builds an adapter over `client`.
+	/// Builds an adapter over `client` with the project and worktree roots
+	/// core needs for checkout/push.
 	#[must_use]
-	pub const fn new(client: C) -> Self {
-		Self { client }
+	pub fn new(client: C, project_root: PathBuf, worktree_root: PathBuf) -> Self {
+		Self { client, project_root, worktree_root }
 	}
 }
 
@@ -386,13 +395,33 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 		let this = self.clone();
 		let request = request.clone();
 		async move {
-			this
-				.invoke_decode(
-					ForgeOp::ChangeRequestCheckout,
-					paths::CHANGE_REQUEST_CHECKOUT,
-					json!({ "request": request }),
-				)
-				.await
+			let op = ForgeOp::ChangeRequestCheckout;
+			let plan: CheckoutPlan = this
+				.invoke_decode(op, paths::CHANGE_REQUEST_CHECKOUT, json!({ "request": request }))
+				.await?;
+			let cancel = CancellationToken::new();
+			let input = forge_worktree::CheckoutInput {
+				repo_identity: format!("{}/{}/{}", plan.repo.host, plan.repo.owner, plan.repo.name),
+				number:        plan.number,
+				clone_url:     plan.clone_url.to_string(),
+				base_ref:      plan.base_ref.to_string(),
+				head_ref:      plan.head_ref.to_string(),
+				head_sha:      plan.head_sha.to_string(),
+				force:         request.force,
+			};
+			let out =
+				forge_worktree::checkout(&this.project_root, &this.worktree_root, &input, &cancel)
+					.await
+					.map_err(|error| map_worktree(op, error))?;
+			let head = CommitRef::try_new(plan.repo.clone(), out.head_sha)?;
+			Ok(CheckoutReceipt {
+				repo: plan.repo,
+				number: out.number,
+				head,
+				base_ref: Str::new(out.base_ref),
+				head_ref: Str::new(out.head_ref),
+				worktree: Str::new(out.worktree.to_string_lossy().as_ref()),
+			})
 		}
 	}
 
@@ -403,13 +432,31 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 		let this = self.clone();
 		let request = request.clone();
 		async move {
-			this
-				.invoke_decode(
-					ForgeOp::ChangeRequestPush,
-					paths::CHANGE_REQUEST_PUSH,
-					json!({ "request": request }),
-				)
+			let op = ForgeOp::ChangeRequestPush;
+			let prep: PushPrep = this
+				.invoke_decode(op, paths::CHANGE_REQUEST_PUSH, json!({ "request": request }))
+				.await?;
+			let cancel = CancellationToken::new();
+			let head_ref = if !request.head_ref.is_empty() {
+				request.head_ref.to_string()
+			} else {
+				prep.head_ref.to_string()
+			};
+			let input = forge_worktree::PushInput {
+				repo_identity: format!("{}/{}/{}", prep.repo.host, prep.repo.owner, prep.repo.name),
+				number: prep.number,
+				clone_url: prep.clone_url.to_string(),
+				head_ref,
+				force_with_lease: request.force_with_lease,
+			};
+			let out = forge_worktree::push(&this.worktree_root, &input, &cancel)
 				.await
+				.map_err(|error| map_worktree(op, error))?;
+			Ok(PushReceipt {
+				repo:        prep.repo,
+				number:      out.number,
+				head_commit: out.head_commit,
+			})
 		}
 	}
 
@@ -608,8 +655,20 @@ pub fn register_dyn_forge_host<C: ForgeDeviceClient>(
 	builder: &mut DelegatedBuilder<ForgeBackend<C>, PermitAll>,
 	host: &str,
 	client: C,
+	project_root: PathBuf,
+	worktree_root: PathBuf,
 ) -> Result<(), RegisterError> {
-	builder.register(host, ForgeBackend::Dyn(DynForgeAdapter::new(client)))
+	builder
+		.register(host, ForgeBackend::Dyn(DynForgeAdapter::new(client, project_root, worktree_root)))
+}
+
+fn map_worktree(op: ForgeOp, error: forge_worktree::Error) -> ForgeError {
+	match error {
+		forge_worktree::Error::Cancelled
+		| forge_worktree::Error::CheckoutMissing
+		| forge_worktree::Error::IncompletePlan
+		| forge_worktree::Error::GitFailed => ForgeError::Unavailable { op },
+	}
 }
 
 #[cfg(test)]
@@ -626,9 +685,11 @@ mod tests {
 	use omp_con::Ctx;
 	use omp_core::Str;
 	use omp_forge::{
-		ChangeRequest, ForgeError, ForgeHost as _, ForgeOp, Issue, IssueState, RepoRef, RequestState,
+		ChangeRequest, CheckoutPlan, CheckoutRequest, ForgeError, ForgeHost as _, ForgeOp, Issue,
+		IssueState, RepoRef, RequestState,
 	};
 	use omp_forge_delegated::{Delegated, PermitAll};
+	use omp_vcs::testing::run as git;
 	use parking_lot::Mutex;
 	use serde_json::{Value, json};
 
@@ -637,7 +698,7 @@ mod tests {
 		LiveForgeDeviceClient, forge_device_path, forge_op_for_path, paths, register_dyn_forge_host,
 	};
 	use crate::{
-		blobs::BlobHost, github::GithubService, github_adapter::GithubForgeAdapter,
+		blobs::BlobHost, forge_worktree, github::GithubService, github_adapter::GithubForgeAdapter,
 		github_url::GithubCredentialBridge, tool_settings::ForgeCacheSettings,
 	};
 
@@ -646,6 +707,7 @@ mod tests {
 		calls: Arc<Mutex<Vec<(String, Value)>>>,
 		cr:    ChangeRequest,
 		issue: Issue,
+		plan:  Option<CheckoutPlan>,
 	}
 
 	impl ForgeDeviceClient for FakeClient {
@@ -658,6 +720,10 @@ mod tests {
 			let result = match path {
 				paths::CHANGE_REQUEST_VIEW => Ok(serde_json::to_value(&self.cr).expect("cr")),
 				paths::ISSUE_VIEW => Ok(serde_json::to_value(&self.issue).expect("issue")),
+				paths::CHANGE_REQUEST_CHECKOUT => match &self.plan {
+					Some(plan) => Ok(serde_json::to_value(plan).expect("plan")),
+					None => Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestCheckout }),
+				},
 				other => {
 					let op = other
 						.strip_prefix("forge/")
@@ -668,6 +734,10 @@ mod tests {
 			};
 			std::future::ready(result)
 		}
+	}
+
+	fn roots(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+		(dir.to_path_buf(), forge_worktree::worktree_root(dir))
 	}
 
 	fn sample_repo(host: &str) -> RepoRef {
@@ -741,14 +811,16 @@ mod tests {
 			calls: Arc::clone(&calls),
 			cr:    sample_cr(host),
 			issue: sample_issue(host),
+			plan:  None,
 		};
 		let dir = tempfile::tempdir().expect("temp");
 		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let (project, trees) = roots(dir.path());
 		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
 		builder
 			.register("github.com", ForgeBackend::Github(github))
 			.expect("github");
-		register_dyn_forge_host(&mut builder, host, fake).expect("gitlab");
+		register_dyn_forge_host(&mut builder, host, fake, project, trees).expect("gitlab");
 		let router = builder.build();
 
 		let repo = sample_repo(host);
@@ -801,13 +873,69 @@ mod tests {
 			calls: Arc::new(Mutex::new(Vec::new())),
 			cr:    sample_cr(host),
 			issue: sample_issue(host),
+			plan:  None,
 		};
-		let adapter = DynForgeAdapter::new(fake);
+		let dir = tempfile::tempdir().expect("temp");
+		let (project, trees) = roots(dir.path());
+		let adapter = DynForgeAdapter::new(fake, project, trees);
 		let cr = adapter
 			.view_change_request(&sample_repo(host), 7)
 			.await
 			.expect("cr");
 		assert_eq!(cr.web_url.as_str(), "https://gitlab.example/acme/widget/-/merge_requests/7");
+	}
+
+	#[tokio::test]
+	async fn dyn_checkout_plan_yields_worktree_receipt() {
+		let host = "gitlab.example";
+		let dir = tempfile::tempdir().expect("temp");
+		let project = dir.path().join("project");
+		let remote = dir.path().join("remote.git");
+		let state = dir.path().join("state");
+		std::fs::create_dir_all(&project).expect("project");
+		git(&project, &["init", "-b", "main"]);
+		git(&project, &["config", "user.name", "omp"]);
+		git(&project, &["config", "user.email", "omp@example.test"]);
+		std::fs::write(project.join("README"), "hello\n").expect("write");
+		git(&project, &["add", "README"]);
+		git(&project, &["commit", "-m", "init"]);
+		git(&project, &["checkout", "-b", "topic"]);
+		std::fs::write(project.join("README"), "topic\n").expect("write");
+		git(&project, &["add", "README"]);
+		git(&project, &["commit", "-m", "topic"]);
+		git(&project, &["checkout", "main"]);
+		git(dir.path(), &["init", "--bare", remote.to_str().expect("utf8")]);
+		git(&project, &["remote", "add", "origin", remote.to_str().expect("utf8")]);
+		git(&project, &["push", "-u", "origin", "main"]);
+		git(&project, &["push", "origin", "topic"]);
+		let sha = git(&project, &["rev-parse", "topic"]).trim().to_owned();
+
+		let plan = CheckoutPlan {
+			repo:      sample_repo(host),
+			number:    7,
+			clone_url: Str::new(remote.to_string_lossy().as_ref()),
+			base_ref:  Str::new_static("main"),
+			head_ref:  Str::new_static("topic"),
+			head_sha:  Str::new(sha.as_str()),
+		};
+		let fake = FakeClient {
+			calls: Arc::new(Mutex::new(Vec::new())),
+			cr:    sample_cr(host),
+			issue: sample_issue(host),
+			plan:  Some(plan),
+		};
+		let trees = forge_worktree::worktree_root(&state);
+		let adapter = DynForgeAdapter::new(fake, project.clone(), trees.clone());
+		let receipt = adapter
+			.checkout_change_request(&CheckoutRequest::new(sample_repo(host), 7))
+			.await
+			.expect("checkout");
+		assert_eq!(receipt.number, 7);
+		assert_eq!(receipt.head_ref.as_str(), "topic");
+		assert_eq!(receipt.head.id.as_str(), sha);
+		let expected = forge_worktree::worktree_path(&trees, 7);
+		assert_eq!(receipt.worktree.as_str(), expected.to_string_lossy().as_ref());
+		assert!(expected.join("README").is_file());
 	}
 
 	#[tokio::test]
@@ -835,8 +963,15 @@ mod tests {
 		builder
 			.register("github.com", ForgeBackend::Github(github))
 			.expect("github");
-		register_dyn_forge_host(&mut builder, "gitlab.example", Counting(Arc::clone(&hits)))
-			.expect("gitlab");
+		let (project, trees) = roots(dir.path());
+		register_dyn_forge_host(
+			&mut builder,
+			"gitlab.example",
+			Counting(Arc::clone(&hits)),
+			project,
+			trees,
+		)
+		.expect("gitlab");
 		let router = builder.build();
 		let repo = RepoRef::try_new("github.com", "acme", "widget").unwrap();
 		let error = router
@@ -900,11 +1035,13 @@ mod tests {
 
 		let dir = tempfile::tempdir().expect("temp");
 		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let (project, trees) = roots(dir.path());
 		let mut builder = Delegated::<ForgeBackend<LiveForgeDeviceClient>, _>::builder(PermitAll);
 		builder
 			.register("github.com", ForgeBackend::Github(github))
 			.expect("github");
-		register_dyn_forge_host(&mut builder, GITLAB_HOST, client).expect("gitlab.com");
+		register_dyn_forge_host(&mut builder, GITLAB_HOST, client, project, trees)
+			.expect("gitlab.com");
 		let router = builder.build();
 
 		let repo = sample_repo(host);

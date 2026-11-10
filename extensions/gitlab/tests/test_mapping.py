@@ -15,10 +15,12 @@ if str(SRC) not in sys.path:
 from omp_gitlab.mapping import (  # noqa: E402
     issue_create_body,
     list_state_param,
+    map_checkout_plan,
     map_issue,
     map_merge_request,
     map_notes,
     map_project,
+    map_push_prep,
     map_request_state,
     map_search_page,
     merge_request_create_body,
@@ -63,6 +65,32 @@ class MergeRequestMappingTests(unittest.TestCase):
         self.assertEqual(map_request_state("merged"), "merged")
         self.assertEqual(map_request_state("closed"), "closed")
         self.assertEqual(map_request_state("opened"), "open")
+
+
+class CheckoutPlanMappingTests(unittest.TestCase):
+    def test_fixture_with_project_matches_checkout_plan(self) -> None:
+        mr = _load("merge_request.json")
+        project = _load("project.json")
+        assert isinstance(mr, dict)
+        assert isinstance(project, dict)
+        plan = map_checkout_plan(mr, REPO, project=project)
+        self.assertEqual(plan["repo"], REPO)
+        self.assertEqual(plan["number"], 7)
+        self.assertEqual(plan["clone_url"], "https://gitlab.com/acme/widget.git")
+        self.assertEqual(plan["base_ref"], "main")
+        self.assertEqual(plan["head_ref"], "topic")
+        self.assertEqual(plan["head_sha"], "bbb222")
+        self.assertNotIn("worktree", plan)
+
+    def test_push_prep_from_project(self) -> None:
+        mr = _load("merge_request.json")
+        project = _load("project.json")
+        assert isinstance(mr, dict)
+        assert isinstance(project, dict)
+        prep = map_push_prep(mr, REPO, project=project)
+        self.assertEqual(prep["clone_url"], "https://gitlab.com/acme/widget.git")
+        self.assertEqual(prep["head_ref"], "topic")
+        self.assertNotIn("worktree", prep)
 
 
 class IssueMappingTests(unittest.TestCase):

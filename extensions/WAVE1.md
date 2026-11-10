@@ -29,16 +29,17 @@ and `github.com` are registered on the dyn forge arm** (same bound client).
 **DONE:** self-hosted host registration via `sv_forge_dyn_hosts` + adapter env
 `GITLAB_HOST` (checkout hosts in that set route to Dyn; GHE listed there also
 routes to Dyn / `omp_github`). SessionHost bound-client threading for
-`forge@1` / numbered `pr://` is DONE. Checkout / push stay unmounted (ADR
-D2.4). **DONE:** GitHub T2 read+create via dyn. **DONE:** `ci/*` dyn bridge +
-T2 CI extension body (`extensions/ci/` mounts `status` / `log_stream` /
-`capabilities`; Actions + GitLab CI backends). **`github.com` and
-`gitlab.com` CI are on the Dyn arm** (same bound `LiveCiDeviceClient`; caps
-`log_stream` only). **DONE:** search leaves (`forge/search_change_requests`,
-`forge/search_issues`) + list-URL / `GithubResolver` parity via
-`ForgeHost::search` (cached without etag). In-core `github.rs` **remains**
-until Dyn checkout/push (D2.4) allow deletion. Remaining: checkout/push on
-Dyn; full automatic device-catalog host-claim discovery (smaller TODO). See
+`forge@1` / numbered `pr://` is DONE. **DONE:** Dyn checkout/push (D2.4) —
+plan / push-prep from adapters, core `forge_worktree`. **DONE:** GitHub T2
+read+create via dyn. **DONE:** `ci/*` dyn bridge + T2 CI extension body
+(`extensions/ci/` mounts `status` / `log_stream` / `capabilities`; Actions +
+GitLab CI backends). **`github.com` and `gitlab.com` CI are on the Dyn arm**
+(same bound `LiveCiDeviceClient`; caps `log_stream` only). **DONE:** search
+leaves (`forge/search_change_requests`, `forge/search_issues`) + list-URL /
+`GithubResolver` parity via `ForgeHost::search` (cached without etag).
+In-core `github.rs` **remains** for GHE CI, credential bridge, and residual
+`GithubService` Operations — not for forge@1 checkout/push git. Remaining:
+full automatic device-catalog host-claim discovery (smaller TODO). See
 package READMEs.
 
 ## May grow
