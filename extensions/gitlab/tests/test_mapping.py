@@ -13,11 +13,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from omp_gitlab.mapping import (  # noqa: E402
+    issue_create_body,
     map_issue,
     map_merge_request,
     map_notes,
     map_project,
     map_request_state,
+    merge_request_create_body,
     project_path,
 )
 
@@ -89,6 +91,68 @@ class NotesMappingTests(unittest.TestCase):
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0]["author"], "alice")
         self.assertEqual(comments[0]["body"], "looks good")
+
+
+class MergeRequestCreateBodyTests(unittest.TestCase):
+    def test_fixture_maps_change_request_draft(self) -> None:
+        draft = _load("change_request_draft.json")
+        assert isinstance(draft, dict)
+        body = merge_request_create_body(draft)
+        self.assertEqual(
+            body,
+            {
+                "title": "Fix the widget",
+                "source_branch": "topic",
+                "target_branch": "main",
+                "description": "details",
+                "draft": True,
+            },
+        )
+        # repo is client-side only — never in the GitLab POST body
+        self.assertNotIn("repo", body)
+        self.assertNotIn("base", body)
+        self.assertNotIn("head", body)
+        self.assertNotIn("body", body)
+
+    def test_omits_empty_description_and_false_draft(self) -> None:
+        body = merge_request_create_body(
+            {
+                "repo": REPO,
+                "title": "t",
+                "body": "",
+                "base": "main",
+                "head": "topic",
+                "draft": False,
+            }
+        )
+        self.assertEqual(
+            body,
+            {
+                "title": "t",
+                "source_branch": "topic",
+                "target_branch": "main",
+            },
+        )
+
+
+class IssueCreateBodyTests(unittest.TestCase):
+    def test_fixture_maps_issue_draft(self) -> None:
+        draft = _load("issue_draft.json")
+        assert isinstance(draft, dict)
+        body = issue_create_body(draft)
+        self.assertEqual(
+            body,
+            {
+                "title": "Bug",
+                "description": "steps",
+            },
+        )
+        self.assertNotIn("repo", body)
+        self.assertNotIn("body", body)
+
+    def test_omits_empty_description(self) -> None:
+        body = issue_create_body({"repo": REPO, "title": "t", "body": ""})
+        self.assertEqual(body, {"title": "t"})
 
 
 if __name__ == "__main__":

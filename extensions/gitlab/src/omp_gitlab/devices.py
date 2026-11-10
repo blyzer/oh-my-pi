@@ -1,8 +1,8 @@
 """Dyn ``forge/*`` device mounts for the GitLab adapter.
 
-Declares a dynamic parent with ``omp.devices.parent`` and mounts the read
-surface at ``extension_activate`` through ``omp.devices.dynamic_mount``. That
-puts leaves in envd's ``DeviceControlFactory`` catalog so
+Declares a dynamic parent with ``omp.devices.parent`` and mounts the read and
+create surfaces at ``extension_activate`` through ``omp.devices.dynamic_mount``.
+That puts leaves in envd's ``DeviceControlFactory`` catalog so
 ``LiveForgeDeviceClient`` can dispatch ``omp.devices.call`` (ADR 0049 D2.8).
 """
 
@@ -39,6 +39,13 @@ def _number(args: dict[str, Any], *, op: str) -> int:
     return raw
 
 
+def _draft(args: dict[str, Any], *, op: str) -> dict[str, Any]:
+    draft = args.get("draft")
+    if not isinstance(draft, dict):
+        raise ForgeUnavailable(op, "args.draft must be an object")
+    return draft
+
+
 async def repo_view(args: dict[str, Any]) -> dict[str, Any]:
     return client.view_repo(_repo(args))
 
@@ -64,7 +71,15 @@ async def list_comments(args: dict[str, Any]) -> list[dict[str, str]]:
     return client.list_comments(_repo(args), _number(args, op=op), kind)
 
 
-_READ_LEAVES: tuple[MountSpec, ...] = (
+async def change_request_create(args: dict[str, Any]) -> dict[str, Any]:
+    return client.create_change_request(_draft(args, op="change_request_create"))
+
+
+async def issue_create(args: dict[str, Any]) -> dict[str, Any]:
+    return client.create_issue(_draft(args, op="issue_create"))
+
+
+_LEAVES: tuple[MountSpec, ...] = (
     MountSpec(
         subpath="repo_view",
         body=repo_view,
@@ -95,14 +110,28 @@ _READ_LEAVES: tuple[MountSpec, ...] = (
         schema=_ARGS_SCHEMA,
         summary="List notes on a merge request or issue",
     ),
+    MountSpec(
+        subpath="change_request_create",
+        body=change_request_create,
+        schema=_ARGS_SCHEMA,
+        summary="Create a GitLab merge request from ChangeRequestDraft",
+    ),
+    MountSpec(
+        subpath="issue_create",
+        body=issue_create,
+        schema=_ARGS_SCHEMA,
+        summary="Create a GitLab issue from IssueDraft",
+    ),
 )
 
 
 @omp.hook("extension_activate")
 async def mount_forge_leaves(_event: object) -> None:
-    """Mount the read surface into the host dynamic device catalog."""
-    await FORGE_PARENT.mount_many(*_READ_LEAVES)
+    """Mount the read + create surface into the host dynamic device catalog."""
+    await FORGE_PARENT.mount_many(*_LEAVES)
 
 
-# Write / search / checkout surfaces stay unmounted. DynForgeAdapter calls that
+# Search / checkout / push stay unmounted. Checkout and push need honest
+# CheckoutReceipt / PushReceipt (local worktree + git); ADR D2.4 keeps that
+# work in core, so this adapter does not fake them. DynForgeAdapter calls that
 # reach a missing leaf become ForgeError::Unavailable via the live client.

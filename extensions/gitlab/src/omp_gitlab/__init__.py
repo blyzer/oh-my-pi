@@ -1,6 +1,6 @@
 """GitLab T2 forge adapter (ADR 0049 D2.8).
 
-Import mounts ``forge`` + read subtools. Mapping helpers stay importable
+Import mounts ``forge`` + read/create subtools. Mapping helpers stay importable
 without the ``omp`` runtime for unit tests.
 """
 
