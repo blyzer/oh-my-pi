@@ -1057,6 +1057,8 @@ async fn test_connection_scoped(
 		schedules,
 		Arc::new(AuthorityTable::default()),
 		state.path(),
+		#[cfg(feature = "cap-forge")]
+		crate::github_adapter::LiveForgeDeviceClient::default(),
 	));
 	let grants = Grants::supported(capabilities.iter().copied());
 	server

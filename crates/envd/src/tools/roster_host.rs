@@ -257,7 +257,10 @@ impl SessionInstall for SessionHost<'_> {
 
 	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter {
-		crate::github_adapter::forge_router(self.ensure_github())
+		crate::github_adapter::forge_router(
+			self.ensure_github(),
+			crate::github_adapter::LiveForgeDeviceClient::default(),
+		)
 	}
 
 	#[cfg(feature = "cap-ci")]
@@ -578,7 +581,10 @@ impl<'a> EnvironmentHost<'a> {
 				Arc::clone(&self.forge_cache),
 				self.blobs.clone(),
 			);
-			crate::github_adapter::forge_router(github)
+			crate::github_adapter::forge_router(
+				github,
+				crate::github_adapter::LiveForgeDeviceClient::default(),
+			)
 		};
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,
