@@ -45,8 +45,27 @@ neutralized to `forge_url.rs` (credentials / `pr://` / `issue://` /
 **DONE:** crate module `github_adapter` → `forge_adapter` (`dyn_forge` /
 `dyn_ci` filenames kept). **DONE:** conformance CI + first-cut manifest effect
 checks (`just check-extensions` / `python3 scripts/check-extension-conformance.py`;
-CI job `First-party extension conformance`). Remaining Phase 5: rescue wave 1
-+ ADR 0046 item 4. See package READMEs.
+CI job `First-party extension conformance`). **DONE:** rescue wave 1 — eight
+ports restored under `extensions/` against the frozen API (see
+[`RESCUE.md`](RESCUE.md)); several keep documented Gaps (`state_dir` standing
+in for removed typed journal/`omp.state` APIs). Remaining Phase 5 OPEN: ADR
+0046 item 4 (UI-bound ports). See package READMEs.
+
+## Rescue wave 1
+
+| Path | Role |
+|---|---|
+| [`pr-review/`](pr-review/) | Parallel model-tiered PR review |
+| [`green-loop/`](green-loop/) | Affected-test feedback |
+| [`workflows/`](workflows/) | Declarative subagent DAGs |
+| [`remote-approve/`](remote-approve/) | Remote approval relay |
+| [`search-provider/`](search-provider/) | Brave search provider |
+| [`provider-pack/`](provider-pack/) | Extra provider catalog data |
+| [`fuzzy-index/`](fuzzy-index/) | Warm fuzzy path/content index |
+| [`spec-flow/`](spec-flow/) | Spec brainstorm→plan→apply→archive |
+
+UI-bound ports (`sidebar`, `hover-cards`, `welcome-chrome`) wait for ADR 0046
+item 4.
 
 ## Conformance gate
 
@@ -55,14 +74,9 @@ just check-extensions
 # or: python3 scripts/check-extension-conformance.py
 ```
 
-Manifests must declare closed-vocab `capabilities` (wave-1 packages include
-`env.net.fetch`). Package `tests/` run with the PYTHONPATHs in each README.
-Frozen `omp.*` import smoke uses native stubs (no live host).
-
-## May grow
-
-Further wave-1 ports (rescued v1 surfaces, other CI vendors, BuildBuddy behind
-execution `Delegated`, …) are TBD. Candidates from ADR 0049 D5 remain:
-`pr-review`, `green-loop`, `workflows`, `remote-approve`, `search-provider`,
-`provider-pack`, `fuzzy-index`, `spec-flow`. UI-bound ports wait for ADR 0046
-item 4.
+Manifests must declare closed-vocab `capabilities`. Hard `env.net.fetch`
+applies to forge/ci/github/gitlab (and any package that declares network use),
+**not** every `extensions/*` package. Package `tests/` run with the
+PYTHONPATHs in each README. Frozen `omp.*` import smoke uses native stubs (no
+live host); rescue public modules are import-clean under stubs; device modules
+that bind at import are smuggled like forge/ci `devices` where feasible.

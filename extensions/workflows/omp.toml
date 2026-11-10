@@ -1,0 +1,22 @@
+id = "omp.workflows"
+name = "Workflows"
+version = "0.1.0"
+omp_api = 1
+description = "Run resumable, budgeted subagent DAGs in atomic topological waves."
+entry = "omp_workflows"
+capabilities = []
+
+[[declarations]]
+id = "workflow"
+kind = "soft"
+module = "omp_workflows.device"
+key = "agents@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"
+
+[settings]
+workflow = ""

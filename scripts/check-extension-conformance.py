@@ -10,23 +10,29 @@ Checks (fail closed, multi-line report):
 
 A. Manifest effect checks (D4) for every ``extensions/*/omp.toml``:
    required keys ``id``, ``name``, ``version``, ``omp_api``, ``entry``,
-   ``capabilities`` (list); wave-1 network packages must declare
-   ``env.net.fetch``; every capability string must be a closed-vocab token
-   (frozen ``omp.Capability`` values, envd DATA grants, plus the D4
-   first-cut fetch spelling ``env.net.fetch``); refuse any
-   ``extensions/**/Cargo.toml``; backends ``omp.github`` / ``omp.gitlab``
-   must not declare a soft ``forge`` or ``ci`` parent.
+   ``capabilities`` (list); forge/ci/github/gitlab (and any package that
+   already lists a network capability) must declare ``env.net.fetch`` —
+   rescue packages without network use are not forced; every capability
+   string must be a closed-vocab token (frozen ``omp.Capability`` values,
+   envd DATA grants, plus the D4 first-cut fetch spelling
+   ``env.net.fetch``); refuse any ``extensions/**/Cargo.toml``; backends
+   ``omp.github`` / ``omp.gitlab`` must not declare a soft ``forge`` or
+   ``ci`` parent.
 
 B. Unit tests: for each ``extensions/<pkg>/tests/``, run
    ``python3 -m unittest discover`` with PYTHONPATH matching package
-   READMEs (forge/ci include sibling github+gitlab ``src``).
+   READMEs (forge/ci include sibling github+gitlab ``src``). Rescue wave-1
+   packages are included in discovery via their ``omp.toml``.
 
 C. Frozen API import smoke (no live host): install ``_omp`` stubs (same
    pattern as ``scripts/check-python-examples.py``, with stub metaclass
    dunder filtering and a ``Fault.__init_subclass__`` repair so host
    CPython can ``import omp`` without the native extension), then import
-   wave-1 mapping/dispatch modules and catalog ``devices`` modules (they
-   bind ``omp.devices.parent`` at import time but succeed under stubs).
+   wave-1 mapping/dispatch modules, catalog ``devices`` modules (they
+   bind ``omp.devices.parent`` at import time but succeed under stubs),
+   and rescue public modules (pure helpers / ``__init__``). Device modules
+   that register at import are smuggled like forge/ci ``devices`` where
+   feasible; CONTROL-at-import skips stay documented in package READMEs.
 
 Exit 0 prints a short OK summary; non-zero prints every failure.
 """
@@ -47,8 +53,25 @@ _ROOT = Path(__file__).resolve().parents[1]
 _EXTENSIONS = _ROOT / "extensions"
 _PYTHON = _ROOT / "crates" / "py" / "python"
 
-# Wave-1 packages that perform network I/O and must declare env.net.fetch.
+# Forge/CI network packages that must declare env.net.fetch.
 _WAVE1_NETWORK = frozenset({"forge", "ci", "github", "gitlab"})
+
+# Rescue wave-1 package directory names (ADR 0049 D5). Must keep tests/.
+_RESCUE_WAVE1 = frozenset(
+	{
+		"pr-review",
+		"green-loop",
+		"workflows",
+		"remote-approve",
+		"search-provider",
+		"provider-pack",
+		"fuzzy-index",
+		"spec-flow",
+	}
+)
+
+# Capability tokens that imply network use (trigger env.net.fetch requirement).
+_NETWORK_CAPABILITY_HINTS = frozenset({"env.net", "env.net.fetch"})
 
 # Backends that must not compete for forge/* or ci/* mount ownership.
 _BACKEND_IDS = frozenset({"omp.github", "omp.gitlab"})
@@ -91,6 +114,27 @@ _SMOKE_MODULES = (
 	"omp_ci_ext.dispatch",
 	"omp_forge_ext.devices",
 	"omp_ci_ext.devices",
+	# Rescue public modules (import-clean pure helpers / package roots).
+	"omp_pr_review",
+	"omp_green_loop",
+	"omp_workflows",
+	"omp_remote_approve",
+	"omp_search_provider",
+	"omp_provider_pack",
+	"omp_fuzzy_index",
+	"omp_spec_flow",
+)
+
+# Device modules that register at import (succeed under stubs like forge devices).
+_SMOKE_DEVICE_MODULES = (
+	"omp_provider_pack.device",
+	"omp_pr_review.device",
+	"omp_fuzzy_index.device",
+	"omp_search_provider.device",
+	"omp_remote_approve.device",
+	"omp_workflows.device",
+	"omp_green_loop.device",
+	"omp_spec_flow.device",
 )
 
 _REQUIRED_MANIFEST_KEYS = (
@@ -193,8 +237,8 @@ def _install_native_stubs() -> None:
 	sys.modules["_omp_url_vocab"] = vocab
 
 
-def _fault_init_subclass(cls: type, **kwargs: Any) -> None:
-	"""``object.__init_subclass__`` stand-in for slots+``Fault`` on host CPython."""
+def _verdict_init_subclass(cls: type, **kwargs: Any) -> None:
+	"""``object.__init_subclass__`` stand-in for slots+verdict bases on host CPython."""
 
 	object.__init_subclass__(**kwargs)
 	from omp._verdicts import _validate_verdict_schema
@@ -202,13 +246,24 @@ def _fault_init_subclass(cls: type, **kwargs: Any) -> None:
 	_validate_verdict_schema(cls)
 
 
+def _patch_verdict_bases(omp: Any) -> None:
+	"""Repair ``Fault`` / ``Payload`` ``__init_subclass__`` for offline smoke."""
+
+	for name in ("Fault", "Payload"):
+		base = getattr(omp, name, None)
+		if base is None:
+			continue
+		base.__init_subclass__ = classmethod(_verdict_init_subclass)  # type: ignore[method-assign]
+
+
 def _install_fault_patch() -> None:
-	"""Repair ``Fault.__init_subclass__`` before ``omp.env`` loads.
+	"""Repair verdict ``__init_subclass__`` before ``omp.env`` loads.
 
 	``@dataclass(..., slots=True)`` plus ``super().__init_subclass__`` fails on
 	host CPython (``TypeError: super(type, obj)...``). The embedded host is not
 	exercised here; replace with ``object.__init_subclass__`` for the offline
-	smoke only.
+	smoke only. Applies to both ``Fault`` and ``Payload`` (rescue device
+	modules subclass both).
 	"""
 
 	class Hook(importlib.abc.MetaPathFinder):
@@ -217,9 +272,9 @@ def _install_fault_patch() -> None:
 			if fullname != "omp.env":
 				return None
 			omp = sys.modules.get("omp")
-			if omp is None or not hasattr(omp, "Fault"):
+			if omp is None:
 				return None
-			omp.Fault.__init_subclass__ = classmethod(_fault_init_subclass)  # type: ignore[method-assign]
+			_patch_verdict_bases(omp)
 			return None
 
 	sys.meta_path.insert(0, Hook())
@@ -261,10 +316,14 @@ def _check_manifest(pkg: Path, errors: list[str]) -> None:
 		):
 			errors.append(f"{rel}: `capabilities` must be a list of non-empty strings")
 			capabilities = []
-		elif pkg.name in _WAVE1_NETWORK and "env.net.fetch" not in capabilities:
-			errors.append(
-				f"{rel}: wave-1 network package must include capability `env.net.fetch`"
+		else:
+			needs_fetch = pkg.name in _WAVE1_NETWORK or any(
+				cap in _NETWORK_CAPABILITY_HINTS for cap in capabilities
 			)
+			if needs_fetch and "env.net.fetch" not in capabilities:
+				errors.append(
+					f"{rel}: network package must include capability `env.net.fetch`"
+				)
 		for cap in capabilities if isinstance(capabilities, list) else []:
 			if isinstance(cap, str) and cap and cap not in _KNOWN_CAPABILITIES:
 				errors.append(f"{rel}: unknown capability `{cap}` (not in closed vocab)")
@@ -332,7 +391,15 @@ def _smoke_imports(errors: list[str], summary: list[str]) -> None:
 	python_root = str(_PYTHON)
 	if python_root not in sys.path:
 		sys.path.insert(0, python_root)
-	for sibling in ("forge", "ci", "github", "gitlab"):
+	for sibling in sorted(
+		{
+			"forge",
+			"ci",
+			"github",
+			"gitlab",
+			*_RESCUE_WAVE1,
+		}
+	):
 		src = str(_EXTENSIONS / sibling / "src")
 		if src not in sys.path:
 			sys.path.insert(0, src)
@@ -342,10 +409,11 @@ def _smoke_imports(errors: list[str], summary: list[str]) -> None:
 	except Exception as error:  # pragma: no cover - stub/host skew
 		errors.append(f"frozen API: import omp failed: {type(error).__name__}: {error}")
 		return
+	_patch_verdict_bases(omp)
 	summary.append("import omp: ok (native stubs)")
 
 	imported: list[str] = []
-	for module in _SMOKE_MODULES:
+	for module in _SMOKE_MODULES + _SMOKE_DEVICE_MODULES:
 		try:
 			importlib.import_module(module)
 		except Exception as error:
@@ -377,9 +445,14 @@ def main() -> int:
 		_run_unit_tests(pkg, errors, summary)
 
 	tested = [pkg.name for pkg in packages if (pkg / "tests").is_dir()]
-	missing_tests = sorted(_WAVE1_NETWORK - set(tested))
+	required_tests = _WAVE1_NETWORK | _RESCUE_WAVE1
+	missing_tests = sorted(required_tests - set(tested))
 	for name in missing_tests:
 		errors.append(f"extensions/{name}/tests: wave-1 package is missing a tests/ directory")
+
+	missing_rescue = sorted(_RESCUE_WAVE1 - {pkg.name for pkg in packages})
+	for name in missing_rescue:
+		errors.append(f"extensions/{name}/omp.toml: rescue wave-1 package is missing")
 
 	_smoke_imports(errors, summary)
 

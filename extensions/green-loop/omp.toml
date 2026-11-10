@@ -1,0 +1,25 @@
+id = "omp.green-loop"
+name = "Green loop"
+version = "0.1.0"
+omp_api = 1
+description = "Affected-test feedback after settled edits, on demand or after agent idle."
+entry = "omp_green_loop"
+capabilities = ["env.exec", "schedules:project"]
+
+[[declarations]]
+id = "green"
+kind = "command"
+module = "omp_green_loop.device"
+key = "green"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[requires]
+python = ">=3.14"
+
+[settings]
+idle = "20s"
+timeout = "10m"
+test_runner = ""
+affected = { node = { patterns = ["*.js", "*.jsx", "*.mjs", "*.cjs", "*.ts", "*.tsx"], command = "npm test -- --findRelatedTests {paths}" }, python = { patterns = ["*.py"], command = "python3 -m pytest {paths}" }, go = { patterns = ["*.go"], command = "go test ./..." }, rust = { patterns = ["*.rs"], command = "cargo test" }, make = { patterns = ["Makefile", "*.mk"], command = "make test" } }

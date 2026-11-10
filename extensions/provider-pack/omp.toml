@@ -1,0 +1,46 @@
+id = "omp.provider-pack"
+name = "Provider pack"
+version = "0.1.0"
+omp_api = 1
+description = "Pure-data Moonshot, Z.ai, Alibaba, and OVH provider catalog"
+entry = "omp_provider_pack"
+capabilities = []
+
+[[declarations]]
+id = "moonshot"
+kind = "provider"
+module = "omp_provider_pack.device"
+key = "moonshot@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "zai-glm"
+kind = "provider"
+module = "omp_provider_pack.device"
+key = "zai-glm@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "alibaba-dashscope"
+kind = "provider"
+module = "omp_provider_pack.device"
+key = "alibaba-dashscope@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "ovhai"
+kind = "provider"
+module = "omp_provider_pack.device"
+key = "ovhai@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[requires]
+python = ">=3.14"
