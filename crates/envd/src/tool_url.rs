@@ -47,7 +47,7 @@ use crate::github_adapter;
 /// Forge router the production `pr://` and `issue://` resolvers read through.
 #[cfg(feature = "cap-forge")]
 type SchemeForge = omp_forge_delegated::Delegated<
-	github_adapter::GithubForgeAdapter,
+	github_adapter::ForgeBackend,
 	omp_forge_delegated::PermitAll,
 >;
 

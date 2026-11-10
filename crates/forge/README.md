@@ -39,3 +39,7 @@ ADR 0049 D2 places the forge contract in core. It meets the T1 test because
 `pr://` and `issue://` are first-class schemes with selectors, and checkout and
 push coordinate repository mutation. The crate does not hold credentials.
 Vendor adapters stay outside the workspace and are not part of this crate.
+T2 extensions back `ForgeHost` through the dyn `forge/*` device schema
+documented in [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
+(ADR 0049 D2.3); envd's `DynForgeAdapter` / `ForgeBackend` are the in-core
+bridge.

@@ -1,26 +1,31 @@
 # gitlab (placeholder)
 
-**Not implemented yet.** This directory reserves the wave-1 GitLab forge
-adapter (ADR 0049 D2.8).
+**Adapter body not implemented yet.** This directory reserves the wave-1
+GitLab forge adapter (ADR 0049 D2.8).
 
-## Planned shape
+## Bridge status (D2.3)
 
-- Implement a GitLab `ForgeHost` behind the neutral forge contract
-  ([`omp-forge`](../../crates/forge/README.md)).
-- Register as a dyn device under `forge/*` over `toolhost.v1` (ADR 0049 D2.3),
-  or mount an MCP server that the Delegated router can reach.
-- Prove the contract before the in-core GitHub adapter is replaced (D2.8).
+The dyn `forge/*` device bridge is landed in core:
 
-## Why no `omp.toml` yet
+- Schema (paths + JSON args/results):
+  [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md)
+- Envd: `DynForgeAdapter` + `ForgeBackend { Github, Dyn }` +
+  `register_dyn_forge_host` under `cap-forge`
+  (`crates/envd/src/github_adapter/dyn_forge.rs`)
 
-There is currently no Python `ForgeHost` registration surface and no checked-in
-`forge/*` device schema for adapters to declare. An `omp.toml` stub that named
-those APIs would invent undeclared capabilities. This README is the honest
-placeholder until the dyn `forge/*` bridge and adapter body land.
+GitLab should mount those `forge/<op>` devices and answer `omp.devices.call`.
+Do not edit Cargo-workspace vendor code to add GitLab.
+
+## Still to implement (D2.8)
+
+- Python `ForgeHost` body that speaks GitLab HTTP behind the schema above
+- Live registration of `gitlab.com` (and checkout host) via
+  `register_dyn_forge_host` / extension host claims
+- Optional `omp.toml` once mounts and the Python surface are real
 
 ## Related
 
 - Contract: `crates/forge` (`ForgeHost`, `ForgeOp`, `pr://` / `issue://`)
 - Router: `crates/forge-delegated`
-- ADR: `docs/adr/0049-tiered-integration-architecture.md` (D2.3, D2.8, Amendment
-  2026-11-10)
+- ADR: `docs/adr/0049-tiered-integration-architecture.md` (D2.3 DONE for the
+  bridge; D2.8 OPEN for this adapter)

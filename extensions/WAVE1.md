@@ -7,7 +7,7 @@ maintainers / this tree.
 
 | Extension | Role | ADR |
 |---|---|---|
-| **gitlab** | GitLab forge adapter proving `omp-forge` (D2.8) via dyn `forge/*` over toolhost (D2.3) | [0049](../docs/adr/0049-tiered-integration-architecture.md) |
+| **gitlab** | GitLab forge adapter proving `omp-forge` (D2.8) via dyn `forge/*` over toolhost (D2.3 DONE — schema + envd bridge; adapter body OPEN) | [0049](../docs/adr/0049-tiered-integration-architecture.md), [schema](../docs/adr/0049-forge-dyn-device-schema.md) |
 
 Scaffold only today: see [`gitlab/README.md`](gitlab/README.md). The adapter
 body is **not** implemented yet.
