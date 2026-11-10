@@ -45,8 +45,12 @@ omp-catalog.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
 omp-desktop = { workspace = true, optional = true }
+omp-ci.workspace = true
+omp-ci-delegated.workspace = true
 omp-env.workspace = true
 omp-exec.workspace = true
+omp-forge.workspace = true
+omp-forge-delegated.workspace = true
 omp-ext.workspace = true
 bytecount.workspace = true
 grep-matcher.workspace = true

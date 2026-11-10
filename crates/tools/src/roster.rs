@@ -22,6 +22,8 @@
 
 use std::sync::Arc;
 
+use omp_ci::CiHost;
+use omp_forge::{ForgeError, ForgeHost, RepoRef};
 use omp_memory::Capabilities;
 use omp_tool::{
 	Claims, Precedence, Presentation, Registry, RegistryError, Rev, Tool, ToolSpec, ToolsPolicy,
@@ -31,8 +33,8 @@ use strum::{EnumIter, IntoStaticStr};
 #[cfg(feature = "cap-media")]
 use crate::ask::AskVocalizer;
 use crate::{
-	ask::AskPresenter, checkpoint::CheckpointControl, github::GithubHost, goal::GoalControl,
-	grep::SearchPolicy, read::ReadPolicy, shell::ShellPromptSnapshot, web_search::SearchBackend,
+	ask::AskPresenter, checkpoint::CheckpointControl, goal::GoalControl, grep::SearchPolicy,
+	read::ReadPolicy, shell::ShellPromptSnapshot, web_search::SearchBackend,
 };
 
 /// Stable identity of one production native tool family.
@@ -167,8 +169,10 @@ pub enum Family {
 	Tts,
 	/// `report_issue`.
 	ReportIssue,
-	/// `github`.
-	Github,
+	/// `forge`.
+	Forge,
+	/// `ci`.
+	Ci,
 	/// `web_search`.
 	WebSearch,
 	/// `todo`.
@@ -355,7 +359,7 @@ use PresentationClass as Present;
 
 /// Production construction order.
 ///
-/// Order is load-bearing: telemetry upload starts when `github` is built,
+/// Order is load-bearing: telemetry upload starts when `forge` is built,
 /// resource resolvers are created between [`InstallPhase::EnvironmentEarly`]
 /// and [`InstallPhase::Environment`], and `bash` is last so its sibling list
 /// sees the slots registered before it.
@@ -398,7 +402,18 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		BridgeNeeds::TELEMETRY,
 	),
 	same(
-		Family::Github,
+		Family::Forge,
+		false,
+		true,
+		Phase::Session,
+		false,
+		Present::LongTail,
+		Claim::BuiltinDevice,
+		false,
+		BridgeNeeds::GITHUB.or(BridgeNeeds::BLOBS),
+	),
+	same(
+		Family::Ci,
 		false,
 		true,
 		Phase::Session,
@@ -854,7 +869,8 @@ pub const fn phase_of(family: Family) -> InstallPhase {
 		Family::ImageGen
 		| Family::Tts
 		| Family::ReportIssue
-		| Family::Github
+		| Family::Forge
+		| Family::Ci
 		| Family::WebSearch
 		| Family::Todo
 		| Family::Ask
@@ -1015,6 +1031,10 @@ pub trait SessionInstall: ToolGate {
 	type Goal: GoalControl;
 	/// Checkpoint and rewind share one control value.
 	type Checkpoint: CheckpointControl;
+	/// Forge router. The host owns the concrete delegated adapter.
+	type ForgeRouter: ForgeHost;
+	/// CI router. The host owns the concrete delegated adapter.
+	type CiRouter: CiHost;
 
 	/// Registers one session-locus tool using the row's presentation and claims.
 	fn register_session<T: Tool>(
@@ -1040,8 +1060,13 @@ pub trait SessionInstall: ToolGate {
 	fn report_tool(&mut self) -> Self::Report;
 	/// Search backend shared with the media devices.
 	fn search_backend(&self) -> Arc<Self::Search>;
-	/// GitHub service. Starts telemetry upload the first time it is built.
-	fn github_host(&mut self) -> Arc<dyn GithubHost>;
+	/// Forge router. Building it starts telemetry upload the first time the
+	/// shared GitHub service is created. `forge` is installed before `ci`.
+	fn forge_router(&mut self) -> Self::ForgeRouter;
+	/// CI router over the same GitHub service as [`Self::forge_router`].
+	fn ci_router(&mut self) -> Self::CiRouter;
+	/// Checkout repository used when a forge call omits `repo`.
+	fn current_repo(&self) -> Arc<dyn Fn() -> Result<RepoRef, ForgeError> + Send + Sync>;
 	/// Ask presenter.
 	fn ask_presenter(&self) -> Arc<dyn AskPresenter>;
 	/// Ask speech vocalizer.
@@ -1230,9 +1255,14 @@ fn install_session_row<H: SessionInstall>(
 			let tool = host.report_tool();
 			host.register_session(tool, row)
 		},
-		Family::Github => {
-			let service = host.github_host();
-			host.register_session(crate::github::tool(service), row)
+		Family::Forge => {
+			let router = host.forge_router();
+			let current = host.current_repo();
+			host.register_session(crate::forge::tool(router, current), row)
+		},
+		Family::Ci => {
+			let router = host.ci_router();
+			host.register_session(crate::ci::tool(router), row)
 		},
 		Family::WebSearch => {
 			let backend = host.search_backend();
@@ -1311,7 +1341,8 @@ pub fn install_composer<H: ComposerInstall>(host: &mut H, roster: &SelectedRoste
 			Family::ImageGen
 			| Family::Tts
 			| Family::ReportIssue
-			| Family::Github
+			| Family::Forge
+			| Family::Ci
 			| Family::WebSearch
 			| Family::Todo
 			| Family::Ask
@@ -1476,7 +1507,8 @@ fn declare_row<H: EnvironmentDeclare>(host: &mut H, row: &BuiltinRosterEntry) {
 		Family::ImageGen
 		| Family::Tts
 		| Family::ReportIssue
-		| Family::Github
+		| Family::Forge
+		| Family::Ci
 		| Family::WebSearch
 		| Family::Todo
 		| Family::Ask
@@ -1612,7 +1644,8 @@ fn construct_row<H: EnvironmentInstall>(
 		Family::ImageGen
 		| Family::Tts
 		| Family::ReportIssue
-		| Family::Github
+		| Family::Forge
+		| Family::Ci
 		| Family::WebSearch
 		| Family::Todo
 		| Family::Ask

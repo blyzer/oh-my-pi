@@ -1,8 +1,10 @@
-//! Native GitHub, browser, and computer renderers.
+//! Native forge, CI, browser, and computer renderers.
 
 use std::fmt::Write as _;
 
+use omp_ci::CiOp;
 use omp_core::{Str, sf};
+use omp_forge::ForgeOp;
 use omp_tool::{CallOutcome, ToolIdentity, render::RenderFold};
 use serde_json::Value;
 
@@ -12,39 +14,34 @@ use crate::{
 		Action as BrowserAction, Fault as BrowserFault, Payload as BrowserPayload,
 		Update as BrowserUpdate,
 	},
+	ci::{Fault as CiFault, Payload as CiPayload, Update as CiUpdate},
 	computer::{Fault as ComputerFault, Payload as ComputerPayload, Update as ComputerUpdate},
+	forge::{Fault as ForgeFault, Payload as ForgePayload, Update as ForgeUpdate},
 	gallery::RendererGalleryFixture,
-	github::{
-		Fault as GithubFault, Operation as GithubOperation, Payload as GithubPayload,
-		Update as GithubUpdate,
-	},
 	view,
 };
 
 #[derive(Default)]
-pub(super) struct GithubState {
-	op:       Option<GithubOperation>,
+pub(super) struct ForgeState {
+	op:       Option<ForgeOp>,
 	repo:     Option<Str>,
 	query:    Option<Str>,
 	progress: Option<Str>,
 }
 
-pub(super) struct GithubRenderer;
+pub(super) struct ForgeRenderer;
 
-impl RenderFold for GithubRenderer {
-	type Outcome = CallOutcome<GithubPayload, GithubFault>;
-	type State = GithubState;
-	type Update = GithubUpdate;
+impl RenderFold for ForgeRenderer {
+	type Outcome = CallOutcome<ForgePayload, ForgeFault>;
+	type State = ForgeState;
+	type Update = ForgeUpdate;
 
-	fn fold(&self, state: &mut Self::State, update: Self::Update) {
-		state.op = Some(update.op);
-		state.progress = Some(update.output);
-	}
+	fn fold(&self, _state: &mut Self::State, _update: Self::Update) {}
 
 	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.op = args
 			.get("op")
-			.and_then(|value| value.deserialize_into::<GithubOperation>().ok());
+			.and_then(|value| value.deserialize_into::<ForgeOp>().ok());
 		state.repo = args
 			.get("repo")
 			.and_then(omp_core::slopjson::Value::as_str)
@@ -57,18 +54,18 @@ impl RenderFold for GithubRenderer {
 
 	fn view(&self, state: &Self::State, outcome: Option<&Self::Outcome>) -> Option<Str> {
 		match outcome {
-			None => Some(render_github_live(state).into()),
-			Some(CallOutcome::Ok(payload)) => Some(render_github_payload(state, payload).into()),
-			Some(CallOutcome::Faulted(fault)) => Some(render_github_fault(state, fault).into()),
+			None => Some(render_forge_live(state).into()),
+			Some(CallOutcome::Ok(payload)) => Some(render_forge_payload(state, payload).into()),
+			Some(CallOutcome::Faulted(fault)) => Some(render_forge_fault(state, fault).into()),
 			Some(CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. }) => None,
 		}
 	}
 }
 
-fn render_github_live(state: &GithubState) -> El {
+fn render_forge_live(state: &ForgeState) -> El {
 	let action = state
 		.op
-		.map_or_else(|| Str::new_static("GitHub request"), |op| sf!("{op}"));
+		.map_or_else(|| Str::new_static("forge"), |op| sf!("{op}"));
 	view! {
 		<row gap=1>
 			<spinner/>
@@ -86,73 +83,54 @@ fn render_github_live(state: &GithubState) -> El {
 	}
 }
 
-fn render_github_payload(state: &GithubState, payload: &GithubPayload) -> El {
+fn render_forge_payload(state: &ForgeState, payload: &ForgePayload) -> El {
 	if matches!(
 		payload.op,
-		GithubOperation::SearchIssues
-			| GithubOperation::SearchPrs
-			| GithubOperation::SearchCode
-			| GithubOperation::SearchCommits
-			| GithubOperation::SearchRepos
+		ForgeOp::SearchChangeRequests
+			| ForgeOp::SearchIssues
+			| ForgeOp::SearchCode
+			| ForgeOp::SearchCommits
+			| ForgeOp::SearchRepos
 	) {
-		return render_github_search(state, payload);
+		return render_forge_search(state, payload);
 	}
 
-	let content = (payload.op == GithubOperation::FileRead).then_some(payload.output.as_str());
+	let content = (payload.op == ForgeOp::FileRead).then_some(payload.output.as_str());
 	view! {
 		<col gap=0>
-			{github_header(state, payload)}
+			{forge_header(state, payload)}
 			if let Some(content) = content {
 				<pre max-rows=40 overflow="lines">{content}</pre>
 			} else {
 				{json_view(&payload.result, 3, 10, 100)}
 			}
-			if let Some(remaining) = payload.rate_limit_remaining {
-				<text fg=muted>{sf!("{remaining} API requests remaining")}</text>
-			}
 		</col>
 	}
 }
 
-fn render_github_search(state: &GithubState, payload: &GithubPayload) -> El {
-	let items = payload
-		.result
-		.get("items")
-		.and_then(Value::as_array)
-		.or_else(|| payload.result.as_array());
-	let count = payload
-		.result
-		.get("total_count")
-		.and_then(Value::as_u64)
-		.unwrap_or_else(|| items.map_or(0, |items| items.len() as u64));
-	let summary = payload
-		.result
-		.get("summary")
-		.and_then(Value::as_str)
-		.map_or_else(|| sf!("{count} results"), Str::new);
+fn render_forge_search(state: &ForgeState, payload: &ForgePayload) -> El {
+	let hits = payload.result.get("hits").and_then(Value::as_array);
+	let count = hits.map_or(0, |hits| hits.len() as u64);
 	view! {
 		<col gap=0>
-			{github_header(state, payload)}
-			if let Some(items) = items {
-				if items.is_empty() {
+			{forge_header(state, payload)}
+			if let Some(hits) = hits {
+				if hits.is_empty() {
 					<text fg=muted>{"No results"}</text>
 				} else {
 					<table max-rows=20 overflow="results">
-						for item in items {
-							{github_search_row(item)}
+						for hit in hits {
+							{forge_search_row(hit)}
 						}
 					</table>
 				}
 			}
-			<row gap=1><text fg=muted>{summary}</text></row>
-			if let Some(remaining) = payload.rate_limit_remaining {
-				<text fg=muted>{sf!("{remaining} API requests remaining")}</text>
-			}
+			<row gap=1><text fg=muted>{sf!("{count} results")}</text></row>
 		</col>
 	}
 }
 
-fn github_header(state: &GithubState, payload: &GithubPayload) -> El {
+fn forge_header(state: &ForgeState, payload: &ForgePayload) -> El {
 	let repo = state
 		.repo
 		.as_deref()
@@ -160,7 +138,7 @@ fn github_header(state: &GithubState, payload: &GithubPayload) -> El {
 		.or_else(|| payload.result.get("full_name").and_then(Value::as_str));
 	view! {
 		<row gap=1>
-			<text bold>{sf!("{}", payload.op)}</text>
+			<text bold>{sf!("forge {}", payload.op)}</text>
 			if let Some(repo) = repo {
 				<text fg=accent>{"["}{repo}{"]"}</text>
 			}
@@ -171,65 +149,131 @@ fn github_header(state: &GithubState, payload: &GithubPayload) -> El {
 	}
 }
 
-fn github_search_row(item: &Value) -> El {
-	let number = item.get("number").and_then(Value::as_u64);
-	let title = item
+fn forge_search_row(hit: &Value) -> El {
+	let number = hit.get("number").and_then(Value::as_u64);
+	let title = hit
 		.get("title")
 		.and_then(Value::as_str)
-		.or_else(|| item.get("name").and_then(Value::as_str))
 		.unwrap_or("untitled");
-	let author = item
-		.get("author")
-		.and_then(Value::as_str)
-		.or_else(|| item.pointer("/user/login").and_then(Value::as_str))
-		.or_else(|| item.pointer("/owner/login").and_then(Value::as_str))
-		.unwrap_or("unknown");
-	let age = item
-		.get("age")
-		.and_then(Value::as_str)
-		.or_else(|| item.get("updated").and_then(Value::as_str))
-		.or_else(|| item.get("updated_at").and_then(Value::as_str));
-	let additions = item
-		.get("additions")
-		.and_then(Value::as_u64)
-		.or_else(|| item.pointer("/diff/additions").and_then(Value::as_u64));
-	let deletions = item
-		.get("deletions")
-		.and_then(Value::as_u64)
-		.or_else(|| item.pointer("/diff/deletions").and_then(Value::as_u64));
 	let number_text = number.map_or_else(|| Str::new_static("—"), |number| sf!("#{number}"));
-
 	view! {
 		<tr>
 			<td w=7><text fg=info bold>{number_text}</text></td>
 			<td grow truncate><text>{title}</text></td>
-			<td w=24 truncate>
-				<text fg=muted>
-					{author}
-					if let Some(age) = age {
-						{" · "}{age}
-					}
-				</text>
-			</td>
-			<td w=15 align="right">
-				if let Some(additions) = additions {
-					<text fg=ok>{sf!("+{additions}")}</text>
-				}
-				if additions.is_some() && deletions.is_some() {
-					{" "}
-				}
-				if let Some(deletions) = deletions {
-					<text fg=err>{sf!("-{deletions}")}</text>
-				}
-			</td>
 		</tr>
 	}
 }
 
-fn render_github_fault(state: &GithubState, fault: &GithubFault) -> El {
+#[derive(Default)]
+pub(super) struct CiState {
+	op:       Option<CiOp>,
+	provider: Option<Str>,
+	pipeline: Option<Str>,
+	watch:    bool,
+	progress: Option<Str>,
+}
+
+pub(super) struct CiRenderer;
+
+impl RenderFold for CiRenderer {
+	type Outcome = CallOutcome<CiPayload, CiFault>;
+	type State = CiState;
+	type Update = CiUpdate;
+
+	fn fold(&self, state: &mut Self::State, update: Self::Update) {
+		state.progress = Some(update.output);
+	}
+
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		state.op = args
+			.get("op")
+			.and_then(|value| value.deserialize_into::<CiOp>().ok());
+		state.provider = args
+			.get("provider")
+			.and_then(omp_core::slopjson::Value::as_str)
+			.map(Str::new);
+		state.pipeline = args
+			.get("pipeline")
+			.and_then(omp_core::slopjson::Value::as_str)
+			.map(Str::new);
+		state.watch = args
+			.get("watch")
+			.and_then(omp_core::slopjson::Value::as_bool)
+			.unwrap_or(false);
+	}
+
+	fn view(&self, state: &Self::State, outcome: Option<&Self::Outcome>) -> Option<Str> {
+		match outcome {
+			None => Some(render_ci_live(state).into()),
+			Some(CallOutcome::Ok(payload)) => Some(render_ci_payload(state, payload).into()),
+			Some(CallOutcome::Faulted(fault)) => Some(render_ci_fault(state, fault).into()),
+			Some(CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. }) => None,
+		}
+	}
+}
+
+fn render_ci_live(state: &CiState) -> El {
 	let action = state
 		.op
-		.map_or_else(|| Str::new_static("GitHub request"), |op| sf!("{op}"));
+		.map_or_else(|| Str::new_static("ci"), |op| sf!("{op}"));
+	view! {
+		<row gap=1>
+			<spinner/>
+			<text bold>{action}</text>
+			if let Some(provider) = state.provider.as_deref() {
+				<text fg=accent>{provider}</text>
+			}
+			if let Some(pipeline) = state.pipeline.as_deref() {
+				<text fg=muted>{pipeline}</text>
+			}
+			if state.watch {
+				<text fg=muted>{"watch"}</text>
+			}
+			if let Some(progress) = state.progress.as_deref() {
+				<text fg=muted truncate>{progress}</text>
+			}
+		</row>
+	}
+}
+
+fn render_ci_payload(state: &CiState, payload: &CiPayload) -> El {
+	view! {
+		<col gap=0>
+			<row gap=1>
+				<text bold>{sf!("ci {}", payload.op)}</text>
+				if let Some(provider) = state.provider.as_deref() {
+					<text fg=accent>{provider}</text>
+				}
+				if let Some(pipeline) = state.pipeline.as_deref() {
+					<text fg=muted>{pipeline}</text>
+				}
+			</row>
+			<pre max-rows=40 overflow="lines">{payload.output.as_str()}</pre>
+		</col>
+	}
+}
+
+fn render_ci_fault(state: &CiState, fault: &CiFault) -> El {
+	let action = state
+		.op
+		.map_or_else(|| Str::new_static("ci"), |op| sf!("{op}"));
+	view! {
+		<col gap=0>
+			<row gap=1>
+				<text bold fg=err>{action}</text>
+				if let Some(provider) = state.provider.as_deref() {
+					<text fg=muted>{provider}</text>
+				}
+			</row>
+			<callout kind="error">{&fault.message}</callout>
+		</col>
+	}
+}
+
+fn render_forge_fault(state: &ForgeState, fault: &ForgeFault) -> El {
+	let action = state
+		.op
+		.map_or_else(|| Str::new_static("forge"), |op| sf!("{op}"));
 	view! {
 		<col gap=0>
 			<row gap=1>
@@ -609,21 +653,30 @@ fn json_view(value: &Value, max_depth: usize, max_rows: usize, max_chars: usize)
 	}
 }
 
-/// Native GitHub, browser, and computer lifecycle fixtures for the visual QA
+/// Native forge, CI, browser, and computer lifecycle fixtures for the visual QA
 /// gallery.
 pub fn gallery_fixtures(
-	github: ToolIdentity,
+	forge: ToolIdentity,
+	ci: ToolIdentity,
 	browser: ToolIdentity,
 	computer: ToolIdentity,
 ) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
-			identity: github,
-			streaming_args: r#"{"op":"search_prs","query":"is:open review-requested:@me sort:up"#,
-			args: r#"{"op":"search_prs","query":"is:open review-requested:@me sort:updated","repo":"oh-my-pi/pi","limit":10}"#,
+			identity: forge,
+			streaming_args: r#"{"op":"search_change_requests","query":"is:open review-requested:@me sort:up"#,
+			args: r#"{"op":"search_change_requests","query":"is:open review-requested:@me sort:updated","repo":"oh-my-pi/pi","limit":10}"#,
 			progress_update: None,
-			success_outcome: br#"{"kind":"ok","value":{"op":"search_prs","result":{"repo":"oh-my-pi/pi","total_count":4,"summary":"4 open pull requests requesting your review","items":[{"number":1842,"title":"feat(tui): virtualized scrollback for tool output","author":"openyou","age":"2h ago","additions":312,"deletions":47},{"number":1839,"title":"fix(agent): retry stream on transient 529","author":"dvir","age":"5h ago","additions":18,"deletions":4},{"number":1830,"title":"refactor(edit): unify hashline + ast_edit previews","author":"mira","age":"1d ago","additions":540,"deletions":210},{"number":1817,"title":"docs: document gallery fixtures contract","author":"leo","age":"2d ago","additions":96,"deletions":0}]},"output":"4 open pull requests requesting your review","artifact":null,"useless":false,"rate_limit_remaining":4876,"rate_limit_reset":null}}"#,
-			error_outcome: br#"{"kind":"faulted","value":{"code":"github_http","message":"gh: Could not resolve to a Repository with the name 'oh-my-pi/pi'. (HTTP 404)"}}"#,
+			success_outcome: br#"{"kind":"ok","value":{"op":"search_change_requests","result":{"hits":[{"number":1842,"title":"feat(tui): virtualized scrollback for tool output"},{"number":1839,"title":"fix(agent): retry stream on transient 529"}]},"output":"2 results","useless":false}}"#,
+			error_outcome: br#"{"kind":"faulted","value":{"code":"repo_not_found","message":"forge repository pi was not found on github.com"}}"#,
+		},
+		RendererGalleryFixture {
+			identity: ci,
+			streaming_args: r#"{"op":"status","provider":"github.com","pipeline":"42","watch":tr"#,
+			args: r#"{"op":"status","provider":"github.com","pipeline":"42","watch":true}"#,
+			progress_update: None,
+			success_outcome: br#"{"kind":"ok","value":{"op":"status","result":{"status":"failure"},"output":"github.com 42 failure","useless":false}}"#,
+			error_outcome: br#"{"kind":"faulted","value":{"code":"not_capable","message":"ci operation cancel is outside the capabilities of github.com"}}"#,
 		},
 		RendererGalleryFixture {
 			identity: browser,
@@ -652,38 +705,51 @@ mod tests {
 	use super::*;
 
 	fn identity(name: &'static str) -> ToolIdentity {
-		ToolIdentity {
-			name: Str::new_static(name),
-			rev:  Rev { family: Str::default(), n: if name == "github" { 3 } else { 1 } },
-		}
+		ToolIdentity { name: Str::new_static(name), rev: Rev { family: Str::default(), n: 1 } }
 	}
 
 	#[test]
 	fn fixture_wire_shapes_decode_and_streaming_args_render() {
-		let fixtures =
-			gallery_fixtures(identity("github"), identity("browser"), identity("computer"));
+		let fixtures = gallery_fixtures(
+			identity("forge"),
+			identity("ci"),
+			identity("browser"),
+			identity("computer"),
+		);
 		for fixture in &fixtures {
 			assert!(omp_core::slopjson::parse(fixture.streaming_args).is_err());
 			omp_core::slopjson::parse(fixture.args).expect("committed args decode");
 			assert!(fixture.progress_update.is_none());
 		}
 
-		let mut github_state = GithubState::default();
-		GithubRenderer.fold_args(
-			&mut github_state,
+		let mut forge_state = ForgeState::default();
+		ForgeRenderer.fold_args(
+			&mut forge_state,
 			&omp_core::slopjson::parse_streaming(fixtures[0].streaming_args),
 			false,
 		);
 		assert!(
-			GithubRenderer
-				.view(&github_state, None)
-				.expect("streaming GitHub args render")
+			ForgeRenderer
+				.view(&forge_state, None)
+				.expect("streaming forge args render")
 				.contains("sort:up")
+		);
+		let mut ci_state = CiState::default();
+		CiRenderer.fold_args(
+			&mut ci_state,
+			&omp_core::slopjson::parse_streaming(fixtures[1].streaming_args),
+			false,
+		);
+		assert!(
+			CiRenderer
+				.view(&ci_state, None)
+				.expect("streaming ci args render")
+				.contains("42")
 		);
 		let mut browser_state = BrowserState::default();
 		BrowserRenderer.fold_args(
 			&mut browser_state,
-			&omp_core::slopjson::parse_streaming(fixtures[1].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[2].streaming_args),
 			false,
 		);
 		assert!(
@@ -695,7 +761,7 @@ mod tests {
 		let mut computer_state = ComputerState::default();
 		ComputerRenderer.fold_args(
 			&mut computer_state,
-			&omp_core::slopjson::parse_streaming(fixtures[2].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[3].streaming_args),
 			false,
 		);
 		assert!(
@@ -705,93 +771,81 @@ mod tests {
 				.contains("desktop.screenshot")
 		);
 
-		serde_json::from_slice::<CallOutcome<GithubPayload, GithubFault>>(
-			fixtures[0].success_outcome,
-		)
-		.expect("GitHub success outcome decodes");
-		serde_json::from_slice::<CallOutcome<GithubPayload, GithubFault>>(fixtures[0].error_outcome)
-			.expect("GitHub error outcome decodes");
+		serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(fixtures[0].success_outcome)
+			.expect("forge success outcome decodes");
+		serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(fixtures[0].error_outcome)
+			.expect("forge error outcome decodes");
+		serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(fixtures[1].success_outcome)
+			.expect("ci success outcome decodes");
+		serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(fixtures[1].error_outcome)
+			.expect("ci error outcome decodes");
 		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(
-			fixtures[1].success_outcome,
+			fixtures[2].success_outcome,
 		)
 		.expect("browser success outcome decodes");
 		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(
-			fixtures[1].error_outcome,
+			fixtures[2].error_outcome,
 		)
 		.expect("browser error outcome decodes");
 		serde_json::from_slice::<CallOutcome<ComputerPayload, ComputerFault>>(
-			fixtures[2].success_outcome,
+			fixtures[3].success_outcome,
 		)
 		.expect("computer success outcome decodes");
 		serde_json::from_slice::<CallOutcome<ComputerPayload, ComputerFault>>(
-			fixtures[2].error_outcome,
+			fixtures[3].error_outcome,
 		)
 		.expect("computer error outcome decodes");
 	}
 
 	#[test]
-	fn github_search_uses_aligned_rows_and_escapes_payload_text() {
-		let payload = GithubPayload {
-			op:                   GithubOperation::SearchPrs,
-			result:               serde_json::json!({
-				"items": [{
+	fn forge_search_uses_aligned_rows_and_escapes_payload_text() {
+		let payload = ForgePayload {
+			op:      ForgeOp::SearchChangeRequests,
+			result:  serde_json::json!({
+				"hits": [{
 					"number": 7,
-					"title": "Fix <unsafe> & parsing",
-					"author": "mira",
-					"age": "2h ago",
-					"additions": 12,
-					"deletions": 3
-				}],
-				"total_count": 1
+					"title": "Fix <unsafe> & parsing"
+				}]
 			}),
-			output:               Str::new_static("1 result"),
-			artifact:             None,
-			useless:              false,
-			rate_limit_remaining: None,
-			rate_limit_reset:     None,
+			output:  Str::new_static("1 result"),
+			useless: false,
 		};
-		let rendered = GithubRenderer
-			.view(&GithubState::default(), Some(&CallOutcome::Ok(payload)))
-			.expect("GitHub search renders");
+		let rendered = ForgeRenderer
+			.view(&ForgeState::default(), Some(&CallOutcome::Ok(payload)))
+			.expect("forge search renders");
 		assert!(rendered.contains("<table max-rows=20 overflow=results>"));
 		assert!(rendered.contains("#7"));
 		assert!(rendered.contains("Fix &lt;unsafe&gt; &amp; parsing"));
-		assert!(rendered.contains("<text fg=ok>+12</text>"));
-		assert!(rendered.contains("<text fg=err>-3</text>"));
+		assert!(!rendered.contains("+12"));
+		assert!(!rendered.contains("API requests remaining"));
 		assert!(!rendered.contains("ctrl+o"));
 	}
 
 	#[test]
-	fn github_file_and_structured_results_delegate_bounding_to_primitives() {
-		let file = GithubPayload {
-			op:                   GithubOperation::FileRead,
-			result:               serde_json::json!({"content": "first\nsecond <third>"}),
-			output:               Str::new_static("first\nsecond <third>"),
-			artifact:             None,
-			useless:              false,
-			rate_limit_remaining: Some(42),
-			rate_limit_reset:     None,
+	fn forge_file_and_structured_results_delegate_bounding_to_primitives() {
+		let file = ForgePayload {
+			op:      ForgeOp::FileRead,
+			result:  serde_json::json!({"path": "src/lib.rs", "size": 20}),
+			output:  Str::new_static("first\nsecond <third>"),
+			useless: false,
 		};
-		let rendered = GithubRenderer
-			.view(&GithubState::default(), Some(&CallOutcome::Ok(file)))
-			.expect("GitHub file renders");
+		let rendered = ForgeRenderer
+			.view(&ForgeState::default(), Some(&CallOutcome::Ok(file)))
+			.expect("forge file renders");
 		assert!(rendered.contains("<pre max-rows=40 overflow=lines>"));
 		assert!(rendered.contains("second &lt;third&gt;"));
-		assert!(rendered.contains("42 API requests remaining"));
+		assert!(!rendered.contains("API requests remaining"));
 		assert!(!rendered.contains("ctrl+o"));
 
-		let repo = GithubPayload {
-			op:                   GithubOperation::RepoView,
-			result:               serde_json::json!({"full_name": "oh-my-pi/pi", "private": false}),
-			output:               Str::new_static("oh-my-pi/pi"),
-			artifact:             None,
-			useless:              false,
-			rate_limit_remaining: None,
-			rate_limit_reset:     None,
+		let repo = ForgePayload {
+			op:      ForgeOp::RepoView,
+			result:  serde_json::json!({"full_name": "oh-my-pi/pi", "private": false}),
+			output:  Str::new_static("oh-my-pi/pi"),
+			useless: false,
 		};
-		let rendered = GithubRenderer
-			.view(&GithubState::default(), Some(&CallOutcome::Ok(repo)))
-			.expect("GitHub structured result renders");
+		let rendered = ForgeRenderer
+			.view(&ForgeState::default(), Some(&CallOutcome::Ok(repo)))
+			.expect("forge structured result renders");
 		assert!(
 			rendered.contains("<json max-depth=3 max-rows=10 max-chars=100>"),
 			"rendered: {rendered}"

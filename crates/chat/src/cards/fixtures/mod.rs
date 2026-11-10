@@ -2,12 +2,13 @@
 
 mod agents;
 mod ask;
+mod ci;
 mod context_gauge;
 mod custom;
 mod debug;
 mod exec;
 mod files;
-mod github;
+mod forge;
 mod memory;
 mod report_issue;
 mod resolve;
@@ -49,7 +50,8 @@ pub(crate) fn all() -> Vec<&'static CardFixture> {
 	fixtures.extend(debug::FIXTURES);
 	fixtures.extend(exec::FIXTURES);
 	fixtures.extend(files::FIXTURES);
-	fixtures.extend(github::FIXTURES);
+	fixtures.extend(ci::FIXTURES);
+	fixtures.extend(forge::FIXTURES);
 	fixtures.extend(memory::FIXTURES);
 	fixtures.extend(report_issue::FIXTURES);
 	fixtures.extend(resolve::FIXTURES);

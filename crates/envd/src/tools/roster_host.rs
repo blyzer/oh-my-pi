@@ -17,7 +17,6 @@ use omp_tools::{
 	ask::AskPresenter,
 	edit::observer::EditRepairClient,
 	eval::{EvalSessionControl, EvalTool, PyEvalTool, TaskDescriptionSnapshot},
-	github::GithubHost,
 	grep::SearchPolicy,
 	read::{ReadPolicy, conflicts::ConflictRegistry, resolver::ResolverTable},
 	roster::{
@@ -155,6 +154,22 @@ impl<'a> SessionHost<'a> {
 		}
 	}
 
+	fn ensure_github(&mut self) -> Arc<GithubService> {
+		if self.github.is_none() {
+			if let Some(upload) = self.telemetry_upload.clone() {
+				upload.start(Arc::clone(self.telemetry), Arc::clone(&self.github_credentials));
+			}
+			self.github = Some(GithubService::new(
+				self.project_root.to_path_buf(),
+				self.state_dir,
+				Arc::clone(&self.github_credentials),
+				Arc::clone(&self.github_cache),
+				self.blobs.clone(),
+			));
+		}
+		Arc::clone(self.github.as_ref().expect("github service"))
+	}
+
 	pub(super) fn output(&self) -> SessionOutput {
 		SessionOutput {
 			search_bridge:      Arc::clone(&self.search_bridge),
@@ -177,7 +192,15 @@ impl ToolGate for SessionHost<'_> {
 
 impl SessionInstall for SessionHost<'_> {
 	type Checkpoint = AgentCheckpointControl;
+	type CiRouter = omp_ci_delegated::Delegated<
+		crate::github_adapter::GithubCiAdapter,
+		omp_ci_delegated::PermitAll,
+	>;
 	type Error = EnvdError;
+	type ForgeRouter = omp_forge_delegated::Delegated<
+		crate::github_adapter::GithubForgeAdapter,
+		omp_forge_delegated::PermitAll,
+	>;
 	type Goal = GoalControlAdapter;
 	#[cfg(feature = "cap-media")]
 	type Image = media_devices::MediaDevice;
@@ -230,21 +253,19 @@ impl SessionInstall for SessionHost<'_> {
 		Arc::clone(&self.search_bridge)
 	}
 
-	fn github_host(&mut self) -> Arc<dyn GithubHost> {
-		if self.github.is_none() {
-			if let Some(upload) = self.telemetry_upload.clone() {
-				upload.start(Arc::clone(self.telemetry), Arc::clone(&self.github_credentials));
-			}
-			self.github = Some(GithubService::new(
-				self.project_root.to_path_buf(),
-				self.state_dir,
-				Arc::clone(&self.github_credentials),
-				Arc::clone(&self.github_cache),
-				self.blobs.clone(),
-			));
-		}
-		let service: Arc<GithubService> = Arc::clone(self.github.as_ref().expect("github service"));
-		service
+	fn forge_router(&mut self) -> Self::ForgeRouter {
+		crate::github_adapter::forge_router(self.ensure_github())
+	}
+
+	fn ci_router(&mut self) -> Self::CiRouter {
+		crate::github_adapter::ci_router(self.ensure_github())
+	}
+
+	fn current_repo(
+		&self,
+	) -> Arc<dyn Fn() -> Result<omp_forge::RepoRef, omp_forge::ForgeError> + Send + Sync> {
+		let root = self.project_root.to_path_buf();
+		Arc::new(move || checkout_repo(&root))
 	}
 
 	fn ask_presenter(&self) -> Arc<dyn AskPresenter> {
@@ -263,6 +284,15 @@ impl SessionInstall for SessionHost<'_> {
 	fn checkpoint_control(&self) -> Self::Checkpoint {
 		self.checkpoint_control.clone()
 	}
+}
+
+fn checkout_repo(root: &Path) -> Result<omp_forge::RepoRef, omp_forge::ForgeError> {
+	let repo = crate::github_url::infer_repo(root)
+		.map_err(|_| omp_forge::ForgeError::Unscoped { op: omp_forge::ForgeOp::RepoView })?;
+	let mut parts = repo.slug().split('/');
+	let owner = parts.next().unwrap_or_default();
+	let name = parts.next().unwrap_or_default();
+	omp_forge::RepoRef::try_new(repo.host(), owner, name).map_err(omp_forge::ForgeError::from)
 }
 
 pub(super) struct DeclarationHost<'a> {

@@ -743,40 +743,34 @@ fn debug_card_omits_the_session_block_and_paints_command_output() {
 }
 
 #[test]
-fn github_card_titles_every_operation_with_its_target() {
-	let checkout = node(
-		KnownTag::Input,
-		r#"{"op":"pr_checkout","pr":["https://github.com/o/r/pull/42","17"],"repo":"o/r"}"#,
-	);
-	let text = render("github", &checkout, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub PR Checkout #42, #17 · o/r"), "{text}");
+fn forge_and_ci_cards_title_each_operation_with_its_target() {
+	let checkout =
+		node(KnownTag::Input, r#"{"op":"change_request_checkout","number":42,"repo":"o/r"}"#);
+	let text = render("forge", &checkout, None, None, CardStatus::InProgress, false);
+	assert!(text.contains("Forge change_request_checkout #42 · o/r"), "{text}");
 
-	let push = node(KnownTag::Input, r#"{"op":"pr_push","branch":"feat/x","forceWithLease":true}"#);
-	let text = render("github", &push, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub PR Push feat/x"), "{text}");
-
-	let file = node(
-		KnownTag::Input,
-		r#"{"op":"file_read","repo":"o/r","path":"src/lib.rs","branch":"main"}"#,
-	);
-	let text = render("github", &file, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub File src/lib.rs · o/r · main"), "{text}");
+	let file =
+		node(KnownTag::Input, r#"{"op":"file_read","repo":"o/r","path":"src/lib.rs","rev":"main"}"#);
+	let text = render("forge", &file, None, None, CardStatus::InProgress, false);
+	assert!(text.contains("Forge file_read o/r · src/lib.rs · main"), "{text}");
 
 	let create = node(
 		KnownTag::Input,
-		r#"{"op":"pr_create","title":"Add cards","head":"feat/cards","base":"main"}"#,
+		r#"{"op":"change_request_create","title":"Add cards","head":"feat/cards","base":"main"}"#,
 	);
-	let text = render("github", &create, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub PR Create Add cards · feat/cards -> main"), "{text}");
+	let text = render("forge", &create, None, None, CardStatus::InProgress, false);
+	assert!(text.contains("Forge change_request_create Add cards"), "{text}");
 
 	let repos = node(KnownTag::Input, r#"{"op":"search_repos","query":"org:o language:rust"}"#);
-	let text = render("github", &repos, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub Search Repos org:o language:rust"), "{text}");
+	let text = render("forge", &repos, None, None, CardStatus::InProgress, false);
+	assert!(text.contains("Forge search_repos org:o language:rust"), "{text}");
 
-	// The search heading is unchanged from the gallery reference.
-	let prs = node(KnownTag::Input, r#"{"op":"search_prs","query":"is:open","repo":"o/r"}"#);
-	let text = render("github", &prs, None, None, CardStatus::InProgress, false);
-	assert!(text.contains("GitHub Search PRs is:open · o/r"), "{text}");
+	let status = node(
+		KnownTag::Input,
+		r#"{"op":"status","provider":"github.com","pipeline":"42","watch":true}"#,
+	);
+	let text = render("ci", &status, None, None, CardStatus::InProgress, false);
+	assert!(text.contains("Ci status github.com · 42 · watch"), "{text}");
 }
 
 fn ast_match(path: &str, line: usize, text: &str) -> Value {
