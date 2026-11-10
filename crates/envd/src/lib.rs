@@ -49,9 +49,9 @@ pub mod exthost;
 /// The hosts a fetch reaches and the approval subjects keyed on them.
 pub mod fetch_host;
 #[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
-mod github_adapter;
+mod forge_adapter;
 #[cfg(feature = "cap-forge")]
-pub use github_adapter::CheckoutForge;
+pub use forge_adapter::CheckoutForge;
 mod forge_worktree;
 pub mod forge_url;
 pub mod grep;
@@ -1391,7 +1391,7 @@ impl ProjectEnvironment {
 			self.lifecycle.server.project_root(),
 			self.lifecycle.server.state_dir().to_path_buf(),
 			self.lifecycle.server.forge_devices(),
-			github_adapter::ForgeDynHosts::from_con(con),
+			forge_adapter::ForgeDynHosts::from_con(con),
 		)
 	}
 

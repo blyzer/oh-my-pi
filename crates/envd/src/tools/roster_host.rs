@@ -98,10 +98,10 @@ pub(super) struct SessionHost<'a> {
 	forge_cache:        Arc<ForgeCache>,
 	/// Session-bound forge device client (same slot as CheckoutForge / CONTROL).
 	#[cfg(feature = "cap-forge")]
-	forge_devices:      crate::github_adapter::LiveForgeDeviceClient,
+	forge_devices:      crate::forge_adapter::LiveForgeDeviceClient,
 	/// Session-bound CI device client (dyn `ci/*` bridge).
 	#[cfg(feature = "cap-ci")]
-	ci_devices:         crate::github_adapter::LiveCiDeviceClient,
+	ci_devices:         crate::forge_adapter::LiveCiDeviceClient,
 	#[cfg(feature = "cap-media")]
 	image_config:       media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")]
@@ -128,8 +128,8 @@ impl<'a> SessionHost<'a> {
 		state_dir: &'a Path,
 		telemetry: &'a Arc<omp_cache::telemetry_cache::TelemetryIndex>,
 		forge_cache: Arc<ForgeCache>,
-		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
-		#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::forge_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-ci")] ci_devices: crate::forge_adapter::LiveCiDeviceClient,
 		#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
@@ -199,11 +199,11 @@ impl SessionInstall for SessionHost<'_> {
 	type Checkpoint = AgentCheckpointControl;
 	#[cfg(feature = "cap-ci")]
 	type CiRouter =
-		omp_ci_delegated::Delegated<crate::github_adapter::CiBackend, omp_ci_delegated::PermitAll>;
+		omp_ci_delegated::Delegated<crate::forge_adapter::CiBackend, omp_ci_delegated::PermitAll>;
 	type Error = EnvdError;
 	#[cfg(feature = "cap-forge")]
 	type ForgeRouter = omp_forge_delegated::Delegated<
-		crate::github_adapter::ForgeBackend,
+		crate::forge_adapter::ForgeBackend,
 		omp_forge_delegated::PermitAll,
 	>;
 	type Goal = GoalControlAdapter;
@@ -262,8 +262,8 @@ impl SessionInstall for SessionHost<'_> {
 	fn forge_router(&mut self) -> Self::ForgeRouter {
 		self.ensure_telemetry();
 		let dyn_hosts =
-			crate::github_adapter::ForgeDynHosts::resolve(self.tool_settings.forge_dyn_hosts.as_str());
-		crate::github_adapter::forge_router(
+			crate::forge_adapter::ForgeDynHosts::resolve(self.tool_settings.forge_dyn_hosts.as_str());
+		crate::forge_adapter::forge_router(
 			self.forge_devices.clone(),
 			&dyn_hosts,
 			self.project_root.to_path_buf(),
@@ -274,7 +274,7 @@ impl SessionInstall for SessionHost<'_> {
 	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter {
 		self.ensure_telemetry();
-		crate::github_adapter::ci_router(self.ci_devices.clone(), self.project_root)
+		crate::forge_adapter::ci_router(self.ci_devices.clone(), self.project_root)
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -305,7 +305,7 @@ impl SessionInstall for SessionHost<'_> {
 
 #[cfg(feature = "cap-forge")]
 fn checkout_repo(root: &Path) -> Result<omp_forge::RepoRef, omp_forge::ForgeError> {
-	crate::github_adapter::checkout_repo(root)
+	crate::forge_adapter::checkout_repo(root)
 }
 
 pub(super) struct DeclarationHost<'a> {
@@ -433,7 +433,7 @@ pub(super) struct EnvironmentHost<'a> {
 	/// Session-bound forge device client (same slot as SessionHost /
 	/// CheckoutForge).
 	#[cfg(feature = "cap-forge")]
-	forge_devices:       crate::github_adapter::LiveForgeDeviceClient,
+	forge_devices:       crate::forge_adapter::LiveForgeDeviceClient,
 	url_resolvers:       Vec<Arc<dyn ContentResolver>>,
 	host_resources:      Option<Arc<dyn HostResources>>,
 	session_authority:   Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -488,7 +488,7 @@ impl<'a> EnvironmentHost<'a> {
 		skills: Option<Arc<ManagedSkills>>,
 		github_credentials: Arc<ForgeCredentialBridge>,
 		forge_cache: Arc<ForgeCache>,
-		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::forge_adapter::LiveForgeDeviceClient,
 		url_resolvers: Vec<Arc<dyn ContentResolver>>,
 		host_resources: Option<Arc<dyn HostResources>>,
 		session_authority: Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -590,8 +590,8 @@ impl<'a> EnvironmentHost<'a> {
 		let security = self.security.clone().expect("security service");
 		#[cfg(feature = "cap-forge")]
 		let forge = {
-			let dyn_hosts = crate::github_adapter::ForgeDynHosts::from_con(self.con);
-			crate::github_adapter::forge_router(
+			let dyn_hosts = crate::forge_adapter::ForgeDynHosts::from_con(self.con);
+			crate::forge_adapter::forge_router(
 				self.forge_devices.clone(),
 				&dyn_hosts,
 				self.workspace.root().to_path_buf(),
@@ -1134,7 +1134,7 @@ mod forge_bind_tests {
 	use super::SessionHost;
 	use crate::{
 		blobs::BlobHost,
-		github_adapter::{
+		forge_adapter::{
 			ForgeDeviceInvoker, GITLAB_HOST, LiveForgeDeviceClient, forge_device_paths as paths,
 			forge_op_for_path,
 		},
@@ -1222,7 +1222,7 @@ mod forge_bind_tests {
 			forge_cache,
 			devices.clone(),
 			#[cfg(feature = "cap-ci")]
-			crate::github_adapter::LiveCiDeviceClient::default(),
+			crate::forge_adapter::LiveCiDeviceClient::default(),
 			#[cfg(feature = "cap-media")]
 			crate::media_devices::ImageConfig::default(),
 			#[cfg(feature = "cap-media")]

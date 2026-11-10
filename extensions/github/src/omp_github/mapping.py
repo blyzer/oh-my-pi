@@ -2,7 +2,7 @@
 
 No network. Unit-tested with fixture payloads under ``tests/fixtures/``.
 Field names match ``crates/forge`` serde (snake_case) and the in-core
-``GithubForgeAdapter`` mappers in ``crates/envd/src/github_adapter``.
+``GithubForgeAdapter`` mappers in ``crates/envd/src/forge_adapter``.
 """
 
 from __future__ import annotations

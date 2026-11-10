@@ -1,7 +1,7 @@
 # Dyn `forge/*` device schema (ADR 0049 D2.3)
 
 Source of truth for the T2 forge device bridge. Rustdoc on
-`omp_envd::github_adapter` (`dyn_forge`) and `omp-forge` point here.
+`omp_envd::forge_adapter` (`dyn_forge`) and `omp-forge` point here.
 
 T2 forge backends (`extensions/github/`, `extensions/gitlab/`) implement the
 `ForgeHost` leaf set. **One** extension — `extensions/forge/` (`omp.forge`) —
@@ -74,7 +74,7 @@ hook point.
 
 ## Evidence
 
-Unit tests in `crates/envd/src/github_adapter/dyn_forge.rs` prove Delegated
+Unit tests in `crates/envd/src/forge_adapter/dyn_forge.rs` prove Delegated
 routes dyn hosts through a fake / live client and returns `ChangeRequest` /
 `Issue` for `view_change_request` / `view_issue`. `forge_router` registers
 `ForgeDynHosts` (always `gitlab.com` + `github.com`, plus `sv_forge_dyn_hosts`
@@ -117,4 +117,6 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   Class C, autocomplete `GithubRefs`.
 - **DONE (neutralize `github_url.rs`):** renamed+moved to `forge_url.rs`
   (`ForgeResolver` / `ForgeCredentialBridge` / `DEFAULT_FORGE_HOST`); no
-  shims. Follow-up: `github_adapter` → `forge_adapter`.
+  shims.
+- **DONE (rename `github_adapter`):** crate module moved to `forge_adapter`;
+  `dyn_forge.rs` / `dyn_ci.rs` filenames kept.

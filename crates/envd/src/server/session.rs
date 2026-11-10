@@ -150,8 +150,8 @@ impl EnvServer {
 		schedules: DurableScheduleActor,
 		authority: Arc<AuthorityTable>,
 		state_dir: &Path,
-		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
-		#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::forge_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-ci")] ci_devices: crate::forge_adapter::LiveCiDeviceClient,
 	) -> Self {
 		let host_info = HostInfoHost::new(state_dir);
 		let workspace_roots =
@@ -1322,7 +1322,7 @@ impl EnvServer {
 
 	/// Live forge device client bound to the mounted `forge/*` catalog.
 	#[cfg(feature = "cap-forge")]
-	pub(crate) fn forge_devices(&self) -> crate::github_adapter::LiveForgeDeviceClient {
+	pub(crate) fn forge_devices(&self) -> crate::forge_adapter::LiveForgeDeviceClient {
 		self.forge_devices.clone()
 	}
 

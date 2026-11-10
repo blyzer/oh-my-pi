@@ -442,10 +442,10 @@ pub struct EnvServer {
 	state_dir:               PathBuf,
 	/// Live forge device client (bound to the device catalog under cap-forge).
 	#[cfg(feature = "cap-forge")]
-	forge_devices:           crate::github_adapter::LiveForgeDeviceClient,
+	forge_devices:           crate::forge_adapter::LiveForgeDeviceClient,
 	/// Live CI device client (bound to the device catalog under cap-ci).
 	#[cfg(feature = "cap-ci")]
-	ci_devices:              crate::github_adapter::LiveCiDeviceClient,
+	ci_devices:              crate::forge_adapter::LiveCiDeviceClient,
 }
 
 #[derive(Clone)]
