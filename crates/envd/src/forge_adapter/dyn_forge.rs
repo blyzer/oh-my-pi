@@ -30,8 +30,8 @@ use crate::forge_worktree;
 /// Canonical GitLab SaaS host always registered on the dyn forge arm (D2.8).
 ///
 /// Additional self-hosted hosts come from `sv_forge_dyn_hosts` and adapter env
-/// `GITLAB_HOST` via [`super::ForgeDynHosts`]. Automatic device-catalog
-/// host-claim discovery remains a smaller TODO.
+/// `GITLAB_HOST` / `GITHUB_HOST` via [`super::ForgeDynHosts`] (adapter
+/// host-claim discovery).
 pub const GITLAB_HOST: &str = "gitlab.com";
 
 /// Canonical GitHub SaaS host on the dyn forge arm (ADR 0049 GitHub T2).
@@ -485,8 +485,8 @@ pub type ForgeBackend<C = LiveForgeDeviceClient> = DynForgeAdapter<C>;
 /// [`super::forge_router`] registers every host in [`super::ForgeDynHosts`]
 /// with a [`LiveForgeDeviceClient`]. Catalog mounts are owned by the
 /// `omp.forge` extension (host-dispatch to `omp_github` / `omp_gitlab`).
-/// Automatic discovery of additional hosts from the extension device catalog /
-/// host claims is not wired yet (TODO, ADR 0049 D2.8).
+/// Adapter host-claim discovery (`GITLAB_HOST` / `GITHUB_HOST` / convar /
+/// catalog claims) lives in [`super::ForgeDynHosts`] (ADR 0049 D2.7 / D2.8).
 ///
 /// # Errors
 ///

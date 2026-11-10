@@ -46,8 +46,9 @@ Prefer host-minted scoped creds when available. Local/dev adapter data:
 | `GITHUB_API_URL` | Full API root override (`https://host/api/v3`) |
 | `GITHUB_REPOSITORY` / `OMP_CI_REPO` | `owner/name` for CI when `args.repo` omitted |
 
-Self-hosted GHE joins Dyn via operator convar `sv_forge_dyn_hosts` (forge) /
-checkout-host Dyn registration (CI). No tokens live in this tree.
+Self-hosted GHE joins Dyn automatically when `GITHUB_HOST` is set (envd
+`ForgeDynHosts` registers it on both forge and CI Dyn arms), or via operator
+convar `sv_forge_dyn_hosts`. No tokens live in this tree.
 
 ## Unsupported / unmounted
 

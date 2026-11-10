@@ -26,9 +26,10 @@ and GitHub, plus live `ForgeDeviceClient` wiring. Mapping unit tests cover
 fixture → `ChangeRequest`/`Issue` shapes and draft → create bodies. Mounted
 creates: `forge/change_request_create`, `forge/issue_create`. **`gitlab.com`
 and `github.com` are registered on the dyn forge arm** (same bound client).
-**DONE:** self-hosted host registration via `sv_forge_dyn_hosts` + adapter env
-`GITLAB_HOST` (checkout hosts in that set route to Dyn; GHE listed there also
-routes to Dyn / `omp_github`). SessionHost bound-client threading for
+**DONE:** self-hosted host registration + adapter host-claim discovery via
+`sv_forge_dyn_hosts` + adapter env `GITLAB_HOST` / `GITHUB_HOST`
+(`ForgeDynHosts`; forge and CI routers share the claim set — GHE via
+`GITHUB_HOST` joins Dyn automatically). SessionHost bound-client threading for
 `forge@1` / numbered `pr://` is DONE. **DONE:** Dyn checkout/push (D2.4) —
 plan / push-prep from adapters, core `forge_worktree`. **DONE:** GitHub T2
 read+create via dyn. **DONE:** `ci/*` dyn bridge + T2 CI extension body
@@ -44,8 +45,8 @@ neutralized to `forge_url.rs` (credentials / `pr://` / `issue://` /
 **DONE:** crate module `github_adapter` → `forge_adapter` (`dyn_forge` /
 `dyn_ci` filenames kept). **DONE:** conformance CI + first-cut manifest effect
 checks (`just check-extensions` / `python3 scripts/check-extension-conformance.py`;
-CI job `First-party extension conformance`). Remaining: full automatic
-device-catalog host-claim discovery (smaller TODO). See package READMEs.
+CI job `First-party extension conformance`). Remaining Phase 5: rescue wave 1
++ ADR 0046 item 4. See package READMEs.
 
 ## Conformance gate
 

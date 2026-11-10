@@ -68,9 +68,12 @@ run core `forge_worktree` after the device returns a plan.
 `omp.devices.call` (same destination as `DeviceControlFactory::invoke`, via
 `NestedCallbackDispatcher::dispatch_host`). Tests may inject a fake client or
 a recording invoker. `forge_router` always registers `gitlab.com` and
-`github.com` on the Dyn arm. Automatic discovery of additional hosts from the
-extension device catalog / host claims is **not** wired yet — TODO at that
-hook point.
+`github.com` on the Dyn arm. Additional hosts are discovered via adapter
+host claims: operator convar `sv_forge_dyn_hosts`, adapter env
+`GITLAB_HOST` / `GITHUB_HOST`, and optional catalog claims merged through
+`ForgeDynHosts::with_catalog_claims` (D2.7: env-var names and canonical
+hosts are adapter data). Catalog leaf late-registration is out of scope
+(Delegated stays immutable; checkout host + these claims cover the Dyn arm).
 
 ## Evidence
 
@@ -78,9 +81,9 @@ Unit tests in `crates/envd/src/forge_adapter/dyn_forge.rs` prove Delegated
 routes dyn hosts through a fake / live client and returns `ChangeRequest` /
 `Issue` for `view_change_request` / `view_issue`. `forge_router` registers
 `ForgeDynHosts` (always `gitlab.com` + `github.com`, plus `sv_forge_dyn_hosts`
-/ `GITLAB_HOST`) even when the live client is unbound (`Unavailable`, not
-`Unregistered`). Unlisted checkout hosts still land on the in-core Github arm
-(GHE).
+/ `GITLAB_HOST` / `GITHUB_HOST`) even when the live client is unbound
+(`Unavailable`, not `Unregistered`). Unlisted checkout hosts still register
+on Dyn (honest Unavailable without mounts).
 
 ## GitLab + GitHub T2 (D2.8) status
 
@@ -93,12 +96,11 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
 - **Done (GitHub read + create):** `extensions/github/` maps GitHub REST onto
   the same leaf set; credentials `GH_TOKEN` / `GITHUB_TOKEN` / `GITHUB_HOST` /
   `GITHUB_API_URL`. `github.com` is on the Dyn arm.
-- **Done (self-hosted host registration):** envd `ForgeDynHosts` registers Dyn
+- **DONE (adapter host-claim discovery):** envd `ForgeDynHosts` registers Dyn
   hosts from always-`gitlab.com` + always-`github.com`, operator convar
-  `sv_forge_dyn_hosts`, and adapter env `GITLAB_HOST`. Checkout / inferred
-  hosts in that set route to Dyn; other unlisted hosts still assume GHE on the
-  Github arm. Full automatic device-catalog host-claim discovery remains a
-  smaller TODO.
+  `sv_forge_dyn_hosts`, and adapter env `GITLAB_HOST` / `GITHUB_HOST`
+  (plus optional `with_catalog_claims`). Checkout / inferred hosts in that
+  set route to Dyn; forge and CI routers share the same claim set.
 - **DONE (search leaves + list-URL parity):** `extensions/forge/` mounts
   `forge/search_change_requests` and `forge/search_issues` (host-dispatch to
   `omp_github` / `omp_gitlab`). `search_code` / commits / repos stay

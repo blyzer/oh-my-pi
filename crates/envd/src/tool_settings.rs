@@ -343,13 +343,13 @@ omp_con::var! {
 			"legacy.path": "forge.cache.hardTtlSec",
 		},
 	};
-	/// Extra ASCII hosts registered on the dyn forge arm (beside `gitlab.com`
-	/// and `github.com`, which are always Dyn).
+	/// Extra ASCII hosts registered on the dyn forge / CI arms (beside
+	/// `gitlab.com` and `github.com`, which are always Dyn).
 	///
 	/// Comma- or whitespace-separated. Self-hosted GitLab / GHE (and other T2
-	/// dyn forges) must appear here or in the adapter env `GITLAB_HOST`;
-	/// otherwise a non-listed checkout host still lands on the Github arm
-	/// (GHE assumption).
+	/// dyn forges) must appear here or in adapter env `GITLAB_HOST` /
+	/// `GITHUB_HOST`; otherwise a non-listed checkout host still lands on Dyn
+	/// at router build (honest Unavailable without mounts).
 	pub static SV_FORGE_DYN_HOSTS = sv_forge_dyn_hosts: Str {
 		default: Str::default(),
 		flags: archive,
@@ -473,9 +473,9 @@ pub struct ToolSettings {
 	pub abort_on_fabricated_tool_result: bool,
 	/// Maximum repeated equivalent tool calls before the loop guard trips.
 	pub loop_guard_limit: u32,
-	/// Extra dyn-forge hosts from [`SV_FORGE_DYN_HOSTS`] (raw list text).
+	/// Extra dyn-forge / CI hosts from [`SV_FORGE_DYN_HOSTS`] (raw list text).
 	///
-	/// Resolved together with `GITLAB_HOST` by
+	/// Resolved together with `GITLAB_HOST` / `GITHUB_HOST` by
 	/// [`crate::forge_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
 	/// and `github.com` are always registered on Dyn regardless.
 	#[serde(skip_serializing_if = "Str::is_empty")]

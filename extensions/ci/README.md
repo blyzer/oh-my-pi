@@ -8,9 +8,11 @@ each call by provider host (`run.provider.id`) to:
 | [`omp_github.ci`](../github/) | `github.com`, `GITHUB_HOST`, other Dyn hosts (GHE default) |
 | [`omp_gitlab.ci`](../gitlab/) | `gitlab.com`, `GITLAB_HOST`, hostnames containing `gitlab` |
 
-`DynCiAdapter` calls fixed paths (`ci/status`, `ci/log_stream`,
-`ci/capabilities`, …). A second extension must **not** also mount those leaves
-— that is why mounts live here, not under `omp.github` / `omp.gitlab`.
+Adapter env `GITHUB_HOST` / `GITLAB_HOST` join the Dyn CI arm automatically
+via the same envd `ForgeDynHosts` claim set as forge. `DynCiAdapter` calls
+fixed paths (`ci/status`, `ci/log_stream`, `ci/capabilities`, …). A second
+extension must **not** also mount those leaves — that is why mounts live
+here, not under `omp.github` / `omp.gitlab`.
 
 ## Mounted leaves
 

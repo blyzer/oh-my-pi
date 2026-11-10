@@ -111,8 +111,8 @@ pub fn ci_op_for_path(path: &str) -> CiOp {
 ///
 /// Holds a late-bound [`CiDeviceInvoker`]. Until [`Self::bind`] installs one
 /// (or after [`Self::unbind`]), every call returns
-/// [`CiError::Unavailable`]. The production router still registers
-/// [`CI_GITHUB_HOST`] and [`CI_DYN_HOST`] so Delegated can reach the dyn arm;
+/// [`CiError::Unavailable`]. The production router still registers every host
+/// in [`super::ForgeDynHosts`] so Delegated can reach the dyn arm;
 /// Unavailable until a CI extension mounts devices (or the invoker is bound)
 /// is intentional.
 ///
@@ -301,10 +301,11 @@ pub type CiBackend<C = LiveCiDeviceClient> = DynCiAdapter<C>;
 ///
 /// This is the seam T2 extensions (and tests) use to place a host such as
 /// [`CI_GITHUB_HOST`] / [`CI_DYN_HOST`] on the Dyn arm. The production
-/// [`super::ci_router`] registers both SaaS hosts with a shared
-/// [`LiveCiDeviceClient`]. Catalog mounts for `ci/*` are owned by
-/// `extensions/ci/` (`omp.ci`). Automatic discovery of additional hosts from
-/// the extension device catalog / host claims is not wired yet.
+/// [`super::ci_router`] registers every host in [`super::ForgeDynHosts`] with
+/// a shared [`LiveCiDeviceClient`]. Catalog mounts for `ci/*` are owned by
+/// `extensions/ci/` (`omp.ci`). Adapter host-claim discovery
+/// (`GITLAB_HOST` / `GITHUB_HOST` / convar / catalog claims) lives in
+/// [`super::ForgeDynHosts`] — the same claim set as forge.
 ///
 /// `capabilities` is the Delegated ceiling (`Capabilities::allows`); dyn
 /// device answers cannot widen it.

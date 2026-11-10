@@ -49,9 +49,15 @@ No tokens live in this tree.
 **not mounted**. CI write ops and `artifacts` stay unmounted; registration
 ceilings remain `log_stream` only.
 
+## Host claims
+
+`GITLAB_HOST` joins the Dyn forge / CI arms automatically via envd
+`ForgeDynHosts` (alongside SaaS `gitlab.com` / `github.com` and
+`sv_forge_dyn_hosts`). No separate convar entry required when the adapter
+env is set.
+
 ## Remaining gaps
 
-- Full automatic device-catalog host-claim discovery remains a smaller TODO
 - Checkout / push return plan / push-prep via `extensions/forge/` mounts (ADR D2.4; no local git here)
 - In-core `github.rs` deleted; `github_url.rs` neutralized to `forge_url.rs`;
   crate module `github_adapter` → `forge_adapter` done; residue is Class C /

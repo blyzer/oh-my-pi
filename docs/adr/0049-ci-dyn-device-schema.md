@@ -70,9 +70,14 @@ a recording invoker.
 
 Production `ci_router`:
 
-- registers [`CI_GITHUB_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
-  (`github.com`) and [`CI_DYN_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
-  (`gitlab.com`) on the **Dyn** arm with the same live client;
+- registers every host in
+  [`ForgeDynHosts`](../../crates/envd/src/forge_adapter/mod.rs) on the
+  **Dyn** arm with the same live client — always
+  [`CI_GITHUB_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
+  (`github.com`) and
+  [`CI_DYN_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
+  (`gitlab.com`), plus `sv_forge_dyn_hosts` and adapter env `GITLAB_HOST` /
+  `GITHUB_HOST` (same claim set as forge);
 - registers unlisted checkout hosts on the same Dyn arm (honest Unavailable
   without mounts);
 - in-core `GithubCiAdapter` / `github.rs` are deleted (`CiBackend` is Dyn-only).
@@ -82,7 +87,8 @@ Production `ci_router`:
 Unit tests in `crates/envd/src/forge_adapter/dyn_ci.rs` and
 `forge_adapter/mod.rs` prove Delegated routes dyn hosts through a fake /
 live client for `status` / `log_stream`, and that production `ci_router`
-registers `github.com` on Dyn. Python mapping tests under
+registers `github.com` and adapter host claims (`GITHUB_HOST` /
+`GITLAB_HOST`) on Dyn. Python mapping tests under
 `extensions/github/tests` and `extensions/gitlab/tests` cover Actions /
 GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
 `log_stream` only.
