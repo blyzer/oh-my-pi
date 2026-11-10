@@ -11,8 +11,10 @@ use omp_con::Ctx;
 use omp_core::{Str, sf};
 use omp_memory::Capabilities;
 use omp_tool::{Registry, Rev, Tool, ToolSpec, ToolsPolicy};
+#[cfg(feature = "cap-media")]
+use omp_tools::ask::AskVocalizer;
 use omp_tools::{
-	ask::{AskPresenter, AskVocalizer},
+	ask::AskPresenter,
 	edit::observer::EditRepairClient,
 	eval::{EvalSessionControl, EvalTool, PyEvalTool, TaskDescriptionSnapshot},
 	github::GithubHost,
@@ -41,6 +43,10 @@ use super::{
 use crate::browser_daemon::{BrowserDaemon, BrowserSettings};
 #[cfg(feature = "cap-computer")]
 use crate::computer::ComputerSessionHost;
+#[cfg(feature = "cap-media")]
+use crate::media_devices;
+#[cfg(feature = "cap-media")]
+use crate::media_tts::SpeechConfig;
 use crate::{
 	EnvdError,
 	blobs::BlobHost,
@@ -53,8 +59,6 @@ use crate::{
 	github_url::GithubCredentialBridge,
 	managed_skills::ManagedSkills,
 	mcp::McpService,
-	media_devices,
-	media_tts::SpeechConfig,
 	memory::ReflectionBridgeHost,
 	report_issue::{self, ReportIssue},
 	search_backend::SearchBridgeHost,
@@ -94,7 +98,9 @@ pub(super) struct SessionHost<'a> {
 	project_root:       &'a Path,
 	state_dir:          &'a Path,
 	github_cache:       Arc<GithubCache>,
+	#[cfg(feature = "cap-media")]
 	image_config:       media_devices::ImageConfig,
+	#[cfg(feature = "cap-media")]
 	speech_config:      SpeechConfig,
 	checkpoint_control: AgentCheckpointControl,
 	github:             Option<Arc<GithubService>>,
@@ -118,8 +124,8 @@ impl<'a> SessionHost<'a> {
 		state_dir: &'a Path,
 		telemetry: &'a Arc<omp_cache::telemetry_cache::TelemetryIndex>,
 		github_cache: Arc<GithubCache>,
-		image_config: media_devices::ImageConfig,
-		speech_config: SpeechConfig,
+		#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
+		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
 		let search_bridge = Arc::new(SearchBridgeHost::new(search));
 		let github_credentials = Arc::new(GithubCredentialBridge::new());
@@ -140,7 +146,9 @@ impl<'a> SessionHost<'a> {
 			project_root,
 			state_dir,
 			github_cache,
+			#[cfg(feature = "cap-media")]
 			image_config,
+			#[cfg(feature = "cap-media")]
 			speech_config,
 			checkpoint_control: AgentCheckpointControl::default(),
 			github: None,
@@ -171,9 +179,11 @@ impl SessionInstall for SessionHost<'_> {
 	type Checkpoint = AgentCheckpointControl;
 	type Error = EnvdError;
 	type Goal = GoalControlAdapter;
+	#[cfg(feature = "cap-media")]
 	type Image = media_devices::MediaDevice;
 	type Report = ReportIssue;
 	type Search = SearchBridgeHost;
+	#[cfg(feature = "cap-media")]
 	type Speech = media_devices::MediaDevice;
 
 	fn register_session<T: Tool>(
@@ -191,6 +201,7 @@ impl SessionInstall for SessionHost<'_> {
 		Ok(())
 	}
 
+	#[cfg(feature = "cap-media")]
 	fn image_tool(&mut self) -> Self::Image {
 		media_devices::image_gen(
 			Arc::clone(&self.search_bridge),
@@ -200,6 +211,7 @@ impl SessionInstall for SessionHost<'_> {
 		)
 	}
 
+	#[cfg(feature = "cap-media")]
 	fn speech_tool(&mut self) -> Self::Speech {
 		media_devices::tts_with_config(
 			Arc::clone(&self.search_bridge),
@@ -239,6 +251,7 @@ impl SessionInstall for SessionHost<'_> {
 		Arc::new(self.ask_presenter.clone())
 	}
 
+	#[cfg(feature = "cap-media")]
 	fn ask_vocalizer(&self) -> Arc<dyn AskVocalizer> {
 		media_devices::ask_vocalizer(Arc::clone(&self.search_bridge))
 	}

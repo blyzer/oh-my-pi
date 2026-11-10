@@ -1,6 +1,6 @@
 # ADR 0049 Phase 3 / D3.5 — capability feature plan
 
-Status: PR1 (`cap-computer`, PR #549) and PR2 (`cap-browser`) implemented. Tip at planning: `5173e17090` (ENVD-04 #548).
+Status: PR1 (`cap-computer`, PR #549), PR2 (`cap-browser`, PR #550), and PR3 (`cap-media`) implemented on this branch. Tip at planning: `5173e17090` (ENVD-04 #548).
 Pattern source: ENVD-07 `cap-ssh` (PR #544).
 
 ## Goal
@@ -257,6 +257,7 @@ After PR1 this command still enables no `cap-computer`; as more caps join `defau
 - App/chat keep their own `omp-audio` for say/voice (mirror app×`omp-ssh`).
 - Keep existing `local-tts` feature composition; document interaction (`cap-media` off ⇒ no envd TTS device even if `local-tts` on).
 - **Exit:** `omp-audio` absent from selected `omp-envd` tree; default app still exposes `image_gen`/`tts`.
+- Implemented on this branch. `omp-ai` also depended on `omp-audio` through `rewrite_for_speech`, which is unconditional in the module list. That function now compiles only with `omp-ai`'s `speech` feature, and `realtime` includes `speech`. envd enables neither, so the selected envd tree has no `omp-audio` edge. Ask playback (`ask_vocalizer`) lives in `media_devices` and compiles out with `cap-media`; ask still registers.
 
 ### PR4 — minimal-profile CI + matrix docs (after ≥1 cap, ideally after PR3)
 

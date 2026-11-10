@@ -1,4 +1,7 @@
 //! Harness-owned dynamic devices for media generation.
+//!
+//! Compiled only with `omp-envd`'s `cap-media` feature, which links
+//! `omp-audio`. Chat cards for `image_gen` and `tts` do not use this module.
 
 use std::{
 	fs::{self, OpenOptions},

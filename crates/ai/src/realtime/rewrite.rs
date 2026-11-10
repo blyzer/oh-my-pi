@@ -1,10 +1,19 @@
 //! Fence-aware enhanced-speech rewriting with bounded local-model fallback.
+//!
+//! `rewrite_for_speech` normalizes through `omp-audio` and compiles only with
+//! the `speech` feature. `realtime` enables `speech`. The prompt and
+//! [`RewriteBlockAccumulator`] stay available without it, so a crate that
+//! only segments prose does not link `omp-audio`.
 
-use std::{error, future::Future, mem, time::Duration};
+#[cfg(feature = "speech")]
+use std::time::Duration;
+use std::{error, future::Future, mem};
 
+#[cfg(feature = "speech")]
 use omp_audio::segmentation::normalize_speakable;
 use omp_core::Str;
 use thiserror::Error;
+#[cfg(feature = "speech")]
 use tokio::time;
 
 /// Stable instruction passed to the `@tiny` speech-rewrite role.
@@ -51,7 +60,7 @@ where
 	},
 }
 
-/// Unboxed local-model contract used by [`rewrite_for_speech`].
+/// Unboxed local-model contract used by `rewrite_for_speech`.
 pub trait SpeechRewriteBackend {
 	/// Typed inference failure.
 	type Error: error::Error + Send + Sync + 'static;
@@ -65,6 +74,9 @@ pub trait SpeechRewriteBackend {
 }
 
 /// Rewrites one block through `@tiny`, with a deterministic bounded fallback.
+///
+/// Compiled only with the `speech` feature, which links `omp-audio`.
+#[cfg(feature = "speech")]
 pub async fn rewrite_for_speech<B: SpeechRewriteBackend>(
 	backend: &mut B,
 	text: &str,

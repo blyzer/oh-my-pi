@@ -61,6 +61,10 @@ use super::{
 use crate::browser_daemon::BrowserSettings;
 #[cfg(test)]
 use crate::eval::ProcessEvalExec;
+#[cfg(feature = "cap-media")]
+use crate::media_devices;
+#[cfg(feature = "cap-media")]
+use crate::media_tts::{SpeechConfig, SpeechPreference};
 use crate::{
 	EnvdError,
 	admission::DynamicAdmission,
@@ -86,8 +90,6 @@ use crate::{
 	github_url::GithubCredentialBridge,
 	managed_skills::ManagedSkills,
 	mcp::{McpService, manager::McpManager},
-	media_devices,
-	media_tts::{SpeechConfig, SpeechPreference},
 	memory::ReflectionBridgeHost,
 	search_backend::SearchBridgeHost,
 	tool_settings::ToolSettings,
@@ -914,6 +916,7 @@ pub(super) fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
 	settings.role_selector("default").cloned()
 }
 
+#[cfg(feature = "cap-media")]
 fn image_config(ctx: &Ctx) -> media_devices::ImageConfig {
 	let provider_order = omp_ai::settings::AI_PROVIDERS_IMAGE_ORDER
 		.get(ctx)
@@ -924,6 +927,7 @@ fn image_config(ctx: &Ctx) -> media_devices::ImageConfig {
 	media_devices::ImageConfig { provider_order, active_model: configured_model_identity(ctx) }
 }
 
+#[cfg(feature = "cap-media")]
 fn speech_config(ctx: &Ctx) -> SpeechConfig {
 	use omp_ai::speech_settings::{AI_TTS_PROVIDER, CL_TTS_MODEL, CL_TTS_VOICE, TtsProvider};
 	let preference = match AI_TTS_PROVIDER.get(ctx) {
@@ -984,8 +988,8 @@ fn register_session_base(
 	telemetry: &Arc<TelemetryIndex>,
 	github_cache: Arc<GithubCache>,
 	tool_settings: &ToolSettings,
-	image_config: media_devices::ImageConfig,
-	speech_config: SpeechConfig,
+	#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
+	#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	policy: ToolsPolicy,
 	roster: &omp_tools::roster::SelectedRoster,
 ) -> Result<SessionBaseOutput, EnvdError> {
@@ -1008,7 +1012,9 @@ fn register_session_base(
 		state_dir,
 		telemetry,
 		github_cache,
+		#[cfg(feature = "cap-media")]
 		image_config,
+		#[cfg(feature = "cap-media")]
 		speech_config,
 	);
 	omp_tools::roster::install_session(&mut host, roster)?;
@@ -1369,7 +1375,9 @@ pub(crate) fn session_registry(
 		telemetry,
 		github_cache,
 		tool_settings,
+		#[cfg(feature = "cap-media")]
 		image_config(con),
+		#[cfg(feature = "cap-media")]
 		speech_config(con),
 		policy,
 		&roster,
@@ -1520,7 +1528,9 @@ pub(crate) fn production_registry<
 			telemetry,
 			Arc::clone(&github_cache),
 			tool_settings,
+			#[cfg(feature = "cap-media")]
 			image_config(con),
+			#[cfg(feature = "cap-media")]
 			speech_config(con),
 			policy,
 			&roster,
@@ -3089,8 +3099,8 @@ mod tests {
 		] {
 			tool_settings.enabled.insert(Str::new_static(name), true);
 		}
-		// Enabled in settings on purpose. With `cap-browser` off the row is
-		// absent, so this map cannot reinstall it.
+		// Enabled in settings on purpose. With a cap off the row is absent, so
+		// this map cannot reinstall browser, computer, image_gen, or tts.
 		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings { enabled: true, ..BrowserSettings::default() };
 		let inputs = EnvironmentDeclarationInputs {
@@ -3154,7 +3164,9 @@ mod tests {
 				.expect("GitHub cache"),
 			),
 			&tool_settings,
+			#[cfg(feature = "cap-media")]
 			image_config(&con),
+			#[cfg(feature = "cap-media")]
 			speech_config(&con),
 			ToolsPolicy::Auto,
 			&omp_tools::roster::SelectedRoster::production(),
@@ -3183,6 +3195,10 @@ mod tests {
 			"browser",
 			#[cfg(feature = "cap-computer")]
 			"computer",
+			#[cfg(feature = "cap-media")]
+			"image_gen",
+			#[cfg(feature = "cap-media")]
+			"tts",
 			"eval",
 			"py_eval",
 			"read",
@@ -3204,6 +3220,16 @@ mod tests {
 		assert!(
 			!names.contains("computer"),
 			"computer is absent from the construction table when cap-computer is off"
+		);
+		#[cfg(not(feature = "cap-media"))]
+		assert!(
+			!names.contains("image_gen"),
+			"image_gen is absent from the construction table when cap-media is off"
+		);
+		#[cfg(not(feature = "cap-media"))]
+		assert!(
+			!names.contains("tts"),
+			"tts is absent from the construction table when cap-media is off"
 		);
 		let sandboxed = specs
 			.iter()

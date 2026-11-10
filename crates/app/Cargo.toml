@@ -22,12 +22,15 @@ path = "src/claude_trace.rs"
 required-features = ["claude-trace"]
 
 [features]
-default = ["local", "cap-ssh", "cap-computer", "cap-browser"]
+default = ["local", "cap-ssh", "cap-computer", "cap-browser", "cap-media"]
 claude-trace = []
 local = ["omp-driver/local", "omp-ai/local"]
 cap-ssh = ["omp-envd/cap-ssh"]
 cap-computer = ["omp-envd/cap-computer"]
 cap-browser = ["omp-envd/cap-browser", "omp-driver/cap-browser"]
+# Forwards the environment host's media capability (`image_gen`, `tts`).
+# App and chat keep their own `omp-audio` edges for say and voice.
+cap-media = ["omp-envd/cap-media"]
 gui = ["dep:omp-gui"]
 local-all = [
 	"local-applefm",

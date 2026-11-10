@@ -13,9 +13,10 @@ readme = "README.md"
 workspace = true
 
 [features]
-# Construction-table gates. The browser and computer contract modules stay compiled either way.
+# Construction-table gates. Contract modules stay compiled either way.
 cap-browser = []
 cap-computer = []
+cap-media = []
 
 [dependencies]
 anydoc.workspace = true

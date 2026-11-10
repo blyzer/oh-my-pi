@@ -1,4 +1,8 @@
 //! Real text-to-speech production for the dyn-mounted `tts` device.
+//!
+//! Compiled only with `omp-envd`'s `cap-media` feature. `local-tts` selects
+//! the Kokoro backend inside this module; without `cap-media` the device is
+//! absent even when `local-tts` is on.
 
 use std::{sync::Arc, time::Duration};
 

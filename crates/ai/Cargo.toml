@@ -34,7 +34,11 @@ local-tts = [
 	"dep:voice-g2p",
 ]
 device-attestation = ["dep:block2", "dep:objc2", "dep:objc2-foundation"]
+# `rewrite_for_speech` links `omp-audio`. `omp-envd` does not enable this.
+# `realtime` includes it, so a voice build still normalizes speech.
+speech = ["dep:omp-audio"]
 realtime = [
+	"speech",
 	"dep:audiopus_sys",
 	"dep:opus",
 	"dep:webrtc",
@@ -42,7 +46,7 @@ realtime = [
 ]
 
 [dependencies]
-omp-audio.workspace = true
+omp-audio = { workspace = true, optional = true }
 dashmap.workspace = true
 arc-swap.workspace = true
 async-stream.workspace = true

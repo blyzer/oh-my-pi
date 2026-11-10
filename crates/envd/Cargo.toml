@@ -11,10 +11,13 @@ readme = "README.md"
 
 [features]
 default = []
+# Kokoro inside `omp-ai`. The envd `tts` device still requires `cap-media`:
+# `local-tts` alone does not compile `media_tts` or link `omp-audio`.
 local-tts = ["omp-ai/local-tts"]
 cap-ssh = ["dep:omp-ssh"]
 cap-computer = ["dep:omp-desktop", "omp-tools/cap-computer"]
 cap-browser = ["dep:omp-webview", "dep:tokio-tungstenite", "omp-tools/cap-browser"]
+cap-media = ["dep:omp-audio", "omp-tools/cap-media"]
 
 [dependencies]
 async-stream.workspace = true
@@ -35,7 +38,7 @@ miette.workspace = true
 nix.workspace = true
 omp-contract.workspace = true
 omp-ast.workspace = true
-omp-audio.workspace = true
+omp-audio = { workspace = true, optional = true }
 omp-session.workspace = true
 omp-dom.workspace = true
 omp-catalog.workspace = true
