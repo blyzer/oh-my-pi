@@ -9,7 +9,7 @@ code; apply them once in the GitHub UI.
 
 | Workflow | What it does | Gating |
 |---|---|---|
-| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below) |
+| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, default + minimal capability profiles (`just check-minimal-caps`), `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below); the minimal-caps job is informational until added to the ruleset |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
 `Package macOS` runs only by manual dispatch. P8's macOS recording uses hosted `macos-15`.
@@ -77,6 +77,12 @@ Use the job names exactly as the checks list of a pull request shows them:
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
 queue. Add it to the ruleset once it has reported green on a pull request;
 existing required checks keep their names.
+
+`Minimal and default capability profiles` (ADR 0049 Phase 3) runs
+`just check-minimal-caps` on a GitHub-hosted Linux runner. Keep it
+informational until it has reported green on a pull request, then add that
+exact job name to the ruleset and to
+[`.github/rulesets/omp2-protected.json`](../.github/rulesets/omp2-protected.json).
 
 `Lint workspace (macOS)` is the only macOS clippy pass. It runs on its own
 runner in parallel with `Rust workspace and acceptance proofs`, which no longer

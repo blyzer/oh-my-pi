@@ -1,6 +1,6 @@
 # ADR 0049 Phase 3 / D3.5 — capability feature plan
 
-Status: PR1 (`cap-computer`, PR #549), PR2 (`cap-browser`, PR #550), and PR3 (`cap-media`) implemented on this branch. Tip at planning: `5173e17090` (ENVD-04 #548).
+Status: PR1 (`cap-computer`, PR #549), PR2 (`cap-browser`, PR #550), PR3 (`cap-media`, PR #551), and PR4 (`just check-minimal-caps` + CI job) on this branch. Tip at planning: `5173e17090` (ENVD-04 #548).
 Pattern source: ENVD-07 `cap-ssh` (PR #544).
 
 ## Goal
@@ -264,6 +264,7 @@ After PR1 this command still enables no `cap-computer`; as more caps join `defau
 - Formalize minimal check in `justfile` (e.g. `check-minimal-caps`) and a non-gating or required CI job: default `omp-app` **and** all `cap-*` off.
 - Document feature matrix in ADR 0049 status / TASKS.
 - **Exit:** one command proves minimal profile; default profile still green.
+- **Done on this branch:** `just check-minimal-caps` plus CI job `Minimal and default capability profiles` (non-gating until it reports green and is added to the ruleset).
 
 ### PR5 (optional Phase 3 hygiene) — `cap-security`
 
@@ -280,9 +281,14 @@ After PR1 this command still enables no `cap-computer`; as more caps join `defau
 
 ## Minimal-profile check command (canonical)
 
-Until a `just` recipe exists:
+```bash
+just check-minimal-caps
+```
+
+Equivalent pieces:
 
 ```bash
+cargo check -p omp-app --locked
 cargo check -p omp-app --no-default-features --features local --locked \
   --config 'resolver.feature-unification="selected"'
 ```

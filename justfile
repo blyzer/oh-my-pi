@@ -180,6 +180,25 @@ check:
 check-pkg pkg:
     cargo check -p {{ pkg }} --locked
 
+# ADR 0049 Phase 3: default `omp-app` (all `cap-*` on) and the minimal
+# profile (`local` only). Selected feature unification is required for the
+# minimal tree proofs so workspace unification cannot keep optional envd
+# edges alive through `omp-app`'s defaults.
+[group('build & check')]
+check-minimal-caps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo check -p omp-app --locked
+    cargo check -p omp-app --no-default-features --features local --locked \
+    	--config 'resolver.feature-unification="selected"'
+    selected=(--locked --config 'resolver.feature-unification="selected"')
+    for pkg in omp-desktop omp-webview omp-audio omp-ssh; do
+    	if cargo tree -p omp-envd -i "$pkg" -e normal "${selected[@]}" >/dev/null 2>&1; then
+    		echo "expected ${pkg} absent from the selected omp-envd tree" >&2
+    		exit 1
+    	fi
+    done
+
 # Build the `omp` CLI/daemon binary (dev profile).
 [group('build & check')]
 build:
