@@ -111,9 +111,8 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   bound-client threading for `forge@1` is DONE.
 - **DONE (D2.4 checkout/push):** Dyn devices return `CheckoutPlan` /
   `PushPrep`; core `forge_worktree` fills receipts. `github.com` /
-  `gitlab.com` mounts are live. **`github.rs` is not deletable yet:** residual
-  GHE CI arm (`GithubCiAdapter` / Actions watch), credential bridge /
-  `github_url.rs` helpers, list-URL resolver support, and non-forge
-  `GithubService` Operations (search, file read, `pr_create`, run watch) still
-  live there. Forge@1 checkout/push no longer depends on vendor git inside
-  `github.rs` (git I/O is `forge_worktree`).
+  `gitlab.com` mounts are live.
+- **DONE (delete `github.rs`):** `ForgeBackend` is Dyn-only; in-core
+  `GithubForgeAdapter` / `GithubService` removed. Intentional residue:
+  `github_url.rs` (credentials / `pr://` / `issue://` / `infer_repo`), Class C,
+  autocomplete `GithubRefs`.

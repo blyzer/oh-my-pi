@@ -3,9 +3,9 @@
 //! T2 extensions implement [`omp_ci::CiHost`] by mounting dyn devices at
 //! `ci/<op>` (snake_case [`omp_ci::CiOp`], plus `ci/capabilities`) and
 //! answering `omp.devices.call`. This module is the in-core half: a
-//! [`DynCiAdapter`] that dispatches each [`CiHost`] method to those paths,
-//! plus a [`CiBackend`] enum so the production [`super::ci_router`] can hold
-//! GitHub and dyn hosts without boxing [`CiHost`] futures.
+//! [`DynCiAdapter`] that dispatches each [`CiHost`] method to those paths.
+//! [`CiBackend`] is a Dyn-only type alias so the production
+//! [`super::ci_router`] stays unboxed over [`CiHost`] futures.
 //!
 //! Schema source of truth: `docs/adr/0049-ci-dyn-device-schema.md`.
 //! Capabilities ceilings stay enforced in `omp-ci-delegated` at registration.
@@ -23,19 +23,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use strum::IntoStaticStr as _;
 
-use super::GithubCiAdapter;
-
 /// Canonical GitLab SaaS host on the dyn CI arm (ADR 0049 T2 CI).
 ///
 /// Production [`super::ci_router`] registers this host (and
-/// [`CI_GITHUB_HOST`]) on [`CiBackend::Dyn`] with a shared
-/// [`LiveCiDeviceClient`]. Catalog mounts live in `extensions/ci/`.
+/// [`CI_GITHUB_HOST`]) on Dyn with a shared [`LiveCiDeviceClient`]. Catalog
+/// mounts live in `extensions/ci/`.
 pub const CI_DYN_HOST: &str = "gitlab.com";
 
-/// Canonical GitHub SaaS host on the dyn CI arm once the T2 CI extension
-/// mounts `ci/*` (ADR 0049). Same bound [`LiveCiDeviceClient`] as
-/// [`CI_DYN_HOST`]. In-core [`GithubCiAdapter`] remains for unlisted
-/// checkout hosts (GHE) that are not on the Dyn arm.
+/// Canonical GitHub SaaS host on the dyn CI arm (ADR 0049). Same bound
+/// [`LiveCiDeviceClient`] as [`CI_DYN_HOST`].
 pub const CI_GITHUB_HOST: &str = "github.com";
 
 /// Device paths under `ci/*`.
@@ -293,104 +289,13 @@ impl<C: CiDeviceClient> CiHost for DynCiAdapter<C> {
 	}
 }
 
-/// Concrete [`CiHost`] held by the production CI router.
+/// Concrete [`CiHost`] held by the production CI router — Dyn only.
 ///
-/// Enums before `dyn`: GitHub stays a native arm; T2 extensions ride
-/// [`DynCiAdapter`]. Both arms forward with `match`, so [`CiHost`] futures
-/// stay unboxed. The default client is [`LiveCiDeviceClient`].
-#[derive(Clone)]
-pub enum CiBackend<C = LiveCiDeviceClient> {
-	/// In-tree GitHub Actions adapter.
-	Github(GithubCiAdapter),
-	/// Dyn-device-backed host (`ci/*` over toolhost).
-	Dyn(DynCiAdapter<C>),
-}
-
-impl<C: CiDeviceClient> CiHost for CiBackend<C> {
-	fn capabilities(
-		&self,
-		provider: &CiProvider,
-	) -> impl Future<Output = Result<Capabilities, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.capabilities(provider).await,
-				Self::Dyn(host) => host.capabilities(provider).await,
-			}
-		}
-	}
-
-	fn status(&self, run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.status(run).await,
-				Self::Dyn(host) => host.status(run).await,
-			}
-		}
-	}
-
-	fn artifacts(&self, run: &RunRef) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.artifacts(run).await,
-				Self::Dyn(host) => host.artifacts(run).await,
-			}
-		}
-	}
-
-	fn log_stream(&self, run: &RunRef) -> impl Future<Output = Result<LogPage, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.log_stream(run).await,
-				Self::Dyn(host) => host.log_stream(run).await,
-			}
-		}
-	}
-
-	fn cancel(&self, run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.cancel(run).await,
-				Self::Dyn(host) => host.cancel(run).await,
-			}
-		}
-	}
-
-	fn rerun_failed(&self, run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.rerun_failed(run).await,
-				Self::Dyn(host) => host.rerun_failed(run).await,
-			}
-		}
-	}
-
-	fn rerun_job(&self, run: &RunRef) -> impl Future<Output = Result<Job, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.rerun_job(run).await,
-				Self::Dyn(host) => host.rerun_job(run).await,
-			}
-		}
-	}
-
-	fn trigger(&self, request: Trigger) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.trigger(request).await,
-				Self::Dyn(host) => host.trigger(request).await,
-			}
-		}
-	}
-
-	fn play_manual(&self, run: &RunRef) -> impl Future<Output = Result<Job, CiError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.play_manual(run).await,
-				Self::Dyn(host) => host.play_manual(run).await,
-			}
-		}
-	}
-}
+/// After the in-core `github.rs` deletion there is no Github arm; every
+/// registered host is a [`DynCiAdapter`]. The alias keeps call sites and
+/// Delegated type parameters stable. The default client is
+/// [`LiveCiDeviceClient`].
+pub type CiBackend<C = LiveCiDeviceClient> = DynCiAdapter<C>;
 
 /// Registers a dyn-backed CI host on a [`DelegatedBuilder`].
 ///
@@ -413,26 +318,18 @@ pub fn register_dyn_ci_host<C: CiDeviceClient>(
 	client: C,
 	capabilities: Capabilities,
 ) -> Result<(), RegisterError> {
-	builder.register(host, CiBackend::Dyn(DynCiAdapter::new(client)), capabilities)
+	builder.register(host, DynCiAdapter::new(client), capabilities)
 }
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		future::Future,
-		sync::{
-			Arc,
-			atomic::{AtomicUsize, Ordering},
-		},
-	};
+	use std::{future::Future, sync::Arc};
 
-	use omp_cache::forge_cache::ForgeCache;
 	use omp_ci::{
 		Capabilities, CiError, CiHost as _, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline,
 		RunRef,
 	};
 	use omp_ci_delegated::{Delegated, PermitAll};
-	use omp_con::Ctx;
 	use omp_core::Str;
 	use parking_lot::Mutex;
 	use serde_json::{Value, json};
@@ -441,12 +338,8 @@ mod tests {
 		CI_DYN_HOST, CI_GITHUB_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter,
 		LiveCiDeviceClient, ci_device_path, ci_op_for_path, paths, register_dyn_ci_host,
 	};
-	use crate::{
-		blobs::BlobHost, github::GithubService, github_adapter::GithubCiAdapter,
-		github_url::GithubCredentialBridge, tool_settings::ForgeCacheSettings,
-	};
 
-	fn github_caps() -> Capabilities {
+	fn dyn_caps() -> Capabilities {
 		Capabilities { log_stream: true, ..Capabilities::none() }
 	}
 
@@ -467,7 +360,7 @@ mod tests {
 			let result = match path {
 				paths::STATUS => Ok(serde_json::to_value(&self.pipeline).expect("pipeline")),
 				paths::LOG_STREAM => Ok(serde_json::to_value(&self.log).expect("log")),
-				paths::CAPABILITIES => Ok(serde_json::to_value(github_caps()).expect("caps")),
+				paths::CAPABILITIES => Ok(serde_json::to_value(dyn_caps()).expect("caps")),
 				other => {
 					let op = other
 						.strip_prefix("ci/")
@@ -503,24 +396,6 @@ mod tests {
 		LogPage::new(sample_run(host, "42", Some("7")), "boom\n", true)
 	}
 
-	fn github_service(root: &std::path::Path) -> Arc<GithubService> {
-		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
-		let cache = Arc::new(
-			ForgeCache::open(
-				root.join("forge-cache.sqlite3"),
-				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
-			)
-			.expect("cache"),
-		);
-		GithubService::new(
-			root.to_path_buf(),
-			root,
-			Arc::new(GithubCredentialBridge::new()),
-			cache,
-			blobs,
-		)
-	}
-
 	#[test]
 	fn ci_device_paths_match_op_snake_case() {
 		assert_eq!(ci_device_path(CiOp::Status).as_str(), paths::STATUS);
@@ -540,13 +415,19 @@ mod tests {
 			pipeline: sample_pipeline(host),
 			log:      sample_log(host),
 		};
-		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubCiAdapter { service: github_service(dir.path()) };
-		let caps = github_caps();
+		let caps = dyn_caps();
 		let mut builder = Delegated::<CiBackend<FakeClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", CiBackend::Github(github), caps)
-			.expect("github");
+		register_dyn_ci_host(
+			&mut builder,
+			CI_GITHUB_HOST,
+			FakeClient {
+				calls:    Arc::new(Mutex::new(Vec::new())),
+				pipeline: sample_pipeline(CI_GITHUB_HOST),
+				log:      sample_log(CI_GITHUB_HOST),
+			},
+			caps,
+		)
+		.expect("github.com");
 		register_dyn_ci_host(&mut builder, host, fake, caps).expect("gitlab");
 		let router = builder.build();
 
@@ -572,12 +453,18 @@ mod tests {
 
 	#[tokio::test]
 	async fn unregistered_dyn_host_stays_unregistered() {
-		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubCiAdapter { service: github_service(dir.path()) };
 		let mut builder = Delegated::<CiBackend<FakeClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", CiBackend::Github(github), github_caps())
-			.expect("github");
+		register_dyn_ci_host(
+			&mut builder,
+			CI_GITHUB_HOST,
+			FakeClient {
+				calls:    Arc::new(Mutex::new(Vec::new())),
+				pipeline: sample_pipeline(CI_GITHUB_HOST),
+				log:      sample_log(CI_GITHUB_HOST),
+			},
+			dyn_caps(),
+		)
+		.expect("github.com");
 		let router = builder.build();
 		let run = sample_run("gitlab.example", "1", None);
 		let error = router.status(&run).await.expect_err("unregistered");
@@ -613,43 +500,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn github_backend_arm_skips_dyn_client_when_registered() {
-		// Enum routing proof: an explicit Github-arm registration does not
-		// touch the dyn client. Production `ci_router` places github.com on
-		// Dyn instead (see `github_com_ci_is_registered_dyn_*` in mod tests).
-		let hits = Arc::new(AtomicUsize::new(0));
-		#[derive(Clone)]
-		struct Counting(Arc<AtomicUsize>);
-		impl CiDeviceClient for Counting {
-			fn call(
-				&self,
-				_path: &str,
-				_args: Value,
-			) -> impl Future<Output = Result<Value, CiError>> + Send {
-				self.0.fetch_add(1, Ordering::SeqCst);
-				std::future::ready(Err(CiError::Unavailable { op: CiOp::Status }))
-			}
-		}
-		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubCiAdapter { service: github_service(dir.path()) };
-		let caps = github_caps();
-		let mut builder = Delegated::<CiBackend<Counting>, _>::builder(PermitAll);
-		builder
-			.register(CI_GITHUB_HOST, CiBackend::Github(github), caps)
-			.expect("github");
-		register_dyn_ci_host(&mut builder, "gitlab.example", Counting(Arc::clone(&hits)), caps)
-			.expect("gitlab");
-		let router = builder.build();
-		let run = sample_run(CI_GITHUB_HOST, "1", None);
-		let error = router.status(&run).await.expect_err("no live github");
-		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for Github arm");
-		assert!(
-			!matches!(error, CiError::Unregistered { .. }),
-			"github.com must stay registered: {error}"
-		);
-	}
-
-	#[tokio::test]
 	async fn github_com_on_dyn_arm_uses_device_client() {
 		let host = CI_GITHUB_HOST;
 		let calls = Arc::new(Mutex::new(Vec::new()));
@@ -658,7 +508,7 @@ mod tests {
 			pipeline: sample_pipeline(host),
 			log:      sample_log(host),
 		};
-		let caps = github_caps();
+		let caps = dyn_caps();
 		let mut builder = Delegated::<CiBackend<FakeClient>, _>::builder(PermitAll);
 		register_dyn_ci_host(&mut builder, host, fake, caps).expect("github.com dyn");
 		let router = builder.build();
@@ -727,13 +577,8 @@ mod tests {
 		}));
 		assert!(client.is_bound());
 
-		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubCiAdapter { service: github_service(dir.path()) };
-		let caps = github_caps();
+		let caps = dyn_caps();
 		let mut builder = Delegated::<CiBackend<LiveCiDeviceClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", CiBackend::Github(github), caps)
-			.expect("github");
 		register_dyn_ci_host(&mut builder, CI_DYN_HOST, client, caps).expect("gitlab.com");
 		let router = builder.build();
 
@@ -763,7 +608,7 @@ mod tests {
 			log:      sample_log(host),
 		};
 		let mut builder = Delegated::<CiBackend<FakeClient>, _>::builder(PermitAll);
-		register_dyn_ci_host(&mut builder, host, fake.clone(), github_caps()).expect("dyn");
+		register_dyn_ci_host(&mut builder, host, fake.clone(), dyn_caps()).expect("dyn");
 		let router = builder.build();
 		let run = sample_run(host, "42", None);
 		let error = router.cancel(&run).await.expect_err("not capable");

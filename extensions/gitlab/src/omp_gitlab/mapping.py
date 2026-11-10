@@ -193,14 +193,15 @@ def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
     return body
 
 
-_LIST_FILTER_KEYS = frozenset({"state", "author", "label"})
+_LIST_FILTER_KEYS = frozenset({"state", "author", "label", "head"})
 
 
 def split_list_filters(text: str) -> tuple[dict[str, str], str]:
     """Split neutral list-URL tokens from free-text search.
 
     Same convention as ``omp_github.mapping.split_list_filters``: ``state:``,
-    ``author:``, ``label:`` are filters; remaining tokens are free-text.
+    ``author:``, ``label:``, and ``head:`` (source branch) are filters;
+    remaining tokens are free-text.
     """
     filters: dict[str, str] = {}
     rest: list[str] = []

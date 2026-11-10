@@ -8,13 +8,12 @@
 //! with no etag.
 //!
 //! List URLs such as `issue://owner/repo?state=open` and `pr://…` also go
-//! through [`ForgeHost::search`] (Dyn for `github.com` / `gitlab.com`, in-core
-//! GitHub adapter for remaining GHE hosts). Neutral filter tokens
-//! (`state:` / `author:` / `label:`) ride `SearchQuery.text`. The search path
-//! has no HTTP etag, so list bodies are cached without one (same honesty as
-//! numbered reads). The private GitHub REST client in this module remains for
-//! legacy detail/diff fetch paths that still need it; checkout/push still
-//! need `github.rs`.
+//! through [`ForgeHost::search`] (Dyn for registered hosts). Neutral filter
+//! tokens (`state:` / `author:` / `label:` / `head:`) ride `SearchQuery.text`.
+//! The search path has no HTTP etag, so list bodies are cached without one
+//! (same honesty as numbered reads). The private GitHub REST client in this
+//! module remains for legacy detail/diff fetch paths and credential bridging;
+//! forge/CI tool traffic is Dyn-only after the `github.rs` deletion.
 
 use std::{
 	collections::BTreeMap,

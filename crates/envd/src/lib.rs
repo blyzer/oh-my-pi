@@ -48,13 +48,11 @@ pub mod ext_git;
 pub mod exthost;
 /// The hosts a fetch reaches and the approval subjects keyed on them.
 pub mod fetch_host;
-mod github;
 #[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 mod github_adapter;
 #[cfg(feature = "cap-forge")]
 pub use github_adapter::CheckoutForge;
 mod forge_worktree;
-mod github_params;
 pub mod github_url;
 pub mod grep;
 pub mod host_info;
@@ -1392,9 +1390,6 @@ impl ProjectEnvironment {
 		CheckoutForge::new(
 			self.lifecycle.server.project_root(),
 			self.lifecycle.server.state_dir().to_path_buf(),
-			Arc::clone(&self.github_credentials),
-			self.lifecycle.server.blob_host(),
-			tool_settings::ForgeCacheSettings::from_con(con).policy(),
 			self.lifecycle.server.forge_devices(),
 			github_adapter::ForgeDynHosts::from_con(con),
 		)

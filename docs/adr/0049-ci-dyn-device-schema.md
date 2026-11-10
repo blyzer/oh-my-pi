@@ -73,9 +73,9 @@ Production `ci_router`:
 - registers [`CI_GITHUB_HOST`](../../crates/envd/src/github_adapter/dyn_ci.rs)
   (`github.com`) and [`CI_DYN_HOST`](../../crates/envd/src/github_adapter/dyn_ci.rs)
   (`gitlab.com`) on the **Dyn** arm with the same live client;
-- keeps unlisted checkout hosts on the **Github** arm (GHE);
-- does **not** delete in-core [`GithubCiAdapter`](../../crates/envd/src/github_adapter/mod.rs)
-  / `github.rs` (forge checkout/push and GHE CI still need them).
+- registers unlisted checkout hosts on the same Dyn arm (honest Unavailable
+  without mounts);
+- in-core `GithubCiAdapter` / `github.rs` are deleted (`CiBackend` is Dyn-only).
 
 ## Evidence
 
@@ -93,6 +93,5 @@ GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
   `register_dyn_ci_host`, production invoker under `cap-ci`).
 - **DONE:** T2 CI extension body (`extensions/ci/` + GitHub Actions /
   GitLab CI backends) and flipping `github.com` CI to Dyn.
-- **D2.4 forge checkout/push is DONE.** `github.rs` still remains for the GHE
-  CI arm, credential bridge, and residual `GithubService` Operations
-  (list-URL / search-leaf parity is DONE).
+- **DONE:** D2.4 forge checkout/push and deletion of in-core `github.rs` /
+  `GithubCiAdapter`. Residue: `github_url.rs`, Class C, `GithubRefs`.
