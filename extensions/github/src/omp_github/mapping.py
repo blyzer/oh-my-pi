@@ -186,15 +186,16 @@ def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
     return body
 
 
-_LIST_FILTER_KEYS = frozenset({"state", "author", "label"})
+_LIST_FILTER_KEYS = frozenset({"state", "author", "label", "head"})
 
 
 def split_list_filters(text: str) -> tuple[dict[str, str], str]:
     """Split neutral list-URL tokens from free-text search.
 
-    List URLs encode filters as ``state:open author:alice label:bug``. Remaining
-    tokens are free-text search. Empty free-text with a repo scope means "list
-    the scope" (REST list endpoints).
+    List URLs encode filters as ``state:open author:alice label:bug``.
+    ``head:branch`` (or ``head:owner:branch``) scopes change-request lists to
+    an open head ref. Remaining tokens are free-text search. Empty free-text
+    with a repo scope means "list the scope" (REST list endpoints).
     """
     filters: dict[str, str] = {}
     rest: list[str] = []

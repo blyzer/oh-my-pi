@@ -53,7 +53,7 @@ ceilings remain `log_stream` only.
 
 - Full automatic device-catalog host-claim discovery remains a smaller TODO
 - Checkout / push return plan / push-prep via `extensions/forge/` mounts (ADR D2.4; no local git here)
-- In-core `github.rs` remains until Dyn checkout/push parity
+- In-core `github.rs` deleted; residue is `github_url.rs` / Class C / `GithubRefs`
 
 ## Proofs
 

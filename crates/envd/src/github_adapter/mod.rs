@@ -1,51 +1,48 @@
-//! GitHub-backed [`ForgeHost`] and [`CiHost`] adapters.
+//! Dyn-backed [`ForgeHost`] and [`CiHost`] routers (ADR 0049 D2.4+).
 //!
-//! `GithubService` still performs GitHub HTTP for the in-core arm. Forge@1
-//! checkout/push obtain vendor plan data then run
-//! [`crate::forge_worktree`] (ADR 0049 D2.4). These wrappers speak the neutral
-//! contracts and are installed behind `Delegated` routers.
-//! `view_change_request`, `view_issue`, the unified diff, and the comment
-//! list are reads. Numbered `pr://` and `issue://` resources call them.
+//! Forge@1 / CI@1 ride [`ForgeBackend`] / [`CiBackend`] — both Dyn-only after
+//! the in-core `github.rs` deletion. Checkout/push obtain vendor plan data
+//! then run [`crate::forge_worktree`]. Numbered `pr://` / `issue://` reads and
+//! list-URL search go through the same routers.
 //! `PermitAll` is intentional: the desk gate is the tool commit, and the
 //! routers are not exported, so a second approval would only repeat that gate.
 //!
 //! Hosts are registered explicitly. Dyn hosts come from [`ForgeDynHosts`]:
 //! always `gitlab.com` and `github.com`, plus `sv_forge_dyn_hosts` and adapter
 //! env `GITLAB_HOST`. The checkout host from `infer_repo` joins the Dyn arm
-//! when it is in that set; otherwise a non-listed checkout still lands on the
-//! Github arm (GHE). There is no fallback that sends every host to GitHub.
+//! when it differs (same live client), so GHE / self-hosted listed via remote
+//! still works when extensions answer; unlisted hosts without mounts →
+//! [`omp_forge::ForgeError::Unavailable`] (honest). There is no in-core
+//! Github fallback arm.
 //!
 //! Catalog mounts for `forge/<op>` are owned by the `omp.forge` extension
 //! (host-dispatch to `omp_github` / `omp_gitlab`). Catalog mounts for
 //! `ci/<op>` are owned by the `omp.ci` extension (host-dispatch to
-//! `omp_github.ci` / `omp_gitlab.ci`). In-core [`GithubForgeAdapter`] /
-//! [`GithubCiAdapter`] / `github.rs` remain for list-URL helpers and unlisted
-//! GHE CI checkout hosts; forge checkout/push git is no longer in `github.rs`.
+//! `omp_github.ci` / `omp_gitlab.ci`).
 //!
 //! The CI registration advertises `log_stream` only. Status stays allowed
 //! because the contract does not flag it. Cancel, rerun, trigger, artifacts,
 //! and play-manual are `NotCapable` at the router.
 //!
 //! [`CheckoutForge`] is that same router for one checkout. Chat's git watcher
-//! reads the branch's change request through `view_change_request` on it.
+//! reads the branch's change request through `view_change_request` on it,
+//! after a forge-neutral [`ForgeHost::search`] for the open head branch.
 //!
-//! Under `cap-forge`, the router holds a [`ForgeBackend`] enum so a dyn
-//! `forge/*` device host (T2) can sit beside the in-core Github arm without
-//! boxing [`ForgeHost`] futures (ADR 0049 D2.3). Production registers Dyn
-//! hosts via [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog
-//! host-claim discovery remains a smaller TODO.
+//! Under `cap-forge`, the router holds a [`ForgeBackend`] type alias over
+//! [`DynForgeAdapter`] (ADR 0049 D2.3). Production registers Dyn hosts via
+//! [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog host-claim
+//! discovery remains a smaller TODO.
 //!
-//! Under `cap-ci`, the CI router holds a [`CiBackend`] enum the same way
-//! (ADR 0049 `ci/*` bridge). Production registers [`CI_GITHUB_HOST`]
-//! (`github.com`) and [`CI_DYN_HOST`] (`gitlab.com`) on Dyn via a shared
-//! [`LiveCiDeviceClient`]. Unlisted checkout hosts stay on the Github arm.
+//! Under `cap-ci`, the CI router holds a [`CiBackend`] type alias the same way.
+//! Production registers [`CI_GITHUB_HOST`] (`github.com`) and [`CI_DYN_HOST`]
+//! (`gitlab.com`) on Dyn via a shared [`LiveCiDeviceClient`], plus the
+//! checkout host when it differs.
 
 #[cfg(feature = "cap-ci")]
 mod dyn_ci;
 #[cfg(feature = "cap-forge")]
 mod dyn_forge;
 use std::{
-	future::Future,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::Duration,
@@ -63,46 +60,27 @@ pub(crate) use dyn_forge::{
 	GITLAB_HOST, LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path,
 	forge_op_for_path, paths as forge_device_paths, register_dyn_forge_host,
 };
-#[cfg(feature = "cap-forge")]
-use omp_cache::forge_cache::{ForgeCache, ForgeCachePolicy};
 #[cfg(feature = "cap-ci")]
-use omp_ci::{
-	ArtifactPage, Capabilities, CiError, CiHost, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline,
-	RunRef, Trigger,
-};
+use omp_ci::Capabilities;
 #[cfg(feature = "cap-ci")]
 use omp_ci_delegated::{Delegated as CiDelegated, PermitAll as CiPermitAll};
 #[cfg(feature = "cap-forge")]
 use omp_con::Ctx;
 use omp_core::{Str, sf};
 #[cfg(feature = "cap-forge")]
-use omp_forge::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
-	CommitRef, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
-	IssueState, PushReceipt, PushRequest, RepoRef, Repository, RequestState, ResourceKind,
-	SearchHit, SearchKind, SearchPage, SearchQuery,
-};
+use omp_forge::{ChangeRequest, ForgeError, ForgeHost, ForgeOp, RepoRef, SearchKind, SearchQuery};
 #[cfg(feature = "cap-forge")]
 use omp_forge_delegated::{Delegated as ForgeDelegated, PermitAll as ForgePermitAll};
 #[cfg(feature = "cap-forge")]
-use omp_vcs::git::GitRepo;
-#[cfg(feature = "cap-forge")]
 use parking_lot::Mutex;
-use serde_json::Value;
 #[cfg(feature = "cap-forge")]
 use smallvec::SmallVec;
 #[cfg(feature = "cap-forge")]
 use tokio::time;
-use tokio_util::sync::CancellationToken;
 
+use crate::github_url;
 #[cfg(feature = "cap-forge")]
 use crate::tool_settings::SV_FORGE_DYN_HOSTS;
-use crate::{
-	blobs::BlobHost,
-	github::GithubService,
-	github_params::{self, Operation, Params, Payload},
-	github_url::{self, GithubCredentialBridge},
-};
 
 /// Hosts registered on the dyn forge arm (ADR 0049 D2.8).
 ///
@@ -111,8 +89,9 @@ use crate::{
 /// hosts) and from adapter env `GITLAB_HOST` when set and non-empty.
 ///
 /// Self-hosted GitLab or GHE must appear via the convar (or `GITLAB_HOST` for
-/// GitLab); otherwise a non-listed checkout host still registers on the Github
-/// arm (GHE assumption for unlisted hosts).
+/// GitLab) to be pre-registered; an unlisted checkout host is still placed on
+/// Dyn at router build so a remote that extensions answer can work without a
+/// second registration path.
 #[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ForgeDynHosts {
@@ -188,21 +167,7 @@ fn push_dyn_host(hosts: &mut SmallVec<Str, 4>, host: &str) {
 	hosts.push(Str::new(host));
 }
 
-/// GitHub implementation of [`ForgeHost`].
-#[cfg(feature = "cap-forge")]
-#[derive(Clone)]
-pub(crate) struct GithubForgeAdapter {
-	service: Arc<GithubService>,
-}
-
-/// GitHub implementation of [`CiHost`].
-#[cfg(feature = "cap-ci")]
-#[derive(Clone)]
-pub(crate) struct GithubCiAdapter {
-	service: Arc<GithubService>,
-}
-
-/// Routes `forge@1` through [`ForgeBackend`] (dyn T2 + in-core GHE arm).
+/// Routes `forge@1` through [`ForgeBackend`] (Dyn only).
 ///
 /// See the module docs for `PermitAll` and host registration.
 ///
@@ -210,11 +175,9 @@ pub(crate) struct GithubCiAdapter {
 ///
 /// - every host in [`ForgeDynHosts`] (always [`GITLAB_HOST`] +
 ///   [`GITHUB_DYN_HOST`], plus `sv_forge_dyn_hosts` / `GITLAB_HOST`) →
-///   [`ForgeBackend::Dyn`] over `devices`
-/// - checkout host from `infer_repo` when it differs:
-///   - ∈ Dyn set → already registered (Dyn)
-///   - else → Github arm (GHE). Self-hosted GitLab / GHE must be listed via
-///     convar (or `GITLAB_HOST`) to reach Dyn.
+///   [`ForgeBackend`] over `devices`
+/// - checkout host from `infer_repo` when it differs → same Dyn arm (GHE /
+///   self-hosted still works when extensions answer; otherwise Unavailable)
 ///
 /// `devices` may be unbound ([`LiveForgeDeviceClient`] returns
 /// [`omp_forge::ForgeError::Unavailable`] until
@@ -223,14 +186,12 @@ pub(crate) struct GithubCiAdapter {
 /// the device catalog / extension host claims remains TODO (ADR 0049 D2.8).
 #[cfg(feature = "cap-forge")]
 pub(crate) fn forge_router(
-	service: Arc<GithubService>,
 	devices: LiveForgeDeviceClient,
 	dyn_hosts: &ForgeDynHosts,
+	project_root: PathBuf,
+	worktree_root: PathBuf,
 ) -> ForgeDelegated<ForgeBackend, ForgePermitAll> {
-	let adapter = ForgeBackend::Github(GithubForgeAdapter { service: Arc::clone(&service) });
 	let mut builder = ForgeDelegated::builder(ForgePermitAll);
-	let project_root = service.root().to_path_buf();
-	let worktree_root = service.worktree_root().to_path_buf();
 	for host in dyn_hosts.iter() {
 		register_dyn_forge_host(
 			&mut builder,
@@ -241,28 +202,32 @@ pub(crate) fn forge_router(
 		)
 		.expect("dyn forge host");
 	}
-	register_checkout_host(&service, |host| {
+	register_checkout_host(&project_root, |host| {
 		if dyn_hosts.contains(host) {
 			return;
 		}
-		// GHE (or other unlisted checkout) on the in-core Github arm. Listed
-		// Dyn hosts — including github.com / gitlab.com — already registered.
-		let _ = builder.register(host, adapter.clone());
+		// Unlisted checkout (GHE / self-hosted) on Dyn — honest Unavailable
+		// until an extension answers for that host.
+		let _ = register_dyn_forge_host(
+			&mut builder,
+			host,
+			devices.clone(),
+			project_root.clone(),
+			worktree_root.clone(),
+		);
 	});
 	builder.build()
 }
 
-/// Routes `ci@1` through [`CiBackend`] (dyn T2 arm + Github arm for GHE).
+/// Routes `ci@1` through [`CiBackend`] (Dyn only).
 ///
 /// See the module docs for `PermitAll` and host registration.
 ///
 /// # Host registration
 ///
-/// - [`CI_GITHUB_HOST`] (`github.com`) → [`CiBackend::Dyn`] over `devices`
-/// - [`CI_DYN_HOST`] (`gitlab.com`) → [`CiBackend::Dyn`] over the same client
-/// - checkout host from `infer_repo` when it differs:
-///   - already a Dyn SaaS host → skip
-///   - else → Github arm (GHE / unlisted)
+/// - [`CI_GITHUB_HOST`] (`github.com`) → Dyn over `devices`
+/// - [`CI_DYN_HOST`] (`gitlab.com`) → Dyn over the same client
+/// - checkout host from `infer_repo` when it differs → same Dyn arm
 ///
 /// `devices` may be unbound ([`LiveCiDeviceClient`] returns
 /// [`omp_ci::CiError::Unavailable`] until [`LiveCiDeviceClient::bind`]);
@@ -270,31 +235,31 @@ pub(crate) fn forge_router(
 /// Catalog mounts are owned by `extensions/ci/` (`omp.ci`).
 #[cfg(feature = "cap-ci")]
 pub(crate) fn ci_router(
-	service: Arc<GithubService>,
 	devices: LiveCiDeviceClient,
+	project_root: &Path,
 ) -> CiDelegated<CiBackend, CiPermitAll> {
-	let adapter = GithubCiAdapter { service: Arc::clone(&service) };
-	let caps = github_capabilities();
+	let caps = dyn_ci_capabilities();
 	let mut builder = CiDelegated::builder(CiPermitAll);
 	register_dyn_ci_host(&mut builder, CI_GITHUB_HOST, devices.clone(), caps)
 		.expect("github.com dyn ci host");
-	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices, caps).expect("gitlab.com dyn ci host");
-	register_checkout_host(&service, |host| {
+	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices.clone(), caps)
+		.expect("gitlab.com dyn ci host");
+	register_checkout_host(project_root, |host| {
 		if host.eq_ignore_ascii_case(CI_DYN_HOST) || host.eq_ignore_ascii_case(CI_GITHUB_HOST) {
 			return;
 		}
-		let _ = builder.register(host, CiBackend::Github(adapter.clone()), caps);
+		let _ = register_dyn_ci_host(&mut builder, host, devices.clone(), caps);
 	});
 	builder.build()
 }
 
 #[cfg(feature = "cap-ci")]
-fn github_capabilities() -> Capabilities {
+fn dyn_ci_capabilities() -> Capabilities {
 	Capabilities { log_stream: true, ..Capabilities::none() }
 }
 
-fn register_checkout_host(service: &GithubService, mut register: impl FnMut(&str)) {
-	let Ok(repo) = github_url::infer_repo(service.root()) else {
+fn register_checkout_host(project_root: &Path, mut register: impl FnMut(&str)) {
+	let Ok(repo) = github_url::infer_repo(project_root) else {
 		return;
 	};
 	if repo.host().eq_ignore_ascii_case(github_url::GITHUB_HOST) {
@@ -308,13 +273,13 @@ fn register_checkout_host(service: &GithubService, mut register: impl FnMut(&str
 const BRANCH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Forge `Delegated` router for one checkout.
-#[cfg(feature = "cap-forge")]
 ///
-/// This is the same router `forge@1` builds (`forge_router`).
-/// [`Self::view_branch`] resolves the open change-request number for the
-/// branch, then reads the record through [`ForgeHost::view_change_request`]. A
-/// checkout with no `github.com` remote returns `None` without a request.
-/// GitLab stays on the T2 extension.
+/// This is the same router `forge@1` builds ([`forge_router`]).
+/// [`Self::view_branch`] searches open change requests whose head is `branch`,
+/// then reads the record through [`ForgeHost::view_change_request`] when
+/// exactly one hit. A checkout whose host is not on the Dyn set returns
+/// `None` without a request.
+#[cfg(feature = "cap-forge")]
 #[derive(Clone)]
 pub struct CheckoutForge {
 	inner: Arc<CheckoutForgeInner>,
@@ -322,35 +287,28 @@ pub struct CheckoutForge {
 
 #[cfg(feature = "cap-forge")]
 struct CheckoutForgeInner {
-	root:        PathBuf,
-	state_dir:   PathBuf,
-	credentials: Arc<GithubCredentialBridge>,
-	blobs:       BlobHost,
-	policy:      ForgeCachePolicy,
-	devices:     LiveForgeDeviceClient,
-	dyn_hosts:   ForgeDynHosts,
-	built:       Mutex<Option<BuiltForge>>,
+	root:      PathBuf,
+	state_dir: PathBuf,
+	devices:   LiveForgeDeviceClient,
+	dyn_hosts: ForgeDynHosts,
+	built:     Mutex<Option<BuiltForge>>,
 }
 
 #[cfg(feature = "cap-forge")]
 #[derive(Clone)]
 struct BuiltForge {
-	service: Arc<GithubService>,
-	router:  ForgeDelegated<ForgeBackend, ForgePermitAll>,
+	router: ForgeDelegated<ForgeBackend, ForgePermitAll>,
 }
 
 #[cfg(feature = "cap-forge")]
 impl CheckoutForge {
-	/// Shares `blobs` and `credentials` with the project environment.
+	/// Shares `devices` with the project environment.
 	///
-	/// The router is built on the first read, against the same GitHub cache
-	/// file the environment host opens.
+	/// The router is built on the first read against the same Dyn client the
+	/// environment host binds.
 	pub(crate) fn new(
 		root: PathBuf,
 		state_dir: PathBuf,
-		credentials: Arc<GithubCredentialBridge>,
-		blobs: BlobHost,
-		policy: ForgeCachePolicy,
 		devices: LiveForgeDeviceClient,
 		dyn_hosts: ForgeDynHosts,
 	) -> Self {
@@ -358,9 +316,6 @@ impl CheckoutForge {
 			inner: Arc::new(CheckoutForgeInner {
 				root,
 				state_dir,
-				credentials,
-				blobs,
-				policy,
 				devices,
 				dyn_hosts,
 				built: Mutex::new(None),
@@ -370,31 +325,44 @@ impl CheckoutForge {
 
 	/// Open change request whose head is `branch`, if the checkout has one.
 	///
-	/// The number comes from the existing open-pull lookup. The title, state,
-	/// and URL come from `view_change_request` on the `Delegated` router.
-	/// `Ok(None)` is a checkout this adapter does not read, or a branch with
-	/// no single open change request. Any other failure is returned so the
-	/// caller can retry.
+	/// Lookup is forge-neutral: [`ForgeHost::search`] with `head:` +
+	/// `state:open`, then [`ForgeHost::view_change_request`] when exactly one
+	/// hit. Works for `github.com` and `gitlab.com` through Dyn. `Ok(None)` is
+	/// a checkout this adapter does not read, or a branch with no single open
+	/// change request. Any other failure is returned so the caller can retry.
 	pub async fn view_branch(&self, branch: &str) -> Result<Option<ChangeRequest>, ForgeError> {
 		let branch = branch.trim();
-		if branch.is_empty() || !serves_github(&self.inner.root) {
+		if branch.is_empty() || branch.starts_with('-') {
+			return Ok(None);
+		}
+		if !serves_forge_checkout(&self.inner.root, &self.inner.dyn_hosts) {
 			return Ok(None);
 		}
 		let read = async {
 			let op = ForgeOp::ChangeRequestView;
 			let built = self.built().ok_or(ForgeError::Unavailable { op })?;
 			let repo = checkout_repo(&self.inner.root)?;
-			let github = github_repo(op, &repo)?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let number = match built
-				.service
-				.open_change_request_number(&github, branch, &token)
-				.await
-			{
-				Ok(number) => number,
-				Err(error) if no_single_open_request(&error) => return Ok(None),
-				Err(error) => return Err(map_forge(op, &repo, None, None, error)),
+			let page = built
+				.router
+				.search(SearchQuery {
+					kind:  SearchKind::ChangeRequests,
+					repo:  Some(repo.clone()),
+					text:  sf!("head:{branch} state:open"),
+					limit: 10,
+				})
+				.await?;
+			let numbers = page
+				.as_slice()
+				.iter()
+				.filter(|hit| {
+					hit.state.is_empty()
+						|| hit.state.as_str().eq_ignore_ascii_case("open")
+						|| hit.state.as_str().eq_ignore_ascii_case("opened")
+				})
+				.filter_map(|hit| hit.number)
+				.collect::<Vec<_>>();
+			let Some(number) = numbers.first().copied().filter(|_| numbers.len() == 1) else {
+				return Ok(None);
 			};
 			built
 				.router
@@ -413,23 +381,13 @@ impl CheckoutForge {
 		if let Some(built) = slot.as_ref() {
 			return Some(built.clone());
 		}
-		let cache =
-			ForgeCache::open(self.inner.state_dir.join("forge-cache.sqlite3"), self.inner.policy)
-				.ok()?;
-		let service = GithubService::new(
-			self.inner.root.clone(),
-			&self.inner.state_dir,
-			Arc::clone(&self.inner.credentials),
-			Arc::new(cache),
-			self.inner.blobs.clone(),
-		);
 		let built = BuiltForge {
 			router: forge_router(
-				Arc::clone(&service),
 				self.inner.devices.clone(),
 				&self.inner.dyn_hosts,
+				self.inner.root.clone(),
+				crate::forge_worktree::worktree_root(&self.inner.state_dir),
 			),
-			service,
 		};
 		*slot = Some(built.clone());
 		Some(built)
@@ -447,893 +405,39 @@ pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 	RepoRef::try_new(repo.host(), owner, name).map_err(ForgeError::from)
 }
 
-/// `github_invalid_pr` is the lookup's "no single open request" answer:
-/// an empty or unsafe branch, zero matches, or more than one match.
-#[cfg(feature = "cap-forge")]
-fn no_single_open_request(error: &github_params::Fault) -> bool {
-	error.code == "github_invalid_pr"
-}
-
-/// A `github.com` remote is the only checkout this adapter reads.
+/// Whether the checkout's inferred host is on the Dyn forge set.
 ///
-/// GitHub Enterprise hosts whose URL does not contain `github.com` stay dark,
-/// matching the previous git-watch lookup. GitLab waits on the T2 extension.
+/// Lights the branch chip for `github.com`, `gitlab.com`, and any host listed
+/// via `sv_forge_dyn_hosts` / `GITLAB_HOST`. Unlisted remotes stay dark.
 #[cfg(feature = "cap-forge")]
-fn serves_github(root: &Path) -> bool {
-	let Ok(Some(repo)) = GitRepo::discover(root) else {
+fn serves_forge_checkout(root: &Path, dyn_hosts: &ForgeDynHosts) -> bool {
+	let Ok(repo) = github_url::infer_repo(root) else {
 		return false;
 	};
-	repo.remote_list().ok().is_some_and(|names| {
-		names.into_iter().any(|name| {
-			repo
-				.remote_url(&name)
-				.ok()
-				.flatten()
-				.is_some_and(|url| url.contains("github.com"))
-		})
-	})
-}
-
-struct CancelOnDrop(CancellationToken);
-
-impl Drop for CancelOnDrop {
-	fn drop(&mut self) {
-		self.0.cancel();
-	}
-}
-
-async fn execute(service: &GithubService, params: Params) -> Result<Payload, github_params::Fault> {
-	let token = CancellationToken::new();
-	let _guard = CancelOnDrop(token.clone());
-	let (updates, _rx) = flume::bounded(1);
-	service.execute(params, token, updates).await
-}
-
-fn blank(op: Operation) -> Params {
-	Params {
-		op,
-		repo: None,
-		path: None,
-		branch: None,
-		pr: None,
-		query: None,
-		since: None,
-		until: None,
-		date_field: None,
-		limit: None,
-		title: None,
-		body: None,
-		base: None,
-		head: None,
-		run: None,
-		draft: false,
-		force: false,
-		force_with_lease: false,
-		fill: false,
-		reviewer: Vec::new(),
-		assignee: Vec::new(),
-		label: Vec::new(),
-		tail: None,
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn repo_arg(op: ForgeOp, repo: &RepoRef) -> Result<Str, ForgeError> {
-	if repo.owner.contains('/') {
-		return Err(ForgeError::Unavailable { op });
-	}
-	if repo.host.eq_ignore_ascii_case(github_url::GITHUB_HOST) {
-		Ok(sf!("{}/{}", repo.owner, repo.name))
-	} else {
-		Ok(sf!("{}/{}/{}", repo.host, repo.owner, repo.name))
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn map_forge(
-	op: ForgeOp,
-	repo: &RepoRef,
-	number: Option<u64>,
-	path: Option<&str>,
-	fault: github_params::Fault,
-) -> ForgeError {
-	if fault.status == Some(404) {
-		return match op {
-			ForgeOp::RepoView => ForgeError::RepoNotFound {
-				host:  repo.host.clone(),
-				owner: repo.owner.clone(),
-				name:  repo.name.clone(),
-			},
-			ForgeOp::FileRead => ForgeError::FileNotFound {
-				host:  repo.host.clone(),
-				owner: repo.owner.clone(),
-				name:  repo.name.clone(),
-				path:  Str::new(path.unwrap_or_default()),
-			},
-			ForgeOp::ChangeRequestView
-			| ForgeOp::ChangeRequestCreate
-			| ForgeOp::ChangeRequestCheckout
-			| ForgeOp::ChangeRequestPush => ForgeError::ChangeRequestNotFound {
-				host:   repo.host.clone(),
-				owner:  repo.owner.clone(),
-				name:   repo.name.clone(),
-				number: number.unwrap_or(0),
-			},
-			ForgeOp::IssueView | ForgeOp::IssueCreate => ForgeError::IssueNotFound {
-				host:   repo.host.clone(),
-				owner:  repo.owner.clone(),
-				name:   repo.name.clone(),
-				number: number.unwrap_or(0),
-			},
-			_ => ForgeError::Rejected { op, status: 404 },
-		};
-	}
-	match fault.status {
-		Some(status) => ForgeError::Rejected { op, status },
-		None => ForgeError::Unavailable { op },
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn repository_from(repo: &RepoRef, value: &Value) -> Repository {
-	Repository {
-		repo:           repo.clone(),
-		default_branch: json_str(value, "default_branch"),
-		clone_url:      json_str(value, "clone_url"),
-		web_url:        json_str(value, "html_url"),
-		description:    json_str(value, "description"),
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn github_repo(op: ForgeOp, repo: &RepoRef) -> Result<github_url::GithubRepo, ForgeError> {
-	if repo.owner.contains('/') {
-		return Err(ForgeError::Unavailable { op });
-	}
-	github_url::GithubRepo::new(repo.host.as_str(), repo.owner.as_str(), repo.name.as_str())
-		.map_err(|_| ForgeError::Unavailable { op })
-}
-
-#[cfg(feature = "cap-forge")]
-fn change_request_from(
-	repo: &RepoRef,
-	value: &Value,
-	op: ForgeOp,
-) -> Result<ChangeRequest, ForgeError> {
-	let number = value
-		.get("number")
-		.and_then(Value::as_u64)
-		.ok_or(ForgeError::Unavailable { op })?;
-	let merged = value
-		.get("merged")
-		.and_then(Value::as_bool)
-		.unwrap_or(false);
-	let state = if merged {
-		RequestState::Merged
-	} else if value.get("state").and_then(Value::as_str) == Some("closed") {
-		RequestState::Closed
-	} else {
-		RequestState::Open
-	};
-	Ok(ChangeRequest {
-		repo: repo.clone(),
-		number,
-		title: json_str(value, "title"),
-		body: json_str(value, "body"),
-		state,
-		draft: value.get("draft").and_then(Value::as_bool).unwrap_or(false),
-		base_ref: pointer_str(value, "/base/ref"),
-		head_ref: pointer_str(value, "/head/ref"),
-		head_commit: pointer_str(value, "/head/sha"),
-		base_commit: pointer_str(value, "/base/sha"),
-		web_url: json_str(value, "html_url"),
-	})
-}
-
-#[cfg(feature = "cap-forge")]
-fn issue_from(repo: &RepoRef, value: &Value) -> Result<Issue, ForgeError> {
-	let number = value
-		.get("number")
-		.and_then(Value::as_u64)
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::IssueView })?;
-	let state = if value.get("state").and_then(Value::as_str) == Some("closed") {
-		IssueState::Closed
-	} else {
-		IssueState::Open
-	};
-	Ok(Issue {
-		repo: repo.clone(),
-		number,
-		title: json_str(value, "title"),
-		body: json_str(value, "body"),
-		state,
-		web_url: json_str(value, "html_url"),
-	})
-}
-
-#[cfg(feature = "cap-forge")]
-fn comment_from(value: &Value) -> Comment {
-	Comment {
-		author:     value
-			.pointer("/user/login")
-			.and_then(Value::as_str)
-			.map(Str::new)
-			.unwrap_or_else(Str::empty),
-		created_at: json_str(value, "created_at"),
-		body:       json_str(value, "body"),
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn map_worktree(op: ForgeOp, error: crate::forge_worktree::Error) -> ForgeError {
-	match error {
-		crate::forge_worktree::Error::Cancelled
-		| crate::forge_worktree::Error::CheckoutMissing
-		| crate::forge_worktree::Error::IncompletePlan
-		| crate::forge_worktree::Error::GitFailed => ForgeError::Unavailable { op },
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-fn search_page(query: &SearchQuery, value: &Value) -> SearchPage {
-	let fallback = query.repo.clone();
-	let hits = value
-		.get("items")
-		.and_then(Value::as_array)
-		.map(|items| {
-			items
-				.iter()
-				.filter_map(|row| search_hit(query.kind, fallback.as_ref(), row))
-				.collect::<Vec<_>>()
-		})
-		.unwrap_or_default();
-	SearchPage::new(query.kind, hits)
-}
-
-#[cfg(feature = "cap-forge")]
-fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Option<SearchHit> {
-	let repo = hit_repo(kind, fallback?, row);
-	let (title, number, commit, state) = match kind {
-		SearchKind::ChangeRequests | SearchKind::Issues => {
-			let state = if row.get("pull_request").is_some()
-				&& row.get("merged_at").and_then(Value::as_str).is_some()
-			{
-				Str::new_static("merged")
-			} else if row.get("merged").and_then(Value::as_bool) == Some(true) {
-				Str::new_static("merged")
-			} else {
-				json_str(row, "state")
-			};
-			(json_str(row, "title"), row.get("number").and_then(Value::as_u64), None, state)
-		},
-		SearchKind::Code => (json_str(row, "path"), None, None, Str::empty()),
-		SearchKind::Commits => (
-			pointer_str(row, "/commit/message")
-				.as_str()
-				.lines()
-				.next()
-				.unwrap_or_default()
-				.into(),
-			None,
-			row.get("sha").and_then(Value::as_str).map(Str::new),
-			Str::empty(),
-		),
-		SearchKind::Repositories => (json_str(row, "full_name"), None, None, Str::empty()),
-	};
-	Some(SearchHit { repo, title, web_url: json_str(row, "html_url"), number, commit, state })
-}
-
-#[cfg(feature = "cap-forge")]
-fn hit_repo(kind: SearchKind, fallback: &RepoRef, row: &Value) -> RepoRef {
-	let full = match kind {
-		SearchKind::Code => row.pointer("/repository/full_name").and_then(Value::as_str),
-		SearchKind::Repositories => row.get("full_name").and_then(Value::as_str),
-		_ => None,
-	};
-	if let Some((owner, name)) = full.and_then(|full| full.split_once('/'))
-		&& let Ok(repo) = RepoRef::try_new(fallback.host.clone(), owner, name)
-	{
-		return repo;
-	}
-	fallback.clone()
-}
-
-#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
-fn json_str(value: &Value, key: &str) -> Str {
-	value
-		.get(key)
-		.and_then(Value::as_str)
-		.map(Str::new)
-		.unwrap_or_else(Str::empty)
-}
-
-#[cfg(feature = "cap-forge")]
-fn pointer_str(value: &Value, pointer: &str) -> Str {
-	value
-		.pointer(pointer)
-		.and_then(Value::as_str)
-		.map(Str::new)
-		.unwrap_or_else(Str::empty)
-}
-
-#[cfg(feature = "cap-forge")]
-fn search_operation(kind: SearchKind) -> Operation {
-	match kind {
-		SearchKind::ChangeRequests => Operation::SearchPrs,
-		SearchKind::Issues => Operation::SearchIssues,
-		SearchKind::Code => Operation::SearchCode,
-		SearchKind::Commits => Operation::SearchCommits,
-		SearchKind::Repositories => Operation::SearchRepos,
-	}
-}
-
-/// Translates neutral list-URL filter tokens into GitHub search qualifiers.
-///
-/// `state:open|closed|merged` → `is:…`; `state:all` is dropped. `author:` and
-/// `label:` pass through. Remaining tokens stay as free-text search.
-#[cfg(feature = "cap-forge")]
-fn github_search_text(text: &Str) -> Str {
-	let mut out = String::new();
-	for token in text.as_str().split_whitespace() {
-		let translated = match token.split_once(':') {
-			Some(("state", "all")) => None,
-			Some(("state", "open")) => Some("is:open"),
-			Some(("state", "closed")) => Some("is:closed"),
-			Some(("state", "merged")) => Some("is:merged"),
-			Some(("state", value)) => Some(token).filter(|_| !value.is_empty()),
-			_ => Some(token),
-		};
-		let Some(piece) = translated else {
-			continue;
-		};
-		if !out.is_empty() {
-			out.push(' ');
-		}
-		out.push_str(piece);
-	}
-	// GithubService rejects an empty search query; a bare list wants a state
-	// qualifier so the search API has something to rank.
-	if out.is_empty() {
-		Str::new_static("is:open")
-	} else {
-		Str::new(out)
-	}
-}
-
-#[cfg(feature = "cap-forge")]
-impl ForgeHost for GithubForgeAdapter {
-	fn view_repo(
-		&self,
-		repo: &RepoRef,
-	) -> impl Future<Output = Result<Repository, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let repo = repo.clone();
-		async move {
-			let mut params = blank(Operation::RepoView);
-			params.repo = Some(repo_arg(ForgeOp::RepoView, &repo)?);
-			let payload = execute(&service, params)
-				.await
-				.map_err(|fault| map_forge(ForgeOp::RepoView, &repo, None, None, fault))?;
-			Ok(repository_from(&repo, &payload.result))
-		}
-	}
-
-	fn read_file(
-		&self,
-		query: &FileQuery,
-	) -> impl Future<Output = Result<FileBody, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let query = query.clone();
-		async move {
-			let mut params = blank(Operation::FileRead);
-			params.repo = Some(repo_arg(ForgeOp::FileRead, &query.repo)?);
-			params.path = Some(query.path.clone());
-			params.branch = Some(query.rev.clone());
-			let payload = execute(&service, params).await.map_err(|fault| {
-				map_forge(ForgeOp::FileRead, &query.repo, None, Some(query.path.as_str()), fault)
-			})?;
-			let content = if payload.result.get("binary").and_then(Value::as_bool) == Some(true) {
-				let artifact = payload
-					.artifact
-					.as_ref()
-					.ok_or(ForgeError::Unavailable { op: ForgeOp::FileRead })?;
-				service
-					.artifact_bytes(artifact)
-					.map_err(|_| ForgeError::Unavailable { op: ForgeOp::FileRead })?
-			} else {
-				bytes::Bytes::from(payload.output.as_str().as_bytes().to_vec())
-			};
-			Ok(FileBody { query, content })
-		}
-	}
-
-	fn view_change_request(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let repo = repo.clone();
-		async move {
-			let github = github_repo(ForgeOp::ChangeRequestView, &repo)?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let response = service
-				.pr_view(&github, number, &token)
-				.await
-				.map_err(|fault| {
-					map_forge(ForgeOp::ChangeRequestView, &repo, Some(number), None, fault)
-				})?;
-			change_request_from(&repo, &response.value, ForgeOp::ChangeRequestView)
-		}
-	}
-
-	fn view_issue(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let repo = repo.clone();
-		async move {
-			let github = github_repo(ForgeOp::IssueView, &repo)?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let response = service
-				.issue_view(&github, number, &token)
-				.await
-				.map_err(|fault| map_forge(ForgeOp::IssueView, &repo, Some(number), None, fault))?;
-			issue_from(&repo, &response.value)
-		}
-	}
-
-	fn change_request_diff(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let repo = repo.clone();
-		async move {
-			let github = github_repo(ForgeOp::ChangeRequestView, &repo)?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let text = service
-				.pr_diff(&github, number, &token)
-				.await
-				.map_err(|fault| {
-					map_forge(ForgeOp::ChangeRequestView, &repo, Some(number), None, fault)
-				})?;
-			Ok(Str::new(text))
-		}
-	}
-
-	fn list_comments(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-		kind: ResourceKind,
-	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let repo = repo.clone();
-		async move {
-			let op = match kind {
-				ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
-				ResourceKind::Issue => ForgeOp::IssueView,
-			};
-			let github = github_repo(op, &repo)?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let rows = service
-				.list_comments(&github, number, &token)
-				.await
-				.map_err(|fault| map_forge(op, &repo, Some(number), None, fault))?;
-			Ok(rows.iter().map(comment_from).collect())
-		}
-	}
-
-	fn list_checks(
-		&self,
-		_repo: &RepoRef,
-		_target: &CheckTarget,
-	) -> impl Future<Output = Result<ForgeChecks, ForgeError>> + Send {
-		std::future::ready(Err(ForgeError::Unsupported { op: ForgeOp::ListChecks }))
-	}
-
-	fn search(
-		&self,
-		query: SearchQuery,
-	) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		async move {
-			let Some(repo) = query.repo.clone() else {
-				return Err(ForgeError::Unscoped { op: query.kind.op() });
-			};
-			let mut params = blank(search_operation(query.kind));
-			params.repo = Some(repo_arg(query.kind.op(), &repo)?);
-			// List-URL filters arrive as neutral `state:` / `author:` / `label:`
-			// tokens; GitHub's search API wants `is:` / `author:` / `label:`.
-			params.query = Some(github_search_text(&query.text));
-			params.limit = (query.limit != 0).then_some(query.limit);
-			let payload = execute(&service, params)
-				.await
-				.map_err(|fault| map_forge(query.kind.op(), &repo, None, None, fault))?;
-			Ok(search_page(&query, &payload.result))
-		}
-	}
-
-	fn create_change_request(
-		&self,
-		draft: ChangeRequestDraft,
-	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		async move {
-			let mut params = blank(Operation::PrCreate);
-			params.repo = Some(repo_arg(ForgeOp::ChangeRequestCreate, &draft.repo)?);
-			params.title = Some(draft.title.clone());
-			if !draft.body.is_empty() {
-				params.body = Some(draft.body.clone());
-			}
-			if !draft.base.is_empty() {
-				params.base = Some(draft.base.clone());
-			}
-			if !draft.head.is_empty() {
-				params.head = Some(draft.head.clone());
-			}
-			params.draft = draft.draft;
-			let payload = execute(&service, params).await.map_err(|fault| {
-				map_forge(ForgeOp::ChangeRequestCreate, &draft.repo, None, None, fault)
-			})?;
-			change_request_from(&draft.repo, &payload.result, ForgeOp::ChangeRequestCreate)
-		}
-	}
-
-	fn checkout_change_request(
-		&self,
-		request: &CheckoutRequest,
-	) -> impl Future<Output = Result<CheckoutReceipt, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let request = request.clone();
-		async move {
-			let op = ForgeOp::ChangeRequestCheckout;
-			let gh = github_repo(op, &request.repo)?;
-			let cancel = CancellationToken::new();
-			let _guard = CancelOnDrop(cancel.clone());
-			let mut plan = service
-				.change_request_checkout_plan(&gh, request.number, &cancel)
-				.await
-				.map_err(|fault| map_forge(op, &request.repo, Some(request.number), None, fault))?;
-			plan.force = request.force;
-			let out = crate::forge_worktree::checkout(
-				service.root(),
-				service.worktree_root(),
-				&plan,
-				&cancel,
-			)
-			.await
-			.map_err(|error| map_worktree(op, error))?;
-			let head = CommitRef::try_new(request.repo.clone(), out.head_sha)?;
-			Ok(CheckoutReceipt {
-				repo: request.repo,
-				number: out.number,
-				head,
-				base_ref: Str::new(out.base_ref),
-				head_ref: Str::new(out.head_ref),
-				worktree: Str::new(out.worktree.to_string_lossy().as_ref()),
-			})
-		}
-	}
-
-	fn push_change_request(
-		&self,
-		request: &PushRequest,
-	) -> impl Future<Output = Result<PushReceipt, ForgeError>> + Send {
-		let service = Arc::clone(&self.service);
-		let request = request.clone();
-		async move {
-			let op = ForgeOp::ChangeRequestPush;
-			let gh = github_repo(op, &request.repo)?;
-			let cancel = CancellationToken::new();
-			let _guard = CancelOnDrop(cancel.clone());
-			let mut prep = service
-				.change_request_push_prep(&gh, request.number, &cancel)
-				.await
-				.map_err(|fault| map_forge(op, &request.repo, Some(request.number), None, fault))?;
-			if !request.head_ref.is_empty() {
-				prep.head_ref = request.head_ref.to_string();
-			}
-			prep.force_with_lease = request.force_with_lease;
-			let out = crate::forge_worktree::push(service.worktree_root(), &prep, &cancel)
-				.await
-				.map_err(|error| map_worktree(op, error))?;
-			Ok(PushReceipt {
-				repo:        request.repo,
-				number:      out.number,
-				head_commit: out.head_commit,
-			})
-		}
-	}
-
-	fn create_issue(
-		&self,
-		_draft: IssueDraft,
-	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
-		std::future::ready(Err(ForgeError::Unsupported { op: ForgeOp::IssueCreate }))
-	}
-}
-
-#[cfg(feature = "cap-ci")]
-fn map_ci(op: CiOp, run: &RunRef, fault: &github_params::Fault) -> CiError {
-	if fault.status == Some(404) {
-		return match op {
-			CiOp::LogStream => CiError::JobNotFound {
-				provider: run.provider.id.clone(),
-				pipeline: run.pipeline.clone(),
-				job:      run.job.clone().unwrap_or_else(Str::empty),
-			},
-			_ => CiError::PipelineNotFound {
-				provider: run.provider.id.clone(),
-				pipeline: run.pipeline.clone(),
-			},
-		};
-	}
-	match fault.status {
-		Some(status) => CiError::Rejected { op, status },
-		None => CiError::Unavailable { op },
-	}
-}
-
-#[cfg(feature = "cap-ci")]
-fn pipeline_id(run: &RunRef) -> Result<u64, CiError> {
-	let id = run.pipeline.parse::<u64>().unwrap_or(0);
-	if id == 0 {
-		return Err(CiError::PipelineNotFound {
-			provider: run.provider.id.clone(),
-			pipeline: run.pipeline.clone(),
-		});
-	}
-	Ok(id)
-}
-
-/// Maps one Actions run snapshot (`{ run, jobs }`) onto a [`Pipeline`].
-#[cfg(feature = "cap-ci")]
-fn pipeline_from_actions(run: &RunRef, value: &Value) -> Pipeline {
-	let body = value.get("run").unwrap_or(value);
-	let name = body
-		.get("name")
-		.and_then(Value::as_str)
-		.or_else(|| body.get("display_title").and_then(Value::as_str))
-		.unwrap_or_default();
-	let status = ci_status(
-		body.get("status").and_then(Value::as_str),
-		body.get("conclusion").and_then(Value::as_str),
-	);
-	let jobs = value
-		.get("jobs")
-		.and_then(Value::as_array)
-		.map(|jobs| jobs.iter().filter_map(job_from_actions).collect::<Vec<_>>())
-		.unwrap_or_default();
-	let mut pipeline = Pipeline::new(run.provider.clone(), run.pipeline.clone(), name, status, jobs);
-	if let Some(url) = body.get("html_url").and_then(Value::as_str) {
-		pipeline = pipeline.with_web_url(url);
-	}
-	if let Some(revision) = body.get("head_sha").and_then(Value::as_str) {
-		pipeline = pipeline.with_revision(revision);
-	}
-	pipeline
-}
-
-#[cfg(feature = "cap-ci")]
-fn job_from_actions(value: &Value) -> Option<Job> {
-	let id = value.get("id").and_then(Value::as_u64)?.to_string();
-	let name = value
-		.get("name")
-		.and_then(Value::as_str)
-		.unwrap_or_default();
-	let status = ci_status(
-		value.get("status").and_then(Value::as_str),
-		value.get("conclusion").and_then(Value::as_str),
-	);
-	let mut job = Job::new(id, name, status);
-	if let Some(url) = value.get("html_url").and_then(Value::as_str) {
-		job = job.with_web_url(url);
-	}
-	Some(job)
-}
-
-/// Maps GitHub Actions words onto [`CiStatus`].
-///
-/// `action_required` is [`CiStatus::Failure`]. The old watch treated that
-/// conclusion as a failure, and mapping it to [`CiStatus::Manual`] would
-/// leave `watch: true` polling a state GitHub will not leave on its own.
-#[cfg(feature = "cap-ci")]
-fn ci_status(status: Option<&str>, conclusion: Option<&str>) -> CiStatus {
-	match conclusion {
-		Some("success") => CiStatus::Success,
-		Some("cancelled") => CiStatus::Canceled,
-		Some("skipped" | "neutral") => CiStatus::Skipped,
-		Some("failure" | "timed_out" | "action_required" | "startup_failure") => CiStatus::Failure,
-		Some(_) => CiStatus::Failure,
-		None => match status {
-			Some("queued" | "waiting" | "pending" | "requested") => CiStatus::Queued,
-			Some("completed") => CiStatus::Success,
-			_ => CiStatus::Running,
-		},
-	}
-}
-
-#[cfg(feature = "cap-ci")]
-impl CiHost for GithubCiAdapter {
-	fn capabilities(
-		&self,
-		_provider: &CiProvider,
-	) -> impl Future<Output = Result<Capabilities, CiError>> + Send {
-		std::future::ready(Ok(github_capabilities()))
-	}
-
-	fn status(&self, run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		let service = Arc::clone(&self.service);
-		let run = run.clone();
-		async move {
-			let id = pipeline_id(&run)?;
-			let repo = service
-				.inferred_repo()
-				.map_err(|_| CiError::Unavailable { op: CiOp::Status })?;
-			let token = CancellationToken::new();
-			let _guard = CancelOnDrop(token.clone());
-			let response = service
-				.actions_run(&repo, id, &token)
-				.await
-				.map_err(|fault| map_ci(CiOp::Status, &run, &fault))?;
-			Ok(pipeline_from_actions(&run, &response.value))
-		}
-	}
-
-	fn artifacts(
-		&self,
-		_run: &RunRef,
-	) -> impl Future<Output = Result<ArtifactPage, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::Artifacts }))
-	}
-
-	fn log_stream(&self, run: &RunRef) -> impl Future<Output = Result<LogPage, CiError>> + Send {
-		let service = Arc::clone(&self.service);
-		let run = run.clone();
-		async move { log_page(&service, &run).await }
-	}
-
-	fn cancel(&self, _run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::Cancel }))
-	}
-
-	fn rerun_failed(&self, _run: &RunRef) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::RerunFailed }))
-	}
-
-	fn rerun_job(&self, _run: &RunRef) -> impl Future<Output = Result<Job, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::RerunJob }))
-	}
-
-	fn trigger(&self, _request: Trigger) -> impl Future<Output = Result<Pipeline, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::Trigger }))
-	}
-
-	fn play_manual(&self, _run: &RunRef) -> impl Future<Output = Result<Job, CiError>> + Send {
-		std::future::ready(Err(CiError::Unsupported { op: CiOp::PlayManual }))
-	}
-}
-
-#[cfg(feature = "cap-ci")]
-async fn log_page(service: &GithubService, run: &RunRef) -> Result<LogPage, CiError> {
-	let Some(job) = run.job.clone() else {
-		let pipeline = status_snapshot(service, run).await?;
-		let mut text = String::new();
-		for job in pipeline
-			.as_slice()
-			.iter()
-			.filter(|job| job.status == CiStatus::Failure)
-		{
-			let mut scoped = run.clone();
-			scoped.job = Some(job.id.clone());
-			let page = one_job_log(service, &scoped).await?;
-			if !text.is_empty() && !page.text.is_empty() {
-				text.push('\n');
-			}
-			text.push_str(page.text.as_str());
-		}
-		return Ok(LogPage::new(run.clone(), text, true));
-	};
-	let mut scoped = run.clone();
-	scoped.job = Some(job);
-	one_job_log(service, &scoped).await
-}
-
-#[cfg(feature = "cap-ci")]
-async fn status_snapshot(service: &GithubService, run: &RunRef) -> Result<Pipeline, CiError> {
-	let id = pipeline_id(run)?;
-	let repo = service
-		.inferred_repo()
-		.map_err(|_| CiError::Unavailable { op: CiOp::Status })?;
-	let token = CancellationToken::new();
-	let _guard = CancelOnDrop(token.clone());
-	let response = service
-		.actions_run(&repo, id, &token)
-		.await
-		.map_err(|fault| map_ci(CiOp::Status, run, &fault))?;
-	Ok(pipeline_from_actions(run, &response.value))
-}
-
-#[cfg(feature = "cap-ci")]
-async fn one_job_log(service: &GithubService, run: &RunRef) -> Result<LogPage, CiError> {
-	let job = run
-		.job
-		.as_deref()
-		.ok_or(CiError::MissingJob { op: CiOp::LogStream })?;
-	let job_id = job.parse::<u64>().unwrap_or(0);
-	if job_id == 0 {
-		return Err(CiError::JobNotFound {
-			provider: run.provider.id.clone(),
-			pipeline: run.pipeline.clone(),
-			job:      run.job.clone().unwrap_or_else(Str::empty),
-		});
-	}
-	let repo = service
-		.inferred_repo()
-		.map_err(|_| CiError::Unavailable { op: CiOp::LogStream })?;
-	let token = CancellationToken::new();
-	let _guard = CancelOnDrop(token.clone());
-	let text = service
-		.actions_job_log(&repo, job_id, &token)
-		.await
-		.map_err(|fault| map_ci(CiOp::LogStream, run, &fault))?
-		.unwrap_or_default();
-	Ok(LogPage::new(run.clone(), text, true))
+	dyn_hosts.contains(repo.host())
 }
 
 #[cfg(test)]
 mod tests {
 	use std::sync::Arc;
 
-	use omp_cache::forge_cache::ForgeCache;
 	#[cfg(feature = "cap-ci")]
 	use omp_ci::{
 		CiError, CiHost as _, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline, RunRef, Trigger,
 	};
-	use omp_con::Ctx;
 	use omp_core::Str;
 	#[cfg(feature = "cap-forge")]
-	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, IssueState, RepoRef, RequestState};
-	use serde_json::json;
+	use omp_forge::{
+		ForgeError, ForgeHost as _, ForgeOp, RepoRef, SearchKind, SearchPage, SearchQuery,
+	};
 
 	#[cfg(feature = "cap-ci")]
-	use super::{CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions};
+	use super::{CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient};
 	#[cfg(feature = "cap-forge")]
 	use super::{
 		ForgeDeviceInvoker, ForgeDynHosts, GITHUB_DYN_HOST, GITLAB_HOST, LiveForgeDeviceClient,
 		forge_device_paths, forge_router,
 	};
-	use crate::{
-		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
-		tool_settings::ForgeCacheSettings,
-	};
-
-	fn service(root: &std::path::Path) -> Arc<GithubService> {
-		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
-		let cache = Arc::new(
-			ForgeCache::open(
-				root.join("forge-cache.sqlite3"),
-				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
-			)
-			.expect("cache"),
-		);
-		GithubService::new(
-			root.to_path_buf(),
-			root,
-			Arc::new(GithubCredentialBridge::new()),
-			cache,
-			blobs,
-		)
-	}
 
 	#[cfg(feature = "cap-ci")]
 	fn run(pipeline: &str) -> RunRef {
@@ -1364,7 +468,6 @@ mod tests {
 		assert!(hosts.contains("forge.internal"));
 		assert!(hosts.contains(GITHUB_DYN_HOST));
 		assert!(hosts.contains(GITLAB_HOST));
-		// Dedup: listing github.com in the convar must not double-register.
 		assert_eq!(
 			hosts
 				.iter()
@@ -1383,17 +486,20 @@ mod tests {
 		assert!(hosts.contains(GITHUB_DYN_HOST));
 		let ignored = ForgeDynHosts::from_sources("", Some(""));
 		assert!(!ignored.contains("gitlab.example.com"));
-		// github.com is always Dyn; passing it as GITLAB_HOST is a no-op dedup.
 		let listed = ForgeDynHosts::from_sources("", Some("github.com"));
 		assert!(listed.contains(GITHUB_DYN_HOST));
 	}
 
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
-	async fn unregistered_host_is_not_sent_to_github() {
+	async fn unregistered_host_is_not_sent_to_dyn() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router =
-			forge_router(service(dir.path()), LiveForgeDeviceClient::default(), &default_dyn_hosts());
+		let router = forge_router(
+			LiveForgeDeviceClient::default(),
+			&default_dyn_hosts(),
+			dir.path().to_path_buf(),
+			crate::forge_worktree::worktree_root(dir.path()),
+		);
 		let repo = RepoRef::try_new("gitlab.example", "acme", "widget").unwrap();
 		let error = router.view_repo(&repo).await.expect_err("unregistered");
 		assert!(
@@ -1405,10 +511,12 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn gitlab_com_is_registered_dyn_even_when_unbound() {
+		let dir = tempfile::tempdir().expect("temp");
 		let router = forge_router(
-			service(tempfile::tempdir().expect("temp").path()),
 			LiveForgeDeviceClient::default(),
 			&default_dyn_hosts(),
+			dir.path().to_path_buf(),
+			crate::forge_worktree::worktree_root(dir.path()),
 		);
 		let repo = RepoRef::try_new(GITLAB_HOST, "acme", "widget").unwrap();
 		let error = router
@@ -1424,10 +532,12 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn github_com_is_registered_dyn_even_when_unbound() {
+		let dir = tempfile::tempdir().expect("temp");
 		let router = forge_router(
-			service(tempfile::tempdir().expect("temp").path()),
 			LiveForgeDeviceClient::default(),
 			&default_dyn_hosts(),
+			dir.path().to_path_buf(),
+			crate::forge_worktree::worktree_root(dir.path()),
 		);
 		let repo = RepoRef::try_new(GITHUB_DYN_HOST, "acme", "widget").unwrap();
 		let error = router
@@ -1484,8 +594,13 @@ mod tests {
 		let calls = Arc::new(ParkingMutex::new(Vec::new()));
 		devices.bind(Arc::new(RecordingInvoker { calls: Arc::clone(&calls) }));
 
-		let router =
-			forge_router(service(tempfile::tempdir().expect("temp").path()), devices, &dyn_hosts);
+		let dir = tempfile::tempdir().expect("temp");
+		let router = forge_router(
+			devices,
+			&dyn_hosts,
+			dir.path().to_path_buf(),
+			crate::forge_worktree::worktree_root(dir.path()),
+		);
 		let repo = RepoRef::try_new(host, "acme", "widget").unwrap();
 		let cr = router
 			.view_change_request(&repo, 7)
@@ -1500,7 +615,6 @@ mod tests {
 		assert_eq!(recorded[0].0, forge_device_paths::CHANGE_REQUEST_VIEW);
 		assert_eq!(recorded[0].1["number"], 7);
 
-		// github.com is also on the Dyn arm (same bound client).
 		let github_repo = RepoRef::try_new(GITHUB_DYN_HOST, "acme", "widget").unwrap();
 		let github_cr = router
 			.view_change_request(&github_repo, 1)
@@ -1512,7 +626,7 @@ mod tests {
 
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
-	async fn checkout_host_in_dyn_set_is_not_registered_on_github_arm() {
+	async fn checkout_host_registers_on_dyn_even_when_unlisted() {
 		use std::pin::Pin;
 
 		use serde_json::{Value, json};
@@ -1529,7 +643,7 @@ mod tests {
 			) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ForgeError>> + Send + '_>> {
 				self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 				Box::pin(std::future::ready(Ok(json!({
-					"repo": { "host": "gitlab.example.com", "owner": "acme", "name": "widget" },
+					"repo": { "host": "ghe.example.com", "owner": "acme", "name": "widget" },
 					"number": 1,
 					"title": "t",
 					"body": "",
@@ -1539,7 +653,7 @@ mod tests {
 					"head_ref": "topic",
 					"head_commit": "b",
 					"base_commit": "a",
-					"web_url": "https://gitlab.example.com/acme/widget/-/merge_requests/1"
+					"web_url": "https://ghe.example.com/acme/widget/pull/1"
 				}))))
 			}
 		}
@@ -1551,53 +665,37 @@ mod tests {
 			.expect("discover")
 			.expect("repo");
 		repo
-			.remote_add("origin", "https://gitlab.example.com/acme/widget.git")
+			.remote_add("origin", "https://ghe.example.com/acme/widget.git")
 			.expect("remote");
 
 		let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 		let devices = LiveForgeDeviceClient::default();
 		devices.bind(Arc::new(CountingInvoker { hits: Arc::clone(&hits) }));
 
-		let dyn_hosts = ForgeDynHosts::from_sources("gitlab.example.com", None);
-		let router = forge_router(service(root), devices, &dyn_hosts);
-		let forge_repo = RepoRef::try_new("gitlab.example.com", "acme", "widget").unwrap();
+		// Unlisted checkout host still lands on Dyn (honest Unavailable without
+		// mounts; here the bound fake answers).
+		let router = forge_router(
+			devices,
+			&default_dyn_hosts(),
+			root.to_path_buf(),
+			crate::forge_worktree::worktree_root(root),
+		);
+		let forge_repo = RepoRef::try_new("ghe.example.com", "acme", "widget").unwrap();
 		let cr = router
 			.view_change_request(&forge_repo, 1)
 			.await
-			.expect("checkout host in dyn set");
+			.expect("unlisted checkout host on Dyn");
 		assert_eq!(cr.number, 1);
 		assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-		// Without the Dyn list, the same checkout host would land on the
-		// Github arm (GHE assumption) — prove the contrast.
-		let devices = LiveForgeDeviceClient::default();
-		let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-		devices.bind(Arc::new(CountingInvoker { hits: Arc::clone(&hits) }));
-		let router = forge_router(service(root), devices, &default_dyn_hosts());
-		let error = router
-			.view_change_request(&forge_repo, 1)
-			.await
-			.expect_err("GHE arm without dyn list");
-		assert_eq!(
-			hits.load(std::sync::atomic::Ordering::SeqCst),
-			0,
-			"self-hosted GitLab without convar/GITLAB_HOST must not hit Dyn"
-		);
-		assert!(
-			!matches!(error, ForgeError::Unregistered { .. }),
-			"checkout host is still registered — on the Github arm: {error}"
-		);
 	}
 
 	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn ci_writes_and_artifacts_are_not_capable() {
 		let dir = tempfile::tempdir().expect("temp");
-		// Bound invoker so capabilities() can answer; registration ceilings
-		// still gate writes before the dyn client runs.
 		let client = LiveCiDeviceClient::default();
 		client.bind(Arc::new(RecordingCiCapsInvoker));
-		let router = super::ci_router(service(dir.path()), client);
+		let router = super::ci_router(client, dir.path());
 		let run = run("42");
 		let provider = run.provider.clone();
 		for op in [
@@ -1659,10 +757,8 @@ mod tests {
 	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn gitlab_com_ci_is_registered_dyn_even_when_unbound() {
-		let router = super::ci_router(
-			service(tempfile::tempdir().expect("temp").path()),
-			LiveCiDeviceClient::default(),
-		);
+		let dir = tempfile::tempdir().expect("temp");
+		let router = super::ci_router(LiveCiDeviceClient::default(), dir.path());
 		let run = RunRef::try_new(CiProvider::try_new(CI_DYN_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
@@ -1674,10 +770,8 @@ mod tests {
 	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn github_com_ci_is_registered_dyn_even_when_unbound() {
-		let router = super::ci_router(
-			service(tempfile::tempdir().expect("temp").path()),
-			LiveCiDeviceClient::default(),
-		);
+		let dir = tempfile::tempdir().expect("temp");
+		let router = super::ci_router(LiveCiDeviceClient::default(), dir.path());
 		let run = RunRef::try_new(CiProvider::try_new(CI_GITHUB_HOST).unwrap(), "1", None).unwrap();
 		let error = router.status(&run).await.expect_err("unbound live client");
 		assert!(
@@ -1743,7 +837,8 @@ mod tests {
 		let hits = Arc::new(AtomicUsize::new(0));
 		let client = LiveCiDeviceClient::default();
 		client.bind(Arc::new(Recording { calls: Arc::clone(&calls), hits: Arc::clone(&hits) }));
-		let router = super::ci_router(service(tempfile::tempdir().expect("temp").path()), client);
+		let dir = tempfile::tempdir().expect("temp");
+		let router = super::ci_router(client, dir.path());
 		let run = run("42");
 		let pipeline = router.status(&run).await.expect("status via dyn");
 		assert_eq!(pipeline.id.as_str(), "42");
@@ -1756,184 +851,47 @@ mod tests {
 		assert_eq!(calls.lock().as_slice(), ["ci/status", "ci/log_stream"]);
 	}
 
-	#[cfg(feature = "cap-ci")]
-	#[test]
-	fn actions_snapshot_maps_failure_and_action_required() {
-		let run = run("42");
-		let pipeline = pipeline_from_actions(
-			&run,
-			&json!({
-				"run": {
-					"id": 42,
-					"name": "ci",
-					"status": "completed",
-					"conclusion": "failure",
-					"html_url": "https://github.com/acme/widget/actions/runs/42",
-					"head_sha": "abc123"
-				},
-				"jobs": [{
-					"id": 7,
-					"name": "test",
-					"status": "completed",
-					"conclusion": "action_required"
-				}]
-			}),
-		);
-		assert_eq!(pipeline.status, CiStatus::Failure);
-		assert_eq!(pipeline.id.as_str(), "42");
-		assert_eq!(pipeline.revision.as_deref(), Some("abc123"));
-		assert_eq!(pipeline.jobs.len(), 1);
-		assert_eq!(pipeline.jobs[0].status, CiStatus::Failure);
-		assert_eq!(ci_status(Some("queued"), None), CiStatus::Queued);
-		assert_eq!(ci_status(Some("in_progress"), None), CiStatus::Running);
-		assert_eq!(ci_status(Some("completed"), Some("success")), CiStatus::Success);
-		assert_eq!(ci_status(Some("completed"), Some("cancelled")), CiStatus::Canceled);
-		assert_eq!(ci_status(Some("completed"), Some("skipped")), CiStatus::Skipped);
-	}
-
-	#[cfg(feature = "cap-forge")]
-	fn view_repo() -> RepoRef {
-		RepoRef::try_new("github.com", "acme", "widget").unwrap()
-	}
-
-	#[cfg(feature = "cap-forge")]
-	fn http_fault(status: u16) -> crate::github_params::Fault {
-		crate::github_params::Fault {
-			code:                 Str::new_static("github_http_error"),
-			message:              Str::new_static("GitHub API request failed"),
-			status:               Some(status),
-			rate_limit_remaining: None,
-			rate_limit_reset:     None,
-			retry_after_seconds:  None,
-		}
-	}
-
 	#[cfg(feature = "cap-forge")]
 	#[test]
-	fn pull_request_json_maps_onto_a_change_request() {
-		let repo = view_repo();
-		let open = super::change_request_from(
-			&repo,
-			&json!({
-				"number": 7,
-				"title": "Fix the widget",
-				"body": "details",
-				"state": "open",
-				"draft": true,
-				"merged": false,
-				"base": {"ref": "main", "sha": "aaa"},
-				"head": {"ref": "topic", "sha": "bbb"},
-				"html_url": "https://github.com/acme/widget/pull/7"
-			}),
-			ForgeOp::ChangeRequestView,
-		)
-		.expect("open pull request");
-		assert_eq!(open.number, 7);
-		assert_eq!(open.title.as_str(), "Fix the widget");
-		assert_eq!(open.body.as_str(), "details");
-		assert_eq!(open.state, RequestState::Open);
-		assert!(open.draft);
-		assert_eq!(open.base_ref.as_str(), "main");
-		assert_eq!(open.head_commit.as_str(), "bbb");
+	fn forge_checkout_gate_requires_a_dyn_host() {
+		let hosts = default_dyn_hosts();
 
-		let merged = super::change_request_from(
-			&repo,
-			&json!({"number": 8, "title": "Landed", "state": "closed", "merged": true}),
-			ForgeOp::ChangeRequestView,
-		)
-		.expect("merged pull request");
-		assert_eq!(merged.state, RequestState::Merged);
-		assert!(merged.body.is_empty());
-
-		let closed = super::change_request_from(
-			&repo,
-			&json!({"number": 9, "title": "Dropped", "state": "closed", "merged": false}),
-			ForgeOp::ChangeRequestView,
-		)
-		.expect("closed pull request");
-		assert_eq!(closed.state, RequestState::Closed);
-	}
-
-	#[cfg(feature = "cap-forge")]
-	#[test]
-	fn issue_json_maps_onto_an_issue() {
-		let repo = view_repo();
-		let opened = super::issue_from(
-			&repo,
-			&json!({
-				"number": 3,
-				"title": "Bug",
-				"body": "steps",
-				"state": "open",
-				"html_url": "https://github.com/acme/widget/issues/3"
-			}),
-		)
-		.expect("issue");
-		assert_eq!(opened.number, 3);
-		assert_eq!(opened.title.as_str(), "Bug");
-		assert_eq!(opened.body.as_str(), "steps");
-		assert_eq!(opened.state, IssueState::Open);
-		assert_eq!(opened.web_url.as_str(), "https://github.com/acme/widget/issues/3");
-
-		let closed =
-			super::issue_from(&repo, &json!({"number": 4, "title": "Done", "state": "closed"}))
-				.expect("closed issue");
-		assert_eq!(closed.state, IssueState::Closed);
-		assert!(closed.body.is_empty());
-	}
-
-	#[cfg(feature = "cap-forge")]
-	#[test]
-	fn comment_json_keeps_author_time_and_body() {
-		let comment = super::comment_from(&json!({
-			"user": {"login": "octocat"},
-			"created_at": "2026-11-10T00:00:00Z",
-			"body": "looks good"
-		}));
-		assert_eq!(comment.author.as_str(), "octocat");
-		assert_eq!(comment.created_at.as_str(), "2026-11-10T00:00:00Z");
-		assert_eq!(comment.body.as_str(), "looks good");
-		let anonymous = super::comment_from(&json!({}));
-		assert!(anonymous.author.is_empty());
-		assert!(anonymous.body.is_empty());
-	}
-
-	#[cfg(feature = "cap-forge")]
-	#[test]
-	fn missing_views_are_not_found_rather_than_unsupported() {
-		let repo = view_repo();
-		let missing =
-			super::map_forge(ForgeOp::ChangeRequestView, &repo, Some(7), None, http_fault(404));
-		assert!(matches!(missing, ForgeError::ChangeRequestNotFound { number: 7, .. }), "{missing}");
-		let missing = super::map_forge(ForgeOp::IssueView, &repo, Some(3), None, http_fault(404));
-		assert!(matches!(missing, ForgeError::IssueNotFound { number: 3, .. }), "{missing}");
-		let rejected = super::map_forge(ForgeOp::IssueView, &repo, Some(3), None, http_fault(500));
-		assert!(matches!(rejected, ForgeError::Rejected { status: 500, .. }), "{rejected}");
-	}
-
-	#[cfg(feature = "cap-forge")]
-	#[test]
-	fn github_remote_gate_requires_a_github_com_remote() {
 		let dir = tempfile::tempdir().expect("temp");
 		let root = dir.path();
 		omp_vcs::git::init(root).expect("init");
-		assert!(!super::serves_github(root));
-		let repo = omp_vcs::git::GitRepo::discover(root)
+		assert!(!super::serves_forge_checkout(root, &hosts));
+
+		let ghe = tempfile::tempdir().expect("temp");
+		omp_vcs::git::init(ghe.path()).expect("init");
+		omp_vcs::git::GitRepo::discover(ghe.path())
 			.expect("discover")
-			.expect("repo");
-		repo
-			.remote_add("origin", "https://gitlab.example/acme/widget.git")
+			.expect("repo")
+			.remote_add("origin", "https://ghe.example/acme/widget.git")
+			.expect("ghe remote");
+		assert!(!super::serves_forge_checkout(ghe.path(), &hosts));
+
+		let gitlab = tempfile::tempdir().expect("temp");
+		omp_vcs::git::init(gitlab.path()).expect("init");
+		omp_vcs::git::GitRepo::discover(gitlab.path())
+			.expect("discover")
+			.expect("repo")
+			.remote_add("origin", "https://gitlab.com/acme/widget.git")
 			.expect("gitlab remote");
-		assert!(!super::serves_github(root));
-		repo
-			.remote_add("upstream", "https://github.com/acme/widget.git")
+		assert!(super::serves_forge_checkout(gitlab.path(), &hosts));
+
+		let github = tempfile::tempdir().expect("temp");
+		omp_vcs::git::init(github.path()).expect("init");
+		omp_vcs::git::GitRepo::discover(github.path())
+			.expect("discover")
+			.expect("repo")
+			.remote_add("origin", "https://github.com/acme/widget.git")
 			.expect("github remote");
-		assert!(super::serves_github(root));
+		assert!(super::serves_forge_checkout(github.path(), &hosts));
 	}
 
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
-	async fn view_branch_returns_none_without_a_github_remote() {
+	async fn view_branch_returns_none_without_a_dyn_host() {
 		let dir = tempfile::tempdir().expect("temp");
 		let root = dir.path();
 		omp_vcs::git::init(root).expect("init");
@@ -1941,15 +899,11 @@ mod tests {
 			.expect("discover")
 			.expect("repo");
 		repo
-			.remote_add("origin", "https://gitlab.example/acme/widget.git")
+			.remote_add("origin", "https://ghe.example/acme/widget.git")
 			.expect("remote");
-		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
 		let forge = super::CheckoutForge::new(
 			root.to_path_buf(),
 			root.to_path_buf(),
-			Arc::new(GithubCredentialBridge::new()),
-			blobs,
-			ForgeCacheSettings::from_con(&Ctx::new()).policy(),
 			LiveForgeDeviceClient::default(),
 			default_dyn_hosts(),
 		);
@@ -1957,23 +911,95 @@ mod tests {
 			forge
 				.view_branch("main")
 				.await
-				.expect("gitlab stays unread")
+				.expect("unlisted stays unread")
 				.is_none()
 		);
 	}
 
 	#[cfg(feature = "cap-forge")]
-	#[test]
-	fn github_search_text_translates_list_filter_tokens() {
-		assert_eq!(
-			super::github_search_text(&Str::new_static("state:open author:alice")).as_str(),
-			"is:open author:alice"
+	#[tokio::test]
+	async fn view_branch_searches_then_views_single_open_hit() {
+		use std::pin::Pin;
+
+		use parking_lot::Mutex as ParkingMutex;
+		use serde_json::{Value, json};
+
+		struct BranchInvoker {
+			calls: Arc<ParkingMutex<Vec<(String, Value)>>>,
+		}
+
+		impl ForgeDeviceInvoker for BranchInvoker {
+			fn invoke(
+				&self,
+				path: &str,
+				args: Value,
+			) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ForgeError>> + Send + '_>> {
+				self.calls.lock().push((path.to_string(), args.clone()));
+				let result = match path {
+					p if p == forge_device_paths::SEARCH_CHANGE_REQUESTS => {
+						let page = SearchPage::new(SearchKind::ChangeRequests, [omp_forge::SearchHit {
+							repo:    RepoRef::try_new(GITHUB_DYN_HOST, "acme", "widget").unwrap(),
+							title:   Str::new_static("topic"),
+							web_url: Str::new_static("https://github.com/acme/widget/pull/9"),
+							number:  Some(9),
+							commit:  None,
+							state:   Str::new_static("open"),
+						}]);
+						Ok(serde_json::to_value(page).expect("page"))
+					},
+					p if p == forge_device_paths::CHANGE_REQUEST_VIEW => Ok(json!({
+						"repo": { "host": "github.com", "owner": "acme", "name": "widget" },
+						"number": 9,
+						"title": "topic",
+						"body": "",
+						"state": "open",
+						"draft": false,
+						"base_ref": "main",
+						"head_ref": "topic",
+						"head_commit": "bbb",
+						"base_commit": "aaa",
+						"web_url": "https://github.com/acme/widget/pull/9"
+					})),
+					other => Err(ForgeError::Unavailable { op: super::forge_op_for_path(other) }),
+				};
+				Box::pin(std::future::ready(result))
+			}
+		}
+
+		let dir = tempfile::tempdir().expect("temp");
+		let root = dir.path();
+		omp_vcs::git::init(root).expect("init");
+		let repo = omp_vcs::git::GitRepo::discover(root)
+			.expect("discover")
+			.expect("repo");
+		repo
+			.remote_add("origin", "https://github.com/acme/widget.git")
+			.expect("remote");
+
+		let calls = Arc::new(ParkingMutex::new(Vec::new()));
+		let devices = LiveForgeDeviceClient::default();
+		devices.bind(Arc::new(BranchInvoker { calls: Arc::clone(&calls) }));
+		let forge = super::CheckoutForge::new(
+			root.to_path_buf(),
+			root.to_path_buf(),
+			devices,
+			default_dyn_hosts(),
 		);
-		assert_eq!(
-			super::github_search_text(&Str::new_static("state:all label:bug")).as_str(),
-			"label:bug"
-		);
-		assert_eq!(super::github_search_text(&Str::new_static("")).as_str(), "is:open");
-		assert_eq!(super::github_search_text(&Str::new_static("state:merged")).as_str(), "is:merged");
+		let cr = forge
+			.view_branch("topic")
+			.await
+			.expect("branch")
+			.expect("open hit");
+		assert_eq!(cr.number, 9);
+		assert_eq!(cr.head_ref.as_str(), "topic");
+		let recorded = calls.lock().clone();
+		assert_eq!(recorded.len(), 2);
+		assert_eq!(recorded[0].0, forge_device_paths::SEARCH_CHANGE_REQUESTS);
+		let query: SearchQuery =
+			serde_json::from_value(recorded[0].1["query"].clone()).expect("query");
+		assert_eq!(query.kind, SearchKind::ChangeRequests);
+		assert_eq!(query.text.as_str(), "head:topic state:open");
+		assert_eq!(recorded[1].0, forge_device_paths::CHANGE_REQUEST_VIEW);
+		assert_eq!(recorded[1].1["number"], 9);
 	}
 }

@@ -289,6 +289,11 @@ def search(query: Mapping[str, Any]) -> dict[str, Any]:
         params["creator"] = author
     if label := filters.get("label"):
         params["labels"] = label
+    if family == "pulls" and (head := filters.get("head")):
+        # Accept bare branch or owner:branch; GitHub list wants owner:branch.
+        if ":" not in head:
+            head = f"{repo.get('owner')}:{head}"
+        params["head"] = head
     url = f"{_repo_url(repo, family)}?{urlencode(params)}"
     payload = _get_json(url, op=op)
     if not isinstance(payload, list):

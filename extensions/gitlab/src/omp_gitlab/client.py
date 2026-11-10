@@ -267,6 +267,9 @@ def search(query: Mapping[str, Any]) -> dict[str, Any]:
         params["author_username"] = author
     if label := filters.get("label"):
         params["labels"] = label
+    if family == "merge_requests" and (head := filters.get("head")):
+        # Bare branch, or owner:branch → source_branch is the branch half.
+        params["source_branch"] = head.rsplit(":", 1)[-1]
     if freeform:
         params["search"] = freeform
 

@@ -3,8 +3,8 @@
 //! Vendor adapters return plan data (clone URL, refs, SHAs). This module
 //! performs fetch, worktree creation under the repository mutation lock, and
 //! push via `omp-vcs`. It does not speak a forge product name and does not
-//! depend on `omp-forge` so both the dyn bridge and residual `GithubService`
-//! Operation paths can share one git implementation.
+//! depend on `omp-forge` so the dyn forge bridge shares one git
+//! implementation.
 
 use std::{
 	fs,

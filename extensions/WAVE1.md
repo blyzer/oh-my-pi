@@ -37,10 +37,11 @@ GitLab CI backends). **`github.com` and `gitlab.com` CI are on the Dyn arm**
 (same bound `LiveCiDeviceClient`; caps `log_stream` only). **DONE:** search
 leaves (`forge/search_change_requests`, `forge/search_issues`) + list-URL /
 `GithubResolver` parity via `ForgeHost::search` (cached without etag).
-In-core `github.rs` **remains** for GHE CI, credential bridge, and residual
-`GithubService` Operations — not for forge@1 checkout/push git. Remaining:
-full automatic device-catalog host-claim discovery (smaller TODO). See
-package READMEs.
+**DONE:** in-core `github.rs` / `GithubService` / Github forge+CI adapters
+deleted; forge/CI routers are Dyn-only. Intentional residue: `github_url.rs`
+(credentials / `pr://` / `issue://` / `infer_repo`), Class C, `GithubRefs`.
+Remaining: full automatic device-catalog host-claim discovery (smaller TODO).
+See package READMEs.
 
 ## May grow
 

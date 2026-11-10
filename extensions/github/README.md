@@ -31,8 +31,8 @@ mounting the same leaves would collide. Mount owners:
   JSON → forge / CI / `SearchPage` shapes. Unit tests under `tests/` (no network).
 - **Core (envd)**: production `forge_router` and `ci_router` register
   `github.com` on the **Dyn** arm (shared bound live clients). List URLs go
-  through `ForgeHost::search`. In-core `GithubForgeAdapter` / `GithubCiAdapter`
-  / `github.rs` remain for checkout/push and unlisted GHE CI checkout hosts.
+  through `ForgeHost::search`. In-core `github.rs` / Github adapters are
+  deleted; unlisted checkout hosts also land on Dyn.
 
 ## Credentials (adapter data — ADR 0049 D2.7)
 
@@ -47,8 +47,7 @@ Prefer host-minted scoped creds when available. Local/dev adapter data:
 | `GITHUB_REPOSITORY` / `OMP_CI_REPO` | `owner/name` for CI when `args.repo` omitted |
 
 Self-hosted GHE joins Dyn via operator convar `sv_forge_dyn_hosts` (forge) /
-checkout host registration (CI Github arm when unlisted). No tokens live in
-this tree.
+checkout-host Dyn registration (CI). No tokens live in this tree.
 
 ## Unsupported / unmounted
 
@@ -58,10 +57,10 @@ Checkout / push return plan / push-prep JSON via the forge catalog mounts
 `rerun_*`, `trigger`, `play_manual`) and `artifacts` stay unmounted;
 registration ceilings remain `log_stream` only.
 
-## Remaining gaps (blocks deleting `github.rs`)
+## Intentional residue (not blocking)
 
-- GHE CI arm, credential bridge, list-URL helpers, residual `GithubService` ops
-- Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay
+- `crates/envd/src/github_url.rs` — `pr://`/`issue://`, credentials, `infer_repo`
+- Autocomplete `GithubRefs`, Class C scrapers / `gh` scrub stay by design
 
 ## Proofs
 
@@ -75,4 +74,4 @@ python3 -m unittest discover -s extensions/github/tests -v
 - Schemas: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md),
   [`docs/adr/0049-ci-dyn-device-schema.md`](../../docs/adr/0049-ci-dyn-device-schema.md)
 - Bridges: `crates/envd/src/github_adapter/dyn_forge.rs`, `dyn_ci.rs`
-- In-core (kept): `crates/envd/src/github.rs`, `github_url.rs`
+- In-core residue: `crates/envd/src/github_url.rs`

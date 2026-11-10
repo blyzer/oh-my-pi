@@ -54,7 +54,6 @@ use crate::{
 	eval::{PreludeTable, ProcessEvalExec, SessionBridgeHost},
 	exec::ExecHost,
 	exec_settings::{SandboxSettings, ShellSettings},
-	github::GithubService,
 	github_url::GithubCredentialBridge,
 	managed_skills::ManagedSkills,
 	mcp::McpService,
@@ -108,7 +107,7 @@ pub(super) struct SessionHost<'a> {
 	#[cfg(feature = "cap-media")]
 	speech_config:      SpeechConfig,
 	checkpoint_control: AgentCheckpointControl,
-	github:             Option<Arc<GithubService>>,
+	telemetry_started:  bool,
 }
 
 impl<'a> SessionHost<'a> {
@@ -162,24 +161,18 @@ impl<'a> SessionHost<'a> {
 			#[cfg(feature = "cap-media")]
 			speech_config,
 			checkpoint_control: AgentCheckpointControl::default(),
-			github: None,
+			telemetry_started: false,
 		}
 	}
 
-	fn ensure_github(&mut self) -> Arc<GithubService> {
-		if self.github.is_none() {
-			if let Some(upload) = self.telemetry_upload.clone() {
-				upload.start(Arc::clone(self.telemetry), Arc::clone(&self.github_credentials));
-			}
-			self.github = Some(GithubService::new(
-				self.project_root.to_path_buf(),
-				self.state_dir,
-				Arc::clone(&self.github_credentials),
-				Arc::clone(&self.forge_cache),
-				self.blobs.clone(),
-			));
+	fn ensure_telemetry(&mut self) {
+		if self.telemetry_started {
+			return;
 		}
-		Arc::clone(self.github.as_ref().expect("github service"))
+		if let Some(upload) = self.telemetry_upload.clone() {
+			upload.start(Arc::clone(self.telemetry), Arc::clone(&self.github_credentials));
+		}
+		self.telemetry_started = true;
 	}
 
 	pub(super) fn output(&self) -> SessionOutput {
@@ -267,18 +260,21 @@ impl SessionInstall for SessionHost<'_> {
 
 	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter {
+		self.ensure_telemetry();
 		let dyn_hosts =
 			crate::github_adapter::ForgeDynHosts::resolve(self.tool_settings.forge_dyn_hosts.as_str());
 		crate::github_adapter::forge_router(
-			self.ensure_github(),
 			self.forge_devices.clone(),
 			&dyn_hosts,
+			self.project_root.to_path_buf(),
+			crate::forge_worktree::worktree_root(self.state_dir),
 		)
 	}
 
 	#[cfg(feature = "cap-ci")]
 	fn ci_router(&mut self) -> Self::CiRouter {
-		crate::github_adapter::ci_router(self.ensure_github(), self.ci_devices.clone())
+		self.ensure_telemetry();
+		crate::github_adapter::ci_router(self.ci_devices.clone(), self.project_root)
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -594,15 +590,13 @@ impl<'a> EnvironmentHost<'a> {
 		let security = self.security.clone().expect("security service");
 		#[cfg(feature = "cap-forge")]
 		let forge = {
-			let github = GithubService::new(
-				self.workspace.root().to_path_buf(),
-				self.state_dir,
-				Arc::clone(&self.github_credentials),
-				Arc::clone(&self.forge_cache),
-				self.blobs.clone(),
-			);
 			let dyn_hosts = crate::github_adapter::ForgeDynHosts::from_con(self.con);
-			crate::github_adapter::forge_router(github, self.forge_devices.clone(), &dyn_hosts)
+			crate::github_adapter::forge_router(
+				self.forge_devices.clone(),
+				&dyn_hosts,
+				self.workspace.root().to_path_buf(),
+				crate::forge_worktree::worktree_root(self.state_dir),
+			)
 		};
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,

@@ -175,6 +175,9 @@ class SearchMappingTests(unittest.TestCase):
         filters, rest = split_list_filters("state:open author:alice label:bug fix me")
         self.assertEqual(filters, {"state": "open", "author": "alice", "label": "bug"})
         self.assertEqual(rest, "fix me")
+        head, blank = split_list_filters("head:topic state:open")
+        self.assertEqual(head, {"head": "topic", "state": "open"})
+        self.assertEqual(blank, "")
 
     def test_issues_list_skips_pull_requests(self) -> None:
         payload = _load("issues_list.json")

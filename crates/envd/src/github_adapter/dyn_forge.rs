@@ -3,9 +3,9 @@
 //! T2 extensions implement [`omp_forge::ForgeHost`] by mounting dyn devices at
 //! `forge/<op>` (snake_case [`omp_forge::ForgeOp`]) and answering
 //! `omp.devices.call`. This module is the in-core half: a [`DynForgeAdapter`]
-//! that dispatches each [`ForgeHost`] method to those paths, plus a
-//! [`ForgeBackend`] enum so the production [`super::forge_router`] can hold
-//! GitHub and dyn hosts without boxing [`ForgeHost`] futures.
+//! that dispatches each [`ForgeHost`] method to those paths. [`ForgeBackend`]
+//! is a Dyn-only type alias so the production [`super::forge_router`] stays
+//! unboxed over [`ForgeHost`] futures.
 //!
 //! Schema source of truth: `docs/adr/0049-forge-dyn-device-schema.md`.
 
@@ -25,7 +25,6 @@ use serde_json::{Value, json};
 use strum::IntoStaticStr as _;
 use tokio_util::sync::CancellationToken;
 
-use super::GithubForgeAdapter;
 use crate::forge_worktree;
 
 /// Canonical GitLab SaaS host always registered on the dyn forge arm (D2.8).
@@ -35,10 +34,8 @@ use crate::forge_worktree;
 /// host-claim discovery remains a smaller TODO.
 pub const GITLAB_HOST: &str = "gitlab.com";
 
-/// Canonical GitHub SaaS host on the dyn forge arm once the T2 extension can
-/// answer (ADR 0049 GitHub T2). Same bound [`LiveForgeDeviceClient`] as
-/// [`GITLAB_HOST`]. In-core [`GithubForgeAdapter`] remains for CI, list-URL
-/// helpers, and GHE checkout hosts that are not in the Dyn set.
+/// Canonical GitHub SaaS host on the dyn forge arm (ADR 0049 GitHub T2).
+/// Same bound [`LiveForgeDeviceClient`] as [`GITLAB_HOST`].
 pub const GITHUB_DYN_HOST: &str = "github.com";
 
 /// Device paths under `forge/*`.
@@ -473,170 +470,13 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 	}
 }
 
-/// Concrete [`ForgeHost`] held by the production forge router.
+/// Concrete [`ForgeHost`] held by the production forge router — Dyn only.
 ///
-/// Enums before `dyn`: GitHub stays a native arm; T2 extensions ride
-/// [`DynForgeAdapter`]. Both arms forward with `match`, so [`ForgeHost`]
-/// futures stay unboxed. The default client is [`LiveForgeDeviceClient`].
-#[derive(Clone)]
-pub enum ForgeBackend<C = LiveForgeDeviceClient> {
-	/// In-tree GitHub HTTP/git adapter.
-	Github(GithubForgeAdapter),
-	/// Dyn-device-backed host (`forge/*` over toolhost).
-	Dyn(DynForgeAdapter<C>),
-}
-
-impl<C: ForgeDeviceClient> ForgeHost for ForgeBackend<C> {
-	fn view_repo(
-		&self,
-		repo: &RepoRef,
-	) -> impl Future<Output = Result<Repository, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.view_repo(repo).await,
-				Self::Dyn(host) => host.view_repo(repo).await,
-			}
-		}
-	}
-
-	fn read_file(
-		&self,
-		query: &FileQuery,
-	) -> impl Future<Output = Result<FileBody, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.read_file(query).await,
-				Self::Dyn(host) => host.read_file(query).await,
-			}
-		}
-	}
-
-	fn view_change_request(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.view_change_request(repo, number).await,
-				Self::Dyn(host) => host.view_change_request(repo, number).await,
-			}
-		}
-	}
-
-	fn view_issue(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.view_issue(repo, number).await,
-				Self::Dyn(host) => host.view_issue(repo, number).await,
-			}
-		}
-	}
-
-	fn change_request_diff(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.change_request_diff(repo, number).await,
-				Self::Dyn(host) => host.change_request_diff(repo, number).await,
-			}
-		}
-	}
-
-	fn list_comments(
-		&self,
-		repo: &RepoRef,
-		number: u64,
-		kind: ResourceKind,
-	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.list_comments(repo, number, kind).await,
-				Self::Dyn(host) => host.list_comments(repo, number, kind).await,
-			}
-		}
-	}
-
-	fn list_checks(
-		&self,
-		repo: &RepoRef,
-		target: &CheckTarget,
-	) -> impl Future<Output = Result<ForgeChecks, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.list_checks(repo, target).await,
-				Self::Dyn(host) => host.list_checks(repo, target).await,
-			}
-		}
-	}
-
-	fn search(
-		&self,
-		query: SearchQuery,
-	) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.search(query).await,
-				Self::Dyn(host) => host.search(query).await,
-			}
-		}
-	}
-
-	fn create_change_request(
-		&self,
-		draft: ChangeRequestDraft,
-	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.create_change_request(draft).await,
-				Self::Dyn(host) => host.create_change_request(draft).await,
-			}
-		}
-	}
-
-	fn checkout_change_request(
-		&self,
-		request: &CheckoutRequest,
-	) -> impl Future<Output = Result<CheckoutReceipt, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.checkout_change_request(request).await,
-				Self::Dyn(host) => host.checkout_change_request(request).await,
-			}
-		}
-	}
-
-	fn push_change_request(
-		&self,
-		request: &PushRequest,
-	) -> impl Future<Output = Result<PushReceipt, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.push_change_request(request).await,
-				Self::Dyn(host) => host.push_change_request(request).await,
-			}
-		}
-	}
-
-	fn create_issue(
-		&self,
-		draft: IssueDraft,
-	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
-		async move {
-			match self {
-				Self::Github(host) => host.create_issue(draft).await,
-				Self::Dyn(host) => host.create_issue(draft).await,
-			}
-		}
-	}
-}
+/// After ADR 0049 D2.4 / github.rs deletion there is no in-core Github arm;
+/// every registered host is a [`DynForgeAdapter`]. The alias keeps call sites
+/// and Delegated type parameters stable. The default client is
+/// [`LiveForgeDeviceClient`].
+pub type ForgeBackend<C = LiveForgeDeviceClient> = DynForgeAdapter<C>;
 
 /// Registers a dyn-backed forge host on a [`DelegatedBuilder`].
 ///
@@ -658,8 +498,7 @@ pub fn register_dyn_forge_host<C: ForgeDeviceClient>(
 	project_root: PathBuf,
 	worktree_root: PathBuf,
 ) -> Result<(), RegisterError> {
-	builder
-		.register(host, ForgeBackend::Dyn(DynForgeAdapter::new(client, project_root, worktree_root)))
+	builder.register(host, DynForgeAdapter::new(client, project_root, worktree_root))
 }
 
 fn map_worktree(op: ForgeOp, error: forge_worktree::Error) -> ForgeError {
@@ -673,16 +512,8 @@ fn map_worktree(op: ForgeOp, error: forge_worktree::Error) -> ForgeError {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		future::Future,
-		sync::{
-			Arc,
-			atomic::{AtomicUsize, Ordering},
-		},
-	};
+	use std::{future::Future, sync::Arc};
 
-	use omp_cache::forge_cache::ForgeCache;
-	use omp_con::Ctx;
 	use omp_core::Str;
 	use omp_forge::{
 		ChangeRequest, CheckoutPlan, CheckoutRequest, ForgeError, ForgeHost as _, ForgeOp, Issue,
@@ -694,13 +525,11 @@ mod tests {
 	use serde_json::{Value, json};
 
 	use super::{
-		DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
-		LiveForgeDeviceClient, forge_device_path, forge_op_for_path, paths, register_dyn_forge_host,
+		DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITHUB_DYN_HOST,
+		GITLAB_HOST, LiveForgeDeviceClient, forge_device_path, forge_op_for_path, paths,
+		register_dyn_forge_host,
 	};
-	use crate::{
-		blobs::BlobHost, forge_worktree, github::GithubService, github_adapter::GithubForgeAdapter,
-		github_url::GithubCredentialBridge, tool_settings::ForgeCacheSettings,
-	};
+	use crate::forge_worktree;
 
 	#[derive(Clone)]
 	struct FakeClient {
@@ -771,24 +600,6 @@ mod tests {
 		}
 	}
 
-	fn github_service(root: &std::path::Path) -> Arc<GithubService> {
-		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
-		let cache = Arc::new(
-			ForgeCache::open(
-				root.join("forge-cache.sqlite3"),
-				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
-			)
-			.expect("cache"),
-		);
-		GithubService::new(
-			root.to_path_buf(),
-			root,
-			Arc::new(GithubCredentialBridge::new()),
-			cache,
-			blobs,
-		)
-	}
-
 	#[test]
 	fn forge_device_paths_match_op_snake_case() {
 		assert_eq!(forge_device_path(ForgeOp::RepoView).as_str(), paths::REPO_VIEW);
@@ -814,12 +625,21 @@ mod tests {
 			plan:  None,
 		};
 		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubForgeAdapter { service: github_service(dir.path()) };
 		let (project, trees) = roots(dir.path());
 		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", ForgeBackend::Github(github))
-			.expect("github");
+		register_dyn_forge_host(
+			&mut builder,
+			GITHUB_DYN_HOST,
+			FakeClient {
+				calls: Arc::new(Mutex::new(Vec::new())),
+				cr:    sample_cr(GITHUB_DYN_HOST),
+				issue: sample_issue(GITHUB_DYN_HOST),
+				plan:  None,
+			},
+			project.clone(),
+			trees.clone(),
+		)
+		.expect("github.com");
 		register_dyn_forge_host(&mut builder, host, fake, project, trees).expect("gitlab");
 		let router = builder.build();
 
@@ -848,11 +668,21 @@ mod tests {
 	#[tokio::test]
 	async fn unregistered_dyn_host_stays_unregistered() {
 		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let (project, trees) = roots(dir.path());
 		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", ForgeBackend::Github(github))
-			.expect("github");
+		register_dyn_forge_host(
+			&mut builder,
+			GITHUB_DYN_HOST,
+			FakeClient {
+				calls: Arc::new(Mutex::new(Vec::new())),
+				cr:    sample_cr(GITHUB_DYN_HOST),
+				issue: sample_issue(GITHUB_DYN_HOST),
+				plan:  None,
+			},
+			project,
+			trees,
+		)
+		.expect("github.com");
 		let router = builder.build();
 		let repo = sample_repo("gitlab.example");
 		let error = router.view_issue(&repo, 1).await.expect_err("unregistered");
@@ -939,50 +769,27 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn github_arm_still_selected_for_github_com() {
-		// Enum routing proof: a host registered on ForgeBackend::Github is not
-		// sent to the Dyn client. Production forge_router puts github.com on
-		// Dyn; this keeps the Github arm selectable for unlisted GHE hosts.
-
-		let hits = Arc::new(AtomicUsize::new(0));
-		#[derive(Clone)]
-		struct Counting(Arc<AtomicUsize>);
-		impl ForgeDeviceClient for Counting {
-			fn call(
-				&self,
-				_path: &str,
-				_args: Value,
-			) -> impl Future<Output = Result<Value, ForgeError>> + Send {
-				self.0.fetch_add(1, Ordering::SeqCst);
-				std::future::ready(Err(ForgeError::Unavailable { op: ForgeOp::IssueView }))
-			}
-		}
+	async fn github_com_on_dyn_arm_uses_device_client() {
+		let host = GITHUB_DYN_HOST;
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let fake = FakeClient {
+			calls: Arc::clone(&calls),
+			cr:    sample_cr(host),
+			issue: sample_issue(host),
+			plan:  None,
+		};
 		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubForgeAdapter { service: github_service(dir.path()) };
-		let mut builder = Delegated::<ForgeBackend<Counting>, _>::builder(PermitAll);
-		builder
-			.register("github.com", ForgeBackend::Github(github))
-			.expect("github");
 		let (project, trees) = roots(dir.path());
-		register_dyn_forge_host(
-			&mut builder,
-			"gitlab.example",
-			Counting(Arc::clone(&hits)),
-			project,
-			trees,
-		)
-		.expect("gitlab");
+		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
+		register_dyn_forge_host(&mut builder, host, fake, project, trees).expect("github.com");
 		let router = builder.build();
-		let repo = RepoRef::try_new("github.com", "acme", "widget").unwrap();
-		let error = router
-			.view_issue(&repo, 1)
+		let issue = router
+			.view_issue(&sample_repo(host), 3)
 			.await
-			.expect_err("no live github");
-		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for github.com");
-		assert!(
-			!matches!(error, ForgeError::Unregistered { .. }),
-			"github.com must stay registered: {error}"
-		);
+			.expect("issue via dyn");
+		assert_eq!(issue.number, 3);
+		assert_eq!(calls.lock().len(), 1);
+		assert_eq!(calls.lock()[0].0, paths::ISSUE_VIEW);
 	}
 
 	struct RecordingInvoker {
@@ -1034,12 +841,8 @@ mod tests {
 		assert!(client.is_bound());
 
 		let dir = tempfile::tempdir().expect("temp");
-		let github = GithubForgeAdapter { service: github_service(dir.path()) };
 		let (project, trees) = roots(dir.path());
 		let mut builder = Delegated::<ForgeBackend<LiveForgeDeviceClient>, _>::builder(PermitAll);
-		builder
-			.register("github.com", ForgeBackend::Github(github))
-			.expect("github");
 		register_dyn_forge_host(&mut builder, GITLAB_HOST, client, project, trees)
 			.expect("gitlab.com");
 		let router = builder.build();
