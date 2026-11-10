@@ -37,3 +37,15 @@ See [WAVE1.md](WAVE1.md).
 | [`ci/`](ci/) | Sole `ci/*` mount owner; dispatches by provider host |
 | [`github/`](github/) | GitHub T2 backend (`omp_github` forge + Actions CI) |
 | [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab` forge + GitLab CI) |
+
+## Conformance (ADR 0049 D5)
+
+```sh
+just check-extensions
+# alias: just test-extensions
+# or:    python3 scripts/check-extension-conformance.py
+```
+
+Gates manifests (effect grants / closed-vocab `capabilities`), package unit
+tests, and a frozen `omp` import smoke under native stubs. omp2 CI runs the
+same script as job `First-party extension conformance`.

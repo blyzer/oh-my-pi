@@ -17,6 +17,7 @@ on:
       - "THIRD-PARTY-NOTICES.txt"
       - "crates/**"
       - "examples/**"
+      - "extensions/**"
       - "fixtures/**"
       - "docs/py/**"
       - "scripts/**"
@@ -196,6 +197,19 @@ jobs:
         run: rustup show active-toolchain
       - name: Generate and validate runtime specification
         run: cargo -Zscript scripts/check-spec.rs -- target/runtime-symbol-spec.json
+
+  # ADR 0049 D5: wave-1 first-party extensions against frozen omp.* (stdlib + stubs).
+  # Informational — not listed in .github/rulesets/omp2-protected.json required checks.
+  extensions_conformance:
+    name: First-party extension conformance
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Extension conformance (manifests, unittests, frozen API smoke)
+        run: python3 scripts/check-extension-conformance.py
 
   licenses:
     name: License policy and release notices
