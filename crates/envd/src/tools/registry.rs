@@ -708,6 +708,64 @@ impl DeviceControlFactory {
 	pub fn forge_invoker(self: &Arc<Self>) -> Arc<dyn crate::github_adapter::ForgeDeviceInvoker> {
 		Arc::new(DeviceCatalogForgeInvoker { devices: Arc::clone(self) })
 	}
+
+	/// Host-issued CI bridge: look up a mounted leaf and dispatch
+	/// `omp.devices.call` (same destination as [`Self::invoke`], without a
+	/// nested CONTROL parent).
+	///
+	/// Used by [`crate::github_adapter::LiveCiDeviceClient`] once bound via
+	/// [`Self::ci_invoker`].
+	#[cfg(feature = "cap-ci")]
+	pub async fn call_mounted_ci(
+		&self,
+		path: &str,
+		args: JsonValue,
+	) -> Result<JsonValue, omp_ci::CiError> {
+		use crate::github_adapter::ci_op_for_path;
+
+		let op = ci_op_for_path(path);
+		let args = args
+			.as_object()
+			.cloned()
+			.ok_or(omp_ci::CiError::Unavailable { op })?;
+		let matches = self
+			.catalog
+			.snapshot()
+			.leaves
+			.iter()
+			.filter(|leaf| leaf.name.as_str() == path && leaf.mounted)
+			.cloned()
+			.collect::<Vec<_>>();
+		let [leaf] = matches.as_slice() else {
+			return Err(omp_ci::CiError::Unavailable { op });
+		};
+		let mut callback_args = JsonMap::new();
+		callback_args.insert(String::from("path"), JsonValue::String(path.to_string()));
+		callback_args.insert(String::from("args"), JsonValue::Object(args));
+		callback_args
+			.insert(String::from("family"), JsonValue::String(leaf.value.entry.family.to_string()));
+		callback_args.insert(String::from("rev"), JsonValue::from(leaf.value.entry.rev));
+		self
+			.callbacks
+			.dispatch_host(
+				Arc::clone(&leaf.value.identity),
+				"omp.devices.call",
+				callback_args,
+				CallbackConcurrency::Serialized,
+				time::Duration::from_secs(30),
+				Some(Str::new(path)),
+			)
+			.await
+			.map_err(|_| omp_ci::CiError::Unavailable { op })
+	}
+
+	/// Catalog-backed [`crate::github_adapter::CiDeviceInvoker`] for the live
+	/// CI client.
+	#[cfg(feature = "cap-ci")]
+	#[must_use]
+	pub fn ci_invoker(self: &Arc<Self>) -> Arc<dyn crate::github_adapter::CiDeviceInvoker> {
+		Arc::new(DeviceCatalogCiInvoker { devices: Arc::clone(self) })
+	}
 }
 
 /// [`ForgeDeviceInvoker`] that forwards to
@@ -728,6 +786,26 @@ impl crate::github_adapter::ForgeDeviceInvoker for DeviceCatalogForgeInvoker {
 		let devices = Arc::clone(&self.devices);
 		let path = path.to_owned();
 		Box::pin(async move { devices.call_mounted(&path, args).await })
+	}
+}
+
+/// [`CiDeviceInvoker`] that forwards to
+/// [`DeviceControlFactory::call_mounted_ci`].
+#[cfg(feature = "cap-ci")]
+struct DeviceCatalogCiInvoker {
+	devices: Arc<DeviceControlFactory>,
+}
+
+#[cfg(feature = "cap-ci")]
+impl crate::github_adapter::CiDeviceInvoker for DeviceCatalogCiInvoker {
+	fn invoke(
+		&self,
+		path: &str,
+		args: JsonValue,
+	) -> std::pin::Pin<Box<dyn Future<Output = Result<JsonValue, omp_ci::CiError>> + Send + '_>> {
+		let devices = Arc::clone(&self.devices);
+		let path = path.to_owned();
+		Box::pin(async move { devices.call_mounted_ci(&path, args).await })
 	}
 }
 
@@ -1067,6 +1145,7 @@ fn register_session_base(
 	telemetry: &Arc<TelemetryIndex>,
 	forge_cache: Arc<ForgeCache>,
 	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+	#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
 	tool_settings: &ToolSettings,
 	#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
@@ -1094,6 +1173,8 @@ fn register_session_base(
 		forge_cache,
 		#[cfg(feature = "cap-forge")]
 		forge_devices,
+		#[cfg(feature = "cap-ci")]
+		ci_devices,
 		#[cfg(feature = "cap-media")]
 		image_config,
 		#[cfg(feature = "cap-media")]
@@ -1424,6 +1505,7 @@ pub(crate) fn session_registry(
 	telemetry: &Arc<TelemetryIndex>,
 	forge_cache: Arc<ForgeCache>,
 	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+	#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
 	workers: &ExtHostSupervisor,
 	py_eval: bool,
 	con: &Ctx,
@@ -1459,6 +1541,8 @@ pub(crate) fn session_registry(
 		forge_cache,
 		#[cfg(feature = "cap-forge")]
 		forge_devices,
+		#[cfg(feature = "cap-ci")]
+		ci_devices,
 		tool_settings,
 		#[cfg(feature = "cap-media")]
 		image_config(con),
@@ -1544,6 +1628,7 @@ pub(crate) fn production_registry<
 	session_id: &str,
 	forge_cache: Arc<ForgeCache>,
 	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+	#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
 	mcp: &Arc<McpService>,
 	mcp_manager: Arc<McpManager>,
 	workspace: &WorkspaceHost,
@@ -1615,6 +1700,8 @@ pub(crate) fn production_registry<
 			Arc::clone(&forge_cache),
 			#[cfg(feature = "cap-forge")]
 			forge_devices.clone(),
+			#[cfg(feature = "cap-ci")]
+			ci_devices,
 			tool_settings,
 			#[cfg(feature = "cap-media")]
 			image_config(con),
@@ -3256,6 +3343,8 @@ mod tests {
 			),
 			#[cfg(feature = "cap-forge")]
 			crate::github_adapter::LiveForgeDeviceClient::default(),
+			#[cfg(feature = "cap-ci")]
+			crate::github_adapter::LiveCiDeviceClient::default(),
 			&tool_settings,
 			#[cfg(feature = "cap-media")]
 			image_config(&con),

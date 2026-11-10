@@ -25,10 +25,15 @@ and `github.com` are registered on the dyn forge arm** (same bound client).
 `GITLAB_HOST` (checkout hosts in that set route to Dyn; GHE listed there also
 routes to Dyn / `omp_github`). SessionHost bound-client threading for
 `forge@1` / numbered `pr://` is DONE. Checkout / push stay unmounted (ADR
-D2.4). **DONE:** GitHub T2 read+create via dyn. In-core `github.rs` /
-`github_url.rs` **remain** until checkout/push/CI/list-URL Dyn parity allows
-deletion. Remaining: search leaves; full automatic device-catalog host-claim
-discovery (smaller TODO). See package READMEs.
+D2.4). **DONE:** GitHub T2 read+create via dyn. **DONE:** `ci/*` dyn bridge
+(`DynCiAdapter` / `CiBackend` / `LiveCiDeviceClient`; schema
+[`0049-ci-dyn-device-schema.md`](../docs/adr/0049-ci-dyn-device-schema.md));
+`github.com` CI stays on the in-core Github arm; `gitlab.com` is registered
+on the Dyn CI arm (Unavailable until a T2 CI extension mounts). In-core
+`github.rs` / `github_url.rs` **remain** until checkout/push + T2 CI body +
+flipping `github.com` CI to Dyn + list-URL Dyn parity allow deletion.
+Remaining: search leaves; T2 CI extension body; full automatic device-catalog
+host-claim discovery (smaller TODO). See package READMEs.
 
 ## May grow
 

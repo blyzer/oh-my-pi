@@ -1059,6 +1059,8 @@ async fn test_connection_scoped(
 		state.path(),
 		#[cfg(feature = "cap-forge")]
 		crate::github_adapter::LiveForgeDeviceClient::default(),
+		#[cfg(feature = "cap-ci")]
+		crate::github_adapter::LiveCiDeviceClient::default(),
 	));
 	let grants = Grants::supported(capabilities.iter().copied());
 	server

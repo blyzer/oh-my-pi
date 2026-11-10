@@ -12,7 +12,8 @@ dispatches each `ForgeHost` method to those paths. The production router keeps
 an enum `ForgeBackend { Github(...), Dyn(...) }` so heterogeneous hosts stay
 unboxed (AGENTS: enums before `dyn`).
 
-A parallel `ci/*` dyn bridge is a follow-up; it is not part of this schema.
+The parallel `ci/*` dyn bridge is documented in
+[`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md) (DONE).
 
 ## Device paths
 
@@ -87,7 +88,9 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   Github arm. Full automatic device-catalog host-claim discovery remains a
   smaller TODO.
 - **Remaining before deleting `envd/src/github.rs`:** Dyn checkout/push (ADR
-  D2.4), `ci/*` dyn bridge, list-URL / `GithubResolver` parity. Search leaves
-  still open. SessionHost bound-client threading for `forge@1` is DONE.
-  In-core `GithubForgeAdapter` / `github.rs` / `github_url.rs` stay for CI,
+  D2.4), T2 CI extension body + flipping `github.com` CI to Dyn (bridge DONE —
+  see [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)), list-URL /
+  `GithubResolver` parity. Search leaves still open. SessionHost bound-client
+  threading for `forge@1` is DONE. In-core `GithubForgeAdapter` /
+  `GithubCiAdapter` / `github.rs` / `github_url.rs` stay for Actions CI,
   list URLs, and checkout/push via `GithubService`.

@@ -30,7 +30,15 @@
 //! boxing [`ForgeHost`] futures (ADR 0049 D2.3). Production registers Dyn
 //! hosts via [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog
 //! host-claim discovery remains a smaller TODO.
+//!
+//! Under `cap-ci`, the CI router holds a [`CiBackend`] enum the same way
+//! (ADR 0049 `ci/*` bridge). Production keeps `github.com` on the Github arm
+//! and registers [`CI_DYN_HOST`] (`gitlab.com`) on Dyn via
+//! [`LiveCiDeviceClient`]. Flipping `github.com` CI to Dyn waits on a T2 CI
+//! extension body.
 
+#[cfg(feature = "cap-ci")]
+mod dyn_ci;
 #[cfg(feature = "cap-forge")]
 mod dyn_forge;
 use std::{
@@ -40,6 +48,12 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(feature = "cap-ci")]
+pub(crate) use dyn_ci::{
+	CI_DYN_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter, LiveCiDeviceClient,
+	UnavailableCiClient, ci_device_path, ci_op_for_path, paths as ci_device_paths,
+	register_dyn_ci_host,
+};
 #[cfg(feature = "cap-forge")]
 pub(crate) use dyn_forge::{
 	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITHUB_DYN_HOST,
@@ -226,19 +240,43 @@ pub(crate) fn forge_router(
 	builder.build()
 }
 
-/// Routes `ci@1` to [`GithubCiAdapter`] with log streaming only.
+/// Routes `ci@1` through [`CiBackend`] (Github arm + dyn T2 arm).
 ///
 /// See the module docs for `PermitAll` and host registration.
+///
+/// # Host registration
+///
+/// - `github.com` → [`CiBackend::Github`] (unchanged `ci@1` path)
+/// - [`CI_DYN_HOST`] (`gitlab.com`) → [`CiBackend::Dyn`] over `devices`
+/// - checkout host from `infer_repo` when it differs:
+///   - [`CI_DYN_HOST`] → already registered (Dyn)
+///   - else → Github arm (GHE / unlisted)
+///
+/// `devices` may be unbound ([`LiveCiDeviceClient`] returns
+/// [`omp_ci::CiError::Unavailable`] until [`LiveCiDeviceClient::bind`]);
+/// [`CI_DYN_HOST`] is still registered so Delegated can reach the dyn arm.
+/// Flipping `github.com` CI to Dyn waits on a T2 CI extension body.
 #[cfg(feature = "cap-ci")]
-pub(crate) fn ci_router(service: Arc<GithubService>) -> CiDelegated<GithubCiAdapter, CiPermitAll> {
+pub(crate) fn ci_router(
+	service: Arc<GithubService>,
+	devices: LiveCiDeviceClient,
+) -> CiDelegated<CiBackend, CiPermitAll> {
 	let adapter = GithubCiAdapter { service: Arc::clone(&service) };
 	let caps = github_capabilities();
 	let mut builder = CiDelegated::builder(CiPermitAll);
 	builder
-		.register(github_url::GITHUB_HOST, adapter.clone(), caps)
+		.register(
+			github_url::GITHUB_HOST,
+			CiBackend::Github(adapter.clone()),
+			caps,
+		)
 		.expect("github.com is a CI provider");
+	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices, caps).expect("dyn ci host");
 	register_checkout_host(&service, |host| {
-		let _ = builder.register(host, adapter.clone(), caps);
+		if host.eq_ignore_ascii_case(CI_DYN_HOST) {
+			return;
+		}
+		let _ = builder.register(host, CiBackend::Github(adapter.clone()), caps);
 	});
 	builder.build()
 }
@@ -1224,7 +1262,7 @@ mod tests {
 		forge_device_paths, forge_router,
 	};
 	#[cfg(feature = "cap-ci")]
-	use super::{ci_status, pipeline_from_actions};
+	use super::{CI_DYN_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
 		tool_settings::ForgeCacheSettings,
@@ -1506,7 +1544,8 @@ mod tests {
 	#[tokio::test]
 	async fn ci_writes_and_artifacts_are_not_capable() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router = super::ci_router(service(dir.path()));
+		let router =
+			super::ci_router(service(dir.path()), LiveCiDeviceClient::default());
 		let run = run("42");
 		let provider = run.provider.clone();
 		for op in [
@@ -1539,6 +1578,22 @@ mod tests {
 		assert!(!caps.cancel);
 		assert!(!caps.artifacts);
 		assert!(caps.allows(CiOp::Status));
+	}
+
+	#[cfg(feature = "cap-ci")]
+	#[tokio::test]
+	async fn gitlab_com_ci_is_registered_dyn_even_when_unbound() {
+		let router = super::ci_router(
+			service(tempfile::tempdir().expect("temp").path()),
+			LiveCiDeviceClient::default(),
+		);
+		let run =
+			RunRef::try_new(CiProvider::try_new(CI_DYN_HOST).unwrap(), "1", None).unwrap();
+		let error = router.status(&run).await.expect_err("unbound live client");
+		assert!(
+			matches!(error, CiError::Unavailable { op: CiOp::Status }),
+			"gitlab.com must be registered on the dyn CI arm: {error}"
+		);
 	}
 
 	#[cfg(feature = "cap-ci")]

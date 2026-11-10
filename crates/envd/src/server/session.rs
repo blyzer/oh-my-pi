@@ -151,6 +151,7 @@ impl EnvServer {
 		authority: Arc<AuthorityTable>,
 		state_dir: &Path,
 		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-ci")] ci_devices: crate::github_adapter::LiveCiDeviceClient,
 	) -> Self {
 		let host_info = HostInfoHost::new(state_dir);
 		let workspace_roots =
@@ -197,6 +198,8 @@ impl EnvServer {
 			state_dir: state_dir.to_path_buf(),
 			#[cfg(feature = "cap-forge")]
 			forge_devices,
+			#[cfg(feature = "cap-ci")]
+			ci_devices,
 		}
 	}
 
@@ -367,6 +370,8 @@ impl EnvServer {
 			Arc::clone(&forge_cache),
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices.clone(),
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices.clone(),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -445,6 +450,8 @@ impl EnvServer {
 			state_dir,
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices,
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices,
 		))
 	}
 
@@ -671,6 +678,8 @@ impl EnvServer {
 			Arc::clone(&forge_cache),
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices.clone(),
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices.clone(),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -749,6 +758,8 @@ impl EnvServer {
 			state_dir,
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices,
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices,
 		))
 	}
 
@@ -913,6 +924,8 @@ impl EnvServer {
 			Arc::clone(&forge_cache),
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices.clone(),
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices.clone(),
 			ext_hosts.as_ref(),
 			py_eval,
 			con,
@@ -985,6 +998,8 @@ impl EnvServer {
 			state_dir,
 			#[cfg(feature = "cap-forge")]
 			control_bindings.forge_devices,
+			#[cfg(feature = "cap-ci")]
+			control_bindings.ci_devices,
 		))
 	}
 
