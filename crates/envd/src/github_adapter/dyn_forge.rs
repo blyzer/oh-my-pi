@@ -25,10 +25,11 @@ use strum::IntoStaticStr as _;
 
 use super::GithubForgeAdapter;
 
-/// Canonical GitLab SaaS host registered on the production forge router (D2.8).
+/// Canonical GitLab SaaS host always registered on the dyn forge arm (D2.8).
 ///
-/// Env-var names and other self-hosted hosts remain adapter data; automatic
-/// host-claim discovery from the device catalog is still TODO.
+/// Additional self-hosted hosts come from `sv_forge_dyn_hosts` and adapter env
+/// `GITLAB_HOST` via [`super::ForgeDynHosts`]. Automatic device-catalog
+/// host-claim discovery remains a smaller TODO.
 pub const GITLAB_HOST: &str = "gitlab.com";
 
 /// Device paths under `forge/*`.
@@ -588,9 +589,10 @@ impl<C: ForgeDeviceClient> ForgeHost for ForgeBackend<C> {
 ///
 /// This is the seam T2 extensions (and tests) use to place a host such as
 /// [`GITLAB_HOST`] beside `github.com`. The production [`super::forge_router`]
-/// registers [`GITLAB_HOST`] with a [`LiveForgeDeviceClient`]. Automatic
-/// discovery of additional hosts from the extension device catalog / host
-/// claims is not wired yet (TODO, ADR 0049 D2.8).
+/// registers every host in [`super::ForgeDynHosts`] with a
+/// [`LiveForgeDeviceClient`]. Automatic discovery of additional hosts from the
+/// extension device catalog / host claims is not wired yet (TODO, ADR 0049
+/// D2.8).
 ///
 /// # Errors
 ///

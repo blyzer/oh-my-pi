@@ -224,7 +224,7 @@ Phase 4 `cap-forge` and `cap-ci` are DONE. Phase 4 PR1 landed the pure `omp-forg
 Consequences of this amendment:
 - T2 home is this monorepo’s `extensions/` tree. Root `Cargo.toml` keeps `members = ["crates/*"]`; `extensions/` is never a Cargo member and has no `extensions/Cargo.toml`.
 - Wheels remain locked and signed via `crates/ext`. Development installs use `path:` / `omp ext link` against trees under `extensions/`.
-- GitLab T2 (D2.8) read path landed under `extensions/gitlab/` with live `ForgeDeviceClient` wiring (`gitlab.com` on the Dyn arm). SessionHost bound-client threading for `forge@1` is DONE. Remaining: self-hosted host claims, write ops, GitHub T2 parity before deleting in-core `github.rs`.
+- GitLab T2 (D2.8) read path landed under `extensions/gitlab/` with live `ForgeDeviceClient` wiring (`gitlab.com` on the Dyn arm). SessionHost bound-client threading for `forge@1` is DONE. Self-hosted Dyn host registration via `sv_forge_dyn_hosts` + `GITLAB_HOST` is DONE (catalog host-claim discovery remains a smaller TODO). Remaining: write ops, GitHub T2 parity before deleting in-core `github.rs`.
 - Conformance CI, manifest effect checks, rescue wave 1, and ADR 0046 item 4 remain Phase 5 work; the home location is settled.
 
 ## References
