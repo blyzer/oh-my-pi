@@ -19,8 +19,10 @@ from omp_github.mapping import (  # noqa: E402
     map_pull_request,
     map_repository,
     map_request_state,
+    map_search_page,
     pull_request_create_body,
     repo_slug,
+    split_list_filters,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -141,6 +143,35 @@ class IssueCreateBodyTests(unittest.TestCase):
     def test_omits_empty_body(self) -> None:
         body = issue_create_body({"repo": REPO, "title": "t", "body": ""})
         self.assertEqual(body, {"title": "t"})
+
+
+class SearchMappingTests(unittest.TestCase):
+    def test_split_list_filters(self) -> None:
+        filters, rest = split_list_filters("state:open author:alice label:bug fix me")
+        self.assertEqual(filters, {"state": "open", "author": "alice", "label": "bug"})
+        self.assertEqual(rest, "fix me")
+
+    def test_issues_list_skips_pull_requests(self) -> None:
+        payload = _load("issues_list.json")
+        assert isinstance(payload, list)
+        page = map_search_page("issues", payload, REPO)
+        self.assertEqual(page["kind"], "issues")
+        self.assertEqual(len(page["hits"]), 1)
+        hit = page["hits"][0]
+        self.assertEqual(hit["number"], 3)
+        self.assertEqual(hit["title"], "Bug")
+        self.assertEqual(hit["state"], "open")
+        self.assertEqual(hit["repo"], REPO)
+
+    def test_pulls_list_maps_merged_state(self) -> None:
+        payload = _load("pulls_list.json")
+        assert isinstance(payload, list)
+        page = map_search_page("change_requests", payload, REPO)
+        self.assertEqual(page["kind"], "change_requests")
+        self.assertEqual(len(page["hits"]), 2)
+        self.assertEqual(page["hits"][0]["state"], "open")
+        self.assertEqual(page["hits"][1]["number"], 8)
+        self.assertEqual(page["hits"][1]["state"], "merged")
 
 
 if __name__ == "__main__":

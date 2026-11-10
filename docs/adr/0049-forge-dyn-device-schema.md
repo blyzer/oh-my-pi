@@ -87,11 +87,17 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   hosts in that set route to Dyn; other unlisted hosts still assume GHE on the
   Github arm. Full automatic device-catalog host-claim discovery remains a
   smaller TODO.
+- **DONE (search leaves + list-URL parity):** `extensions/forge/` mounts
+  `forge/search_change_requests` and `forge/search_issues` (host-dispatch to
+  `omp_github` / `omp_gitlab`). `search_code` / commits / repos stay
+  unmounted → Unavailable. List URLs (`issue://owner/repo?state=open`,
+  `pr://…`) resolve through `ForgeHost::search` (neutral `state:` /
+  `author:` / `label:` tokens in `SearchQuery.text`); rendered markdown is
+  cached **without** etag (search has no HTTP validator). T2 CI +
+  `github.com` CI on Dyn is DONE (see
+  [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)). SessionHost
+  bound-client threading for `forge@1` is DONE.
 - **Remaining before deleting `envd/src/github.rs`:** Dyn checkout/push (ADR
-  D2.4), list-URL / `GithubResolver` parity. T2 CI extension + flipping
-  `github.com` CI to Dyn is DONE (see
-  [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)). Search leaves
-  still open. SessionHost bound-client threading for `forge@1` is DONE.
-  In-core `GithubForgeAdapter` / `GithubCiAdapter` / `github.rs` /
-  `github_url.rs` stay for list URLs, checkout/push via `GithubService`, and
-  unlisted GHE CI.
+  D2.4). In-core `GithubForgeAdapter` / `GithubCiAdapter` / `github.rs` /
+  `github_url.rs` stay for checkout/push via `GithubService` and unlisted
+  GHE CI.

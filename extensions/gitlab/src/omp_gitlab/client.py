@@ -22,12 +22,15 @@ from urllib.parse import urlencode
 from .errors import ForgeUnavailable
 from .mapping import (
     issue_create_body,
+    list_state_param,
     map_issue,
     map_merge_request,
     map_notes,
     map_project,
+    map_search_page,
     merge_request_create_body,
     project_path,
+    split_list_filters,
 )
 
 
@@ -182,3 +185,62 @@ def create_issue(draft: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ForgeUnavailable(op, "GitLab issue create payload was not an object")
     return map_issue(payload, repo)
+
+
+def _query_repo(query: Mapping[str, Any], *, op: str) -> dict[str, Any]:
+    repo = query.get("repo")
+    if not isinstance(repo, dict):
+        raise ForgeUnavailable(op, "query.repo must be an object")
+    return repo
+
+
+def _clamp_limit(raw: Any) -> int:
+    try:
+        limit = int(raw or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return 30
+    return min(limit, 100)
+
+
+def search(query: Mapping[str, Any]) -> dict[str, Any]:
+    """Search or list issues / merge requests → ``SearchPage``.
+
+    Neutral list-URL filters with no free-text remainder use project list
+    endpoints. Free-text uses GitLab search scoped to the project. Other
+    ``SearchKind`` values stay Unavailable (leaves unmounted).
+    """
+    kind = str(query.get("kind") or "").strip().lower()
+    if kind in {"change_requests", "search_change_requests"}:
+        op = "search_change_requests"
+        page_kind = "change_requests"
+        family = "merge_requests"
+    elif kind in {"issues", "search_issues"}:
+        op = "search_issues"
+        page_kind = "issues"
+        family = "issues"
+    else:
+        raise ForgeUnavailable(
+            "search_issues",
+            f"GitLab dyn search does not mount kind={kind!r}",
+        )
+
+    repo = _query_repo(query, op=op)
+    filters, freeform = split_list_filters(str(query.get("text") or ""))
+    limit = _clamp_limit(query.get("limit"))
+    params: dict[str, str] = {
+        "state": list_state_param(filters.get("state", "open")),
+        "per_page": str(limit),
+    }
+    if author := filters.get("author"):
+        params["author_username"] = author
+    if label := filters.get("label"):
+        params["labels"] = label
+    if freeform:
+        params["search"] = freeform
+
+    payload = _get_json(_project_url(repo, family, query=params), op=op)
+    if not isinstance(payload, list):
+        raise ForgeUnavailable(op, f"GitLab {family} list payload was not a list")
+    return map_search_page(page_kind, payload, repo)

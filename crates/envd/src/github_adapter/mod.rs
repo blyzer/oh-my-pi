@@ -713,11 +713,20 @@ fn search_page(query: &SearchQuery, value: &Value) -> SearchPage {
 #[cfg(feature = "cap-forge")]
 fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Option<SearchHit> {
 	let repo = hit_repo(kind, fallback?, row);
-	let (title, number, commit) = match kind {
+	let (title, number, commit, state) = match kind {
 		SearchKind::ChangeRequests | SearchKind::Issues => {
-			(json_str(row, "title"), row.get("number").and_then(Value::as_u64), None)
+			let state = if row.get("pull_request").is_some()
+				&& row.get("merged_at").and_then(Value::as_str).is_some()
+			{
+				Str::new_static("merged")
+			} else if row.get("merged").and_then(Value::as_bool) == Some(true) {
+				Str::new_static("merged")
+			} else {
+				json_str(row, "state")
+			};
+			(json_str(row, "title"), row.get("number").and_then(Value::as_u64), None, state)
 		},
-		SearchKind::Code => (json_str(row, "path"), None, None),
+		SearchKind::Code => (json_str(row, "path"), None, None, Str::empty()),
 		SearchKind::Commits => (
 			pointer_str(row, "/commit/message")
 				.as_str()
@@ -727,10 +736,18 @@ fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Opti
 				.into(),
 			None,
 			row.get("sha").and_then(Value::as_str).map(Str::new),
+			Str::empty(),
 		),
-		SearchKind::Repositories => (json_str(row, "full_name"), None, None),
+		SearchKind::Repositories => (json_str(row, "full_name"), None, None, Str::empty()),
 	};
-	Some(SearchHit { repo, title, web_url: json_str(row, "html_url"), number, commit })
+	Some(SearchHit {
+		repo,
+		title,
+		web_url: json_str(row, "html_url"),
+		number,
+		commit,
+		state,
+	})
 }
 
 #[cfg(feature = "cap-forge")]
@@ -774,6 +791,39 @@ fn search_operation(kind: SearchKind) -> Operation {
 		SearchKind::Code => Operation::SearchCode,
 		SearchKind::Commits => Operation::SearchCommits,
 		SearchKind::Repositories => Operation::SearchRepos,
+	}
+}
+
+/// Translates neutral list-URL filter tokens into GitHub search qualifiers.
+///
+/// `state:open|closed|merged` → `is:…`; `state:all` is dropped. `author:` and
+/// `label:` pass through. Remaining tokens stay as free-text search.
+#[cfg(feature = "cap-forge")]
+fn github_search_text(text: &Str) -> Str {
+	let mut out = String::new();
+	for token in text.as_str().split_whitespace() {
+		let translated = match token.split_once(':') {
+			Some(("state", "all")) => None,
+			Some(("state", "open")) => Some("is:open"),
+			Some(("state", "closed")) => Some("is:closed"),
+			Some(("state", "merged")) => Some("is:merged"),
+			Some(("state", value)) => Some(token).filter(|_| !value.is_empty()),
+			_ => Some(token),
+		};
+		let Some(piece) = translated else {
+			continue;
+		};
+		if !out.is_empty() {
+			out.push(' ');
+		}
+		out.push_str(piece);
+	}
+	// GithubService rejects an empty search query; a bare list wants a state
+	// qualifier so the search API has something to rank.
+	if out.is_empty() {
+		Str::new_static("is:open")
+	} else {
+		Str::new(out)
 	}
 }
 
@@ -928,7 +978,9 @@ impl ForgeHost for GithubForgeAdapter {
 			};
 			let mut params = blank(search_operation(query.kind));
 			params.repo = Some(repo_arg(query.kind.op(), &repo)?);
-			params.query = Some(query.text.clone());
+			// List-URL filters arrive as neutral `state:` / `author:` / `label:`
+			// tokens; GitHub's search API wants `is:` / `author:` / `label:`.
+			params.query = Some(github_search_text(&query.text));
 			params.limit = (query.limit != 0).then_some(query.limit);
 			let payload = execute(&service, params)
 				.await
@@ -1933,6 +1985,27 @@ mod tests {
 				.await
 				.expect("gitlab stays unread")
 				.is_none()
+		);
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[test]
+	fn github_search_text_translates_list_filter_tokens() {
+		assert_eq!(
+			super::github_search_text(&Str::new_static("state:open author:alice")).as_str(),
+			"is:open author:alice"
+		);
+		assert_eq!(
+			super::github_search_text(&Str::new_static("state:all label:bug")).as_str(),
+			"label:bug"
+		);
+		assert_eq!(
+			super::github_search_text(&Str::new_static("")).as_str(),
+			"is:open"
+		);
+		assert_eq!(
+			super::github_search_text(&Str::new_static("state:merged")).as_str(),
+			"is:merged"
 		);
 	}
 }

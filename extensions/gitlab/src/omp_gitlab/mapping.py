@@ -145,3 +145,83 @@ def issue_create_body(draft: Mapping[str, Any]) -> dict[str, Any]:
     if description:
         body["description"] = description
     return body
+
+
+_LIST_FILTER_KEYS = frozenset({"state", "author", "label"})
+
+
+def split_list_filters(text: str) -> tuple[dict[str, str], str]:
+    """Split neutral list-URL tokens from free-text search.
+
+    Same convention as ``omp_github.mapping.split_list_filters``: ``state:``,
+    ``author:``, ``label:`` are filters; remaining tokens are free-text.
+    """
+    filters: dict[str, str] = {}
+    rest: list[str] = []
+    for token in (text or "").split():
+        key, sep, value = token.partition(":")
+        if sep and key in _LIST_FILTER_KEYS and value:
+            filters[key] = value
+            continue
+        rest.append(token)
+    return filters, " ".join(rest)
+
+
+def list_state_param(state: str | None) -> str:
+    """Neutral ``open|closed|merged|all`` → GitLab list ``state`` query value."""
+    raw = (state or "open").lower()
+    if raw in {"closed", "merged"}:
+        return "closed" if raw == "closed" else "merged"
+    if raw == "all":
+        return "all"
+    return "opened"
+
+
+def map_issue_hit(payload: Mapping[str, Any], repo: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one GitLab issue JSON object to a ``SearchHit``."""
+    return {
+        "repo": _repo_ref(repo),
+        "title": _str(payload.get("title")),
+        "web_url": _str(payload.get("web_url")),
+        "number": int(payload.get("iid") or payload.get("id") or 0) or None,
+        "commit": None,
+        "state": map_issue_state(_str(payload.get("state"))),
+    }
+
+
+def map_merge_request_hit(
+    payload: Mapping[str, Any],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map one GitLab merge-request JSON object to a ``SearchHit``."""
+    return {
+        "repo": _repo_ref(repo),
+        "title": _str(payload.get("title")),
+        "web_url": _str(payload.get("web_url")),
+        "number": int(payload.get("iid") or payload.get("id") or 0) or None,
+        "commit": None,
+        "state": map_request_state(
+            _str(payload.get("state")),
+            detailed=_str(payload.get("detailed_merge_status") or None) or None,
+        ),
+    }
+
+
+def map_search_page(
+    kind: str,
+    payloads: list[Mapping[str, Any]],
+    repo: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Map a GitLab issues/MRs list to ``SearchPage``."""
+    hits: list[dict[str, Any]] = []
+    if kind in {"change_requests", "search_change_requests"}:
+        for row in payloads:
+            hits.append(map_merge_request_hit(row, repo))
+        page_kind = "change_requests"
+    elif kind in {"issues", "search_issues"}:
+        for row in payloads:
+            hits.append(map_issue_hit(row, repo))
+        page_kind = "issues"
+    else:
+        page_kind = kind
+    return {"kind": page_kind, "hits": hits}

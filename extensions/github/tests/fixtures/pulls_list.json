@@ -1,0 +1,20 @@
+[
+  {
+    "number": 7,
+    "title": "Fix the widget",
+    "body": "details",
+    "state": "open",
+    "draft": false,
+    "merged": false,
+    "html_url": "https://github.com/acme/widget/pull/7"
+  },
+  {
+    "number": 8,
+    "title": "Landed already",
+    "body": "",
+    "state": "closed",
+    "draft": false,
+    "merged": true,
+    "html_url": "https://github.com/acme/widget/pull/8"
+  }
+]

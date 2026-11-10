@@ -20,6 +20,7 @@ for path in (SRC, GITHUB_SRC, GITLAB_SRC):
 from omp_forge_ext.dispatch import (  # noqa: E402
     Backend,
     host_from_args,
+    host_from_search_args,
     select_backend,
 )
 from omp_forge_ext.errors import ForgeUnavailable  # noqa: E402
@@ -63,6 +64,41 @@ class HostFromArgsTests(unittest.TestCase):
     def test_missing_raises(self) -> None:
         with self.assertRaises(ForgeUnavailable):
             host_from_args({}, op="repo_view")
+
+
+class SearchHostFromArgsTests(unittest.TestCase):
+    def test_query_repo_host(self) -> None:
+        self.assertEqual(
+            host_from_search_args(
+                {
+                    "query": {
+                        "kind": "issues",
+                        "repo": {"host": "gitlab.com", "owner": "acme", "name": "widget"},
+                    }
+                },
+                op="search_issues",
+            ),
+            "gitlab.com",
+        )
+        self.assertEqual(
+            select_backend(
+                host_from_search_args(
+                    {
+                        "query": {
+                            "repo": {"host": "github.com", "owner": "acme", "name": "widget"},
+                        }
+                    },
+                    op="search_change_requests",
+                )
+            ),
+            Backend.GITHUB,
+        )
+
+    def test_missing_raises(self) -> None:
+        with self.assertRaises(ForgeUnavailable):
+            host_from_search_args({}, op="search_issues")
+        with self.assertRaises(ForgeUnavailable):
+            host_from_search_args({"query": {}}, op="search_issues")
 
 
 if __name__ == "__main__":

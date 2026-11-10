@@ -75,7 +75,7 @@ Production `ci_router`:
   (`gitlab.com`) on the **Dyn** arm with the same live client;
 - keeps unlisted checkout hosts on the **Github** arm (GHE);
 - does **not** delete in-core [`GithubCiAdapter`](../../crates/envd/src/github_adapter/mod.rs)
-  / `github.rs` (list-URL, forge checkout/push, GHE CI still need them).
+  / `github.rs` (forge checkout/push and GHE CI still need them).
 
 ## Evidence
 
@@ -94,5 +94,6 @@ GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
 - **DONE:** T2 CI extension body (`extensions/ci/` + GitHub Actions /
   GitLab CI backends) and flipping `github.com` CI to Dyn.
 - **Remaining before deleting `envd/src/github.rs`:** Dyn forge checkout/push
-  (ADR D2.4); list-URL / `GithubResolver` parity. In-core `GithubCiAdapter` /
-  `GithubForgeAdapter` / `github.rs` / `github_url.rs` stay until those land.
+  (ADR D2.4). List-URL / search-leaf parity is DONE. In-core
+  `GithubCiAdapter` / `GithubForgeAdapter` / `github.rs` / `github_url.rs`
+  stay until checkout/push land.

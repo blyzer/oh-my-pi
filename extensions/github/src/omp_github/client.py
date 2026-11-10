@@ -18,6 +18,7 @@ import os
 import urllib.error
 import urllib.request
 from typing import Any, Mapping
+from urllib.parse import urlencode
 
 from .errors import ForgeUnavailable
 from .mapping import (
@@ -26,8 +27,10 @@ from .mapping import (
     map_issue,
     map_pull_request,
     map_repository,
+    map_search_page,
     pull_request_create_body,
     repo_slug,
+    split_list_filters,
 )
 
 GITHUB_COM = "github.com"
@@ -179,3 +182,97 @@ def create_issue(draft: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ForgeUnavailable(op, "GitHub issue create payload was not an object")
     return map_issue(payload, repo)
+
+
+def _query_repo(query: Mapping[str, Any], *, op: str) -> dict[str, Any]:
+    repo = query.get("repo")
+    if not isinstance(repo, dict):
+        raise ForgeUnavailable(op, "query.repo must be an object")
+    return repo
+
+
+def _clamp_limit(raw: Any) -> int:
+    try:
+        limit = int(raw or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return 30
+    return min(limit, 100)
+
+
+def _list_state_param(state: str) -> str:
+    """Neutral list state → GitHub issues/pulls ``state`` query value."""
+    raw = (state or "open").lower()
+    if raw == "merged":
+        return "closed"
+    if raw in {"open", "closed", "all"}:
+        return raw
+    return "open"
+
+
+def search(query: Mapping[str, Any]) -> dict[str, Any]:
+    """Search or list issues / change requests → ``SearchPage``.
+
+    Neutral list-URL filters (``state:`` / ``author:`` / ``label:``) with no
+    free-text remainder use the repo list REST endpoints (same shape the
+    historical ``github_url`` resolver expected). Free-text uses Search API.
+    Other ``SearchKind`` values stay Unavailable (leaves unmounted).
+    """
+    kind = str(query.get("kind") or "").strip().lower()
+    if kind in {"change_requests", "search_change_requests"}:
+        op = "search_change_requests"
+        page_kind = "change_requests"
+        family = "pulls"
+    elif kind in {"issues", "search_issues"}:
+        op = "search_issues"
+        page_kind = "issues"
+        family = "issues"
+    else:
+        raise ForgeUnavailable(
+            "search_issues",
+            f"GitHub dyn search does not mount kind={kind!r}",
+        )
+
+    repo = _query_repo(query, op=op)
+    filters, freeform = split_list_filters(str(query.get("text") or ""))
+    limit = _clamp_limit(query.get("limit"))
+
+    if freeform:
+        # Search API — keep list filters as GitHub qualifiers.
+        host = _host_from_repo(repo)
+        slug = f"{repo.get('owner')}/{repo.get('name')}"
+        parts = [freeform, f"repo:{slug}"]
+        if page_kind == "issues":
+            parts.append("is:issue")
+        else:
+            parts.append("is:pr")
+        state = filters.get("state", "")
+        if state and state != "all":
+            parts.append(f"is:{state}")
+        if author := filters.get("author"):
+            parts.append(f"author:{author}")
+        if label := filters.get("label"):
+            parts.append(f"label:{label}")
+        q = " ".join(parts)
+        url = f"{_api_root(host)}/search/issues?{urlencode({'q': q, 'per_page': str(limit)})}"
+        payload = _get_json(url, op=op)
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise ForgeUnavailable(op, "GitHub search payload missing items[]")
+        return map_search_page(page_kind, items, repo)
+
+    # Scoped list (empty free-text) — repo issues/pulls endpoints.
+    params: dict[str, str] = {
+        "state": _list_state_param(filters.get("state", "open")),
+        "per_page": str(limit),
+    }
+    if author := filters.get("author"):
+        params["creator"] = author
+    if label := filters.get("label"):
+        params["labels"] = label
+    url = f"{_repo_url(repo, family)}?{urlencode(params)}"
+    payload = _get_json(url, op=op)
+    if not isinstance(payload, list):
+        raise ForgeUnavailable(op, f"GitHub {family} list payload was not a list")
+    return map_search_page(page_kind, payload, repo)

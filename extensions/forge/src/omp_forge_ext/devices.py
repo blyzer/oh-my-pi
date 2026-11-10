@@ -92,6 +92,27 @@ async def issue_create(args: dict[str, Any]) -> dict[str, Any]:
     return _client(args, op="issue_create").create_issue(draft)
 
 
+async def search_change_requests(args: dict[str, Any]) -> dict[str, Any]:
+    query = args.get("query")
+    if not isinstance(query, dict):
+        raise ForgeUnavailable("search_change_requests", "args.query must be an object")
+    # Ensure kind matches the leaf when callers omit it.
+    payload = dict(query)
+    payload.setdefault("kind", "change_requests")
+    host = dispatch.host_from_search_args(args, op="search_change_requests")
+    return dispatch.client_for(host).search(payload)
+
+
+async def search_issues(args: dict[str, Any]) -> dict[str, Any]:
+    query = args.get("query")
+    if not isinstance(query, dict):
+        raise ForgeUnavailable("search_issues", "args.query must be an object")
+    payload = dict(query)
+    payload.setdefault("kind", "issues")
+    host = dispatch.host_from_search_args(args, op="search_issues")
+    return dispatch.client_for(host).search(payload)
+
+
 _LEAVES: tuple[MountSpec, ...] = (
     MountSpec(
         subpath="repo_view",
@@ -135,14 +156,26 @@ _LEAVES: tuple[MountSpec, ...] = (
         schema=_ARGS_SCHEMA,
         summary="Create an issue from IssueDraft",
     ),
+    MountSpec(
+        subpath="search_change_requests",
+        body=search_change_requests,
+        schema=_ARGS_SCHEMA,
+        summary="Search or list change requests (SearchQuery → SearchPage)",
+    ),
+    MountSpec(
+        subpath="search_issues",
+        body=search_issues,
+        schema=_ARGS_SCHEMA,
+        summary="Search or list issues (SearchQuery → SearchPage)",
+    ),
 )
 
 
 @omp.hook("extension_activate")
 async def mount_forge_leaves(_event: object) -> None:
-    """Mount the read + create surface into the host dynamic device catalog."""
+    """Mount the read + create + search surface into the host dynamic device catalog."""
     await FORGE_PARENT.mount_many(*_LEAVES)
 
 
-# Search / checkout / push stay unmounted (ADR D2.4). DynForgeAdapter calls that
-# reach a missing leaf become ForgeError::Unavailable via the live client.
+# search_code / search_commits / search_repos stay unmounted (Unavailable).
+# Checkout / push stay unmounted (ADR D2.4).
