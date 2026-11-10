@@ -17,6 +17,7 @@ pub mod child_env;
 mod child_tree;
 /// Codex `app-server` adapter for the delegated-executor contract (ADR 0043).
 pub mod codex_app_server;
+#[cfg(feature = "cap-computer")]
 mod computer;
 pub mod daemon_policy;
 mod devices_host;

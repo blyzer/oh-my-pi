@@ -12,6 +12,10 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+# Construction-table gate. The computer contract module stays compiled either way.
+cap-computer = []
+
 [dependencies]
 anydoc.workspace = true
 async-stream.workspace = true

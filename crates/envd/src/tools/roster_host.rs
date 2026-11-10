@@ -37,11 +37,12 @@ use super::{
 		production_search_policy, shell_timeout_bounds, state_error,
 	},
 };
+#[cfg(feature = "cap-computer")]
+use crate::computer::ComputerSessionHost;
 use crate::{
 	EnvdError,
 	blobs::BlobHost,
 	browser_daemon::{BrowserDaemon, BrowserSettings},
-	computer::ComputerSessionHost,
 	docs::{DocumentHost, ResourceMutationServices},
 	document_cache,
 	eval::{PreludeTable, ProcessEvalExec, SessionBridgeHost},
@@ -689,6 +690,7 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 		self.register(omp_tools::browser::tool(daemon), row)
 	}
 
+	#[cfg(feature = "cap-computer")]
 	fn install_computer(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error> {
 		let computer = ComputerSessionHost::new(self.blobs.clone(), self.con);
 		self.register(omp_tools::computer::tool(computer), row)

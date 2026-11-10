@@ -22,10 +22,11 @@ path = "src/claude_trace.rs"
 required-features = ["claude-trace"]
 
 [features]
-default = ["local", "cap-ssh"]
+default = ["local", "cap-ssh", "cap-computer"]
 claude-trace = []
 local = ["omp-driver/local", "omp-ai/local"]
 cap-ssh = ["omp-envd/cap-ssh"]
+cap-computer = ["omp-envd/cap-computer"]
 gui = ["dep:omp-gui"]
 local-all = [
 	"local-applefm",

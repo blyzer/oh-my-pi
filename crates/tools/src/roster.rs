@@ -2,7 +2,9 @@
 //!
 //! Driver selects a [`SelectedRoster`] in `compose_kernel`. The environment
 //! host iterates that selection and fills the host traits below. This module
-//! enumerates every built-in family; the host enumerates none.
+//! enumerates every built-in family; the host enumerates none. Capability
+//! rows such as `computer` are rows of this table only while their `cap-*`
+//! feature is on. The `Family` variant and the contract module stay either way.
 //!
 //! Constructors are the exhaustive `Family` matches in this file, not function
 //! pointers on the row. Several host traits return `impl Future` and are not
@@ -528,6 +530,7 @@ pub static ROSTER: &[BuiltinRosterEntry] = &[
 		true,
 		BridgeNeeds::BROWSER.or(BridgeNeeds::BLOBS),
 	),
+	#[cfg(feature = "cap-computer")]
 	same(
 		Family::Computer,
 		false,
@@ -1106,6 +1109,10 @@ pub trait EnvironmentInstall: ToolGate {
 	/// Registers `browser` when the daemon is enabled.
 	fn install_browser(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error>;
 	/// Registers `computer`.
+	///
+	/// Absent when `cap-computer` is off. The host does not compile the
+	/// desktop session in that build.
+	#[cfg(feature = "cap-computer")]
 	fn install_computer(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error>;
 	/// Registers `security_scan`.
 	fn install_security_scan(&mut self, row: &BuiltinRosterEntry) -> Result<(), Self::Error>;
@@ -1317,10 +1324,15 @@ fn declare_row<H: EnvironmentDeclare>(host: &mut H, row: &BuiltinRosterEntry) {
 				host.declare(spec, row);
 			}
 		},
+		#[cfg(feature = "cap-computer")]
 		Family::Computer => {
 			let spec = crate::computer::spec();
 			host.declare(spec, row);
 		},
+		// The variant stays so chat cards keep a stable `Family`. The row is
+		// not in `ROSTER` in this build, so declaration never reaches here.
+		#[cfg(not(feature = "cap-computer"))]
+		Family::Computer => {},
 		Family::SecurityScan => {
 			let spec = crate::security_scan::spec();
 			host.declare(spec, row);
@@ -1480,7 +1492,10 @@ fn construct_row<H: EnvironmentInstall>(
 			}
 			Ok(())
 		},
+		#[cfg(feature = "cap-computer")]
 		Family::Computer => host.install_computer(row),
+		#[cfg(not(feature = "cap-computer"))]
+		Family::Computer => Ok(()),
 		Family::SecurityScan => host.install_security_scan(row),
 		Family::Retain => {
 			if host.memory_capabilities().writable {
@@ -1565,14 +1580,25 @@ mod tests {
 
 	use super::*;
 
+	fn family_in_construction_table(family: Family) -> bool {
+		match family {
+			#[cfg(not(feature = "cap-computer"))]
+			Family::Computer => false,
+			_ => true,
+		}
+	}
+
 	#[test]
 	fn production_rows_are_unique_and_cover_every_family() {
 		let names = ROSTER.iter().map(|row| row.name).collect::<BTreeSet<_>>();
 		assert_eq!(names.len(), ROSTER.len());
 		let families = ROSTER.iter().map(|row| row.family).collect::<BTreeSet<_>>();
 		assert_eq!(families.len(), ROSTER.len());
-		assert_eq!(families.len(), Family::iter().count());
-		for family in Family::iter() {
+		let compiled = Family::iter()
+			.filter(|family| family_in_construction_table(*family))
+			.count();
+		assert_eq!(families.len(), compiled);
+		for family in Family::iter().filter(|family| family_in_construction_table(*family)) {
 			let row = entry(family).expect("row");
 			assert_eq!(row.name, family.into_str());
 			assert_eq!(row.phase, phase_of(family));
@@ -1581,6 +1607,10 @@ mod tests {
 				assert_eq!(key, row.name);
 			}
 		}
+		#[cfg(feature = "cap-computer")]
+		assert!(entry(Family::Computer).is_some(), "computer row is in the construction table");
+		#[cfg(not(feature = "cap-computer"))]
+		assert!(entry(Family::Computer).is_none(), "computer row is compiled out");
 	}
 
 	#[test]
@@ -1635,6 +1665,7 @@ mod tests {
 			"browser",
 			"learn",
 			"manage_skill",
+			#[cfg(feature = "cap-computer")]
 			"computer",
 			"lsp",
 			"debug",
@@ -1648,6 +1679,8 @@ mod tests {
 		for name in ["think", "goal", "yield", "py_eval"] {
 			assert!(!protect.contains(name), "{name} stays unprotected");
 		}
+		#[cfg(not(feature = "cap-computer"))]
+		assert!(!protect.contains("computer"), "computer is compiled out of the construction table");
 		let phases = ROSTER.iter().map(|row| row.phase).collect::<BTreeSet<_>>();
 		assert!(phases.contains(&InstallPhase::Session));
 		assert!(phases.contains(&InstallPhase::Composer));

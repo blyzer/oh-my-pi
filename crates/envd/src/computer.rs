@@ -1,4 +1,8 @@
 //! Admission-routed native desktop session host.
+//!
+//! Compiled only with `omp-envd`'s `cap-computer` feature, which links
+//! `omp-desktop`. Chat cards use `omp_tools::computer` and do not need this
+//! module.
 
 use std::{
 	sync::{

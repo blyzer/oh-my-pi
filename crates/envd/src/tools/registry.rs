@@ -3162,6 +3162,7 @@ mod tests {
 		for expected in [
 			"bash",
 			"browser",
+			#[cfg(feature = "cap-computer")]
 			"computer",
 			"eval",
 			"py_eval",
@@ -3175,6 +3176,11 @@ mod tests {
 		] {
 			assert!(names.contains(expected), "{expected} must be covered");
 		}
+		#[cfg(not(feature = "cap-computer"))]
+		assert!(
+			!names.contains("computer"),
+			"computer is absent from the construction table when cap-computer is off"
+		);
 		let sandboxed = specs
 			.iter()
 			.filter(|spec| spec.confinement.sandboxed())
