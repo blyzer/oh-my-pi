@@ -9,6 +9,11 @@
 //! the repository. The types name the request and the receipt; this crate does
 //! not touch a worktree. Creating a change request or an issue mutates the
 //! forge record.
+//!
+//! T2 vendor adapters implement this trait through the dyn `forge/*` device
+//! schema (ADR 0049 D2.3). Path and JSON tables live in
+//! `docs/adr/0049-forge-dyn-device-schema.md`; envd's `DynForgeAdapter`
+//! dispatches each method to `forge/<ForgeOp snake_case>`.
 
 use std::{future::Future, sync::Arc};
 

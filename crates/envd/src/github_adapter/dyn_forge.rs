@@ -1,0 +1,763 @@
+//! Dyn `forge/*` device bridge (ADR 0049 D2.3).
+//!
+//! T2 extensions implement [`omp_forge::ForgeHost`] by mounting dyn devices at
+//! `forge/<op>` (snake_case [`omp_forge::ForgeOp`]) and answering
+//! `omp.devices.call`. This module is the in-core half: a [`DynForgeAdapter`]
+//! that dispatches each [`ForgeHost`] method to those paths, plus a
+//! [`ForgeBackend`] enum so the production [`super::forge_router`] can hold
+//! GitHub and dyn hosts without boxing [`ForgeHost`] futures.
+//!
+//! Schema source of truth: `docs/adr/0049-forge-dyn-device-schema.md`.
+
+use std::{future::Future, sync::Arc};
+
+use omp_core::Str;
+use omp_forge::{
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+	FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
+	PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage, SearchQuery,
+};
+use omp_forge_delegated::{DelegatedBuilder, PermitAll, RegisterError};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+use strum::IntoStaticStr as _;
+
+use super::GithubForgeAdapter;
+
+/// Device paths under `forge/*`.
+///
+/// Primary paths match [`ForgeOp`] snake_case. Two [`ForgeHost`] methods share
+/// an op for approval but have distinct device paths so an extension can
+/// implement them separately.
+pub mod paths {
+	/// [`ForgeOp::RepoView`] → [`ForgeHost::view_repo`].
+	pub const REPO_VIEW: &str = "forge/repo_view";
+	/// [`ForgeOp::FileRead`] → [`ForgeHost::read_file`].
+	pub const FILE_READ: &str = "forge/file_read";
+	/// [`ForgeOp::ChangeRequestView`] → [`ForgeHost::view_change_request`].
+	pub const CHANGE_REQUEST_VIEW: &str = "forge/change_request_view";
+	/// Same mutation class as [`ForgeOp::ChangeRequestView`] →
+	/// [`ForgeHost::change_request_diff`].
+	pub const CHANGE_REQUEST_DIFF: &str = "forge/change_request_diff";
+	/// [`ForgeOp::IssueView`] → [`ForgeHost::view_issue`].
+	pub const ISSUE_VIEW: &str = "forge/issue_view";
+	/// Shares [`ForgeOp::ChangeRequestView`] or [`ForgeOp::IssueView`] with
+	/// `kind` in the args → [`ForgeHost::list_comments`].
+	pub const LIST_COMMENTS: &str = "forge/list_comments";
+	/// [`ForgeOp::ListChecks`] → [`ForgeHost::list_checks`].
+	pub const LIST_CHECKS: &str = "forge/list_checks";
+	/// [`ForgeOp::SearchChangeRequests`] (sibling search ops use
+	/// [`super::forge_device_path`]).
+	pub const SEARCH_CHANGE_REQUESTS: &str = "forge/search_change_requests";
+	/// [`ForgeOp::SearchIssues`].
+	pub const SEARCH_ISSUES: &str = "forge/search_issues";
+	/// [`ForgeOp::SearchCode`].
+	pub const SEARCH_CODE: &str = "forge/search_code";
+	/// [`ForgeOp::SearchCommits`].
+	pub const SEARCH_COMMITS: &str = "forge/search_commits";
+	/// [`ForgeOp::SearchRepos`].
+	pub const SEARCH_REPOS: &str = "forge/search_repos";
+	/// [`ForgeOp::ChangeRequestCreate`].
+	pub const CHANGE_REQUEST_CREATE: &str = "forge/change_request_create";
+	/// [`ForgeOp::ChangeRequestCheckout`].
+	pub const CHANGE_REQUEST_CHECKOUT: &str = "forge/change_request_checkout";
+	/// [`ForgeOp::ChangeRequestPush`].
+	pub const CHANGE_REQUEST_PUSH: &str = "forge/change_request_push";
+	/// [`ForgeOp::IssueCreate`].
+	pub const ISSUE_CREATE: &str = "forge/issue_create";
+}
+
+/// `forge/<ForgeOp snake_case>` for one operation.
+#[inline]
+#[must_use]
+pub fn forge_device_path(op: ForgeOp) -> Str {
+	omp_core::sf!("forge/{}", op.into_str())
+}
+
+/// Invokes one mounted `forge/<op>` dyn device.
+///
+/// Production will call through device catalog / `omp.devices.call`. Tests
+/// inject a fake. The trait returns an unboxed future; [`DynForgeAdapter`]
+/// stays generic over the client so [`ForgeHost`] futures stay unboxed.
+pub trait ForgeDeviceClient: Clone + Send + Sync + 'static {
+	/// Calls the device at `path` with JSON `args`.
+	///
+	/// Success payloads are the serde form of the matching `omp_forge` result
+	/// type. Failures are typed [`ForgeError`] values from the client.
+	fn call(
+		&self,
+		path: &str,
+		args: Value,
+	) -> impl Future<Output = Result<Value, ForgeError>> + Send;
+}
+
+/// Placeholder client for the production [`ForgeBackend`] type parameter.
+///
+/// The production router registers only [`ForgeBackend::Github`] today. Dyn
+/// hosts are registered through [`register_dyn_forge_host`] with a real
+/// client (tests) or, later, a live device invoker. Constructing
+/// [`DynForgeAdapter`] with this placeholder and calling it yields
+/// [`ForgeError::Unavailable`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableForgeClient;
+
+impl ForgeDeviceClient for UnavailableForgeClient {
+	fn call(
+		&self,
+		_path: &str,
+		_args: Value,
+	) -> impl Future<Output = Result<Value, ForgeError>> + Send {
+		std::future::ready(Err(ForgeError::Unavailable { op: ForgeOp::RepoView }))
+	}
+}
+
+/// [`ForgeHost`] that dispatches each method to a `forge/<op>` dyn device.
+#[derive(Clone)]
+pub struct DynForgeAdapter<C> {
+	client: C,
+}
+
+impl<C> DynForgeAdapter<C> {
+	/// Builds an adapter over `client`.
+	#[must_use]
+	pub const fn new(client: C) -> Self {
+		Self { client }
+	}
+}
+
+impl<C: ForgeDeviceClient> DynForgeAdapter<C> {
+	async fn invoke_decode<T: DeserializeOwned>(
+		&self,
+		op: ForgeOp,
+		path: &str,
+		args: Value,
+	) -> Result<T, ForgeError> {
+		let value = self.client.call(path, args).await?;
+		serde_json::from_value(value).map_err(|_| ForgeError::Unavailable { op })
+	}
+}
+
+impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
+	fn view_repo(
+		&self,
+		repo: &RepoRef,
+	) -> impl Future<Output = Result<Repository, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::RepoView,
+					paths::REPO_VIEW,
+					json!({ "repo": repo }),
+				)
+				.await
+		}
+	}
+
+	fn read_file(
+		&self,
+		query: &FileQuery,
+	) -> impl Future<Output = Result<FileBody, ForgeError>> + Send {
+		let this = self.clone();
+		let query = query.clone();
+		async move {
+			this
+				.invoke_decode(ForgeOp::FileRead, paths::FILE_READ, json!({ "query": query }))
+				.await
+		}
+	}
+
+	fn view_change_request(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ChangeRequestView,
+					paths::CHANGE_REQUEST_VIEW,
+					json!({ "repo": repo, "number": number }),
+				)
+				.await
+		}
+	}
+
+	fn view_issue(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::IssueView,
+					paths::ISSUE_VIEW,
+					json!({ "repo": repo, "number": number }),
+				)
+				.await
+		}
+	}
+
+	fn change_request_diff(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ChangeRequestView,
+					paths::CHANGE_REQUEST_DIFF,
+					json!({ "repo": repo, "number": number }),
+				)
+				.await
+		}
+	}
+
+	fn list_comments(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		async move {
+			let op = match kind {
+				ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+				ResourceKind::Issue => ForgeOp::IssueView,
+			};
+			let comments: Vec<Comment> = this
+				.invoke_decode(
+					op,
+					paths::LIST_COMMENTS,
+					json!({ "repo": repo, "number": number, "kind": kind }),
+				)
+				.await?;
+			Ok(comments.into())
+		}
+	}
+
+	fn list_checks(
+		&self,
+		repo: &RepoRef,
+		target: &CheckTarget,
+	) -> impl Future<Output = Result<ForgeChecks, ForgeError>> + Send {
+		let this = self.clone();
+		let repo = repo.clone();
+		let target = target.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ListChecks,
+					paths::LIST_CHECKS,
+					json!({ "repo": repo, "target": target }),
+				)
+				.await
+		}
+	}
+
+	fn search(
+		&self,
+		query: SearchQuery,
+	) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
+		let this = self.clone();
+		async move {
+			let op = query.kind.op();
+			let path = forge_device_path(op);
+			this.invoke_decode(op, path.as_str(), json!({ "query": query })).await
+		}
+	}
+
+	fn create_change_request(
+		&self,
+		draft: ChangeRequestDraft,
+	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+		let this = self.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ChangeRequestCreate,
+					paths::CHANGE_REQUEST_CREATE,
+					json!({ "draft": draft }),
+				)
+				.await
+		}
+	}
+
+	fn checkout_change_request(
+		&self,
+		request: &CheckoutRequest,
+	) -> impl Future<Output = Result<CheckoutReceipt, ForgeError>> + Send {
+		let this = self.clone();
+		let request = request.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ChangeRequestCheckout,
+					paths::CHANGE_REQUEST_CHECKOUT,
+					json!({ "request": request }),
+				)
+				.await
+		}
+	}
+
+	fn push_change_request(
+		&self,
+		request: &PushRequest,
+	) -> impl Future<Output = Result<PushReceipt, ForgeError>> + Send {
+		let this = self.clone();
+		let request = request.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::ChangeRequestPush,
+					paths::CHANGE_REQUEST_PUSH,
+					json!({ "request": request }),
+				)
+				.await
+		}
+	}
+
+	fn create_issue(
+		&self,
+		draft: IssueDraft,
+	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+		let this = self.clone();
+		async move {
+			this
+				.invoke_decode(
+					ForgeOp::IssueCreate,
+					paths::ISSUE_CREATE,
+					json!({ "draft": draft }),
+				)
+				.await
+		}
+	}
+}
+
+/// Concrete [`ForgeHost`] held by the production forge router.
+///
+/// Enums before `dyn`: GitHub stays a native arm; T2 extensions ride
+/// [`DynForgeAdapter`]. Both arms forward with `match`, so [`ForgeHost`]
+/// futures stay unboxed.
+#[derive(Clone)]
+pub enum ForgeBackend<C = UnavailableForgeClient> {
+	/// In-tree GitHub HTTP/git adapter.
+	Github(GithubForgeAdapter),
+	/// Dyn-device-backed host (`forge/*` over toolhost).
+	Dyn(DynForgeAdapter<C>),
+}
+
+impl<C: ForgeDeviceClient> ForgeHost for ForgeBackend<C> {
+	fn view_repo(
+		&self,
+		repo: &RepoRef,
+	) -> impl Future<Output = Result<Repository, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.view_repo(repo).await,
+				Self::Dyn(host) => host.view_repo(repo).await,
+			}
+		}
+	}
+
+	fn read_file(
+		&self,
+		query: &FileQuery,
+	) -> impl Future<Output = Result<FileBody, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.read_file(query).await,
+				Self::Dyn(host) => host.read_file(query).await,
+			}
+		}
+	}
+
+	fn view_change_request(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.view_change_request(repo, number).await,
+				Self::Dyn(host) => host.view_change_request(repo, number).await,
+			}
+		}
+	}
+
+	fn view_issue(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.view_issue(repo, number).await,
+				Self::Dyn(host) => host.view_issue(repo, number).await,
+			}
+		}
+	}
+
+	fn change_request_diff(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.change_request_diff(repo, number).await,
+				Self::Dyn(host) => host.change_request_diff(repo, number).await,
+			}
+		}
+	}
+
+	fn list_comments(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.list_comments(repo, number, kind).await,
+				Self::Dyn(host) => host.list_comments(repo, number, kind).await,
+			}
+		}
+	}
+
+	fn list_checks(
+		&self,
+		repo: &RepoRef,
+		target: &CheckTarget,
+	) -> impl Future<Output = Result<ForgeChecks, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.list_checks(repo, target).await,
+				Self::Dyn(host) => host.list_checks(repo, target).await,
+			}
+		}
+	}
+
+	fn search(
+		&self,
+		query: SearchQuery,
+	) -> impl Future<Output = Result<SearchPage, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.search(query).await,
+				Self::Dyn(host) => host.search(query).await,
+			}
+		}
+	}
+
+	fn create_change_request(
+		&self,
+		draft: ChangeRequestDraft,
+	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.create_change_request(draft).await,
+				Self::Dyn(host) => host.create_change_request(draft).await,
+			}
+		}
+	}
+
+	fn checkout_change_request(
+		&self,
+		request: &CheckoutRequest,
+	) -> impl Future<Output = Result<CheckoutReceipt, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.checkout_change_request(request).await,
+				Self::Dyn(host) => host.checkout_change_request(request).await,
+			}
+		}
+	}
+
+	fn push_change_request(
+		&self,
+		request: &PushRequest,
+	) -> impl Future<Output = Result<PushReceipt, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.push_change_request(request).await,
+				Self::Dyn(host) => host.push_change_request(request).await,
+			}
+		}
+	}
+
+	fn create_issue(
+		&self,
+		draft: IssueDraft,
+	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
+		async move {
+			match self {
+				Self::Github(host) => host.create_issue(draft).await,
+				Self::Dyn(host) => host.create_issue(draft).await,
+			}
+		}
+	}
+}
+
+/// Registers a dyn-backed forge host on a [`DelegatedBuilder`].
+///
+/// This is the seam T2 extensions (and tests) use to place a host such as
+/// `gitlab.com` beside `github.com`. Automatic discovery from the extension
+/// device catalog / host claims is not wired yet; call this from composition
+/// once a client and host name are known.
+///
+/// # Errors
+///
+/// Returns [`RegisterError`] when `host` is invalid or already registered.
+pub fn register_dyn_forge_host<C: ForgeDeviceClient>(
+	builder: &mut DelegatedBuilder<ForgeBackend<C>, PermitAll>,
+	host: &str,
+	client: C,
+) -> Result<(), RegisterError> {
+	builder.register(host, ForgeBackend::Dyn(DynForgeAdapter::new(client)))
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		future::Future,
+		sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		},
+	};
+
+	use omp_core::Str;
+	use omp_forge::{
+		ChangeRequest, ForgeError, ForgeHost as _, ForgeOp, Issue, IssueState, RepoRef,
+		RequestState,
+	};
+	use omp_forge_delegated::{Delegated, PermitAll};
+	use parking_lot::Mutex;
+	use serde_json::Value;
+
+	use super::{
+		DynForgeAdapter, ForgeBackend, ForgeDeviceClient, forge_device_path, paths,
+		register_dyn_forge_host,
+	};
+	use crate::{
+		blobs::BlobHost, github::GithubService, github_adapter::GithubForgeAdapter,
+		github_url::GithubCredentialBridge, tool_settings::ForgeCacheSettings,
+	};
+	use omp_cache::forge_cache::ForgeCache;
+	use omp_con::Ctx;
+
+	#[derive(Clone)]
+	struct FakeClient {
+		calls: Arc<Mutex<Vec<(String, Value)>>>,
+		cr:    ChangeRequest,
+		issue: Issue,
+	}
+
+	impl ForgeDeviceClient for FakeClient {
+		fn call(
+			&self,
+			path: &str,
+			args: Value,
+		) -> impl Future<Output = Result<Value, ForgeError>> + Send {
+			self.calls.lock().push((path.to_string(), args));
+			let result = match path {
+				paths::CHANGE_REQUEST_VIEW => Ok(serde_json::to_value(&self.cr).expect("cr")),
+				paths::ISSUE_VIEW => Ok(serde_json::to_value(&self.issue).expect("issue")),
+				other => {
+					let op = other
+						.strip_prefix("forge/")
+						.and_then(|name| name.parse().ok())
+						.unwrap_or(ForgeOp::RepoView);
+					Err(ForgeError::Unsupported { op })
+				},
+			};
+			std::future::ready(result)
+		}
+	}
+
+	fn sample_repo(host: &str) -> RepoRef {
+		RepoRef::try_new(host, "acme", "widget").unwrap()
+	}
+
+	fn sample_cr(host: &str) -> ChangeRequest {
+		ChangeRequest {
+			repo: sample_repo(host),
+			number: 7,
+			title: Str::new_static("Fix the widget"),
+			body: Str::new_static("details"),
+			state: RequestState::Open,
+			draft: false,
+			base_ref: Str::new_static("main"),
+			head_ref: Str::new_static("topic"),
+			head_commit: Str::new_static("bbb"),
+			base_commit: Str::new_static("aaa"),
+			web_url: Str::new_static("https://gitlab.example/acme/widget/-/merge_requests/7"),
+		}
+	}
+
+	fn sample_issue(host: &str) -> Issue {
+		Issue {
+			repo: sample_repo(host),
+			number: 3,
+			title: Str::new_static("Bug"),
+			body: Str::new_static("steps"),
+			state: IssueState::Open,
+			web_url: Str::new_static("https://gitlab.example/acme/widget/-/issues/3"),
+		}
+	}
+
+	fn github_service(root: &std::path::Path) -> Arc<GithubService> {
+		let blobs = BlobHost::open(root.join("blobs")).expect("blobs");
+		let cache = Arc::new(
+			ForgeCache::open(
+				root.join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
+			)
+			.expect("cache"),
+		);
+		GithubService::new(
+			root.to_path_buf(),
+			root,
+			Arc::new(GithubCredentialBridge::new()),
+			cache,
+			blobs,
+		)
+	}
+
+	#[test]
+	fn forge_device_paths_match_op_snake_case() {
+		assert_eq!(forge_device_path(ForgeOp::RepoView).as_str(), paths::REPO_VIEW);
+		assert_eq!(
+			forge_device_path(ForgeOp::ChangeRequestView).as_str(),
+			paths::CHANGE_REQUEST_VIEW
+		);
+		assert_eq!(forge_device_path(ForgeOp::IssueView).as_str(), paths::ISSUE_VIEW);
+		assert_eq!(
+			forge_device_path(ForgeOp::SearchChangeRequests).as_str(),
+			paths::SEARCH_CHANGE_REQUESTS
+		);
+	}
+
+	#[tokio::test]
+	async fn delegated_routes_dyn_host_to_device_client() {
+		let host = "gitlab.example";
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let fake = FakeClient {
+			calls: Arc::clone(&calls),
+			cr: sample_cr(host),
+			issue: sample_issue(host),
+		};
+		let dir = tempfile::tempdir().expect("temp");
+		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
+		builder
+			.register("github.com", ForgeBackend::Github(github))
+			.expect("github");
+		register_dyn_forge_host(&mut builder, host, fake).expect("gitlab");
+		let router = builder.build();
+
+		let repo = sample_repo(host);
+		let cr = router
+			.view_change_request(&repo, 7)
+			.await
+			.expect("change request");
+		assert_eq!(cr.number, 7);
+		assert_eq!(cr.title.as_str(), "Fix the widget");
+		assert_eq!(cr.state, RequestState::Open);
+
+		let issue = router.view_issue(&repo, 3).await.expect("issue");
+		assert_eq!(issue.number, 3);
+		assert_eq!(issue.title.as_str(), "Bug");
+		assert_eq!(issue.state, IssueState::Open);
+
+		let recorded = calls.lock().clone();
+		assert_eq!(recorded.len(), 2);
+		assert_eq!(recorded[0].0, paths::CHANGE_REQUEST_VIEW);
+		assert_eq!(recorded[0].1["number"], 7);
+		assert_eq!(recorded[1].0, paths::ISSUE_VIEW);
+		assert_eq!(recorded[1].1["number"], 3);
+	}
+
+	#[tokio::test]
+	async fn unregistered_dyn_host_stays_unregistered() {
+		let dir = tempfile::tempdir().expect("temp");
+		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let mut builder = Delegated::<ForgeBackend<FakeClient>, _>::builder(PermitAll);
+		builder
+			.register("github.com", ForgeBackend::Github(github))
+			.expect("github");
+		let router = builder.build();
+		let repo = sample_repo("gitlab.example");
+		let error = router.view_issue(&repo, 1).await.expect_err("unregistered");
+		assert!(
+			matches!(
+				error,
+				ForgeError::Unregistered { ref host, op: ForgeOp::IssueView }
+					if host == "gitlab.example"
+			),
+			"{error}"
+		);
+	}
+
+	#[tokio::test]
+	async fn dyn_adapter_alone_decodes_change_request() {
+		let host = "gitlab.example";
+		let fake = FakeClient {
+			calls: Arc::new(Mutex::new(Vec::new())),
+			cr: sample_cr(host),
+			issue: sample_issue(host),
+		};
+		let adapter = DynForgeAdapter::new(fake);
+		let cr = adapter
+			.view_change_request(&sample_repo(host), 7)
+			.await
+			.expect("cr");
+		assert_eq!(cr.web_url.as_str(), "https://gitlab.example/acme/widget/-/merge_requests/7");
+	}
+
+	#[tokio::test]
+	async fn github_arm_still_selected_for_github_com() {
+		// Proves the enum routes by host: github.com stays the Github arm.
+		// The call fails without a live API; Unregistered must not appear.
+		let hits = Arc::new(AtomicUsize::new(0));
+		#[derive(Clone)]
+		struct Counting(Arc<AtomicUsize>);
+		impl ForgeDeviceClient for Counting {
+			fn call(
+				&self,
+				_path: &str,
+				_args: Value,
+			) -> impl Future<Output = Result<Value, ForgeError>> + Send {
+				self.0.fetch_add(1, Ordering::SeqCst);
+				std::future::ready(Err(ForgeError::Unavailable { op: ForgeOp::IssueView }))
+			}
+		}
+		let dir = tempfile::tempdir().expect("temp");
+		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let mut builder = Delegated::<ForgeBackend<Counting>, _>::builder(PermitAll);
+		builder
+			.register("github.com", ForgeBackend::Github(github))
+			.expect("github");
+		register_dyn_forge_host(&mut builder, "gitlab.example", Counting(Arc::clone(&hits)))
+			.expect("gitlab");
+		let router = builder.build();
+		let repo = RepoRef::try_new("github.com", "acme", "widget").unwrap();
+		let error = router.view_issue(&repo, 1).await.expect_err("no live github");
+		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for github.com");
+		assert!(
+			!matches!(error, ForgeError::Unregistered { .. }),
+			"github.com must stay registered: {error}"
+		);
+	}
+}

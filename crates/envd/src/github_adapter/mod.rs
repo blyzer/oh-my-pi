@@ -17,6 +17,18 @@
 //!
 //! [`CheckoutForge`] is that same router for one checkout. Chat's git watcher
 //! reads the branch's change request through `view_change_request` on it.
+//!
+//! Under `cap-forge`, the router holds a [`ForgeBackend`] enum so a dyn
+//! `forge/*` device host (T2) can sit beside GitHub without boxing
+//! [`ForgeHost`] futures (ADR 0049 D2.3).
+
+#[cfg(feature = "cap-forge")]
+mod dyn_forge;
+#[cfg(feature = "cap-forge")]
+pub(crate) use dyn_forge::{
+	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, UnavailableForgeClient, forge_device_path,
+	paths as forge_device_paths, register_dyn_forge_host,
+};
 
 use std::{
 	future::Future,
@@ -74,14 +86,21 @@ pub(crate) struct GithubCiAdapter {
 	service: Arc<GithubService>,
 }
 
-/// Routes `forge@1` to [`GithubForgeAdapter`].
+/// Routes `forge@1` through [`ForgeBackend`] (GitHub today; dyn hosts via
+/// [`register_dyn_forge_host`]).
 ///
 /// See the module docs for `PermitAll` and host registration.
+///
+/// # Dyn host registration
+///
+/// Automatic discovery from the extension device catalog / host claims is
+/// not wired yet (TODO, ADR 0049 D2.3). Call [`register_dyn_forge_host`] on
+/// a builder when a T2 extension advertises an ASCII host name.
 #[cfg(feature = "cap-forge")]
 pub(crate) fn forge_router(
 	service: Arc<GithubService>,
-) -> ForgeDelegated<GithubForgeAdapter, ForgePermitAll> {
-	let adapter = GithubForgeAdapter { service: Arc::clone(&service) };
+) -> ForgeDelegated<ForgeBackend, ForgePermitAll> {
+	let adapter = ForgeBackend::Github(GithubForgeAdapter { service: Arc::clone(&service) });
 	let mut builder = ForgeDelegated::builder(ForgePermitAll);
 	builder
 		.register(github_url::GITHUB_HOST, adapter.clone())
@@ -89,6 +108,8 @@ pub(crate) fn forge_router(
 	register_checkout_host(&service, |host| {
 		let _ = builder.register(host, adapter.clone());
 	});
+	// TODO(ADR 0049 D2.3): register dyn hosts from mounted forge/* device
+	// catalog claims once exthost advertises host→device bindings.
 	builder.build()
 }
 
@@ -155,7 +176,7 @@ struct CheckoutForgeInner {
 #[derive(Clone)]
 struct BuiltForge {
 	service: Arc<GithubService>,
-	router:  ForgeDelegated<GithubForgeAdapter, ForgePermitAll>,
+	router:  ForgeDelegated<ForgeBackend, ForgePermitAll>,
 }
 
 #[cfg(feature = "cap-forge")]

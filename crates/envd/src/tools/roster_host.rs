@@ -200,7 +200,7 @@ impl SessionInstall for SessionHost<'_> {
 	type Error = EnvdError;
 	#[cfg(feature = "cap-forge")]
 	type ForgeRouter = omp_forge_delegated::Delegated<
-		crate::github_adapter::GithubForgeAdapter,
+		crate::github_adapter::ForgeBackend,
 		omp_forge_delegated::PermitAll,
 	>;
 	type Goal = GoalControlAdapter;
