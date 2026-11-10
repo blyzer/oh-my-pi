@@ -54,7 +54,7 @@ use crate::{
 	eval::{PreludeTable, ProcessEvalExec, SessionBridgeHost},
 	exec::ExecHost,
 	exec_settings::{SandboxSettings, ShellSettings},
-	github_url::GithubCredentialBridge,
+	forge_url::ForgeCredentialBridge,
 	managed_skills::ManagedSkills,
 	mcp::McpService,
 	memory::ReflectionBridgeHost,
@@ -77,7 +77,7 @@ use crate::{
 
 pub(super) struct SessionOutput {
 	pub search_bridge:      Arc<SearchBridgeHost>,
-	pub github_credentials: Arc<GithubCredentialBridge>,
+	pub github_credentials: Arc<ForgeCredentialBridge>,
 	pub ask_presenter:      omp_tools::ask::PresenterSlot,
 	pub checkpoint_control: AgentCheckpointControl,
 }
@@ -87,7 +87,7 @@ pub(super) struct SessionHost<'a> {
 	policy:             ToolsPolicy,
 	tool_settings:      &'a ToolSettings,
 	search_bridge:      Arc<SearchBridgeHost>,
-	github_credentials: Arc<GithubCredentialBridge>,
+	github_credentials: Arc<ForgeCredentialBridge>,
 	ask_presenter:      omp_tools::ask::PresenterSlot,
 	goal_control:       Option<Arc<dyn GoalAuthority>>,
 	telemetry_upload:   Option<Arc<dyn TelemetryUpload>>,
@@ -134,7 +134,7 @@ impl<'a> SessionHost<'a> {
 		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
 		let search_bridge = Arc::new(SearchBridgeHost::new(search));
-		let github_credentials = Arc::new(GithubCredentialBridge::new());
+		let github_credentials = Arc::new(ForgeCredentialBridge::new());
 		let ask_presenter = omp_tools::ask::PresenterSlot::new(
 			ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 		);
@@ -428,7 +428,7 @@ pub(super) struct EnvironmentHost<'a> {
 	interrupt_grace:     omp_core::Duration,
 	py_eval:             bool,
 	skills:              Option<Arc<ManagedSkills>>,
-	github_credentials:  Arc<GithubCredentialBridge>,
+	github_credentials:  Arc<ForgeCredentialBridge>,
 	forge_cache:         Arc<ForgeCache>,
 	/// Session-bound forge device client (same slot as SessionHost /
 	/// CheckoutForge).
@@ -486,7 +486,7 @@ impl<'a> EnvironmentHost<'a> {
 		interrupt_grace: omp_core::Duration,
 		py_eval: bool,
 		skills: Option<Arc<ManagedSkills>>,
-		github_credentials: Arc<GithubCredentialBridge>,
+		github_credentials: Arc<ForgeCredentialBridge>,
 		forge_cache: Arc<ForgeCache>,
 		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 		url_resolvers: Vec<Arc<dyn ContentResolver>>,

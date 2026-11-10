@@ -8,7 +8,7 @@ use omp_cache::{
 	telemetry_cache,
 	telemetry_cache::{PendingIssue, TelemetryIndex},
 };
-use omp_envd::github_url::GithubCredentialBridge;
+use omp_envd::forge_url::ForgeCredentialBridge;
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "https://qa.omp.sh/v1/grievances";
@@ -41,7 +41,7 @@ pub fn apply_consent(
 }
 
 /// Starts a nonblocking worker when registry assembly runs inside Tokio.
-pub(crate) fn start(store: Arc<TelemetryIndex>, credentials: Arc<GithubCredentialBridge>) {
+pub(crate) fn start(store: Arc<TelemetryIndex>, credentials: Arc<ForgeCredentialBridge>) {
 	use tokio::{runtime, time};
 
 	let Ok(runtime) = runtime::Handle::try_current() else {
@@ -64,7 +64,7 @@ pub(crate) fn start(store: Arc<TelemetryIndex>, credentials: Arc<GithubCredentia
 /// Authenticates and drains every issue selected by explicit manual intent.
 pub async fn manual_push(
 	store: &TelemetryIndex,
-	credentials: &GithubCredentialBridge,
+	credentials: &ForgeCredentialBridge,
 ) -> Result<ManualPushResult, omp_cache::telemetry_cache::QueryError> {
 	let client = omp_http::no_redirect_client();
 	let endpoint = env::var("OMP_AUTO_QA_PUSH_URL").unwrap_or_else(|_| ENDPOINT.to_owned());
@@ -88,7 +88,7 @@ async fn deliver_to(
 	client: &omp_http::Client,
 	endpoint: &str,
 	store: &TelemetryIndex,
-	credentials: &GithubCredentialBridge,
+	credentials: &ForgeCredentialBridge,
 	pending: PendingIssue,
 	now: u64,
 	bypass_consent: bool,

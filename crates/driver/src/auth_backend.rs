@@ -78,7 +78,7 @@ pub fn github_authority(store: Arc<omp_ai::auth::CredentialStore>) -> GithubCred
 	GithubCredentialAuthority::new(Arc::new(combined_authority(store)))
 }
 
-impl omp_envd::github_url::CredentialAuthority for GithubCredentialAuthority {
+impl omp_envd::forge_url::CredentialAuthority for GithubCredentialAuthority {
 	fn provider_lease(
 		&self,
 		need: omp_ai::auth::CredentialNeed,

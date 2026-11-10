@@ -1,19 +1,20 @@
-//! Resolver for `issue://` and `pr://`.
+//! Forge-neutral resolver for `issue://` and `pr://`.
 //!
 //! A numbered resource is parsed with [`omp_forge::parse_resource_url`]. A
-//! bare number uses [`infer_repo`]. A missing host is `github.com`. The body
-//! comes from the forge [`omp_forge::ForgeHost`] (`view_change_request`,
-//! `view_issue`, the unified diff, and the comment list) and is rendered as
-//! `# title`, a blank line, and the body. The cache stores that markdown
-//! with no etag.
+//! bare number uses [`infer_repo`]. A missing host defaults to
+//! [`DEFAULT_FORGE_HOST`] (`github.com`). The body comes from the forge
+//! [`omp_forge::ForgeHost`] (`view_change_request`, `view_issue`, the unified
+//! diff, and the comment list) and is rendered as `# title`, a blank line,
+//! and the body. The cache stores that markdown with no etag.
 //!
 //! List URLs such as `issue://owner/repo?state=open` and `pr://…` also go
 //! through [`ForgeHost::search`] (Dyn for registered hosts). Neutral filter
 //! tokens (`state:` / `author:` / `label:` / `head:`) ride `SearchQuery.text`.
 //! The search path has no HTTP etag, so list bodies are cached without one
-//! (same honesty as numbered reads). The private GitHub REST client in this
-//! module remains for legacy detail/diff fetch paths and credential bridging;
-//! forge/CI tool traffic is Dyn-only after the `github.rs` deletion.
+//! (same honesty as numbered reads). A private GitHub REST client remains for
+//! legacy detail/diff fetch paths and credential bridging on github.com /
+//! GitHub Enterprise hosts; forge/CI tool traffic is Dyn-only after the
+//! `github.rs` deletion.
 
 use std::{
 	collections::BTreeMap,
@@ -67,37 +68,38 @@ use super::tool_url;
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-pub(super) const GITHUB_HOST: &str = "github.com";
+/// Default forge host when a resource omits one (`github.com`).
+pub(super) const DEFAULT_FORGE_HOST: &str = "github.com";
 
 #[derive(Clone, Debug)]
-pub(super) struct GithubRepo {
+pub(super) struct ForgeRepo {
 	host:     Str,
 	slug:     Str,
 	identity: Str,
 }
 
-impl GithubRepo {
+impl ForgeRepo {
 	pub(super) fn parse(value: &str) -> Result<Self, Fault> {
 		let mut parts = value.trim().trim_end_matches(".git").split('/');
 		let first = parts.next().unwrap_or_default();
 		let second = parts.next().unwrap_or_default();
 		let third = parts.next();
 		if parts.next().is_some() {
-			return Err(invalid("GitHub repository must be [host/]owner/repo."));
+			return Err(invalid("Forge repository must be [host/]owner/repo."));
 		}
 		match third {
 			Some(name) => Self::new(first, second, name),
-			None => Self::new(GITHUB_HOST, first, second),
+			None => Self::new(DEFAULT_FORGE_HOST, first, second),
 		}
 	}
 
 	pub(super) fn new(host: &str, owner: &str, name: &str) -> Result<Self, Fault> {
-		if !valid_github_host(host) || !valid_repo_component(owner) || !valid_repo_component(name) {
-			return Err(invalid("GitHub repository must be [host/]owner/repo."));
+		if !valid_forge_host(host) || !valid_repo_component(owner) || !valid_repo_component(name) {
+			return Err(invalid("Forge repository must be [host/]owner/repo."));
 		}
 		let host = Str::new(host);
 		let slug = Str::new(format!("{owner}/{name}"));
-		let identity = if host.eq_ignore_ascii_case(GITHUB_HOST) {
+		let identity = if host.eq_ignore_ascii_case(DEFAULT_FORGE_HOST) {
 			slug.clone()
 		} else {
 			Str::new(format!("{host}/{slug}"))
@@ -123,14 +125,14 @@ impl GithubRepo {
 }
 
 pub(super) fn api_url_for_host(host: &str, path: &str) -> String {
-	if host.eq_ignore_ascii_case(GITHUB_HOST) {
+	if host.eq_ignore_ascii_case(DEFAULT_FORGE_HOST) {
 		format!("https://api.github.com{path}")
 	} else {
 		format!("https://{host}/api/v3{path}")
 	}
 }
 
-fn valid_github_host(host: &str) -> bool {
+fn valid_forge_host(host: &str) -> bool {
 	!host.is_empty()
 		&& host.len() <= 255
 		&& host
@@ -146,8 +148,8 @@ fn valid_repo_component(component: &str) -> bool {
 			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// Provider credential authority consumed by environment-owned GitHub
-/// resources.
+/// Provider credential authority consumed by environment-owned forge
+/// resources (and other host services that share the same bridge).
 pub trait CredentialAuthority: Send + Sync + 'static {
 	/// Issues one sealed provider lease.
 	fn provider_lease(
@@ -156,15 +158,15 @@ pub trait CredentialAuthority: Send + Sync + 'static {
 	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>>;
 }
 
-/// How long a host with no ambient GitHub credential is remembered as a miss
+/// How long a host with no ambient forge credential is remembered as a miss
 /// before the environment and credential helpers are consulted again.
 const AMBIENT_MISS_TTL: Duration = Duration::from_secs(60);
 
 /// Environment variables consulted for `github.com`, in precedence order
-/// (the `gh` CLI convention).
+/// (the `gh` CLI convention — adapter data for the GitHub product).
 const GITHUB_COM_TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 /// Environment variables consulted for GitHub Enterprise hosts, in
-/// precedence order (the `gh` CLI convention).
+/// precedence order (the `gh` CLI convention — adapter data).
 const GITHUB_ENTERPRISE_TOKEN_VARS: [&str; 2] = ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
 
 /// One host's ambient-credential lookup outcome.
@@ -175,25 +177,26 @@ enum AmbientEntry {
 }
 
 /// Late-bound projection of the one combined daemon credential authority,
-/// with a host-scoped ambient fallback for the GitHub REST API.
-pub struct GithubCredentialBridge {
+/// with a host-scoped ambient fallback for forge REST hosts.
+pub struct ForgeCredentialBridge {
 	authority: OnceLock<Arc<dyn CredentialAuthority>>,
 	ambient:   Mutex<BTreeMap<String, AmbientEntry>>,
 }
 
-impl GithubCredentialBridge {
+impl ForgeCredentialBridge {
 	/// Creates an unbound credential projection.
 	pub const fn new() -> Self {
 		Self { authority: OnceLock::new(), ambient: Mutex::new(BTreeMap::new()) }
 	}
 
-	/// Leases the credential for one GitHub host's REST API.
+	/// Leases the credential for one forge host's REST API.
 	///
 	/// Resolution order, first hit wins:
 	/// 1. the stored `github` provider credential, for `github.com` only, so a
 	///    github.com token is never projected onto an Enterprise host;
 	/// 2. the daemon's environment: `GH_TOKEN`/`GITHUB_TOKEN` for `github.com`,
-	///    `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` for any other host;
+	///    `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` for any other host
+	///    (GitHub product adapter data);
 	/// 3. the user's git credential helpers for `https://<host>`, the same
 	///    source push and fetch already authenticate with.
 	///
@@ -206,7 +209,7 @@ impl GithubCredentialBridge {
 		cwd: &Path,
 	) -> Result<Option<CredentialLease>, Fault> {
 		let host = host.to_ascii_lowercase();
-		if host == GITHUB_HOST
+		if host == DEFAULT_FORGE_HOST
 			&& let Some(lease) = self.lease().await?
 		{
 			return Ok(Some(lease));
@@ -262,7 +265,7 @@ impl GithubCredentialBridge {
 		self.authority.set(authority)
 	}
 
-	/// Leases the default GitHub provider credential when one is available.
+	/// Leases the default `github` provider credential when one is available.
 	pub async fn lease(&self) -> Result<Option<CredentialLease>, Fault> {
 		self.lease_for("github").await
 	}
@@ -301,10 +304,10 @@ impl GithubCredentialBridge {
 	}
 }
 
-impl fmt::Debug for GithubCredentialBridge {
+impl fmt::Debug for ForgeCredentialBridge {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		formatter
-			.debug_struct("GithubCredentialBridge")
+			.debug_struct("ForgeCredentialBridge")
 			.field("bound", &self.authority.get().is_some())
 			.finish()
 	}
@@ -318,7 +321,7 @@ fn ambient_token(
 	host: &str,
 	env: impl Fn(&str) -> Option<String>,
 ) -> Option<(&'static str, SecretString)> {
-	let names: &[&'static str] = if host.eq_ignore_ascii_case(GITHUB_HOST) {
+	let names: &[&'static str] = if host.eq_ignore_ascii_case(DEFAULT_FORGE_HOST) {
 		&GITHUB_COM_TOKEN_VARS
 	} else {
 		&GITHUB_ENTERPRISE_TOKEN_VARS
@@ -346,34 +349,34 @@ fn ambient_lease(host: &str, source: &str, token: SecretString) -> CredentialLea
 
 #[cfg(feature = "cap-forge")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum GithubScheme {
+pub(super) enum ForgeScheme {
 	Issue,
 	PullRequest,
 }
 
 #[cfg(feature = "cap-forge")]
-pub(super) struct GithubResolver<H> {
-	scheme:      GithubScheme,
+pub(super) struct ForgeResolver<H> {
+	scheme:      ForgeScheme,
 	root:        PathBuf,
 	cache:       Arc<ForgeCache>,
-	credentials: Arc<GithubCredentialBridge>,
+	credentials: Arc<ForgeCredentialBridge>,
 	client:      omp_http::Client,
 	forge:       H,
 }
 
 #[cfg(feature = "cap-forge")]
-impl<H> GithubResolver<H> {
+impl<H> ForgeResolver<H> {
 	pub(super) fn new(
-		scheme: GithubScheme,
+		scheme: ForgeScheme,
 		root: PathBuf,
 		cache: Arc<ForgeCache>,
-		credentials: Arc<GithubCredentialBridge>,
+		credentials: Arc<ForgeCredentialBridge>,
 		forge: H,
 	) -> Self {
 		Self { scheme, root, cache, credentials, client: omp_http::no_redirect_client(), forge }
 	}
 
-	/// Names the GitHub host a read of `resource` reaches, as a read resolves
+	/// Names the forge host a read of `resource` reaches, as a read resolves
 	/// it: the host the resource names or, without one, the workspace's git
 	/// remote, in ASCII lowercase. `None` when neither names one, which fails
 	/// the read the same way.
@@ -392,12 +395,12 @@ impl<H> GithubResolver<H> {
 	}
 
 	#[tracing::instrument(
-		name = "github_resource_resolve",
+		name = "forge_resource_resolve",
 		level = "debug",
 		skip_all,
 		fields(scheme = ?self.scheme, repo = tracing::field::Empty, number = tracing::field::Empty),
 	)]
-	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<GithubRead, Fault>
+	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<ForgeRead, Fault>
 	where
 		H: ForgeHost,
 	{
@@ -422,7 +425,7 @@ impl<H> GithubResolver<H> {
 			.as_ref()
 			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
 		{
-			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
+			return Ok(ForgeRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
 		match self
 			.fetch(&target, cached.as_ref().and_then(|entry| entry.etag.as_deref()))
@@ -430,7 +433,7 @@ impl<H> GithubResolver<H> {
 		{
 			Ok(Fetch::NotModified) => {
 				self.cache.touch(&key, now).map_err(cache_fault)?;
-				Ok(GithubRead {
+				Ok(ForgeRead {
 					data:  cached.expect("304 requires cached entity").body.to_vec(),
 					stale: false,
 				})
@@ -443,10 +446,10 @@ impl<H> GithubResolver<H> {
 							tracing::warn!(
 								error = ?error,
 								cached = cached.is_some(),
-								"GitHub comments refresh failed",
+								"forge comments refresh failed",
 							);
 							if let Some(cached) = &cached {
-								return Ok(GithubRead { data: cached.body.to_vec(), stale: true });
+								return Ok(ForgeRead { data: cached.body.to_vec(), stale: true });
 							}
 							return Err(error);
 						},
@@ -459,16 +462,16 @@ impl<H> GithubResolver<H> {
 					.cache
 					.put(&key, &rendered, etag.as_deref(), now)
 					.map_err(cache_fault)?;
-				Ok(GithubRead { data: rendered, stale: false })
+				Ok(ForgeRead { data: rendered, stale: false })
 			},
 			Err(error) => {
 				tracing::warn!(
 					error = ?error,
 					cached = cached.is_some(),
-					"GitHub resource refresh failed",
+					"forge resource refresh failed",
 				);
 				if let Some(cached) = cached {
-					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
+					Ok(ForgeRead { data: cached.body.to_vec(), stale: true })
 				} else {
 					Err(error)
 				}
@@ -478,7 +481,7 @@ impl<H> GithubResolver<H> {
 
 	/// List URLs via [`ForgeHost::search`]. No etag — cache the rendered
 	/// markdown only (same contract as numbered forge reads).
-	async fn resolve_list(&self, target: Target) -> Result<GithubRead, Fault>
+	async fn resolve_list(&self, target: Target) -> Result<ForgeRead, Fault>
 	where
 		H: ForgeHost,
 	{
@@ -489,7 +492,7 @@ impl<H> GithubResolver<H> {
 			.as_ref()
 			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
 		{
-			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
+			return Ok(ForgeRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
 		match self.fetch_list(&target).await {
 			Ok(rendered) => {
@@ -497,7 +500,7 @@ impl<H> GithubResolver<H> {
 					.cache
 					.put(&key, &rendered, None, now)
 					.map_err(cache_fault)?;
-				Ok(GithubRead { data: rendered, stale: false })
+				Ok(ForgeRead { data: rendered, stale: false })
 			},
 			Err(error) => {
 				tracing::warn!(
@@ -506,7 +509,7 @@ impl<H> GithubResolver<H> {
 					"forge list refresh failed",
 				);
 				if let Some(cached) = cached {
-					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
+					Ok(ForgeRead { data: cached.body.to_vec(), stale: true })
 				} else {
 					Err(error)
 				}
@@ -521,13 +524,13 @@ impl<H> GithubResolver<H> {
 		let query = list_search_query(target)?;
 		let page = self.forge.search(query).await.map_err(forge_fault)?;
 		if page.hits.len() > MAX_BODY {
-			return Err(invalid("GitHub response exceeds 8 MiB."));
+			return Err(invalid("Forge response exceeds 8 MiB."));
 		}
 		Ok(render_search_list(target.scheme, &target.repo, &page))
 	}
 
 	#[tracing::instrument(
-		name = "github_resource_fetch",
+		name = "forge_resource_fetch",
 		level = "debug",
 		skip_all,
 		fields(scheme = ?target.scheme, repo = %target.repo.identity(), number = ?target.number),
@@ -544,12 +547,12 @@ impl<H> GithubResolver<H> {
 		{
 			lease
 				.apply_header(&HeaderPlacement::bearer(), &mut headers)
-				.map_err(|_| Fault::Source { message: sf!("GitHub credential projection failed.") })?;
+				.map_err(|_| Fault::Source { message: sf!("Forge credential projection failed.") })?;
 		}
 		if let Some(etag) = etag {
 			headers.insert(
 				IF_NONE_MATCH,
-				HeaderValue::from_str(etag).map_err(|_| invalid("Invalid cached GitHub ETag."))?,
+				HeaderValue::from_str(etag).map_err(|_| invalid("Invalid cached forge ETag."))?,
 			);
 		}
 		let response = self
@@ -573,7 +576,7 @@ impl<H> GithubResolver<H> {
 		while let Some(chunk) = stream.next().await {
 			let chunk = chunk.map_err(http_fault)?;
 			if bytes.len().saturating_add(chunk.len()) > MAX_BODY {
-				return Err(invalid("GitHub response exceeds 8 MiB."));
+				return Err(invalid("Forge response exceeds 8 MiB."));
 			}
 			bytes.extend_from_slice(&chunk);
 		}
@@ -582,14 +585,14 @@ impl<H> GithubResolver<H> {
 				self.credentials.reject_host(target.repo.host());
 			}
 			return Err(Fault::Source {
-				message: Str::new(format!("GitHub API returned HTTP {status}.")),
+				message: Str::new(format!("Forge API returned HTTP {status}.")),
 			});
 		}
 		Ok(Fetch::Body { body: bytes.freeze().to_vec(), etag })
 	}
 
 	#[tracing::instrument(
-		name = "github_comments_fetch",
+		name = "forge_comments_fetch",
 		level = "debug",
 		skip_all,
 		fields(scheme = ?target.scheme, repo = %target.repo.identity(), number = ?target.number),
@@ -610,7 +613,7 @@ impl<H> GithubResolver<H> {
 				lease
 					.apply_header(&HeaderPlacement::bearer(), &mut headers)
 					.map_err(|_| Fault::Source {
-						message: sf!("GitHub credential projection failed."),
+						message: sf!("Forge credential projection failed."),
 					})?;
 			}
 			let response = self
@@ -623,7 +626,7 @@ impl<H> GithubResolver<H> {
 			let status = response.status().as_u16();
 			if !(200..300).contains(&status) {
 				return Err(Fault::Source {
-					message: Str::new(format!("GitHub comments API returned HTTP {status}.")),
+					message: Str::new(format!("Forge comments API returned HTTP {status}.")),
 				});
 			}
 			let mut stream = response.bytes_stream();
@@ -632,22 +635,22 @@ impl<H> GithubResolver<H> {
 				let chunk = chunk.map_err(http_fault)?;
 				retained_bytes = retained_bytes.saturating_add(chunk.len());
 				if retained_bytes > MAX_BODY {
-					return Err(invalid("GitHub comments exceed 8 MiB."));
+					return Err(invalid("Forge comments exceed 8 MiB."));
 				}
 				bytes.extend_from_slice(&chunk);
 			}
 			let page_comments: Vec<Value> = serde_json::from_slice(&bytes)
-				.map_err(|error| invalid_json("GitHub comments", error))?;
+				.map_err(|error| invalid_json("forge comments", error))?;
 			let complete = page_comments.len() < 100;
 			comments.extend(page_comments);
 			if complete {
 				return Ok(comments);
 			}
 		}
-		Err(invalid("GitHub comments exceed 100 pages."))
+		Err(invalid("Forge comments exceed 100 pages."))
 	}
 
-	async fn resolve_numbered(&self, parsed: SchemeRef) -> Result<GithubRead, Fault>
+	async fn resolve_numbered(&self, parsed: SchemeRef) -> Result<ForgeRead, Fault>
 	where
 		H: ForgeHost,
 	{
@@ -663,7 +666,7 @@ impl<H> GithubResolver<H> {
 			.as_ref()
 			.is_some_and(|entry| entry.status == ForgeCacheStatus::Fresh)
 		{
-			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
+			return Ok(ForgeRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
 		match self.fetch_numbered(&parsed).await {
 			Ok(rendered) => {
@@ -673,7 +676,7 @@ impl<H> GithubResolver<H> {
 						.put(key, &rendered, None, now)
 						.map_err(cache_fault)?;
 				}
-				Ok(GithubRead { data: rendered, stale: false })
+				Ok(ForgeRead { data: rendered, stale: false })
 			},
 			Err(error) => {
 				tracing::warn!(
@@ -682,7 +685,7 @@ impl<H> GithubResolver<H> {
 					"forge resource refresh failed",
 				);
 				if let Some(cached) = cached {
-					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
+					Ok(ForgeRead { data: cached.body.to_vec(), stale: true })
 				} else {
 					Err(error)
 				}
@@ -706,7 +709,7 @@ impl<H> GithubResolver<H> {
 					.await
 					.map_err(forge_fault)?;
 				if text.len() > MAX_BODY {
-					return Err(invalid("GitHub response exceeds 8 MiB."));
+					return Err(invalid("Forge response exceeds 8 MiB."));
 				}
 				render_diff(text.as_str(), &diff_mode(selector), &diff_repo_label(&repo), parsed.number)
 			},
@@ -752,7 +755,7 @@ impl<H> GithubResolver<H> {
 }
 
 #[cfg(feature = "cap-forge")]
-impl<H: ForgeHost> Resolve for GithubResolver<H> {
+impl<H: ForgeHost> Resolve for ForgeResolver<H> {
 	async fn read<'a>(
 		&'a self,
 		resource: &'a str,
@@ -798,7 +801,7 @@ impl<H: ForgeHost> Resolve for GithubResolver<H> {
 
 #[cfg(feature = "cap-forge")]
 fn selected_read(
-	resolved: GithubRead,
+	resolved: ForgeRead,
 	resource: &str,
 	selector: &ParsedSelector,
 ) -> Result<ResolvedRead, Fault> {
@@ -811,7 +814,7 @@ fn selected_read(
 	let diags = if resolved.stale {
 		smallvec![Diag::warn(
 			DiagKind::StaleCache,
-			"Live GitHub refresh failed; cached content may be stale.",
+			"Live forge refresh failed; cached content may be stale.",
 		)]
 	} else {
 		smallvec![]
@@ -820,14 +823,14 @@ fn selected_read(
 }
 
 #[cfg(feature = "cap-forge")]
-impl<H> fmt::Debug for GithubResolver<H> {
+impl<H> fmt::Debug for ForgeResolver<H> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str("GithubResolver(..)")
+		f.write_str("ForgeResolver(..)")
 	}
 }
 
 #[cfg(feature = "cap-forge")]
-struct GithubRead {
+struct ForgeRead {
 	data:  Vec<u8>,
 	stale: bool,
 }
@@ -855,8 +858,8 @@ enum DiffMode {
 #[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug)]
 struct Target {
-	scheme: GithubScheme,
-	repo:   GithubRepo,
+	scheme: ForgeScheme,
+	repo:   ForgeRepo,
 	number: Option<u64>,
 	view:   View,
 }
@@ -864,7 +867,7 @@ struct Target {
 #[cfg(feature = "cap-forge")]
 impl Target {
 	fn parse(
-		scheme: GithubScheme,
+		scheme: ForgeScheme,
 		resource: &str,
 		query: Option<&str>,
 		root: &Path,
@@ -874,7 +877,7 @@ impl Target {
 			.filter(|part| !part.is_empty())
 			.collect::<Vec<_>>();
 		if parts.iter().any(|part| matches!(*part, "." | "..")) {
-			return Err(invalid("Unsafe GitHub resource path."));
+			return Err(invalid("Unsafe forge resource path."));
 		}
 		let (repo, number, trailing) = match parts.as_slice() {
 			[] => (infer_repo(root)?, None, &[][..]),
@@ -882,16 +885,16 @@ impl Target {
 				(infer_repo(root)?, Some(parse_number(number)?), &[][..])
 			},
 			[host, owner, repo] if host.contains('.') => {
-				(GithubRepo::new(host, owner, repo)?, None, &[][..])
+				(ForgeRepo::new(host, owner, repo)?, None, &[][..])
 			},
 			[host, owner, repo, number, tail @ ..]
 				if number.bytes().all(|byte| byte.is_ascii_digit()) =>
 			{
-				(GithubRepo::new(host, owner, repo)?, Some(parse_number(number)?), tail)
+				(ForgeRepo::new(host, owner, repo)?, Some(parse_number(number)?), tail)
 			},
-			[owner, repo] => (GithubRepo::new(GITHUB_HOST, owner, repo)?, None, &[][..]),
+			[owner, repo] => (ForgeRepo::new(DEFAULT_FORGE_HOST, owner, repo)?, None, &[][..]),
 			[owner, repo, number, tail @ ..] => {
-				(GithubRepo::new(GITHUB_HOST, owner, repo)?, Some(parse_number(number)?), tail)
+				(ForgeRepo::new(DEFAULT_FORGE_HOST, owner, repo)?, Some(parse_number(number)?), tail)
 			},
 			_ => {
 				return Err(invalid(
@@ -913,7 +916,7 @@ impl Target {
 				.map(|(_, value)| value.as_str())
 		};
 		let view = if !trailing.is_empty() {
-			if scheme != GithubScheme::PullRequest
+			if scheme != ForgeScheme::PullRequest
 				|| trailing.first() != Some(&"diff")
 				|| trailing.len() > 2
 			{
@@ -934,11 +937,11 @@ impl Target {
 		} else {
 			let state = Str::new(get("state").unwrap_or("open"));
 			if !matches!(state.as_str(), "open" | "closed" | "merged" | "all") {
-				return Err(invalid("Invalid GitHub list state."));
+				return Err(invalid("Invalid forge list state."));
 			}
 			let limit = get("limit")
 				.map_or(Ok(30), str::parse::<u32>)
-				.map_err(|_| invalid("Invalid GitHub list limit."))?
+				.map_err(|_| invalid("Invalid forge list limit."))?
 				.clamp(1, 100);
 			View::List {
 				state,
@@ -954,7 +957,7 @@ impl Target {
 		ForgeCacheKey::new(
 			match &self.view {
 				View::Diff { .. } => ForgeResourceKind::Diff,
-				_ if self.scheme == GithubScheme::Issue => ForgeResourceKind::Issue,
+				_ if self.scheme == ForgeScheme::Issue => ForgeResourceKind::Issue,
 				_ => ForgeResourceKind::PullRequest,
 			},
 			self.repo.identity(),
@@ -980,7 +983,7 @@ impl Target {
 		let base = self.repo.api_url(&format!("/repos/{}", self.repo.slug()));
 		match &self.view {
 			View::List { state, limit, author, label } => {
-				let family = if self.scheme == GithubScheme::Issue {
+				let family = if self.scheme == ForgeScheme::Issue {
 					"issues"
 				} else {
 					"pulls"
@@ -1005,7 +1008,7 @@ impl Target {
 			},
 			View::Detail { .. } => format!(
 				"{base}/{}/{}",
-				if self.scheme == GithubScheme::Issue {
+				if self.scheme == ForgeScheme::Issue {
 					"issues"
 				} else {
 					"pulls"
@@ -1030,21 +1033,21 @@ impl Target {
 
 	fn render(&self, body: &[u8], comments: Option<&[Value]>) -> Result<Vec<u8>, Fault> {
 		if let View::Diff { mode } = &self.view {
-			let text = str::from_utf8(body).map_err(|_| invalid("GitHub diff is not UTF-8."))?;
+			let text = str::from_utf8(body).map_err(|_| invalid("Forge diff is not UTF-8."))?;
 			return render_diff(text, mode, self.repo.identity(), self.number.expect("diff number"));
 		}
 		let value: Value =
-			serde_json::from_slice(body).map_err(|error| invalid_json("GitHub", error))?;
+			serde_json::from_slice(body).map_err(|error| invalid_json("forge", error))?;
 		let mut out = String::new();
 		match (&self.view, value) {
 			(View::List { .. }, Value::Array(items)) => {
-				out.push_str(if self.scheme == GithubScheme::Issue {
+				out.push_str(if self.scheme == ForgeScheme::Issue {
 					"# Issues\n\n"
 				} else {
 					"# Pull Requests\n\n"
 				});
 				for item in items {
-					if self.scheme == GithubScheme::Issue && item.get("pull_request").is_some() {
+					if self.scheme == ForgeScheme::Issue && item.get("pull_request").is_some() {
 						continue;
 					}
 					render_item(&mut out, &item, self.repo.identity(), self.scheme);
@@ -1066,7 +1069,7 @@ impl Target {
 					render_comments(&mut out, comments);
 				}
 			},
-			_ => return Err(invalid("Unexpected GitHub response shape.")),
+			_ => return Err(invalid("Unexpected forge response shape.")),
 		}
 		Ok(out.into_bytes())
 	}
@@ -1152,7 +1155,7 @@ fn render_comments(out: &mut String, comments: &[Value]) {
 }
 
 #[cfg(feature = "cap-forge")]
-fn render_item(out: &mut String, item: &Value, repo: &str, scheme: GithubScheme) {
+fn render_item(out: &mut String, item: &Value, repo: &str, scheme: ForgeScheme) {
 	let number = item
 		.get("number")
 		.and_then(Value::as_u64)
@@ -1164,7 +1167,7 @@ fn render_item(out: &mut String, item: &Value, repo: &str, scheme: GithubScheme)
 		.unwrap_or("(no title)");
 	out.push_str(&format!(
 		"- [{state}] #{number} {title}\n  {}://{repo}/{number}\n",
-		if scheme == GithubScheme::Issue {
+		if scheme == ForgeScheme::Issue {
 			"issue"
 		} else {
 			"pr"
@@ -1202,7 +1205,7 @@ fn render_diff(text: &str, mode: &DiffMode, repo: &str, number: u64) -> Result<V
 }
 #[cfg(feature = "cap-forge")]
 fn numbered_ref(
-	scheme: GithubScheme,
+	scheme: ForgeScheme,
 	resource: &str,
 	query: Option<&str>,
 	root: &Path,
@@ -1215,7 +1218,7 @@ fn numbered_ref(
 	match parse_resource_url(&url) {
 		Ok(mut parsed) => {
 			if parsed.host.is_none() {
-				parsed.host = Some(Str::new_static(GITHUB_HOST));
+				parsed.host = Some(Str::new_static(DEFAULT_FORGE_HOST));
 			}
 			Ok(Some(parsed))
 		},
@@ -1239,7 +1242,7 @@ fn is_list_resource(resource: &str) -> bool {
 }
 
 #[cfg(feature = "cap-forge")]
-fn expand_shorthand(scheme: GithubScheme, resource: &str, root: &Path) -> Result<String, Fault> {
+fn expand_shorthand(scheme: ForgeScheme, resource: &str, root: &Path) -> Result<String, Fault> {
 	let name = scheme_name(scheme);
 	if let Some(tail) = shorthand_tail(resource) {
 		let repo = infer_repo(root)?;
@@ -1271,10 +1274,10 @@ fn append_query(url: String, query: Option<&str>) -> String {
 }
 
 #[cfg(feature = "cap-forge")]
-const fn scheme_name(scheme: GithubScheme) -> &'static str {
+const fn scheme_name(scheme: ForgeScheme) -> &'static str {
 	match scheme {
-		GithubScheme::Issue => "issue",
-		GithubScheme::PullRequest => "pr",
+		ForgeScheme::Issue => "issue",
+		ForgeScheme::PullRequest => "pr",
 	}
 }
 
@@ -1289,10 +1292,10 @@ fn target_for_scheme(parsed: &SchemeRef) -> Result<Target, Fault> {
 		.host
 		.as_deref()
 		.ok_or_else(|| invalid("Forge resource is missing a host."))?;
-	let repo = GithubRepo::new(host, parsed.owner.as_str(), parsed.name.as_str())?;
+	let repo = ForgeRepo::new(host, parsed.owner.as_str(), parsed.name.as_str())?;
 	let scheme = match parsed.kind {
-		ResourceKind::ChangeRequest => GithubScheme::PullRequest,
-		ResourceKind::Issue => GithubScheme::Issue,
+		ResourceKind::ChangeRequest => ForgeScheme::PullRequest,
+		ResourceKind::Issue => ForgeScheme::Issue,
 	};
 	let view = match parsed.selector {
 		ResourceSelector::None => View::Detail { comments: parsed.comments.unwrap_or(true) },
@@ -1312,7 +1315,7 @@ fn diff_mode(selector: DiffSelector) -> DiffMode {
 
 #[cfg(feature = "cap-forge")]
 fn diff_repo_label(repo: &RepoRef) -> String {
-	if repo.host.eq_ignore_ascii_case(GITHUB_HOST) {
+	if repo.host.eq_ignore_ascii_case(DEFAULT_FORGE_HOST) {
 		format!("{}/{}", repo.owner, repo.name)
 	} else {
 		format!("{}/{}/{}", repo.host, repo.owner, repo.name)
@@ -1331,7 +1334,7 @@ fn list_search_query(target: &Target) -> Result<SearchQuery, Fault> {
 	let View::List { state, limit, author, label } = &target.view else {
 		return Err(invalid("Expected a forge list view."));
 	};
-	let repo = repo_ref_from_github(&target.repo)?;
+	let repo = repo_ref_from_forge_repo(&target.repo)?;
 	let mut text = format!("state:{state}");
 	if let Some(author) = author {
 		text.push_str(" author:");
@@ -1343,8 +1346,8 @@ fn list_search_query(target: &Target) -> Result<SearchQuery, Fault> {
 	}
 	Ok(SearchQuery {
 		kind:  match target.scheme {
-			GithubScheme::Issue => SearchKind::Issues,
-			GithubScheme::PullRequest => SearchKind::ChangeRequests,
+			ForgeScheme::Issue => SearchKind::Issues,
+			ForgeScheme::PullRequest => SearchKind::ChangeRequests,
 		},
 		repo:  Some(repo),
 		text:  Str::new(text),
@@ -1353,22 +1356,22 @@ fn list_search_query(target: &Target) -> Result<SearchQuery, Fault> {
 }
 
 #[cfg(feature = "cap-forge")]
-fn repo_ref_from_github(repo: &GithubRepo) -> Result<RepoRef, Fault> {
+fn repo_ref_from_forge_repo(repo: &ForgeRepo) -> Result<RepoRef, Fault> {
 	let (owner, name) = repo
 		.slug()
 		.split_once('/')
-		.ok_or_else(|| invalid("GitHub repository must be [host/]owner/repo."))?;
+		.ok_or_else(|| invalid("Forge repository must be [host/]owner/repo."))?;
 	RepoRef::try_new(repo.host().to_owned(), owner, name)
-		.map_err(|_| invalid("GitHub repository must be [host/]owner/repo."))
+		.map_err(|_| invalid("Forge repository must be [host/]owner/repo."))
 }
 
 /// Renders a [`SearchPage`] into the historical list-URL markdown contract:
 /// `# Issues` / `# Pull Requests` plus `- [state] #N title` / scheme link
 /// lines.
 #[cfg(feature = "cap-forge")]
-fn render_search_list(scheme: GithubScheme, repo: &GithubRepo, page: &SearchPage) -> Vec<u8> {
+fn render_search_list(scheme: ForgeScheme, repo: &ForgeRepo, page: &SearchPage) -> Vec<u8> {
 	let mut out = String::new();
-	out.push_str(if scheme == GithubScheme::Issue {
+	out.push_str(if scheme == ForgeScheme::Issue {
 		"# Issues\n\n"
 	} else {
 		"# Pull Requests\n\n"
@@ -1380,7 +1383,7 @@ fn render_search_list(scheme: GithubScheme, repo: &GithubRepo, page: &SearchPage
 }
 
 #[cfg(feature = "cap-forge")]
-fn render_search_hit(out: &mut String, hit: &SearchHit, repo: &str, scheme: GithubScheme) {
+fn render_search_hit(out: &mut String, hit: &SearchHit, repo: &str, scheme: ForgeScheme) {
 	let number = hit.number.unwrap_or_default();
 	let state = if hit.state.is_empty() {
 		"?"
@@ -1394,7 +1397,7 @@ fn render_search_hit(out: &mut String, hit: &SearchHit, repo: &str, scheme: Gith
 	};
 	out.push_str(&format!(
 		"- [{state}] #{number} {title}\n  {}://{repo}/{number}\n",
-		if scheme == GithubScheme::Issue {
+		if scheme == ForgeScheme::Issue {
 			"issue"
 		} else {
 			"pr"
@@ -1402,9 +1405,9 @@ fn render_search_hit(out: &mut String, hit: &SearchHit, repo: &str, scheme: Gith
 	));
 }
 
-pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
+pub(super) fn infer_repo(root: &Path) -> Result<ForgeRepo, Fault> {
 	let repo = GitRepo::require(root)
-		.map_err(|_| invalid("Cannot infer GitHub repo; use [host/]owner/repo explicitly."))?;
+		.map_err(|_| invalid("Cannot infer forge repo; use [host/]owner/repo explicitly."))?;
 	let config = std::fs::read_to_string(repo.info().common_dir.join("config"))
 		.map_err(|_| invalid("Git repository config is unavailable."))?;
 	let mut in_origin = false;
@@ -1429,14 +1432,14 @@ pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
 	repo_from_remote(remote)
 }
 
-pub(super) fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
+pub(super) fn repo_from_remote(remote: &str) -> Result<ForgeRepo, Fault> {
 	let remote = remote.trim();
 	if remote.contains("://") {
 		let parsed =
-			url::Url::parse(remote).map_err(|_| invalid("Git origin is not a GitHub remote."))?;
+			url::Url::parse(remote).map_err(|_| invalid("Git origin is not a forge remote."))?;
 		let host = parsed
 			.host_str()
-			.ok_or_else(|| invalid("Git origin is not a GitHub remote."))?;
+			.ok_or_else(|| invalid("Git origin is not a forge remote."))?;
 		let host = parsed
 			.port()
 			.map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
@@ -1444,7 +1447,7 @@ pub(super) fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
 	} else {
 		let (authority, path) = remote
 			.split_once(':')
-			.ok_or_else(|| invalid("Git origin is not a GitHub remote."))?;
+			.ok_or_else(|| invalid("Git origin is not a forge remote."))?;
 		let host = authority
 			.rsplit_once('@')
 			.map_or(authority, |(_, host)| host);
@@ -1453,15 +1456,15 @@ pub(super) fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
 }
 
 /// Builds the repo identity from a remote's host and path segments.
-fn repo_from_host_path(host: &str, path: &str) -> Result<GithubRepo, Fault> {
+fn repo_from_host_path(host: &str, path: &str) -> Result<ForgeRepo, Fault> {
 	let path = path.trim_end_matches('/').trim_end_matches(".git");
 	let mut parts = path.split('/');
 	let owner = parts.next().unwrap_or_default();
 	let name = parts.next().unwrap_or_default();
 	if parts.next().is_some() {
-		return Err(invalid("GitHub origin is not owner/repo."));
+		return Err(invalid("Forge origin is not owner/repo."));
 	}
-	GithubRepo::new(host, owner, name)
+	ForgeRepo::new(host, owner, name)
 }
 #[cfg(feature = "cap-forge")]
 fn parse_number(value: &str) -> Result<u64, Fault> {
@@ -1469,7 +1472,7 @@ fn parse_number(value: &str) -> Result<u64, Fault> {
 		.parse::<u64>()
 		.ok()
 		.filter(|n| *n > 0)
-		.ok_or_else(|| invalid("GitHub number must be positive."))
+		.ok_or_else(|| invalid("Forge number must be positive."))
 }
 #[cfg(feature = "cap-forge")]
 fn now_ms() -> u64 {
@@ -1492,7 +1495,7 @@ fn cache_fault(error: impl Display) -> Fault {
 }
 #[cfg(feature = "cap-forge")]
 fn http_fault(error: impl Display) -> Fault {
-	Fault::Source { message: Str::new(format!("GitHub API request failed: {error}")) }
+	Fault::Source { message: Str::new(format!("Forge API request failed: {error}")) }
 }
 #[cfg(test)]
 mod tests {
@@ -1589,7 +1592,7 @@ mod tests {
 			"credential.helper",
 			"!f() { test \"$1\" = get && echo username=x && echo password=helper-ghe; }; f",
 		]);
-		let bridge = GithubCredentialBridge::new();
+		let bridge = ForgeCredentialBridge::new();
 		assert!(bridge.bind(Arc::new(AlwaysStored)).is_ok());
 
 		let dotcom = bridge
@@ -1615,7 +1618,7 @@ mod tests {
 	fn stale_cache_is_reported_out_of_band_without_changing_document_bytes() {
 		let cached = b"# Cached issue\n\nBody".to_vec();
 		let resolved = selected_read(
-			GithubRead { data: cached.clone(), stale: true },
+			ForgeRead { data: cached.clone(), stale: true },
 			"owner/repo/1",
 			&ParsedSelector::None,
 		)
@@ -1631,16 +1634,16 @@ mod tests {
 	fn target_parses_dotted_and_single_label_enterprise_hosts() {
 		let root = Path::new("/unused");
 		let dotted =
-			Target::parse(GithubScheme::PullRequest, "ghe.example.com/owner/repo/7", None, root)
+			Target::parse(ForgeScheme::PullRequest, "ghe.example.com/owner/repo/7", None, root)
 				.expect("dotted enterprise target");
 		assert_eq!(dotted.repo.identity(), "ghe.example.com/owner/repo");
 		assert_eq!(dotted.api_url(), "https://ghe.example.com/api/v3/repos/owner/repo/pulls/7",);
 
-		let single = Target::parse(GithubScheme::PullRequest, "ghe/owner/repo/7", None, root)
+		let single = Target::parse(ForgeScheme::PullRequest, "ghe/owner/repo/7", None, root)
 			.expect("single-label enterprise target");
 		assert_eq!(single.repo.identity(), "ghe/owner/repo");
 		assert_eq!(single.api_url(), "https://ghe/api/v3/repos/owner/repo/pulls/7");
-		let issue = Target::parse(GithubScheme::Issue, "ghe.example.com/owner/repo/8", None, root)
+		let issue = Target::parse(ForgeScheme::Issue, "ghe.example.com/owner/repo/8", None, root)
 			.expect("enterprise issue target");
 		assert_eq!(issue.api_url(), "https://ghe.example.com/api/v3/repos/owner/repo/issues/8",);
 	}
@@ -1649,13 +1652,13 @@ mod tests {
 	#[test]
 	fn numeric_tail_disambiguates_host_from_diff_suffix() {
 		let root = Path::new("/unused");
-		let slice = Target::parse(GithubScheme::PullRequest, "owner/repo/77/diff/1", None, root)
+		let slice = Target::parse(ForgeScheme::PullRequest, "owner/repo/77/diff/1", None, root)
 			.expect("default-host diff slice");
 		assert_eq!(slice.repo.identity(), "owner/repo");
 		assert!(matches!(slice.view, View::Diff { mode: DiffMode::Slice(1) }));
 
 		assert!(
-			Target::parse(GithubScheme::PullRequest, "ghe/owner/repo", None, root).is_err(),
+			Target::parse(ForgeScheme::PullRequest, "ghe/owner/repo", None, root).is_err(),
 			"an unnumbered single-label host is ambiguous and must not be guessed",
 		);
 	}
@@ -1691,20 +1694,20 @@ mod tests {
 	fn list_urls_stay_outside_the_numbered_parser() {
 		let root = Path::new("/unused");
 		let list =
-			numbered_ref(GithubScheme::Issue, "acme/widget", Some("state=open"), root).expect("list");
+			numbered_ref(ForgeScheme::Issue, "acme/widget", Some("state=open"), root).expect("list");
 		assert!(list.is_none());
 		let enterprise = numbered_ref(
-			GithubScheme::Issue,
+			ForgeScheme::Issue,
 			"ghe.example.com/acme/widget",
 			Some("state=closed"),
 			root,
 		)
 		.expect("enterprise list");
 		assert!(enterprise.is_none());
-		let numbered = numbered_ref(GithubScheme::PullRequest, "acme/widget/7", None, root)
+		let numbered = numbered_ref(ForgeScheme::PullRequest, "acme/widget/7", None, root)
 			.expect("numbered")
 			.expect("change request");
-		assert_eq!(numbered.host.as_deref(), Some(GITHUB_HOST));
+		assert_eq!(numbered.host.as_deref(), Some(DEFAULT_FORGE_HOST));
 		assert_eq!(numbered.owner.as_str(), "acme");
 		assert_eq!(numbered.number, 7);
 		assert_eq!(numbered.selector, ResourceSelector::None);
@@ -1720,10 +1723,10 @@ mod tests {
 			"[remote \"origin\"]\n\turl = https://github.com/acme/widget.git\n",
 		)
 		.expect("git config");
-		let parsed = numbered_ref(GithubScheme::PullRequest, "7/diff/2", None, workspace.path())
+		let parsed = numbered_ref(ForgeScheme::PullRequest, "7/diff/2", None, workspace.path())
 			.expect("shorthand")
 			.expect("change request");
-		assert_eq!(parsed.host.as_deref(), Some(GITHUB_HOST));
+		assert_eq!(parsed.host.as_deref(), Some(DEFAULT_FORGE_HOST));
 		assert_eq!(parsed.owner.as_str(), "acme");
 		assert_eq!(parsed.name.as_str(), "widget");
 		assert_eq!(parsed.number, 7);
@@ -1952,7 +1955,7 @@ mod tests {
 	fn router(host: Memory) -> Delegated<Memory, PermitAll> {
 		let mut builder = Delegated::builder(PermitAll);
 		builder
-			.register(GITHUB_HOST, host.clone())
+			.register(DEFAULT_FORGE_HOST, host.clone())
 			.expect("github.com");
 		builder.register("gitlab.com", host).expect("gitlab.com");
 		builder.build()
@@ -1975,16 +1978,16 @@ mod tests {
 
 	#[cfg(feature = "cap-forge")]
 	fn resolver(
-		scheme: GithubScheme,
+		scheme: ForgeScheme,
 		root: &Path,
 		cache: Arc<ForgeCache>,
 		host: Memory,
-	) -> GithubResolver<Delegated<Memory, PermitAll>> {
-		GithubResolver::new(
+	) -> ForgeResolver<Delegated<Memory, PermitAll>> {
+		ForgeResolver::new(
 			scheme,
 			root.to_path_buf(),
 			cache,
-			Arc::new(GithubCredentialBridge::new()),
+			Arc::new(ForgeCredentialBridge::new()),
 			router(host),
 		)
 	}
@@ -1996,7 +1999,7 @@ mod tests {
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
 		let resolver =
-			resolver(GithubScheme::PullRequest, dir.path(), Arc::clone(&cache), host.clone());
+			resolver(ForgeScheme::PullRequest, dir.path(), Arc::clone(&cache), host.clone());
 		let resolved = resolver
 			.read_with_diags("acme/widget/7", &ParsedSelector::None)
 			.await
@@ -2010,7 +2013,7 @@ mod tests {
 		assert!(resolved.diags.is_empty());
 		assert_eq!(host.calls(), ["change", "pr-comments"]);
 		let seen = host.repo.lock().clone().expect("repo");
-		assert_eq!(seen.host.as_str(), GITHUB_HOST);
+		assert_eq!(seen.host.as_str(), DEFAULT_FORGE_HOST);
 		assert_eq!(seen.owner.as_str(), "acme");
 		assert_eq!(seen.name.as_str(), "widget");
 
@@ -2039,7 +2042,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver = resolver(GithubScheme::Issue, dir.path(), cache, host.clone());
+		let resolver = resolver(ForgeScheme::Issue, dir.path(), cache, host.clone());
 		let resolved = resolver
 			.read_query_with_diags("acme/widget/3", Some("comments=false"), &ParsedSelector::None)
 			.await
@@ -2063,7 +2066,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver = resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
+		let resolver = resolver(ForgeScheme::PullRequest, dir.path(), cache, host.clone());
 		let index = resolver
 			.read_with_diags("acme/widget/7/diff", &ParsedSelector::None)
 			.await
@@ -2093,7 +2096,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver = resolver(GithubScheme::Issue, dir.path(), Arc::clone(&cache), host.clone());
+		let resolver = resolver(ForgeScheme::Issue, dir.path(), Arc::clone(&cache), host.clone());
 		let resolved = resolver
 			.read_query_with_diags("acme/widget", Some("state=open"), &ParsedSelector::None)
 			.await
@@ -2102,7 +2105,7 @@ mod tests {
 		assert_eq!(text, "# Issues\n\n- [open] #3 Bug\n  issue://acme/widget/3\n");
 		assert_eq!(host.calls(), ["search"]);
 		let seen = host.repo.lock().clone().expect("repo");
-		assert_eq!(seen.host.as_str(), GITHUB_HOST);
+		assert_eq!(seen.host.as_str(), DEFAULT_FORGE_HOST);
 		assert_eq!(seen.owner.as_str(), "acme");
 		assert_eq!(seen.name.as_str(), "widget");
 
@@ -2131,7 +2134,7 @@ mod tests {
 		let dir = tempfile::tempdir().expect("dir");
 		let host = Memory::new();
 		let cache = open_cache(dir.path(), 300);
-		let resolver = resolver(GithubScheme::PullRequest, dir.path(), cache, host.clone());
+		let resolver = resolver(ForgeScheme::PullRequest, dir.path(), cache, host.clone());
 		let resolved = resolver
 			.read_query_with_diags(
 				"gitlab.com/acme/widget",
@@ -2171,7 +2174,7 @@ mod tests {
 			.put(&key, cached.as_bytes(), Some("W/\"old\""), now_ms().saturating_sub(5_000))
 			.expect("seed");
 		*host.fail.lock() = true;
-		let resolver = resolver(GithubScheme::Issue, dir.path(), cache, host.clone());
+		let resolver = resolver(ForgeScheme::Issue, dir.path(), cache, host.clone());
 		let resolved = resolver
 			.read_with_diags("acme/widget/3", &ParsedSelector::None)
 			.await

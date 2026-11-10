@@ -15,7 +15,7 @@ use omp_core::{Str, sf};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::{github_url::GithubCredentialBridge, media_devices::MediaFault};
+use crate::{forge_url::ForgeCredentialBridge, media_devices::MediaFault};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
@@ -93,14 +93,14 @@ pub(crate) struct SpeechOutput {
 /// Reusable producer shared by every invocation of one mounted TTS device.
 pub(crate) struct SpeechProducer {
 	config:      SpeechConfig,
-	credentials: Arc<GithubCredentialBridge>,
+	credentials: Arc<ForgeCredentialBridge>,
 	client:      omp_http::Client,
 	#[cfg(feature = "local-tts")]
 	local:       tokio::sync::OnceCell<Arc<omp_ai::local::tts::KokoroAdapter>>,
 }
 
 impl SpeechProducer {
-	pub(crate) fn new(config: SpeechConfig, credentials: Arc<GithubCredentialBridge>) -> Self {
+	pub(crate) fn new(config: SpeechConfig, credentials: Arc<ForgeCredentialBridge>) -> Self {
 		Self {
 			config,
 			credentials,

@@ -36,12 +36,13 @@ read+create via dyn. **DONE:** `ci/*` dyn bridge + T2 CI extension body
 GitLab CI backends). **`github.com` and `gitlab.com` CI are on the Dyn arm**
 (same bound `LiveCiDeviceClient`; caps `log_stream` only). **DONE:** search
 leaves (`forge/search_change_requests`, `forge/search_issues`) + list-URL /
-`GithubResolver` parity via `ForgeHost::search` (cached without etag).
+`ForgeResolver` parity via `ForgeHost::search` (cached without etag).
 **DONE:** in-core `github.rs` / `GithubService` / Github forge+CI adapters
-deleted; forge/CI routers are Dyn-only. Intentional residue: `github_url.rs`
-(credentials / `pr://` / `issue://` / `infer_repo`), Class C, `GithubRefs`.
-Remaining: full automatic device-catalog host-claim discovery (smaller TODO).
-See package READMEs.
+deleted; forge/CI routers are Dyn-only. **DONE:** `github_url.rs`
+neutralized to `forge_url.rs` (credentials / `pr://` / `issue://` /
+`infer_repo`). Intentional residue: Class C, autocomplete `GithubRefs`.
+Follow-up: `github_adapter` → `forge_adapter`. Remaining: full automatic
+device-catalog host-claim discovery (smaller TODO). See package READMEs.
 
 ## May grow
 

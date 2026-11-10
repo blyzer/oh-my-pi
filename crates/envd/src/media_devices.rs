@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	blobs::{BlobError, BlobHost},
-	github_url::GithubCredentialBridge,
+	forge_url::ForgeCredentialBridge,
 	media_tts::{SpeechConfig, SpeechInput, SpeechOutput, SpeechProducer},
 	search_backend::SearchBridgeHost,
 };
@@ -396,7 +396,7 @@ pub(crate) fn image_gen(
 pub fn tts(backend: Arc<SearchBridgeHost>, blobs: BlobHost, root: PathBuf) -> MediaDevice {
 	tts_with_config(
 		backend,
-		Arc::new(GithubCredentialBridge::new()),
+		Arc::new(ForgeCredentialBridge::new()),
 		SpeechConfig::default(),
 		blobs,
 		root,
@@ -407,7 +407,7 @@ pub fn tts(backend: Arc<SearchBridgeHost>, blobs: BlobHost, root: PathBuf) -> Me
 /// voice settings plus the production credential authority.
 pub(crate) fn tts_with_config(
 	backend: Arc<SearchBridgeHost>,
-	credentials: Arc<GithubCredentialBridge>,
+	credentials: Arc<ForgeCredentialBridge>,
 	config: SpeechConfig,
 	blobs: BlobHost,
 	root: PathBuf,

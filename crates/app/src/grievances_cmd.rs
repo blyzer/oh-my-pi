@@ -4,7 +4,7 @@ use std::{fs, sync::Arc};
 
 use miette::{IntoDiagnostic as _, Result, miette};
 use omp_cache::telemetry_cache::{IssueDeleteSelector, IssueInventoryFilter, TelemetryIndex};
-use omp_envd::github_url::GithubCredentialBridge;
+use omp_envd::forge_url::ForgeCredentialBridge;
 use serde_json::json;
 
 use crate::cli::{GrievanceAction, GrievancesArgs};
@@ -103,9 +103,9 @@ async fn push(index: &TelemetryIndex, json_output: bool) -> Result<()> {
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let credentials = omp_driver::registry::open_credential_store(data_dir.join("credentials.db"))
 		.into_diagnostic()?;
-	let authority: Arc<dyn omp_envd::github_url::CredentialAuthority> =
+	let authority: Arc<dyn omp_envd::forge_url::CredentialAuthority> =
 		Arc::new(omp_driver::auth_backend::github_authority(credentials));
-	let bridge = GithubCredentialBridge::new();
+	let bridge = ForgeCredentialBridge::new();
 	bridge
 		.bind(authority)
 		.map_err(|_| miette!("AutoQA credential authority was already bound"))?;

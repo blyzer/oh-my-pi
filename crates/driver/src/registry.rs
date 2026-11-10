@@ -1120,7 +1120,7 @@ pub struct ProductionInference {
 	pub rpc:                  InferenceRpc,
 	/// Narrow GitHub URL credential projection over the canonical encrypted
 	/// store.
-	pub credential_authority: Arc<dyn omp_envd::github_url::CredentialAuthority>,
+	pub credential_authority: Arc<dyn omp_envd::forge_url::CredentialAuthority>,
 	/// Same encrypted authority used for MCP native-key import and OAuth leases.
 	pub mcp_authority:        Arc<auth_backend::CombinedAuthAuthority>,
 	/// MCP OAuth coordinator over that exact authority.
@@ -1292,7 +1292,7 @@ struct ProductionAssembly {
 	/// Later refreshes of that discovery, when the catalog is not caller-owned.
 	discovery:     Option<DiscoveryRefresher>,
 	sessions:      ConversationSessionPlanner,
-	authority:     Arc<dyn omp_envd::github_url::CredentialAuthority>,
+	authority:     Arc<dyn omp_envd::forge_url::CredentialAuthority>,
 	stored:        Arc<auth_backend::CombinedAuthAuthority>,
 	auth_manager:  AuthManager,
 	usage_manager: ConsoleUsageManager,
@@ -1629,7 +1629,7 @@ async fn production_assembly_with_catalog(
 		builtins:    builtins.clone(),
 		registry:    registry.clone(),
 	});
-	let authority: Arc<dyn omp_envd::github_url::CredentialAuthority> =
+	let authority: Arc<dyn omp_envd::forge_url::CredentialAuthority> =
 		Arc::new(GithubCredentialAuthority::new(Arc::clone(&stored)));
 	Ok(ProductionAssembly {
 		registry,

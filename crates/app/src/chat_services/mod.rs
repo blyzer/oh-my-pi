@@ -115,7 +115,7 @@ pub struct StackHandles {
 	/// Provider usage fetchers.
 	pub usage:                omp_ai::operation::usage::UsageFetcherRegistry,
 	/// Combined credential authority (GitHub gist uploads for `/share`).
-	pub credential_authority: Arc<dyn omp_envd::github_url::CredentialAuthority>,
+	pub credential_authority: Arc<dyn omp_envd::forge_url::CredentialAuthority>,
 }
 
 impl StackHandles {
