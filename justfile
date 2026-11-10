@@ -190,7 +190,12 @@ check-minimal-caps:
     #!/usr/bin/env bash
     set -euo pipefail
     selected=(--locked --no-default-features --config 'resolver.feature-unification="selected"')
-    for pkg in omp-desktop omp-webview omp-audio omp-ssh; do
+    # Forge/CI contract crates are optional on omp-tools as well as envd, so
+    # selected unification leaves them (and the delegated routers) out of the
+    # envd graph when the caps are off. Family variants stay either way; the
+    # forge/ci modules and chat cards compile with the matching cap features
+    # (on by default in omp-app).
+    for pkg in omp-desktop omp-webview omp-audio omp-ssh omp-forge omp-forge-delegated omp-ci omp-ci-delegated; do
         status=0
         out=$(cargo tree -p omp-envd -i "$pkg" "${selected[@]}" 2>&1) || status=$?
         if [[ "$status" -eq 0 ]]; then

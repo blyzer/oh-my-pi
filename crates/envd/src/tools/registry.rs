@@ -3205,7 +3205,9 @@ mod tests {
 			"read",
 			"write",
 			"web_search",
+			#[cfg(feature = "cap-forge")]
 			"forge",
+			#[cfg(feature = "cap-ci")]
 			"ci",
 			"task",
 			"hub",
@@ -3227,6 +3229,16 @@ mod tests {
 		assert!(
 			!names.contains("image_gen"),
 			"image_gen is absent from the construction table when cap-media is off"
+		);
+		#[cfg(not(feature = "cap-forge"))]
+		assert!(
+			!names.contains("forge"),
+			"forge is absent from the construction table when cap-forge is off"
+		);
+		#[cfg(not(feature = "cap-ci"))]
+		assert!(
+			!names.contains("ci"),
+			"ci is absent from the construction table when cap-ci is off"
 		);
 		#[cfg(not(feature = "cap-media"))]
 		assert!(

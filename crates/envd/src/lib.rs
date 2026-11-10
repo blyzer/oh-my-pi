@@ -49,7 +49,9 @@ pub mod exthost;
 /// The hosts a fetch reaches and the approval subjects keyed on them.
 pub mod fetch_host;
 mod github;
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 mod github_adapter;
+#[cfg(feature = "cap-forge")]
 pub use github_adapter::CheckoutForge;
 mod github_params;
 pub mod github_url;
@@ -1383,6 +1385,8 @@ impl ProjectEnvironment {
 	/// Chat's git watcher reads the branch's change request through
 	/// [`CheckoutForge::view_branch`], which calls `view_change_request` on
 	/// the same router `forge@1` uses. The router is built on the first read.
+	/// Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
 	pub fn checkout_forge(&self, con: &Ctx) -> CheckoutForge {
 		CheckoutForge::new(
 			self.lifecycle.server.project_root(),

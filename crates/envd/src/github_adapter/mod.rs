@@ -25,23 +25,31 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(feature = "cap-forge")]
 use omp_cache::forge_cache::{ForgeCache, ForgeCachePolicy};
+#[cfg(feature = "cap-ci")]
 use omp_ci::{
 	ArtifactPage, Capabilities, CiError, CiHost, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline,
 	RunRef, Trigger,
 };
+#[cfg(feature = "cap-ci")]
 use omp_ci_delegated::{Delegated as CiDelegated, PermitAll as CiPermitAll};
 use omp_core::{Str, sf};
+#[cfg(feature = "cap-forge")]
 use omp_forge::{
 	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
 	CommitRef, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
 	IssueState, PushReceipt, PushRequest, RepoRef, Repository, RequestState, ResourceKind,
 	SearchHit, SearchKind, SearchPage, SearchQuery,
 };
+#[cfg(feature = "cap-forge")]
 use omp_forge_delegated::{Delegated as ForgeDelegated, PermitAll as ForgePermitAll};
+#[cfg(feature = "cap-forge")]
 use omp_vcs::git::GitRepo;
+#[cfg(feature = "cap-forge")]
 use parking_lot::Mutex;
 use serde_json::Value;
+#[cfg(feature = "cap-forge")]
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -53,12 +61,14 @@ use crate::{
 };
 
 /// GitHub implementation of [`ForgeHost`].
+#[cfg(feature = "cap-forge")]
 #[derive(Clone)]
 pub(crate) struct GithubForgeAdapter {
 	service: Arc<GithubService>,
 }
 
 /// GitHub implementation of [`CiHost`].
+#[cfg(feature = "cap-ci")]
 #[derive(Clone)]
 pub(crate) struct GithubCiAdapter {
 	service: Arc<GithubService>,
@@ -67,6 +77,7 @@ pub(crate) struct GithubCiAdapter {
 /// Routes `forge@1` to [`GithubForgeAdapter`].
 ///
 /// See the module docs for `PermitAll` and host registration.
+#[cfg(feature = "cap-forge")]
 pub(crate) fn forge_router(
 	service: Arc<GithubService>,
 ) -> ForgeDelegated<GithubForgeAdapter, ForgePermitAll> {
@@ -84,6 +95,7 @@ pub(crate) fn forge_router(
 /// Routes `ci@1` to [`GithubCiAdapter`] with log streaming only.
 ///
 /// See the module docs for `PermitAll` and host registration.
+#[cfg(feature = "cap-ci")]
 pub(crate) fn ci_router(service: Arc<GithubService>) -> CiDelegated<GithubCiAdapter, CiPermitAll> {
 	let adapter = GithubCiAdapter { service: Arc::clone(&service) };
 	let caps = github_capabilities();
@@ -97,6 +109,7 @@ pub(crate) fn ci_router(service: Arc<GithubService>) -> CiDelegated<GithubCiAdap
 	builder.build()
 }
 
+#[cfg(feature = "cap-ci")]
 fn github_capabilities() -> Capabilities {
 	Capabilities { log_stream: true, ..Capabilities::none() }
 }
@@ -112,9 +125,11 @@ fn register_checkout_host(service: &GithubService, mut register: impl FnMut(&str
 }
 
 /// How long a branch change-request read may take before the watcher moves on.
+#[cfg(feature = "cap-forge")]
 const BRANCH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Forge `Delegated` router for one checkout.
+#[cfg(feature = "cap-forge")]
 ///
 /// This is the same router `forge@1` builds (`forge_router`).
 /// [`Self::view_branch`] resolves the open change-request number for the
@@ -126,6 +141,7 @@ pub struct CheckoutForge {
 	inner: Arc<CheckoutForgeInner>,
 }
 
+#[cfg(feature = "cap-forge")]
 struct CheckoutForgeInner {
 	root:        PathBuf,
 	state_dir:   PathBuf,
@@ -135,12 +151,14 @@ struct CheckoutForgeInner {
 	built:       Mutex<Option<BuiltForge>>,
 }
 
+#[cfg(feature = "cap-forge")]
 #[derive(Clone)]
 struct BuiltForge {
 	service: Arc<GithubService>,
 	router:  ForgeDelegated<GithubForgeAdapter, ForgePermitAll>,
 }
 
+#[cfg(feature = "cap-forge")]
 impl CheckoutForge {
 	/// Shares `blobs` and `credentials` with the project environment.
 	///
@@ -227,6 +245,7 @@ impl CheckoutForge {
 }
 
 /// Repository the checkout's origin (or first remote) names.
+#[cfg(feature = "cap-forge")]
 pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 	let repo =
 		github_url::infer_repo(root).map_err(|_| ForgeError::Unscoped { op: ForgeOp::RepoView })?;
@@ -238,6 +257,7 @@ pub(crate) fn checkout_repo(root: &Path) -> Result<RepoRef, ForgeError> {
 
 /// `github_invalid_pr` is the lookup's "no single open request" answer:
 /// an empty or unsafe branch, zero matches, or more than one match.
+#[cfg(feature = "cap-forge")]
 fn no_single_open_request(error: &github_params::Fault) -> bool {
 	error.code == "github_invalid_pr"
 }
@@ -246,6 +266,7 @@ fn no_single_open_request(error: &github_params::Fault) -> bool {
 ///
 /// GitHub Enterprise hosts whose URL does not contain `github.com` stay dark,
 /// matching the previous git-watch lookup. GitLab waits on the T2 extension.
+#[cfg(feature = "cap-forge")]
 fn serves_github(root: &Path) -> bool {
 	let Ok(Some(repo)) = GitRepo::discover(root) else {
 		return false;
@@ -304,6 +325,7 @@ fn blank(op: Operation) -> Params {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn repo_arg(op: ForgeOp, repo: &RepoRef) -> Result<Str, ForgeError> {
 	if repo.owner.contains('/') {
 		return Err(ForgeError::Unavailable { op });
@@ -315,6 +337,7 @@ fn repo_arg(op: ForgeOp, repo: &RepoRef) -> Result<Str, ForgeError> {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn map_forge(
 	op: ForgeOp,
 	repo: &RepoRef,
@@ -359,6 +382,7 @@ fn map_forge(
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn repository_from(repo: &RepoRef, value: &Value) -> Repository {
 	Repository {
 		repo:           repo.clone(),
@@ -369,6 +393,7 @@ fn repository_from(repo: &RepoRef, value: &Value) -> Repository {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn github_repo(op: ForgeOp, repo: &RepoRef) -> Result<github_url::GithubRepo, ForgeError> {
 	if repo.owner.contains('/') {
 		return Err(ForgeError::Unavailable { op });
@@ -377,6 +402,7 @@ fn github_repo(op: ForgeOp, repo: &RepoRef) -> Result<github_url::GithubRepo, Fo
 		.map_err(|_| ForgeError::Unavailable { op })
 }
 
+#[cfg(feature = "cap-forge")]
 fn change_request_from(
 	repo: &RepoRef,
 	value: &Value,
@@ -412,6 +438,7 @@ fn change_request_from(
 	})
 }
 
+#[cfg(feature = "cap-forge")]
 fn issue_from(repo: &RepoRef, value: &Value) -> Result<Issue, ForgeError> {
 	let number = value
 		.get("number")
@@ -432,6 +459,7 @@ fn issue_from(repo: &RepoRef, value: &Value) -> Result<Issue, ForgeError> {
 	})
 }
 
+#[cfg(feature = "cap-forge")]
 fn comment_from(value: &Value) -> Comment {
 	Comment {
 		author:     value
@@ -444,6 +472,7 @@ fn comment_from(value: &Value) -> Comment {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn checkout_from(repo: &RepoRef, value: &Value) -> Result<CheckoutReceipt, ForgeError> {
 	let row = value
 		.pointer("/checkouts/0")
@@ -467,6 +496,7 @@ fn checkout_from(repo: &RepoRef, value: &Value) -> Result<CheckoutReceipt, Forge
 	})
 }
 
+#[cfg(feature = "cap-forge")]
 fn push_from(repo: &RepoRef, value: &Value) -> Result<PushReceipt, ForgeError> {
 	let row = value
 		.pointer("/pushed/0")
@@ -478,6 +508,7 @@ fn push_from(repo: &RepoRef, value: &Value) -> Result<PushReceipt, ForgeError> {
 	Ok(PushReceipt { repo: repo.clone(), number, head_commit: json_str(row, "head_sha") })
 }
 
+#[cfg(feature = "cap-forge")]
 fn search_page(query: &SearchQuery, value: &Value) -> SearchPage {
 	let fallback = query.repo.clone();
 	let hits = value
@@ -493,6 +524,7 @@ fn search_page(query: &SearchQuery, value: &Value) -> SearchPage {
 	SearchPage::new(query.kind, hits)
 }
 
+#[cfg(feature = "cap-forge")]
 fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Option<SearchHit> {
 	let repo = hit_repo(kind, fallback?, row);
 	let (title, number, commit) = match kind {
@@ -515,6 +547,7 @@ fn search_hit(kind: SearchKind, fallback: Option<&RepoRef>, row: &Value) -> Opti
 	Some(SearchHit { repo, title, web_url: json_str(row, "html_url"), number, commit })
 }
 
+#[cfg(feature = "cap-forge")]
 fn hit_repo(kind: SearchKind, fallback: &RepoRef, row: &Value) -> RepoRef {
 	let full = match kind {
 		SearchKind::Code => row.pointer("/repository/full_name").and_then(Value::as_str),
@@ -529,6 +562,7 @@ fn hit_repo(kind: SearchKind, fallback: &RepoRef, row: &Value) -> RepoRef {
 	fallback.clone()
 }
 
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 fn json_str(value: &Value, key: &str) -> Str {
 	value
 		.get(key)
@@ -537,6 +571,7 @@ fn json_str(value: &Value, key: &str) -> Str {
 		.unwrap_or_else(Str::empty)
 }
 
+#[cfg(feature = "cap-forge")]
 fn pointer_str(value: &Value, pointer: &str) -> Str {
 	value
 		.pointer(pointer)
@@ -545,6 +580,7 @@ fn pointer_str(value: &Value, pointer: &str) -> Str {
 		.unwrap_or_else(Str::empty)
 }
 
+#[cfg(feature = "cap-forge")]
 fn search_operation(kind: SearchKind) -> Operation {
 	match kind {
 		SearchKind::ChangeRequests => Operation::SearchPrs,
@@ -555,6 +591,7 @@ fn search_operation(kind: SearchKind) -> Operation {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 impl ForgeHost for GithubForgeAdapter {
 	fn view_repo(
 		&self,
@@ -793,6 +830,7 @@ impl ForgeHost for GithubForgeAdapter {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 fn map_ci(op: CiOp, run: &RunRef, fault: &github_params::Fault) -> CiError {
 	if fault.status == Some(404) {
 		return match op {
@@ -813,6 +851,7 @@ fn map_ci(op: CiOp, run: &RunRef, fault: &github_params::Fault) -> CiError {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 fn pipeline_id(run: &RunRef) -> Result<u64, CiError> {
 	let id = run.pipeline.parse::<u64>().unwrap_or(0);
 	if id == 0 {
@@ -825,6 +864,7 @@ fn pipeline_id(run: &RunRef) -> Result<u64, CiError> {
 }
 
 /// Maps one Actions run snapshot (`{ run, jobs }`) onto a [`Pipeline`].
+#[cfg(feature = "cap-ci")]
 fn pipeline_from_actions(run: &RunRef, value: &Value) -> Pipeline {
 	let body = value.get("run").unwrap_or(value);
 	let name = body
@@ -851,6 +891,7 @@ fn pipeline_from_actions(run: &RunRef, value: &Value) -> Pipeline {
 	pipeline
 }
 
+#[cfg(feature = "cap-ci")]
 fn job_from_actions(value: &Value) -> Option<Job> {
 	let id = value.get("id").and_then(Value::as_u64)?.to_string();
 	let name = value
@@ -873,6 +914,7 @@ fn job_from_actions(value: &Value) -> Option<Job> {
 /// `action_required` is [`CiStatus::Failure`]. The old watch treated that
 /// conclusion as a failure, and mapping it to [`CiStatus::Manual`] would
 /// leave `watch: true` polling a state GitHub will not leave on its own.
+#[cfg(feature = "cap-ci")]
 fn ci_status(status: Option<&str>, conclusion: Option<&str>) -> CiStatus {
 	match conclusion {
 		Some("success") => CiStatus::Success,
@@ -888,6 +930,7 @@ fn ci_status(status: Option<&str>, conclusion: Option<&str>) -> CiStatus {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 impl CiHost for GithubCiAdapter {
 	fn capabilities(
 		&self,
@@ -948,6 +991,7 @@ impl CiHost for GithubCiAdapter {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 async fn log_page(service: &GithubService, run: &RunRef) -> Result<LogPage, CiError> {
 	let Some(job) = run.job.clone() else {
 		let pipeline = status_snapshot(service, run).await?;
@@ -972,6 +1016,7 @@ async fn log_page(service: &GithubService, run: &RunRef) -> Result<LogPage, CiEr
 	one_job_log(service, &scoped).await
 }
 
+#[cfg(feature = "cap-ci")]
 async fn status_snapshot(service: &GithubService, run: &RunRef) -> Result<Pipeline, CiError> {
 	let id = pipeline_id(run)?;
 	let repo = service
@@ -986,6 +1031,7 @@ async fn status_snapshot(service: &GithubService, run: &RunRef) -> Result<Pipeli
 	Ok(pipeline_from_actions(run, &response.value))
 }
 
+#[cfg(feature = "cap-ci")]
 async fn one_job_log(service: &GithubService, run: &RunRef) -> Result<LogPage, CiError> {
 	let job = run
 		.job
@@ -1017,13 +1063,18 @@ mod tests {
 	use std::sync::Arc;
 
 	use omp_cache::forge_cache::ForgeCache;
+	#[cfg(feature = "cap-ci")]
 	use omp_ci::{CiError, CiHost as _, CiOp, CiProvider, CiStatus, RunRef, Trigger};
 	use omp_con::Ctx;
 	use omp_core::Str;
+	#[cfg(feature = "cap-forge")]
 	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, IssueState, RepoRef, RequestState};
 	use serde_json::json;
 
-	use super::{ci_status, forge_router, pipeline_from_actions};
+	#[cfg(feature = "cap-ci")]
+	use super::{ci_status, pipeline_from_actions};
+	#[cfg(feature = "cap-forge")]
+	use super::forge_router;
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
 		tool_settings::ForgeCacheSettings,
@@ -1047,10 +1098,12 @@ mod tests {
 		)
 	}
 
+	#[cfg(feature = "cap-ci")]
 	fn run(pipeline: &str) -> RunRef {
 		RunRef::try_new(CiProvider::try_new("github.com").unwrap(), pipeline, None).unwrap()
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn unregistered_host_is_not_sent_to_github() {
 		let dir = tempfile::tempdir().expect("temp");
@@ -1063,6 +1116,7 @@ mod tests {
 		);
 	}
 
+	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn ci_writes_and_artifacts_are_not_capable() {
 		let dir = tempfile::tempdir().expect("temp");
@@ -1101,6 +1155,7 @@ mod tests {
 		assert!(caps.allows(CiOp::Status));
 	}
 
+	#[cfg(feature = "cap-ci")]
 	#[test]
 	fn actions_snapshot_maps_failure_and_action_required() {
 		let run = run("42");
@@ -1135,10 +1190,12 @@ mod tests {
 		assert_eq!(ci_status(Some("completed"), Some("skipped")), CiStatus::Skipped);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn view_repo() -> RepoRef {
 		RepoRef::try_new("github.com", "acme", "widget").unwrap()
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn http_fault(status: u16) -> crate::github_params::Fault {
 		crate::github_params::Fault {
 			code:                 Str::new_static("github_http_error"),
@@ -1150,6 +1207,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn pull_request_json_maps_onto_a_change_request() {
 		let repo = view_repo();
@@ -1195,6 +1253,7 @@ mod tests {
 		assert_eq!(closed.state, RequestState::Closed);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn issue_json_maps_onto_an_issue() {
 		let repo = view_repo();
@@ -1222,6 +1281,7 @@ mod tests {
 		assert!(closed.body.is_empty());
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn comment_json_keeps_author_time_and_body() {
 		let comment = super::comment_from(&json!({
@@ -1237,6 +1297,7 @@ mod tests {
 		assert!(anonymous.body.is_empty());
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn missing_views_are_not_found_rather_than_unsupported() {
 		let repo = view_repo();
@@ -1249,6 +1310,7 @@ mod tests {
 		assert!(matches!(rejected, ForgeError::Rejected { status: 500, .. }), "{rejected}");
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn github_remote_gate_requires_a_github_com_remote() {
 		let dir = tempfile::tempdir().expect("temp");
@@ -1268,6 +1330,7 @@ mod tests {
 		assert!(super::serves_github(root));
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn view_branch_returns_none_without_a_github_remote() {
 		let dir = tempfile::tempdir().expect("temp");

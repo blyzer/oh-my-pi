@@ -33,14 +33,19 @@ use omp_tools::read::{
 };
 
 use super::{
-	github_url::{GithubCredentialBridge, GithubResolver, GithubScheme},
+	github_url::GithubCredentialBridge,
 	mcp::McpService,
 	security_scan::SecurityScanService,
 	vault::VaultService,
 };
-use crate::{ContentResolver, HostResources, fetch_host::FetchHost, github_adapter};
+#[cfg(feature = "cap-forge")]
+use super::github_url::{GithubResolver, GithubScheme};
+use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
+#[cfg(feature = "cap-forge")]
+use crate::github_adapter;
 
 /// Forge router the production `pr://` and `issue://` resolvers read through.
+#[cfg(feature = "cap-forge")]
 type SchemeForge = omp_forge_delegated::Delegated<
 	github_adapter::GithubForgeAdapter,
 	omp_forge_delegated::PermitAll,
@@ -218,9 +223,11 @@ pub(super) enum UrlResolver {
 	/// Read-only agent transcript index and bodies.
 	History(RegistryResolver),
 	/// Cached forge issues. Numbered reads use the delegated forge host.
+	#[cfg(feature = "cap-forge")]
 	Issue(GithubResolver<SchemeForge>),
 	/// Cached forge change requests and diffs. Numbered reads use the delegated
 	/// forge host.
+	#[cfg(feature = "cap-forge")]
 	Pr(GithubResolver<SchemeForge>),
 	/// Session-local scratch files.
 	Local(local::LocalResolver),
@@ -254,6 +261,7 @@ impl Resolve for UrlResolver {
 			Self::Artifact(resolver) => resolver.read(resource, selector).await,
 			Self::Attachment(resolver) => resolver.read(resource, selector).await,
 			Self::Agent(resolver) | Self::History(resolver) => resolver.read(resource, selector).await,
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => resolver.read(resource, selector).await,
 			Self::Local(resolver) => resolver.read(resource, selector).await,
 			Self::Memory(resolver) => resolver.read(resource, selector).await,
@@ -274,6 +282,7 @@ impl Resolve for UrlResolver {
 		selector: &'a ParsedSelector,
 	) -> Result<ResolvedRead, Fault> {
 		match self {
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.read_with_diags(resource, selector).await
 			},
@@ -295,6 +304,7 @@ impl Resolve for UrlResolver {
 			Self::Agent(resolver) | Self::History(resolver) => {
 				resolver.read_query(resource, query, selector).await
 			},
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.read_query(resource, query, selector).await
 			},
@@ -318,6 +328,7 @@ impl Resolve for UrlResolver {
 		selector: &'a ParsedSelector,
 	) -> Result<ResolvedRead, Fault> {
 		match self {
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver
 					.read_query_with_diags(resource, query, selector)
@@ -360,6 +371,7 @@ impl Resolve for UrlResolver {
 			}),
 			Self::Content(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Docs(resolver) => resolver.list(resource, max_entries, max_bytes).await,
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Err(Fault::Invalid {
 				message: Str::new_static("GitHub list resources are read as Markdown."),
 			}),
@@ -413,7 +425,9 @@ impl Resolve for UrlResolver {
 			Self::Mcp(resolver) => resolver.complete(query, max_results).await,
 			Self::Content(resolver) => resolver.complete(query, max_results).await,
 			Self::Docs(resolver) => resolver.complete(query, max_results).await,
-			Self::Issue(_) | Self::Pr(_) | Self::Conflict(_) => Ok(Vec::new()),
+			#[cfg(feature = "cap-forge")]
+			Self::Issue(_) | Self::Pr(_) => Ok(Vec::new()),
+			Self::Conflict(_) => Ok(Vec::new()),
 		}
 	}
 
@@ -439,6 +453,7 @@ impl Resolve for UrlResolver {
 			Self::Ssh(_) => ssh::parse_resource(resource)
 				.is_ok()
 				.then_some(FetchEffects { credentials: true }),
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Some(FetchEffects { credentials: true }),
 			Self::Mcp(resolver) => resolver.read_fetch(resource, query),
 			Self::Host(_) => Some(FetchEffects { credentials: false }),
@@ -469,6 +484,8 @@ impl Resolve for UrlResolver {
 		match self {
 			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => Some(FetchEffects { credentials: true }),
+			#[cfg(feature = "cap-forge")]
+			Self::Issue(_) | Self::Pr(_) => None,
 			Self::Host(_)
 			| Self::Artifact(_)
 			| Self::Attachment(_)
@@ -481,8 +498,6 @@ impl Resolve for UrlResolver {
 			| Self::Mcp(_)
 			| Self::Content(_)
 			| Self::Docs(_)
-			| Self::Issue(_)
-			| Self::Pr(_)
 			| Self::Conflict(_) => None,
 		}
 	}
@@ -496,6 +511,7 @@ impl UrlResolver {
 	/// resource it cannot name a host for.
 	pub(super) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<FetchHost> {
 		match self {
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.fetch_host(resource, query).map(FetchHost::github)
 			},
@@ -536,7 +552,7 @@ pub(super) fn production_url_resolvers(
 	workspace_root: PathBuf,
 	forge_cache: Arc<ForgeCache>,
 	github_credentials: Arc<GithubCredentialBridge>,
-	forge: SchemeForge,
+	#[cfg(feature = "cap-forge")] forge: SchemeForge,
 	content: Vec<Arc<dyn ContentResolver>>,
 	host_resources: Option<Arc<dyn HostResources>>,
 	session_authority: Option<Arc<dyn SessionAuthority>>,
@@ -600,30 +616,35 @@ pub(super) fn production_url_resolvers(
 			UrlResolver::Mcp(mcp::McpUrlResolver::new(mcp)),
 		)
 		.expect("mcp URL resolver is unique");
-	builder
-		.register(
-			SchemeEntry::new(Scheme::Issue, true, false, "cached forge issues"),
-			UrlResolver::Issue(GithubResolver::new(
-				GithubScheme::Issue,
-				workspace_root.clone(),
-				Arc::clone(&forge_cache),
-				Arc::clone(&github_credentials),
-				forge.clone(),
-			)),
-		)
-		.expect("issue URL resolver is unique");
-	builder
-		.register(
-			SchemeEntry::new(Scheme::Pr, true, false, "cached forge change requests and diffs"),
-			UrlResolver::Pr(GithubResolver::new(
-				GithubScheme::PullRequest,
-				workspace_root,
-				forge_cache,
-				github_credentials,
-				forge,
-			)),
-		)
-		.expect("pr URL resolver is unique");
+	#[cfg(feature = "cap-forge")]
+	{
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Issue, true, false, "cached forge issues"),
+				UrlResolver::Issue(GithubResolver::new(
+					GithubScheme::Issue,
+					workspace_root.clone(),
+					Arc::clone(&forge_cache),
+					Arc::clone(&github_credentials),
+					forge.clone(),
+				)),
+			)
+			.expect("issue URL resolver is unique");
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Pr, true, false, "cached forge change requests and diffs"),
+				UrlResolver::Pr(GithubResolver::new(
+					GithubScheme::PullRequest,
+					workspace_root.clone(),
+					forge_cache,
+					github_credentials,
+					forge,
+				)),
+			)
+			.expect("pr URL resolver is unique");
+	}
+	#[cfg(not(feature = "cap-forge"))]
+	let _ = (forge_cache, github_credentials);
 	builder
 		.register(
 			SchemeEntry::new(Scheme::Attachment, true, false, "latest user image attachments"),

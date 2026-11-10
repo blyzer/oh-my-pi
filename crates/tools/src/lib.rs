@@ -41,6 +41,8 @@ pub mod staging;
 pub use omp_macros::view;
 pub use render::{BuiltinRendererIdentities, live_renderers, register_builtin_renderers};
 
+/// CI pipeline tool. Compiled with `cap-ci`.
+#[cfg(feature = "cap-ci")]
 pub mod ci;
 /// Revisioned project debugger tool.
 pub mod debug;
@@ -56,7 +58,8 @@ pub mod edit;
 pub mod editor_sync;
 /// Persistent Python evaluation.
 pub mod eval;
-/// Direct GitHub API and isolated pull-request operations.
+/// Forge change-request and issue tool. Compiled with `cap-forge`.
+#[cfg(feature = "cap-forge")]
 pub mod forge;
 /// Native renderer lifecycle fixtures for visual QA.
 pub mod gallery;

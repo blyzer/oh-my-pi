@@ -2,12 +2,14 @@
 
 mod agents;
 mod ask;
+#[cfg(feature = "cap-ci")]
 mod ci;
 mod context_gauge;
 mod custom;
 mod debug;
 mod exec;
 mod files;
+#[cfg(feature = "cap-forge")]
 mod forge;
 mod memory;
 mod report_issue;
@@ -50,7 +52,9 @@ pub(crate) fn all() -> Vec<&'static CardFixture> {
 	fixtures.extend(debug::FIXTURES);
 	fixtures.extend(exec::FIXTURES);
 	fixtures.extend(files::FIXTURES);
+	#[cfg(feature = "cap-ci")]
 	fixtures.extend(ci::FIXTURES);
+	#[cfg(feature = "cap-forge")]
 	fixtures.extend(forge::FIXTURES);
 	fixtures.extend(memory::FIXTURES);
 	fixtures.extend(report_issue::FIXTURES);

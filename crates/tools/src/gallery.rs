@@ -63,7 +63,9 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 	let lsp = identity("lsp", "");
 	let debug = identity("debug", "");
 	let goal = identity("goal", "");
+	#[cfg(feature = "cap-forge")]
 	let forge = identity("forge", "");
+	#[cfg(feature = "cap-ci")]
 	let ci = identity("ci", "");
 	let browser = identity("browser", "");
 	let computer = identity("computer", "");
@@ -85,8 +87,14 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		lsp:        Some(lsp.clone()),
 		debug:      Some(debug.clone()),
 		goal:       Some(goal.clone()),
+		#[cfg(feature = "cap-forge")]
 		forge:      Some(forge.clone()),
+		#[cfg(not(feature = "cap-forge"))]
+		forge:      None,
+		#[cfg(feature = "cap-ci")]
 		ci:         Some(ci.clone()),
+		#[cfg(not(feature = "cap-ci"))]
+		ci:         None,
 		browser:    Some(browser.clone()),
 		computer:   Some(computer.clone()),
 	};
@@ -101,7 +109,14 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		crate::render::interaction::gallery_fixtures(ask, todo, think),
 		crate::render::codeintel::gallery_fixtures(lsp, debug),
 		crate::render::agentic::gallery_fixtures(goal),
-		crate::render::misc::gallery_fixtures(forge, ci, browser, computer),
+		crate::render::misc::gallery_fixtures(
+			#[cfg(feature = "cap-forge")]
+			forge,
+			#[cfg(feature = "cap-ci")]
+			ci,
+			browser,
+			computer,
+		),
 	]
 	.concat();
 	BuiltinRendererGallery { identities, fixtures }

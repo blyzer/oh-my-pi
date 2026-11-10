@@ -30,22 +30,30 @@ use omp_ai::{
 	},
 	id::{AccountId, PrincipalId},
 };
+#[cfg(feature = "cap-forge")]
 use omp_cache::forge_cache::{ForgeCache, ForgeCacheKey, ForgeCacheStatus, ForgeResourceKind};
 use omp_catalog::AuthSpecId;
-use omp_core::{CowBytes, SecretString, Str, sf};
+use omp_core::{SecretString, Str, sf};
+#[cfg(feature = "cap-forge")]
+use omp_core::CowBytes;
+#[cfg(feature = "cap-forge")]
 use omp_forge::{
 	Comment, DiffSelector, ForgeError, ForgeHost, RepoRef, ResourceKind, ResourceSelector,
 	SchemeError, SchemeRef, parse_resource_url,
 };
+#[cfg(feature = "cap-forge")]
 use omp_tool::{Diag, DiagKind};
+use omp_tools::read::Fault;
+#[cfg(feature = "cap-forge")]
 use omp_tools::read::{
-	Fault,
 	resolver::{Resolve, ResolvedRead},
 	selector::ParsedSelector,
 };
 use omp_vcs::git::GitRepo;
 use parking_lot::{Mutex, MutexGuard};
+#[cfg(feature = "cap-forge")]
 use serde_json::Value;
+#[cfg(feature = "cap-forge")]
 use smallvec::smallvec;
 
 use super::tool_url;
@@ -329,12 +337,14 @@ fn ambient_lease(host: &str, source: &str, token: SecretString) -> CredentialLea
 	)
 }
 
+#[cfg(feature = "cap-forge")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GithubScheme {
 	Issue,
 	PullRequest,
 }
 
+#[cfg(feature = "cap-forge")]
 pub(super) struct GithubResolver<H> {
 	scheme:      GithubScheme,
 	root:        PathBuf,
@@ -344,6 +354,7 @@ pub(super) struct GithubResolver<H> {
 	forge:       H,
 }
 
+#[cfg(feature = "cap-forge")]
 impl<H> GithubResolver<H> {
 	pub(super) fn new(
 		scheme: GithubScheme,
@@ -680,6 +691,7 @@ impl<H> GithubResolver<H> {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 impl<H: ForgeHost> Resolve for GithubResolver<H> {
 	async fn read<'a>(
 		&'a self,
@@ -724,6 +736,7 @@ impl<H: ForgeHost> Resolve for GithubResolver<H> {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn selected_read(
 	resolved: GithubRead,
 	resource: &str,
@@ -746,34 +759,40 @@ fn selected_read(
 	Ok(ResolvedRead { data, diags })
 }
 
+#[cfg(feature = "cap-forge")]
 impl<H> fmt::Debug for GithubResolver<H> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str("GithubResolver(..)")
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 struct GithubRead {
 	data:  Vec<u8>,
 	stale: bool,
 }
 
+#[cfg(feature = "cap-forge")]
 enum Fetch {
 	NotModified,
 	Body { body: Vec<u8>, etag: Option<Str> },
 }
 
+#[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug)]
 enum View {
 	List { state: Str, limit: u32, author: Option<Str>, label: Option<Str> },
 	Detail { comments: bool },
 	Diff { mode: DiffMode },
 }
+#[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug)]
 enum DiffMode {
 	Index,
 	All,
 	Slice(usize),
 }
+#[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug)]
 struct Target {
 	scheme: GithubScheme,
@@ -782,6 +801,7 @@ struct Target {
 	view:   View,
 }
 
+#[cfg(feature = "cap-forge")]
 impl Target {
 	fn parse(
 		scheme: GithubScheme,
@@ -992,6 +1012,7 @@ impl Target {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_numbered(
 	title: &str,
 	body: &str,
@@ -1015,6 +1036,7 @@ fn render_numbered(
 	out.into_bytes()
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_comment_page(out: &mut String, comments: &[Comment]) {
 	out.push_str("\n\n## Comments\n");
 	if comments.is_empty() {
@@ -1042,6 +1064,7 @@ fn render_comment_page(out: &mut String, comments: &[Comment]) {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_comments(out: &mut String, comments: &[Value]) {
 	out.push_str("\n\n## Comments\n");
 	if comments.is_empty() {
@@ -1068,6 +1091,7 @@ fn render_comments(out: &mut String, comments: &[Value]) {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_item(out: &mut String, item: &Value, repo: &str, scheme: GithubScheme) {
 	let number = item
 		.get("number")
@@ -1087,6 +1111,7 @@ fn render_item(out: &mut String, item: &Value, repo: &str, scheme: GithubScheme)
 		}
 	));
 }
+#[cfg(feature = "cap-forge")]
 fn render_diff(text: &str, mode: &DiffMode, repo: &str, number: u64) -> Result<Vec<u8>, Fault> {
 	if matches!(mode, DiffMode::All) {
 		return Ok(text.as_bytes().to_vec());
@@ -1115,6 +1140,7 @@ fn render_diff(text: &str, mode: &DiffMode, repo: &str, number: u64) -> Result<V
 	}
 	Ok(out.into_bytes())
 }
+#[cfg(feature = "cap-forge")]
 fn numbered_ref(
 	scheme: GithubScheme,
 	resource: &str,
@@ -1138,6 +1164,7 @@ fn numbered_ref(
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn is_list_resource(resource: &str) -> bool {
 	let parts = resource
 		.split('/')
@@ -1151,6 +1178,7 @@ fn is_list_resource(resource: &str) -> bool {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn expand_shorthand(scheme: GithubScheme, resource: &str, root: &Path) -> Result<String, Fault> {
 	let name = scheme_name(scheme);
 	if let Some(tail) = shorthand_tail(resource) {
@@ -1160,6 +1188,7 @@ fn expand_shorthand(scheme: GithubScheme, resource: &str, root: &Path) -> Result
 	Ok(format!("{name}://{resource}"))
 }
 
+#[cfg(feature = "cap-forge")]
 fn shorthand_tail(resource: &str) -> Option<String> {
 	let parts = resource
 		.split('/')
@@ -1173,6 +1202,7 @@ fn shorthand_tail(resource: &str) -> Option<String> {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn append_query(url: String, query: Option<&str>) -> String {
 	match query.map(str::trim).filter(|query| !query.is_empty()) {
 		Some(query) => format!("{url}?{query}"),
@@ -1180,6 +1210,7 @@ fn append_query(url: String, query: Option<&str>) -> String {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 const fn scheme_name(scheme: GithubScheme) -> &'static str {
 	match scheme {
 		GithubScheme::Issue => "issue",
@@ -1187,10 +1218,12 @@ const fn scheme_name(scheme: GithubScheme) -> &'static str {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn all_digits(text: &str) -> bool {
 	!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+#[cfg(feature = "cap-forge")]
 fn target_for_scheme(parsed: &SchemeRef) -> Result<Target, Fault> {
 	let host = parsed
 		.host
@@ -1208,6 +1241,7 @@ fn target_for_scheme(parsed: &SchemeRef) -> Result<Target, Fault> {
 	Ok(Target { scheme, repo, number: Some(parsed.number), view })
 }
 
+#[cfg(feature = "cap-forge")]
 fn diff_mode(selector: DiffSelector) -> DiffMode {
 	match selector {
 		DiffSelector::Index => DiffMode::Index,
@@ -1216,6 +1250,7 @@ fn diff_mode(selector: DiffSelector) -> DiffMode {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn diff_repo_label(repo: &RepoRef) -> String {
 	if repo.host.eq_ignore_ascii_case(GITHUB_HOST) {
 		format!("{}/{}", repo.owner, repo.name)
@@ -1224,6 +1259,7 @@ fn diff_repo_label(repo: &RepoRef) -> String {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn forge_fault(error: ForgeError) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }
 }
@@ -1289,6 +1325,7 @@ fn repo_from_host_path(host: &str, path: &str) -> Result<GithubRepo, Fault> {
 	}
 	GithubRepo::new(host, owner, name)
 }
+#[cfg(feature = "cap-forge")]
 fn parse_number(value: &str) -> Result<u64, Fault> {
 	value
 		.parse::<u64>()
@@ -1296,6 +1333,7 @@ fn parse_number(value: &str) -> Result<u64, Fault> {
 		.filter(|n| *n > 0)
 		.ok_or_else(|| invalid("GitHub number must be positive."))
 }
+#[cfg(feature = "cap-forge")]
 fn now_ms() -> u64 {
 	SystemTime::now()
 		.duration_since(UNIX_EPOCH)
@@ -1306,28 +1344,38 @@ fn invalid(message: &'static str) -> Fault {
 }
 /// Creates an invalid-JSON fault, rendering the cause once at this
 /// model-facing fault boundary.
+#[cfg(feature = "cap-forge")]
 fn invalid_json(what: &'static str, cause: impl Display) -> Fault {
 	Fault::Invalid { message: sf!("Invalid {what} JSON: {cause}") }
 }
+#[cfg(feature = "cap-forge")]
 fn cache_fault(error: impl Display) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }
 }
+#[cfg(feature = "cap-forge")]
 fn http_fault(error: impl Display) -> Fault {
 	Fault::Source { message: Str::new(format!("GitHub API request failed: {error}")) }
 }
 #[cfg(test)]
 mod tests {
-	use std::{future::Future, sync::Arc};
+	use std::sync::Arc;
 
-	use omp_cache::forge_cache::ForgeCachePolicy;
+	#[cfg(feature = "cap-forge")]
+	use std::future::Future;
+
 	use omp_core::ExposeSecret as _;
+	#[cfg(feature = "cap-forge")]
+	use omp_cache::forge_cache::ForgeCachePolicy;
+	#[cfg(feature = "cap-forge")]
 	use omp_forge::{
 		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
 		FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
 		IssueState, PushReceipt, PushRequest, Repository, RequestState, ResourceKind, SearchPage,
 		SearchQuery,
 	};
+	#[cfg(feature = "cap-forge")]
 	use omp_forge_delegated::{Delegated, PermitAll};
+	#[cfg(feature = "cap-forge")]
 	use parking_lot::Mutex;
 
 	use super::*;
@@ -1425,6 +1473,7 @@ mod tests {
 		assert!(bridge.cached("ghe.example.com").is_none());
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn stale_cache_is_reported_out_of_band_without_changing_document_bytes() {
 		let cached = b"# Cached issue\n\nBody".to_vec();
@@ -1440,6 +1489,7 @@ mod tests {
 		assert_eq!(resolved.diags[0].severity, omp_tool::Severity::Warn);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn target_parses_dotted_and_single_label_enterprise_hosts() {
 		let root = Path::new("/unused");
@@ -1458,6 +1508,7 @@ mod tests {
 		assert_eq!(issue.api_url(), "https://ghe.example.com/api/v3/repos/owner/repo/issues/8",);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn numeric_tail_disambiguates_host_from_diff_suffix() {
 		let root = Path::new("/unused");
@@ -1498,6 +1549,7 @@ mod tests {
 		assert_eq!(inferred.identity(), "ghe/Owner/Repo");
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn list_urls_stay_outside_the_numbered_parser() {
 		let root = Path::new("/unused");
@@ -1521,6 +1573,7 @@ mod tests {
 		assert_eq!(numbered.selector, ResourceSelector::None);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn shorthand_number_uses_the_checkout_and_keeps_a_diff_selector() {
 		let workspace = tempfile::tempdir().expect("workspace");
@@ -1541,12 +1594,14 @@ mod tests {
 	}
 
 	#[derive(Clone)]
+	#[cfg(feature = "cap-forge")]
 	struct Memory {
 		calls: Arc<Mutex<Vec<&'static str>>>,
 		fail:  Arc<Mutex<bool>>,
 		repo:  Arc<Mutex<Option<RepoRef>>>,
 	}
 
+	#[cfg(feature = "cap-forge")]
 	impl Memory {
 		fn new() -> Self {
 			Self {
@@ -1566,6 +1621,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(feature = "cap-forge")]
 	impl ForgeHost for Memory {
 		fn view_repo(
 			&self,
@@ -1720,12 +1776,14 @@ mod tests {
 		}
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn router(host: Memory) -> Delegated<Memory, PermitAll> {
 		let mut builder = Delegated::builder(PermitAll);
 		builder.register(GITHUB_HOST, host).expect("github.com");
 		builder.build()
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn open_cache(dir: &Path, soft_secs: u64) -> Arc<ForgeCache> {
 		Arc::new(
 			ForgeCache::open(
@@ -1740,6 +1798,7 @@ mod tests {
 		)
 	}
 
+	#[cfg(feature = "cap-forge")]
 	fn resolver(
 		scheme: GithubScheme,
 		root: &Path,
@@ -1755,6 +1814,7 @@ mod tests {
 		)
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn numbered_reads_render_title_and_body_and_cache_without_an_etag() {
 		let dir = tempfile::tempdir().expect("dir");
@@ -1798,6 +1858,7 @@ mod tests {
 		assert_eq!(host.calls(), ["change", "pr-comments"]);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn issue_comments_can_be_disabled_and_an_unregistered_host_is_not_github() {
 		let dir = tempfile::tempdir().expect("dir");
@@ -1821,6 +1882,7 @@ mod tests {
 		assert_eq!(host.calls(), ["issue"]);
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn diff_selectors_slice_the_host_text() {
 		let dir = tempfile::tempdir().expect("dir");
@@ -1850,6 +1912,7 @@ mod tests {
 		assert!(host.calls().iter().all(|call| *call == "diff"));
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn a_failed_refresh_returns_the_cached_body_and_a_stale_diag() {
 		let dir = tempfile::tempdir().expect("dir");

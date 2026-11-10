@@ -2,8 +2,10 @@
 
 use std::fmt::Write as _;
 
+#[cfg(feature = "cap-ci")]
 use omp_ci::CiOp;
 use omp_core::{Str, sf};
+#[cfg(feature = "cap-forge")]
 use omp_forge::ForgeOp;
 use omp_tool::{CallOutcome, ToolIdentity, render::RenderFold};
 use serde_json::Value;
@@ -14,13 +16,16 @@ use crate::{
 		Action as BrowserAction, Fault as BrowserFault, Payload as BrowserPayload,
 		Update as BrowserUpdate,
 	},
-	ci::{Fault as CiFault, Payload as CiPayload, Update as CiUpdate},
 	computer::{Fault as ComputerFault, Payload as ComputerPayload, Update as ComputerUpdate},
-	forge::{Fault as ForgeFault, Payload as ForgePayload, Update as ForgeUpdate},
 	gallery::RendererGalleryFixture,
 	view,
 };
+#[cfg(feature = "cap-ci")]
+use crate::ci::{Fault as CiFault, Payload as CiPayload, Update as CiUpdate};
+#[cfg(feature = "cap-forge")]
+use crate::forge::{Fault as ForgeFault, Payload as ForgePayload, Update as ForgeUpdate};
 
+#[cfg(feature = "cap-forge")]
 #[derive(Default)]
 pub(super) struct ForgeState {
 	op:       Option<ForgeOp>,
@@ -29,8 +34,10 @@ pub(super) struct ForgeState {
 	progress: Option<Str>,
 }
 
+#[cfg(feature = "cap-forge")]
 pub(super) struct ForgeRenderer;
 
+#[cfg(feature = "cap-forge")]
 impl RenderFold for ForgeRenderer {
 	type Outcome = CallOutcome<ForgePayload, ForgeFault>;
 	type State = ForgeState;
@@ -62,6 +69,7 @@ impl RenderFold for ForgeRenderer {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_forge_live(state: &ForgeState) -> El {
 	let action = state
 		.op
@@ -83,6 +91,7 @@ fn render_forge_live(state: &ForgeState) -> El {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_forge_payload(state: &ForgeState, payload: &ForgePayload) -> El {
 	if matches!(
 		payload.op,
@@ -108,6 +117,7 @@ fn render_forge_payload(state: &ForgeState, payload: &ForgePayload) -> El {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_forge_search(state: &ForgeState, payload: &ForgePayload) -> El {
 	let hits = payload.result.get("hits").and_then(Value::as_array);
 	let count = hits.map_or(0, |hits| hits.len() as u64);
@@ -130,6 +140,7 @@ fn render_forge_search(state: &ForgeState, payload: &ForgePayload) -> El {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn forge_header(state: &ForgeState, payload: &ForgePayload) -> El {
 	let repo = state
 		.repo
@@ -149,6 +160,7 @@ fn forge_header(state: &ForgeState, payload: &ForgePayload) -> El {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn forge_search_row(hit: &Value) -> El {
 	let number = hit.get("number").and_then(Value::as_u64);
 	let title = hit
@@ -165,6 +177,7 @@ fn forge_search_row(hit: &Value) -> El {
 }
 
 #[derive(Default)]
+#[cfg(feature = "cap-ci")]
 pub(super) struct CiState {
 	op:       Option<CiOp>,
 	provider: Option<Str>,
@@ -173,8 +186,10 @@ pub(super) struct CiState {
 	progress: Option<Str>,
 }
 
+#[cfg(feature = "cap-ci")]
 pub(super) struct CiRenderer;
 
+#[cfg(feature = "cap-ci")]
 impl RenderFold for CiRenderer {
 	type Outcome = CallOutcome<CiPayload, CiFault>;
 	type State = CiState;
@@ -212,6 +227,7 @@ impl RenderFold for CiRenderer {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 fn render_ci_live(state: &CiState) -> El {
 	let action = state
 		.op
@@ -236,6 +252,7 @@ fn render_ci_live(state: &CiState) -> El {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 fn render_ci_payload(state: &CiState, payload: &CiPayload) -> El {
 	view! {
 		<col gap=0>
@@ -253,6 +270,7 @@ fn render_ci_payload(state: &CiState, payload: &CiPayload) -> El {
 	}
 }
 
+#[cfg(feature = "cap-ci")]
 fn render_ci_fault(state: &CiState, fault: &CiFault) -> El {
 	let action = state
 		.op
@@ -270,6 +288,7 @@ fn render_ci_fault(state: &CiState, fault: &CiFault) -> El {
 	}
 }
 
+#[cfg(feature = "cap-forge")]
 fn render_forge_fault(state: &ForgeState, fault: &ForgeFault) -> El {
 	let action = state
 		.op
@@ -656,12 +675,13 @@ fn json_view(value: &Value, max_depth: usize, max_rows: usize, max_chars: usize)
 /// Native forge, CI, browser, and computer lifecycle fixtures for the visual QA
 /// gallery.
 pub fn gallery_fixtures(
-	forge: ToolIdentity,
-	ci: ToolIdentity,
+	#[cfg(feature = "cap-forge")] forge: ToolIdentity,
+	#[cfg(feature = "cap-ci")] ci: ToolIdentity,
 	browser: ToolIdentity,
 	computer: ToolIdentity,
 ) -> Vec<RendererGalleryFixture> {
 	vec![
+		#[cfg(feature = "cap-forge")]
 		RendererGalleryFixture {
 			identity: forge,
 			streaming_args: r#"{"op":"search_change_requests","query":"is:open review-requested:@me sort:up"#,
@@ -670,6 +690,7 @@ pub fn gallery_fixtures(
 			success_outcome: br#"{"kind":"ok","value":{"op":"search_change_requests","result":{"hits":[{"number":1842,"title":"feat(tui): virtualized scrollback for tool output"},{"number":1839,"title":"fix(agent): retry stream on transient 529"}]},"output":"2 results","useless":false}}"#,
 			error_outcome: br#"{"kind":"faulted","value":{"code":"repo_not_found","message":"forge repository pi was not found on github.com"}}"#,
 		},
+		#[cfg(feature = "cap-ci")]
 		RendererGalleryFixture {
 			identity: ci,
 			streaming_args: r#"{"op":"status","provider":"github.com","pipeline":"42","watch":tr"#,
@@ -711,7 +732,9 @@ mod tests {
 	#[test]
 	fn fixture_wire_shapes_decode_and_streaming_args_render() {
 		let fixtures = gallery_fixtures(
+			#[cfg(feature = "cap-forge")]
 			identity("forge"),
+			#[cfg(feature = "cap-ci")]
 			identity("ci"),
 			identity("browser"),
 			identity("computer"),
@@ -722,34 +745,61 @@ mod tests {
 			assert!(fixture.progress_update.is_none());
 		}
 
-		let mut forge_state = ForgeState::default();
-		ForgeRenderer.fold_args(
-			&mut forge_state,
-			&omp_core::slopjson::parse_streaming(fixtures[0].streaming_args),
-			false,
-		);
-		assert!(
-			ForgeRenderer
-				.view(&forge_state, None)
-				.expect("streaming forge args render")
-				.contains("sort:up")
-		);
-		let mut ci_state = CiState::default();
-		CiRenderer.fold_args(
-			&mut ci_state,
-			&omp_core::slopjson::parse_streaming(fixtures[1].streaming_args),
-			false,
-		);
-		assert!(
-			CiRenderer
-				.view(&ci_state, None)
-				.expect("streaming ci args render")
-				.contains("42")
-		);
+		#[cfg(feature = "cap-forge")]
+		{
+			let forge = fixtures
+				.iter()
+				.find(|fixture| fixture.identity.name.as_str() == "forge")
+				.expect("forge fixture");
+			let mut forge_state = ForgeState::default();
+			ForgeRenderer.fold_args(
+				&mut forge_state,
+				&omp_core::slopjson::parse_streaming(forge.streaming_args),
+				false,
+			);
+			assert!(
+				ForgeRenderer
+					.view(&forge_state, None)
+					.expect("streaming forge args render")
+					.contains("sort:up")
+			);
+			serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(forge.success_outcome)
+				.expect("forge success outcome decodes");
+			serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(forge.error_outcome)
+				.expect("forge error outcome decodes");
+		}
+		#[cfg(feature = "cap-ci")]
+		{
+			let ci = fixtures
+				.iter()
+				.find(|fixture| fixture.identity.name.as_str() == "ci")
+				.expect("ci fixture");
+			let mut ci_state = CiState::default();
+			CiRenderer.fold_args(
+				&mut ci_state,
+				&omp_core::slopjson::parse_streaming(ci.streaming_args),
+				false,
+			);
+			assert!(
+				CiRenderer
+					.view(&ci_state, None)
+					.expect("streaming ci args render")
+					.contains("42")
+			);
+			serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(ci.success_outcome)
+				.expect("ci success outcome decodes");
+			serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(ci.error_outcome)
+				.expect("ci error outcome decodes");
+		}
+
+		let browser = fixtures
+			.iter()
+			.find(|fixture| fixture.identity.name.as_str() == "browser")
+			.expect("browser fixture");
 		let mut browser_state = BrowserState::default();
 		BrowserRenderer.fold_args(
 			&mut browser_state,
-			&omp_core::slopjson::parse_streaming(fixtures[2].streaming_args),
+			&omp_core::slopjson::parse_streaming(browser.streaming_args),
 			false,
 		);
 		assert!(
@@ -758,10 +808,14 @@ mod tests {
 				.expect("streaming browser args render")
 				.contains("role === 'head")
 		);
+		let computer = fixtures
+			.iter()
+			.find(|fixture| fixture.identity.name.as_str() == "computer")
+			.expect("computer fixture");
 		let mut computer_state = ComputerState::default();
 		ComputerRenderer.fold_args(
 			&mut computer_state,
-			&omp_core::slopjson::parse_streaming(fixtures[3].streaming_args),
+			&omp_core::slopjson::parse_streaming(computer.streaming_args),
 			false,
 		);
 		assert!(
@@ -771,32 +825,19 @@ mod tests {
 				.contains("desktop.screenshot")
 		);
 
-		serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(fixtures[0].success_outcome)
-			.expect("forge success outcome decodes");
-		serde_json::from_slice::<CallOutcome<ForgePayload, ForgeFault>>(fixtures[0].error_outcome)
-			.expect("forge error outcome decodes");
-		serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(fixtures[1].success_outcome)
-			.expect("ci success outcome decodes");
-		serde_json::from_slice::<CallOutcome<CiPayload, CiFault>>(fixtures[1].error_outcome)
-			.expect("ci error outcome decodes");
-		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(
-			fixtures[2].success_outcome,
-		)
-		.expect("browser success outcome decodes");
-		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(
-			fixtures[2].error_outcome,
-		)
-		.expect("browser error outcome decodes");
+		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(browser.success_outcome)
+			.expect("browser success outcome decodes");
+		serde_json::from_slice::<CallOutcome<BrowserPayload, BrowserFault>>(browser.error_outcome)
+			.expect("browser error outcome decodes");
 		serde_json::from_slice::<CallOutcome<ComputerPayload, ComputerFault>>(
-			fixtures[3].success_outcome,
+			computer.success_outcome,
 		)
 		.expect("computer success outcome decodes");
-		serde_json::from_slice::<CallOutcome<ComputerPayload, ComputerFault>>(
-			fixtures[3].error_outcome,
-		)
-		.expect("computer error outcome decodes");
+		serde_json::from_slice::<CallOutcome<ComputerPayload, ComputerFault>>(computer.error_outcome)
+			.expect("computer error outcome decodes");
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn forge_search_uses_aligned_rows_and_escapes_payload_text() {
 		let payload = ForgePayload {
@@ -821,6 +862,7 @@ mod tests {
 		assert!(!rendered.contains("ctrl+o"));
 	}
 
+	#[cfg(feature = "cap-forge")]
 	#[test]
 	fn forge_file_and_structured_results_delegate_bounding_to_primitives() {
 		let file = ForgePayload {
