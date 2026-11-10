@@ -8120,6 +8120,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-ci"
+version = "2.0.0"
+dependencies = [
+ "omp-core",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "omp-collab"
 version = "2.0.0"
 dependencies = [
