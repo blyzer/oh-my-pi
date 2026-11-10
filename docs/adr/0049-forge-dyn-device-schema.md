@@ -88,9 +88,10 @@ routes dyn hosts through a fake / live client and returns `ChangeRequest` /
   Github arm. Full automatic device-catalog host-claim discovery remains a
   smaller TODO.
 - **Remaining before deleting `envd/src/github.rs`:** Dyn checkout/push (ADR
-  D2.4), T2 CI extension body + flipping `github.com` CI to Dyn (bridge DONE —
-  see [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)), list-URL /
-  `GithubResolver` parity. Search leaves still open. SessionHost bound-client
-  threading for `forge@1` is DONE. In-core `GithubForgeAdapter` /
-  `GithubCiAdapter` / `github.rs` / `github_url.rs` stay for Actions CI,
-  list URLs, and checkout/push via `GithubService`.
+  D2.4), list-URL / `GithubResolver` parity. T2 CI extension + flipping
+  `github.com` CI to Dyn is DONE (see
+  [`0049-ci-dyn-device-schema.md`](0049-ci-dyn-device-schema.md)). Search leaves
+  still open. SessionHost bound-client threading for `forge@1` is DONE.
+  In-core `GithubForgeAdapter` / `GithubCiAdapter` / `github.rs` /
+  `github_url.rs` stay for list URLs, checkout/push via `GithubService`, and
+  unlisted GHE CI.

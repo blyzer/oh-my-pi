@@ -1,0 +1,31 @@
+id = "omp.ci"
+name = "CI catalog"
+version = "0.1.0"
+omp_api = 1
+description = "Host-dispatching dyn ci/* mounts (GitHub Actions + GitLab CI, ADR 0049)"
+entry = "omp_ci_ext"
+capabilities = ["env.net.fetch"]
+
+# Sole ci/* catalog owner. Backends omp.github / omp.gitlab must not declare
+# a competing ci parent (DynCiAdapter fixed-path collision).
+
+[[declarations]]
+id = "ci"
+kind = "soft"
+module = "omp_ci_ext"
+key = "ci@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "mount_ci_leaves"
+kind = "hook"
+module = "omp_ci_ext"
+key = "extension_activate/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
+
+[requires]
+python = ">=3.14"
