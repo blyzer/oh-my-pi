@@ -16,6 +16,7 @@ crates/**
 deny.toml
 docs/py/**
 examples/**
+extensions/**
 fixtures/**
 justfile
 rust-toolchain.toml

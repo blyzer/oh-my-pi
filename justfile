@@ -257,6 +257,16 @@ test-pkg pkg:
 test-ssh:
     scripts/ssh-loopback-fixture.sh cargo nextest run -p omp-exec-ssh --locked --run-ignored all
 
+# ADR 0049 D5: first-party extension conformance (manifests, unittests, frozen API smoke).
+[group('test')]
+test-extensions:
+    python3 scripts/check-extension-conformance.py
+
+# ADR 0049 D5: alias for the full extension conformance gate.
+[group('build & check')]
+check-extensions:
+    python3 scripts/check-extension-conformance.py
+
 # ---------------------------------------------------------------------------
 # E2E acceptance suite (crates/e2e, joined-system proofs P1-P12, P14)
 # ---------------------------------------------------------------------------

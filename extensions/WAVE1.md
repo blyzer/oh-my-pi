@@ -42,8 +42,21 @@ deleted; forge/CI routers are Dyn-only. **DONE:** `github_url.rs`
 neutralized to `forge_url.rs` (credentials / `pr://` / `issue://` /
 `infer_repo`). Intentional residue: Class C, autocomplete `GithubRefs`.
 **DONE:** crate module `github_adapter` → `forge_adapter` (`dyn_forge` /
-`dyn_ci` filenames kept). Remaining: full automatic device-catalog host-claim
-discovery (smaller TODO). See package READMEs.
+`dyn_ci` filenames kept). **DONE:** conformance CI + first-cut manifest effect
+checks (`just check-extensions` / `python3 scripts/check-extension-conformance.py`;
+CI job `First-party extension conformance`). Remaining: full automatic
+device-catalog host-claim discovery (smaller TODO). See package READMEs.
+
+## Conformance gate
+
+```sh
+just check-extensions
+# or: python3 scripts/check-extension-conformance.py
+```
+
+Manifests must declare closed-vocab `capabilities` (wave-1 packages include
+`env.net.fetch`). Package `tests/` run with the PYTHONPATHs in each README.
+Frozen `omp.*` import smoke uses native stubs (no live host).
 
 ## May grow
 
