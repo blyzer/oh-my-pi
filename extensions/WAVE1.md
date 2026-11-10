@@ -48,8 +48,10 @@ checks (`just check-extensions` / `python3 scripts/check-extension-conformance.p
 CI job `First-party extension conformance`). **DONE:** rescue wave 1 — eight
 ports restored under `extensions/` against the frozen API (see
 [`RESCUE.md`](RESCUE.md)); several keep documented Gaps (`state_dir` standing
-in for removed typed journal/`omp.state` APIs). Remaining Phase 5 OPEN: ADR
-0046 item 4 (UI-bound ports). See package READMEs.
+in for removed typed journal/`omp.state` APIs). **DONE:** ADR 0046 item 4 —
+chat host slot/overlay/`dynamic_mount` arms plus UI-bound ports
+(`sidebar`, `hover-cards`, `welcome-chrome`). Phase 5 remainder is empty. See
+package READMEs.
 
 ## Rescue wave 1
 
@@ -64,8 +66,8 @@ in for removed typed journal/`omp.state` APIs). Remaining Phase 5 OPEN: ADR
 | [`fuzzy-index/`](fuzzy-index/) | Warm fuzzy path/content index |
 | [`spec-flow/`](spec-flow/) | Spec brainstorm→plan→apply→archive |
 
-UI-bound ports (`sidebar`, `hover-cards`, `welcome-chrome`) wait for ADR 0046
-item 4.
+UI-bound ports (`sidebar`, `hover-cards`, `welcome-chrome`) restored with
+ADR 0046 item 4 host arms (see [`RESCUE.md`](RESCUE.md)).
 
 ## Conformance gate
 

@@ -27,6 +27,8 @@ pub mod ask;
 pub mod copy;
 /// Extension `input` / `editor` text prompts (`omp.ui.input`, `omp.ui.editor`).
 pub mod ext_input;
+/// Extension retained overlays (`omp.ui.overlay`).
+pub mod ext_overlay;
 /// `/extensions` Extension Control Center dashboard.
 pub mod extensions;
 /// Codex quota-reset fireworks celebration.

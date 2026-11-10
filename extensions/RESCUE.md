@@ -1,4 +1,4 @@
-# ADR 0049 D5 — rescue wave 1
+# ADR 0049 D5 — rescue wave 1 + UI ports
 
 Owner: repo maintainers / this tree.  
 Historical sources: `git show 00611047c1^:examples/<name>/` (parent of delete
@@ -14,9 +14,12 @@ commit `00611047c1`).
 | [`provider-pack/`](provider-pack/) | Moonshot / Z.ai / Alibaba / OVH catalog data | restored cleanly | `00611047c1^:examples/provider-pack/` |
 | [`fuzzy-index/`](fuzzy-index/) | Warm fuzzy `ffind` / `fgrep` worker | restored (Gap: no workspace watch rescan event) | `00611047c1^:examples/fuzzy-index/` |
 | [`spec-flow/`](spec-flow/) | Spec brainstorm→plan→apply→archive | restored with Gaps (`state_dir` phase store; Component rewrite deferred) | `00611047c1^:examples/spec-flow/` |
+| [`sidebar/`](sidebar/) | Retained `Slot.SIDEBAR_RIGHT` session rail | restored (Gap: telemetry event types as `object`) | `00611047c1^:examples/sidebar/` |
+| [`hover-cards/`](hover-cards/) | Declarative hover/lift card + overlay | restored (Gap: no frozen activation callback) | `00611047c1^:examples/hover-cards/` |
+| [`welcome-chrome/`](welcome-chrome/) | Header chrome + recent-session picker | restored cleanly | `00611047c1^:examples/welcome-chrome/` |
 
-UI-bound ports (`sidebar`, `hover-cards`, `welcome-chrome`) are **not** in this
-wave — they wait for ADR 0046 item 4.
+UI-bound ports (`sidebar`, `hover-cards`, `welcome-chrome`) landed with ADR
+0046 item 4 (chat host slot/overlay/`dynamic_mount` arms).
 
 Conformance: `python3 scripts/check-extension-conformance.py` (or
 `just check-extensions`).

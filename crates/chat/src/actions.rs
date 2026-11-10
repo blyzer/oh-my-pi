@@ -18,6 +18,7 @@ use omp_core::Str;
 
 use crate::{
 	commands::CommandAction,
+	extension_slots::ExtensionSlot,
 	extension_status::ExtensionStatus,
 	overlays::{ModelRow, PanelCall, PanelOpener},
 };
@@ -275,6 +276,8 @@ pub enum HostAction {
 	/// Insert, replace, clear, or reset one observer-local extension/hook
 	/// status contribution.
 	ExtensionStatus(ExtensionStatus),
+	/// Mount, unmount, patch, focus, or blur one observer-local extension slot.
+	ExtensionSlot(ExtensionSlot),
 	/// Give an extension verbatim ownership of the terminal title until the
 	/// next authoritative session title.
 	ExtensionTitle(Str),
@@ -284,6 +287,8 @@ pub enum HostAction {
 	DropEscapeHook(Str),
 	/// Open a command-owned panel on the overlay stack.
 	Open(PanelOpener),
+	/// Close the open panel whose [`Panel::id`] matches `id`, if any.
+	ClosePanel(Str),
 	/// Run a command-owned host effect and apply its panel event.
 	Call(PanelCall),
 	/// A typed slash-command request (`crate::commands`).
