@@ -123,6 +123,7 @@ omp-adw = { path = "crates/adw", version = "2.0.0" }
 omp-agent = { path = "crates/agent", version = "2.0.0" }
 omp-app = { path = "crates/app", version = "2.0.0" }
 omp-chat = { path = "crates/chat", version = "2.0.0" }
+omp-ci = { path = "crates/ci", version = "2.0.0" }
 omp-con = { path = "crates/con", version = "2.0.0" }
 omp-contract = { path = "crates/contract", version = "2.0.0" }
 omp-ar = { path = "crates/ar", version = "2.0.0" }
