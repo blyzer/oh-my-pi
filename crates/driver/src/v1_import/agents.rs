@@ -163,6 +163,8 @@ const V1_TOOL_NAMES: &[&str] = &[
 const V1_TOOL_ALIASES: &[(&str, &str)] = &[("search", "grep"), ("find", "glob")];
 /// v1's `exec` pseudo-tool, which its executor expanded into these.
 const V1_EXEC: (&str, &[&str]) = ("exec", &["eval", "bash"]);
+/// v1's `github` tool, which this roster split into forge and CI.
+const V1_GITHUB: (&str, &[&str]) = ("github", &["forge", "ci"]);
 /// The subagent tool; v1 advertised it when `spawns` was set.
 const TASK_TOOL: &str = "task";
 /// Tools v1 appended to every explicit list: `yield` (`parseAgentFields`) and
@@ -800,6 +802,8 @@ fn convert(
 					.unwrap_or(tool);
 				if canonical == V1_EXEC.0 {
 					listed.extend(V1_EXEC.1.iter().copied().map(Str::new_static));
+				} else if canonical == V1_GITHUB.0 {
+					listed.extend(V1_GITHUB.1.iter().copied().map(Str::new_static));
 				} else {
 					listed.push(Str::new(canonical));
 				}

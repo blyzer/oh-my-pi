@@ -8,7 +8,6 @@ use std::{
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use async_trait::async_trait;
 use bytes::BytesMut;
 use futures::StreamExt as _;
 use http::{
@@ -19,9 +18,6 @@ use omp_ai::auth::HeaderPlacement;
 use omp_cache::github_cache::GithubCache;
 use omp_core::{Str, sf};
 use omp_journal::blob::BlobRef;
-use omp_tools::github::{
-	Artifact, DateField, Fault, GithubHost, Operation, Params, Payload, Update,
-};
 use omp_vcs::{PushOptions, git::GitRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	blobs::BlobHost,
+	github_params::{Artifact, DateField, Fault, Operation, Params, Payload, PrSelector, Update},
 	github_url::{self, GithubCredentialBridge, GithubRepo},
 };
 
@@ -296,12 +293,65 @@ impl GithubService {
 				fault("github_cache_failed", "GitHub cache invalidation failed after mutation")
 			})
 	}
+
+	/// Project root the service infers a checkout from.
+	pub(crate) fn root(&self) -> &Path {
+		&self.root
+	}
+
+	/// Repository inferred from the checkout, when the origin names one.
+	pub(crate) fn inferred_repo(&self) -> Result<GithubRepo, Fault> {
+		self.repo(None)
+	}
+
+	/// One Actions run and its jobs. This is the snapshot `ci@1` status
+	/// reads. It does not poll.
+	pub(crate) async fn actions_run(
+		&self,
+		repo: &GithubRepo,
+		run_id: u64,
+		cancellation: &CancellationToken,
+	) -> Result<ApiResponse, Fault> {
+		self
+			.fetch_watch_snapshot(repo, &WatchTarget::Run(run_id), cancellation)
+			.await
+	}
+
+	/// One Actions job log, when GitHub still has it.
+	pub(crate) async fn actions_job_log(
+		&self,
+		repo: &GithubRepo,
+		job_id: u64,
+		cancellation: &CancellationToken,
+	) -> Result<Option<String>, Fault> {
+		self.job_log(repo, job_id, cancellation).await
+	}
+
+	/// Bytes previously spilled for a file-read artifact.
+	pub(crate) fn artifact_bytes(&self, artifact: &Artifact) -> Result<bytes::Bytes, Fault> {
+		let Some(hex) = artifact.uri.as_str().strip_prefix("artifact://sha256/") else {
+			return Err(fault(
+				"github_artifact_failed",
+				"GitHub artifact URI is not content-addressed",
+			));
+		};
+		let reference = BlobRef::parse_hex(hex, artifact.size).map_err(|_| {
+			fault("github_artifact_failed", "GitHub artifact URI is not a blob digest")
+		})?;
+		self
+			.blobs
+			.get(reference.into())
+			.map_err(|_| fault("github_artifact_failed", "GitHub file artifact could not be read"))
+	}
 }
 
-#[async_trait]
-impl GithubHost for GithubService {
+impl GithubService {
+	/// Dispatches one GitHub operation.
+	///
+	/// The forge and CI adapters are the callers. The model-facing tools do
+	/// not name this vocabulary.
 	#[tracing::instrument(name = "github_operation", level = "debug", skip_all, fields(operation = ?params.op))]
-	async fn execute(
+	pub(crate) async fn execute(
 		&self,
 		params: Params,
 		cancellation: CancellationToken,
@@ -636,10 +686,17 @@ impl GithubService {
 		}
 		let mut query = params.query.as_deref().unwrap_or("").trim().to_owned();
 		let caller_scoped = has_scope(&query);
+		let explicit = params
+			.repo
+			.as_deref()
+			.map(str::trim)
+			.filter(|text| !text.is_empty())
+			.map(|text| self.repo(Some(text)))
+			.transpose()?;
 		let repo = if params.op == Operation::SearchRepos {
 			None
-		} else if let Some(requested) = params.repo.as_deref() {
-			Some(self.repo(Some(requested))?)
+		} else if let Some(explicit) = explicit.clone() {
+			Some(explicit)
 		} else if caller_scoped {
 			None
 		} else {
@@ -670,8 +727,9 @@ impl GithubService {
 		};
 		let mut response = self
 			.request(
-				repo
+				explicit
 					.as_ref()
+					.or(repo.as_ref())
 					.map_or(github_url::GITHUB_HOST, GithubRepo::host),
 				if params.op == Operation::SearchCode {
 					Method::GetTextMatch
@@ -789,7 +847,7 @@ impl GithubService {
 		let prs = params
 			.pr
 			.as_ref()
-			.map(omp_tools::github::PrSelector::as_slice)
+			.map(PrSelector::as_slice)
 			.ok_or_else(|| fault("github_invalid_pr", "pr_checkout requires `pr`"))?;
 		if prs.is_empty() {
 			return Err(fault("github_invalid_pr", "pr_checkout requires at least one `pr`"));
@@ -892,6 +950,7 @@ impl GithubService {
 			"remote": clone_url,
 			"remote_branch": head,
 			"head_sha": expected_head,
+			"base_ref": api.value.pointer("/base/ref").and_then(Value::as_str),
 			"reused": reused,
 		}))
 	}
@@ -904,7 +963,7 @@ impl GithubService {
 		let prs = params
 			.pr
 			.as_ref()
-			.map(omp_tools::github::PrSelector::as_slice)
+			.map(PrSelector::as_slice)
 			.ok_or_else(|| {
 				fault("github_invalid_pr", "pr_push requires `pr` from a prior checkout")
 			})?;
@@ -984,6 +1043,7 @@ impl GithubService {
 			"pr": number,
 			"path": path,
 			"remote_branch": metadata.head,
+			"head_sha": metadata.expected_head,
 			"force_with_lease": force,
 		}))
 	}
@@ -1343,11 +1403,11 @@ enum ActionsState {
 	Success,
 	Failure,
 }
-struct ApiResponse {
-	value:     Value,
-	remaining: Option<u64>,
-	reset:     Option<u64>,
-	artifact:  Option<Artifact>,
+pub(crate) struct ApiResponse {
+	pub(crate) value: Value,
+	remaining:        Option<u64>,
+	reset:            Option<u64>,
+	artifact:         Option<Artifact>,
 }
 struct FailedLogs {
 	rows:     Vec<Value>,

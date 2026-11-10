@@ -8,6 +8,7 @@
 use std::{mem::size_of, sync::Arc};
 
 use omp_core::Str;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
@@ -52,6 +53,7 @@ pub enum Mutation {
 	VariantArray,
 	Serialize,
 	Deserialize,
+	JsonSchema,
 )]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive, const_into_str)]
 #[serde(rename_all = "snake_case")]

@@ -41,6 +41,7 @@ pub mod staging;
 pub use omp_macros::view;
 pub use render::{BuiltinRendererIdentities, live_renderers, register_builtin_renderers};
 
+pub mod ci;
 /// Revisioned project debugger tool.
 pub mod debug;
 /// Bounded debugger snapshot renderers.
@@ -55,10 +56,10 @@ pub mod edit;
 pub mod editor_sync;
 /// Persistent Python evaluation.
 pub mod eval;
+/// Direct GitHub API and isolated pull-request operations.
+pub mod forge;
 /// Native renderer lifecycle fixtures for visual QA.
 pub mod gallery;
-/// Direct GitHub API and isolated pull-request operations.
-pub mod github;
 /// Deterministic workspace path matching.
 pub mod glob;
 /// Hidden durable goal lifecycle tool.

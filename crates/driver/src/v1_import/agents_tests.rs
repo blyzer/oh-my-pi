@@ -27,7 +27,7 @@ const REVIEWER: &str = concat!(
 	"  for correctness\n",
 	"model: pi/slow:high\n",
 	"thinkingLevel: medium\n",
-	"tools: read, search, exec, context_notes, Task\n",
+	"tools: read, search, exec, github, context_notes, Task\n",
 	"spawns: none\n",
 	"output:\n",
 	"  type: object\n",
@@ -42,7 +42,7 @@ const REVIEWER_CFG: &str = concat!(
 	"// Reviews diffs for correctness\n",
 	"ai_model @slow:high\n",
 	"ai_thinking medium\n",
-	"sv_tools [read grep eval bash yield hub]\n",
+	"sv_tools [read grep eval bash forge ci yield hub]\n",
 );
 
 const REVIEWER_RULE: &str = concat!(
@@ -244,7 +244,9 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 	let reviewer = child_ctx(&parent, &files, "reviewer").expect("reviewer child");
 	assert_eq!(omp_agent::AI_MODEL.get(&reviewer).as_str(), "@slow:high");
 	assert_eq!(omp_agent::AI_THINKING.get(&reviewer).as_str(), "medium");
-	assert_eq!(omp_agent::SV_TOOLS.get(&reviewer), ["read", "grep", "eval", "bash", "yield", "hub"]);
+	assert_eq!(omp_agent::SV_TOOLS.get(&reviewer), [
+		"read", "grep", "eval", "bash", "forge", "ci", "yield", "hub"
+	]);
 	let scout = child_ctx(&parent, &files, "scout").expect("scout child");
 	assert_eq!(omp_agent::AI_MODEL.get(&scout).as_str(), "@task");
 	assert_eq!(omp_agent::SV_TOOLS.get(&scout), ["read", "task", "yield", "hub"]);

@@ -49,6 +49,8 @@ pub mod exthost;
 /// The hosts a fetch reaches and the approval subjects keyed on them.
 pub mod fetch_host;
 mod github;
+mod github_adapter;
+mod github_params;
 pub mod github_url;
 pub mod grep;
 pub mod host_info;

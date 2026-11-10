@@ -15,7 +15,7 @@ use self::{
 	fs::{ReadRenderer, WriteRenderer},
 	hub::HubRenderer,
 	interaction::{AskRenderer, ThinkRenderer, TodoRenderer},
-	misc::{BrowserRenderer, ComputerRenderer, GithubRenderer},
+	misc::{BrowserRenderer, CiRenderer, ComputerRenderer, ForgeRenderer},
 	search::{GlobRenderer, GrepRenderer},
 	web::WebSearchRenderer,
 };
@@ -28,7 +28,7 @@ pub mod ast;
 pub mod codeintel;
 /// Native ask, todo, and think renderer views.
 pub mod interaction;
-/// Native GitHub, browser, and computer renderer views.
+/// Native forge, CI, browser, and computer renderer views.
 pub mod misc;
 
 /// Native edit renderer views.
@@ -92,8 +92,10 @@ pub struct BuiltinRendererIdentities {
 	pub debug:      Option<ToolIdentity>,
 	/// Identity of the native durable goal tool, when enabled.
 	pub goal:       Option<ToolIdentity>,
-	/// Identity of the native GitHub device, when enabled.
-	pub github:     Option<ToolIdentity>,
+	/// Identity of the native forge device, when enabled.
+	pub forge:      Option<ToolIdentity>,
+	/// Identity of the native CI device, when enabled.
+	pub ci:         Option<ToolIdentity>,
 	/// Identity of the native browser device, when enabled.
 	pub browser:    Option<ToolIdentity>,
 	/// Identity of the native computer device, when enabled.
@@ -161,8 +163,11 @@ pub fn register_builtin_renderers(
 	if let Some(identity) = identities.goal {
 		registry.register(identity, GoalRenderer)?;
 	}
-	if let Some(identity) = identities.github {
-		registry.register(identity, GithubRenderer)?;
+	if let Some(identity) = identities.forge {
+		registry.register(identity, ForgeRenderer)?;
+	}
+	if let Some(identity) = identities.ci {
+		registry.register(identity, CiRenderer)?;
 	}
 	if let Some(identity) = identities.browser {
 		registry.register(identity, BrowserRenderer)?;
@@ -201,7 +206,8 @@ pub fn live_renderers(tools: &Registry) -> Result<RenderRegistry, RenderRegistry
 		lsp:        identity("lsp"),
 		debug:      identity("debug"),
 		goal:       identity("goal"),
-		github:     identity("github"),
+		forge:      identity("forge"),
+		ci:         identity("ci"),
 		browser:    identity("browser"),
 		computer:   identity("computer"),
 	})?;
@@ -293,7 +299,8 @@ pub(crate) mod test_support {
 			lsp:        Some(identity("lsp", 55)),
 			debug:      Some(identity("debug", 56)),
 			goal:       Some(identity("goal", 57)),
-			github:     Some(identity("github", 58)),
+			forge:      Some(identity("forge", 58)),
+			ci:         Some(identity("ci", 61)),
 			browser:    Some(identity("browser", 59)),
 			computer:   Some(identity("computer", 60)),
 		}
@@ -343,7 +350,8 @@ mod tests {
 			identities.lsp.as_ref().unwrap(),
 			identities.debug.as_ref().unwrap(),
 			identities.goal.as_ref().unwrap(),
-			identities.github.as_ref().unwrap(),
+			identities.forge.as_ref().unwrap(),
+			identities.ci.as_ref().unwrap(),
 			identities.browser.as_ref().unwrap(),
 			identities.computer.as_ref().unwrap(),
 		] {

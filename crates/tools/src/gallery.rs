@@ -63,8 +63,8 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 	let lsp = identity("lsp", "");
 	let debug = identity("debug", "");
 	let goal = identity("goal", "");
-	let github =
-		ToolIdentity { name: Str::new_static("github"), rev: Rev { family: Str::default(), n: 3 } };
+	let forge = identity("forge", "");
+	let ci = identity("ci", "");
 	let browser = identity("browser", "");
 	let computer = identity("computer", "");
 	let identities = BuiltinRendererIdentities {
@@ -85,7 +85,8 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		lsp:        Some(lsp.clone()),
 		debug:      Some(debug.clone()),
 		goal:       Some(goal.clone()),
-		github:     Some(github.clone()),
+		forge:      Some(forge.clone()),
+		ci:         Some(ci.clone()),
 		browser:    Some(browser.clone()),
 		computer:   Some(computer.clone()),
 	};
@@ -100,7 +101,7 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		crate::render::interaction::gallery_fixtures(ask, todo, think),
 		crate::render::codeintel::gallery_fixtures(lsp, debug),
 		crate::render::agentic::gallery_fixtures(goal),
-		crate::render::misc::gallery_fixtures(github, browser, computer),
+		crate::render::misc::gallery_fixtures(forge, ci, browser, computer),
 	]
 	.concat();
 	BuiltinRendererGallery { identities, fixtures }
