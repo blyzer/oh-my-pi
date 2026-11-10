@@ -90,6 +90,8 @@ pub enum UiControlRequest {
 	DynamicMount {
 		/// Exact verified host generation whose roster should be installed.
 		generation: u64,
+		/// Activate-time command specs transferred from the extension.
+		commands:   Vec<Value>,
 	},
 }
 
@@ -203,6 +205,14 @@ impl ControlAuthority for UiControlAuthority {
 		operation: Str,
 		mut arguments: Map<String, Value>,
 	) -> Result<Value, ControlProtocolError> {
+		// Python's `omp.ui.dynamic_mount` sends command specs; the verified
+		// host generation is the connection fence, injected here so the
+		// decode surface stays generation-keyed without a second wire field.
+		if operation.as_str() == "omp.ui.dynamic_mount" {
+			arguments
+				.entry("generation")
+				.or_insert_with(|| json!(self.identity.host_generation));
+		}
 		let request = decode_ui_request(operation.as_str(), &mut arguments)?;
 		match self.owner.request(context, request).await? {
 			UiControlResult::Value(value) => Ok(value),
@@ -524,7 +534,18 @@ fn decode_ui_request(
 			UiControlRequest::OverlayClose { id: required_string(arguments, "id")? }
 		},
 		"omp.ui.dynamic_mount" => {
-			UiControlRequest::DynamicMount { generation: required_u64(arguments, "generation")? }
+			let generation = required_u64(arguments, "generation")?;
+			let commands = match arguments.remove("commands") {
+				None | Some(Value::Null) => Vec::new(),
+				Some(Value::Array(commands)) => commands,
+				Some(_) => {
+					return Err(protocol(
+						"invalid_ui_request",
+						"omp.ui.dynamic_mount commands must be an array",
+					));
+				},
+			};
+			UiControlRequest::DynamicMount { generation, commands }
 		},
 		_ => return Err(protocol("unknown_operation", "unknown UI operation")),
 	};

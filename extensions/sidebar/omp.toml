@@ -1,0 +1,24 @@
+id = "omp.sidebar"
+name = "Sidebar"
+version = "0.1.0"
+omp_api = 1
+description = "Retained right rail for live session-tree and usage facts."
+entry = "omp_sidebar.sidebar"
+capabilities = ["ui.slots"]
+
+[[hooks]]
+event = "extension_activate"
+phase = "observe"
+order = 0
+failure = "fail-open"
+
+[[telemetry]]
+kinds = ["session_start", "turn_start", "turn_end", "session_end"]
+scope = "tree"
+queue = 256
+overflow = "coalesce_by_key"
+replay = true
+replay_limit = 512
+
+[requires]
+python = ">=3.14"

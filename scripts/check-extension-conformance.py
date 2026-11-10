@@ -67,6 +67,10 @@ _RESCUE_WAVE1 = frozenset(
 		"provider-pack",
 		"fuzzy-index",
 		"spec-flow",
+		# ADR 0046 item 4 UI-bound ports (Phase 5 remainder).
+		"sidebar",
+		"hover-cards",
+		"welcome-chrome",
 	}
 )
 
@@ -102,6 +106,14 @@ _KNOWN_CAPABILITIES = frozenset(
 		"place.env",
 		"place.worker",
 		"schedules:project",
+		# CONTROL-side UI / session grants (ADR 0046 item 4 host arms).
+		"sessions.read",
+		"ui.commands",
+		"ui.dialogs",
+		"ui.ghost",
+		"ui.notify",
+		"ui.slots",
+		"ui.title",
 	}
 )
 
@@ -123,6 +135,9 @@ _SMOKE_MODULES = (
 	"omp_provider_pack",
 	"omp_fuzzy_index",
 	"omp_spec_flow",
+	"omp_sidebar",
+	"omp_hover_cards",
+	"omp_welcome_chrome",
 )
 
 # Device modules that register at import (succeed under stubs like forge devices).

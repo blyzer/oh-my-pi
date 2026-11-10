@@ -19,6 +19,8 @@ pub mod commands;
 pub mod composer;
 /// External editor resolution and temporary-draft round trips.
 pub mod editor;
+/// Observer-local extension slot mounts (ADR 0046 item 4).
+pub mod extension_slots;
 /// Observer-local extension and hook status feed.
 pub mod extension_status;
 /// Journal-derived tool-card gallery.
@@ -64,6 +66,10 @@ pub mod welcome;
 
 pub use actions::{HostAction, HostMailbox, ModelRoster, SttFailureKind, SttUiEvent};
 pub use chrome::ModelBadge;
+pub use extension_slots::{
+	ExtensionSlot, ExtensionSlots, RailReservation, SlotCollapse, SlotOptions, SlotPlacement,
+	SlotView,
+};
 pub use extension_status::{ExtensionStatus, ExtensionStatuses};
 pub use host::{
 	CtrlCAction, Host, HostCommand, HostError, HostOptions, InitialPanel, LocalFacts, NativeEffect,

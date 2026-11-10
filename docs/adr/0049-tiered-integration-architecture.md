@@ -117,7 +117,7 @@ CI builds the default `omp` profile and a minimal profile with all `cap-*` off.
 - **Triage the 58 ports without a native equivalent.** Restore a first wave of 6–8 with distinct surfaces and real demand, from `git show 00611047c1^:examples/<name>/`.
   - Candidates: `pr-review`, `green-loop`, `workflows`, `remote-approve`, `search-provider`, `provider-pack`, `fuzzy-index`, `spec-flow`.
   - Each must pass on the current API, declare its effects and have an owner.
-- **UI-bound ports** (`sidebar`, `hover-cards`, `welcome-chrome`) wait for ADR 0046 item 4.
+- **UI-bound ports** (`sidebar`, `hover-cards`, `welcome-chrome`) restored with ADR 0046 item 4 host arms.
 - The 34 ports with a confirmed native equivalent are not restored.
 
 ### D6. Vendor-code inventory: what leaves, what stays
@@ -143,7 +143,7 @@ Class A items move in Phase 4. Cards render `forge@1` data. `gitwatch` reads the
 | 2 Locality | D3.4; `server.rs`/`tools.rs`/`mcp` splits | 0046 item 1, ENVD-03/04 | Adding a test capability edits 0 envd files |
 | 3 Generic capabilities | D3.5, one capability per change | ENVD-08/09 | Each removes an envd dependency edge; the minimal profile builds |
 | 4 Neutral forge/CI/exec | `omp-forge`, `omp-ci`, `Delegated` adapters, `forge@1`/`ci@1`, generalized `pr://`/`issue://`; GitLab adapter (T2) proves the contract; GitHub adapter (T2) reaches parity; then remove every D6 class A forge item; BuildBuddy behind the execution `Delegated` adapter, then remove the D6 class A execution items | ENVD-09 (github item), ADR 0040 amendment | Parity suite green on the GitHub adapter; no D6 class A code in any `omp2` crate |
-| 5 Extensions | In-repo `extensions/` home (scaffolded), conformance CI job, manifest effect checks, rescue wave 1, GitLab T2 (D2.8); ADR 0046 item 4 for UI ports | 0046 item 4 | Wave-1 extensions green against the frozen API |
+| 5 Extensions | In-repo `extensions/` home, conformance CI, rescue wave 1, GitLab T2 (D2.8), ADR 0046 item 4 UI host arms + UI ports | 0046 item 4 DONE | Wave-1 + UI ports green against the frozen API; Phase 5 remainder empty |
 
 Every step is one self-contained, reversible change, with no shims or re-exports and all callers migrated (AGENTS.md). Until Phase 4 completes, the existing in-core GitHub code stays and receives fixes (for example host-scoped API authentication) as ordinary maintenance.
 
@@ -226,7 +226,8 @@ Consequences of this amendment:
 - Wheels remain locked and signed via `crates/ext`. Development installs use `path:` / `omp ext link` against trees under `extensions/`.
 - GitLab + GitHub T2 (D2.8) read+create via dyn: backends under `extensions/gitlab/` and `extensions/github/`; sole catalog owner `extensions/forge/` host-dispatches by `repo.host`. `gitlab.com` and `github.com` on the Dyn arm. SessionHost bound-client threading for `forge@1` is DONE. Self-hosted Dyn host registration + adapter host-claim discovery via `sv_forge_dyn_hosts` + `GITLAB_HOST` / `GITHUB_HOST` (`ForgeDynHosts`, shared by forge and CI) is DONE. Search leaves + list-URL via `ForgeHost::search` are DONE. Dyn checkout/push (D2.4) is DONE (`CheckoutPlan`/`PushPrep` → core `forge_worktree`). In-core `github.rs` deleted; Class C / `GithubRefs` stay.
 - **DONE (2026-11-10):** conformance CI + first-cut manifest effect checks — `scripts/check-extension-conformance.py`, `just check-extensions` / `just test-extensions`, CI job `First-party extension conformance` (informational). Host-claim discovery is DONE. The home location is settled.
-- **DONE (rescue wave 1):** eight D5 candidate ports restored under `extensions/` against the frozen `omp.*` API (`extensions/RESCUE.md`). Documented Gaps remain where typed journal / `omp.state` APIs were removed. Remaining Phase 5 work: ADR 0046 item 4 (UI-bound ports only).
+- **DONE (rescue wave 1):** eight D5 candidate ports restored under `extensions/` against the frozen `omp.*` API (`extensions/RESCUE.md`). Documented Gaps remain where typed journal / `omp.state` APIs were removed.
+- **DONE (ADR 0046 item 4):** chat-host slot/overlay/`dynamic_mount` arms; UI-bound ports `sidebar`, `hover-cards`, `welcome-chrome` restored. Phase 5 remainder is empty.
 
 ## References
 - ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment).
