@@ -29,7 +29,7 @@ installs package wheels; the registry/lock/signing path stays in `crates/ext`.
 
 ## Wave 1
 
-See [WAVE1.md](WAVE1.md).
+See [WAVE1.md](WAVE1.md) and rescue triage [RESCUE.md](RESCUE.md).
 
 | Path | Role |
 |---|---|
@@ -37,6 +37,7 @@ See [WAVE1.md](WAVE1.md).
 | [`ci/`](ci/) | Sole `ci/*` mount owner; dispatches by provider host |
 | [`github/`](github/) | GitHub T2 backend (`omp_github` forge + Actions CI) |
 | [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab` forge + GitLab CI) |
+| [`pr-review/`](pr-review/) … [`spec-flow/`](spec-flow/) | Rescue wave 1 (eight ports; see RESCUE.md) |
 
 ## Conformance (ADR 0049 D5)
 
@@ -47,5 +48,7 @@ just check-extensions
 ```
 
 Gates manifests (effect grants / closed-vocab `capabilities`), package unit
-tests, and a frozen `omp` import smoke under native stubs. omp2 CI runs the
-same script as job `First-party extension conformance`.
+tests, and a frozen `omp` import smoke under native stubs. Hard
+`env.net.fetch` applies to forge/ci/github/gitlab (network packages), not every
+tree under `extensions/`. omp2 CI runs the same script as job
+`First-party extension conformance`.

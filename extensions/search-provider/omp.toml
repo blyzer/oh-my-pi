@@ -1,0 +1,31 @@
+id = "omp.search-provider"
+name = "Search provider"
+version = "0.1.0"
+omp_api = 1
+description = "Declared Brave search provider with typed Python response parsing and paging."
+entry = "omp_search_provider"
+capabilities = ["place.env", "env.net.fetch"]
+
+[[declarations]]
+id = "brave-search"
+kind = "provider"
+module = "omp_search_provider.device"
+key = "brave-search@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "web_search"
+kind = "soft"
+module = "omp_search_provider.device"
+key = "ws@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"
+
+[settings]
+credential_id = ""

@@ -1,0 +1,37 @@
+id = "omp.fuzzy-index"
+name = "Fuzzy index"
+version = "0.1.0"
+omp_api = 1
+description = "Warm Environment-colocated fuzzy path and content index."
+entry = "omp_fuzzy_index"
+capabilities = ["env.doc.read", "env.search", "place.worker"]
+
+[[declarations]]
+id = "ffind"
+kind = "soft"
+module = "omp_fuzzy_index.device"
+key = "fff@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "fgrep"
+kind = "soft"
+module = "omp_fuzzy_index.device"
+key = "fff@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "fuzzy-index"
+kind = "worker"
+module = "omp_fuzzy_index.device"
+key = "fuzzy-index"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"
