@@ -15,7 +15,7 @@ use omp_exec::{
 	Artifact, BuildCommand, Eligibility, ExecutionBackend, ExecutionEvent, ExecutionId,
 	ExecutionRun, Intent, Platform, Stage, fallback_eligible,
 };
-use omp_exec_reapi::{ReapiBackend, profile::Profile};
+use omp_exec_reapi::ReapiBackend;
 use omp_observability::attrs::omp_exec as exec_attrs;
 use omp_proto::blob::v1::Chunk;
 use tokio_util::sync::CancellationToken;
@@ -25,26 +25,17 @@ use super::production::{ProductionAdwHost, ProductionError};
 use crate::exec_composer::{EnvironmentInputs, ExecutionSettings, PreparedExecution, RemoteError};
 #[cfg(test)]
 use crate::exec_composer::{
-	SV_EXEC_REMOTE_CACHE, SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_IMAGE, SV_EXEC_REMOTE_PROFILE,
-	config_list,
+	SV_EXEC_REMOTE_ARCH_SPELLING, SV_EXEC_REMOTE_CACHE, SV_EXEC_REMOTE_CREDENTIAL_HEADER,
+	SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_FIXED_PROPERTIES, SV_EXEC_REMOTE_IMAGE,
+	SV_EXEC_REMOTE_PROFILE, SV_EXEC_REMOTE_REFUSE_ACTION_CACHE, config_list,
 };
 
-/// An ADW remote phase error: a shared composer error or a vendor-only failure.
+/// An ADW remote phase error: a shared composer error.
 #[derive(Debug, thiserror::Error)]
 pub enum AdwRemoteError {
 	/// The shared composer failed.
 	#[error(transparent)]
 	Remote(#[from] RemoteError),
-	/// The ADW cancellation client could not connect.
-	#[error("BuildBuddy cancellation client could not connect")]
-	CancelConnect(#[source] omp_exec_reapi::buildbuddy_cancel::CancelConnectError),
-	/// Action-cache mode `read` or `read-write` is incompatible with the
-	/// BuildBuddy profile while runner recycling is active.
-	#[error(
-		"cache policy read or read-write is not allowed with the buildbuddy profile (runner \
-		 recycling makes AC hits unsafe as execution substitutes)"
-	)]
-	CachePolicyConflict,
 }
 
 /// Execution placement policy; mirrors ADR 0040 Part C.3.
@@ -97,36 +88,6 @@ pub fn eligible(binary: &str, args: &[Str]) -> bool {
 			.is_some_and(|class| {
 				matches!(class.eligibility, Eligibility::RemotePreferred | Eligibility::RemoteRequired)
 			})
-}
-
-/// The operator's REAPI profile and action-cache policy from one settings
-/// snapshot. The policy is validated against the profile it is returned with,
-/// so a cfg write during the run cannot swap in an unvalidated value.
-fn profile_from_values(
-	profile_name: &str,
-	cache_name: &str,
-) -> Result<(Profile, omp_exec::CachePolicy), AdwRemoteError> {
-	let profile = match profile_name {
-		"buildbuddy" => Profile::buildbuddy(),
-		"reapi" => Profile::reapi(),
-		_ => return Err(RemoteError::MissingConfiguration.into()),
-	};
-	let cache = cache_name.parse().unwrap_or_default();
-	validate_cache_policy(cache, profile.name.as_str())?;
-	Ok((profile, cache))
-}
-
-/// Returns `Err` when `policy` is non-off and `profile` uses runner recycling
-/// (BuildBuddy). An action-cache hit would substitute for the full execution
-/// result, which must not happen under worker-recycling profiles.
-fn validate_cache_policy(
-	policy: omp_exec::CachePolicy,
-	profile: &str,
-) -> Result<(), AdwRemoteError> {
-	if policy != omp_exec::CachePolicy::Off && profile == "buildbuddy" {
-		return Err(AdwRemoteError::CachePolicyConflict);
-	}
-	Ok(())
 }
 
 async fn materialize_artifact(
@@ -182,21 +143,8 @@ impl ProductionAdwHost {
 		tracing::Span::current().record("exec_id", command.id.as_str());
 		let PreparedExecution { request, pins } =
 			settings.prepare(&environment, &self.root, &command).await?;
-		let (profile, cache) = profile_from_values(settings.profile_name(), settings.cache_name())?;
-		let buildbuddy_canceller = if profile.name.as_str() == "buildbuddy" {
-			Some(
-				omp_exec_reapi::buildbuddy_cancel::BuildBuddyCanceller::connect(
-					settings.endpoint_text(),
-					credential.clone(),
-				)
-				.await
-				.map_err(AdwRemoteError::CancelConnect)?,
-			)
-		} else {
-			None
-		};
-		let mut config = settings.config(&pins, profile, cache, credential);
-		config.buildbuddy_canceller = buildbuddy_canceller;
+		let (profile, cache) = settings.resolved_profile()?;
+		let config = settings.config(&pins, profile, cache, credential);
 		let materialize_client = environment.clone();
 		let backend = settings.connect_config(environment, config).await?;
 		let mut run = backend.start(request).await.map_err(RemoteError::Execute)?;
@@ -306,6 +254,8 @@ fn uuid_v4() -> String {
 
 #[cfg(test)]
 mod tests {
+	use omp_exec_reapi::profile::{ArchSpelling, Profile};
+
 	use super::*;
 
 	#[test]
@@ -331,27 +281,36 @@ mod tests {
 		assert!(matches!(value.as_bytes()[19], b'8'..=b'9' | b'a'..=b'b'));
 	}
 
-	#[test]
-	fn cache_policy_refused_for_buildbuddy_runner_recycling() {
-		let err = validate_cache_policy(omp_exec::CachePolicy::Read, "buildbuddy").unwrap_err();
-		assert!(
-			matches!(err, AdwRemoteError::CachePolicyConflict),
-			"expected CachePolicyConflict, got {err:?}",
-		);
-		let err = validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "buildbuddy").unwrap_err();
-		assert!(matches!(err, AdwRemoteError::CachePolicyConflict));
-	}
-
-	#[test]
-	fn cache_policy_off_with_buildbuddy_passes_validation() {
-		validate_cache_policy(omp_exec::CachePolicy::Off, "buildbuddy").unwrap();
-		validate_cache_policy(omp_exec::CachePolicy::Read, "reapi").unwrap();
-		validate_cache_policy(omp_exec::CachePolicy::ReadWrite, "reapi").unwrap();
-	}
-
 	fn remote_profile(ctx: &Ctx) -> Result<(Profile, omp_exec::CachePolicy), AdwRemoteError> {
 		let settings = ExecutionSettings::for_adw(ctx)?;
-		profile_from_values(settings.profile_name(), settings.cache_name())
+		Ok(settings.resolved_profile()?)
+	}
+
+	#[test]
+	fn refuse_action_cache_rejects_non_off_cache_policy() {
+		let ctx = Ctx::new();
+		SV_EXEC_REMOTE_ENDPOINT
+			.set(&ctx, Str::new_static("grpcs://example.com"))
+			.unwrap();
+		SV_EXEC_REMOTE_IMAGE
+			.set(&ctx, Str::new_static("image@sha256:abc"))
+			.unwrap();
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("operator"))
+			.unwrap();
+		SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.set(&ctx, true).unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("read"))
+			.unwrap();
+		let err = remote_profile(&ctx).unwrap_err();
+		assert!(
+			matches!(err, AdwRemoteError::Remote(RemoteError::CachePolicyConflict)),
+			"got {err:?}",
+		);
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("off"))
+			.unwrap();
+		assert!(remote_profile(&ctx).is_ok());
 	}
 
 	#[test]
@@ -374,31 +333,41 @@ mod tests {
 			(Profile::reapi(), omp_exec::CachePolicy::ReadWrite)
 		);
 
-		SV_EXEC_REMOTE_PROFILE
-			.set(&ctx, Str::new_static("buildbuddy"))
+		SV_EXEC_REMOTE_CREDENTIAL_HEADER
+			.set(&ctx, Str::new_static("x-buildbuddy-api-key"))
 			.unwrap();
+		SV_EXEC_REMOTE_ARCH_SPELLING
+			.set(&ctx, Str::new_static("short"))
+			.unwrap();
+		SV_EXEC_REMOTE_FIXED_PROPERTIES
+			.set(&ctx, Str::new_static("workload-isolation-type=oci"))
+			.unwrap();
+		SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.set(&ctx, true).unwrap();
 		let err = remote_profile(&ctx).unwrap_err();
-		assert!(matches!(err, AdwRemoteError::CachePolicyConflict), "got {err:?}");
+		assert!(
+			matches!(err, AdwRemoteError::Remote(RemoteError::CachePolicyConflict)),
+			"got {err:?}"
+		);
 
 		SV_EXEC_REMOTE_CACHE
 			.set(&ctx, Str::new_static("off"))
 			.unwrap();
+		let (profile, cache) = remote_profile(&ctx).unwrap();
+		assert_eq!(profile.name.as_str(), "reapi");
+		assert_eq!(profile.credential_header.as_deref(), Some("x-buildbuddy-api-key"));
+		assert_eq!(profile.arch, ArchSpelling::Short);
 		assert_eq!(
-			remote_profile(&ctx).unwrap(),
-			(Profile::buildbuddy(), omp_exec::CachePolicy::Off)
+			profile
+				.fixed
+				.get("workload-isolation-type")
+				.map(Str::as_str),
+			Some("oci")
 		);
-
-		SV_EXEC_REMOTE_PROFILE
-			.set(&ctx, Str::new_static("other"))
-			.unwrap();
-		let err = remote_profile(&ctx).unwrap_err();
+		assert_eq!(cache, omp_exec::CachePolicy::Off);
 		assert!(
-			matches!(err, AdwRemoteError::Remote(RemoteError::MissingConfiguration)),
-			"got {err:?}"
-		);
-		assert_eq!(
-			profile_from_values("reapi", "READ").unwrap(),
-			(Profile::reapi(), omp_exec::CachePolicy::Read)
+			ExecutionSettings::for_adw(&ctx)
+				.unwrap()
+				.refuse_action_cache()
 		);
 	}
 }

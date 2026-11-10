@@ -4,7 +4,8 @@
 //! capture stays local; callers authorize the destination before connecting.
 
 use std::{
-	collections::BTreeMap, env, fs, future::Future, io, path::Path, sync::Arc, time::Duration,
+	collections::BTreeMap, env, fs, future::Future, io, path::Path, str::FromStr, sync::Arc,
+	time::Duration,
 };
 
 use bytes::Bytes;
@@ -22,7 +23,7 @@ use omp_exec_reapi::{
 	ExecuteConfig, ReapiBackend, Toolchain,
 	cas::{BlobSource, InputSource},
 	endpoint::Endpoint,
-	profile::{Credential, Profile},
+	profile::{ArchSpelling, Credential, Profile},
 	tree::InputFile,
 };
 use omp_observability::attrs::omp_exec as exec_attrs;
@@ -44,9 +45,30 @@ omp_con::var! {
 	pub static SV_EXEC_REMOTE_CACHE = sv_exec_remote_cache: Str {
 		default: Str::new_static("off"), flags: archive,
 	};
-	/// REAPI profile name: `reapi` or `buildbuddy`.
+	/// Operator-chosen REAPI profile name. Behaviour comes from the profile
+	/// convars below, not from this name.
 	pub static SV_EXEC_REMOTE_PROFILE = sv_exec_remote_profile: Str {
 		default: Str::new_static("reapi"), flags: archive,
+	};
+	/// Metadata header that carries the remote credential. Empty means none.
+	pub static SV_EXEC_REMOTE_CREDENTIAL_HEADER = sv_exec_remote_credential_header: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// Architecture property spelling: `reapi` (`ISA`/`x86-64`) or `short`
+	/// (`Arch`/`amd64`).
+	pub static SV_EXEC_REMOTE_ARCH_SPELLING = sv_exec_remote_arch_spelling: Str {
+		default: Str::new_static("reapi"), flags: archive,
+	};
+	/// Fixed platform properties on every action: comma-separated `k=v` pairs.
+	/// Empty means none. Keys and values are trimmed; empty keys are refused.
+	pub static SV_EXEC_REMOTE_FIXED_PROPERTIES = sv_exec_remote_fixed_properties: Str {
+		default: Str::default(), flags: archive,
+	};
+	/// When true, refuse non-`off` action-cache policy. Use for profiles where
+	/// runner recycling would make an action-cache hit an unsafe substitute for
+	/// a full execution result.
+	pub static SV_EXEC_REMOTE_REFUSE_ACTION_CACHE = sv_exec_remote_refuse_action_cache: bool {
+		default: false, flags: archive,
 	};
 	/// Command credential source, prefixed with `!`; never the key itself.
 	pub static SV_EXEC_REMOTE_CREDENTIAL = sv_exec_remote_credential: Str {
@@ -67,7 +89,7 @@ omp_con::var! {
 }
 
 /// Enforced by the Linux runner profile: the remote action cannot write the
-/// local workspace and BuildBuddy's Firecracker worker has networking off.
+/// local workspace and networking is off.
 pub const REMOTE_POSTURE: Posture = Posture {
 	write:    WriteScope::ReadOnly,
 	network:  NetworkScope::Disabled,
@@ -121,9 +143,19 @@ pub enum RemoteError {
 	/// The environment could not materialize an artifact.
 	#[error("remote artifact could not be materialized into the Environment blob store")]
 	Materialize(#[source] omp_env::ClientError),
-	/// The selected profile is not on the generic execution allowlist.
-	#[error("the selected remote profile is not available to generic execution")]
-	UnsupportedProfile,
+	/// `sv_exec_remote_arch_spelling` is not `reapi` or `short`.
+	#[error("remote arch spelling must be reapi or short")]
+	InvalidArchSpelling,
+	/// `sv_exec_remote_fixed_properties` is not comma-separated `k=v` pairs.
+	#[error("remote fixed properties must be comma-separated k=v pairs")]
+	InvalidFixedProperties,
+	/// Action-cache mode `read` or `read-write` is refused when
+	/// `sv_exec_remote_refuse_action_cache` is set.
+	#[error(
+		"cache policy read or read-write is not allowed when sv_exec_remote_refuse_action_cache is \
+		 set"
+	)]
+	CachePolicyConflict,
 	/// A reattach handle names a backend generic execution does not compose.
 	#[error("the reattach handle names backend {backend}, which generic execution does not compose")]
 	UnknownBackend {
@@ -320,14 +352,18 @@ pub struct DestinationIdentity {
 
 /// A snapshot of operator-controlled execution configuration.
 pub struct ExecutionSettings {
-	endpoint_text:     Str,
-	endpoint:          Endpoint,
-	image:             Str,
-	credential_source: Str,
-	profile:           Str,
-	cache:             Str,
-	deny_globs:        Str,
-	allow_paths:       Str,
+	endpoint_text:       Str,
+	endpoint:            Endpoint,
+	image:               Str,
+	credential_source:   Str,
+	profile:             Str,
+	cache:               Str,
+	credential_header:   Str,
+	arch_spelling:       Str,
+	fixed_properties:    Str,
+	refuse_action_cache: bool,
+	deny_globs:          Str,
+	allow_paths:         Str,
 }
 
 /// A planned request with locally captured inputs and its repository pins.
@@ -341,30 +377,71 @@ pub struct PreparedExecution {
 const BACKEND_NAME: &str = "remote";
 const INSTANCE: &str = "";
 
-fn generic_profile(name: &str) -> Result<Profile, RemoteError> {
-	match name {
-		"reapi" => Ok(Profile::reapi()),
-		_ => Err(RemoteError::UnsupportedProfile),
+/// Parses comma-separated `k=v` platform properties into a deterministic map.
+fn parse_fixed_properties(value: &str) -> Result<BTreeMap<Str, Str>, RemoteError> {
+	let mut fixed = BTreeMap::new();
+	for part in value.split(',') {
+		let part = part.trim();
+		if part.is_empty() {
+			continue;
+		}
+		let Some((key, value)) = part.split_once('=') else {
+			return Err(RemoteError::InvalidFixedProperties);
+		};
+		let key = key.trim();
+		let value = value.trim();
+		if key.is_empty() {
+			return Err(RemoteError::InvalidFixedProperties);
+		}
+		fixed.insert(Str::new(key), Str::new(value));
 	}
+	Ok(fixed)
+}
+
+fn profile_from_operator_data(
+	name: Str,
+	credential_header: &str,
+	arch_spelling: &str,
+	fixed_properties: &str,
+	cache_name: &str,
+	refuse_action_cache: bool,
+) -> Result<(Profile, CachePolicy), RemoteError> {
+	let arch =
+		ArchSpelling::from_str(arch_spelling).map_err(|_| RemoteError::InvalidArchSpelling)?;
+	let credential_header = if credential_header.is_empty() {
+		None
+	} else {
+		Some(Str::new(credential_header))
+	};
+	let profile = Profile {
+		name,
+		credential_header,
+		arch,
+		image_property: Str::new_static("container-image"),
+		fixed: parse_fixed_properties(fixed_properties)?,
+	};
+	let cache = cache_name.parse().unwrap_or_default();
+	if refuse_action_cache && cache != CachePolicy::Off {
+		return Err(RemoteError::CachePolicyConflict);
+	}
+	Ok((profile, cache))
 }
 
 impl ExecutionSettings {
-	/// Reads and validates operator settings for generic REAPI execution.
+	/// Reads and validates operator settings for REAPI execution.
 	///
 	/// # Errors
 	///
-	/// Returns an error for invalid settings or a vendor-specific profile.
+	/// Returns an error for invalid settings.
 	pub fn generic(ctx: &Ctx) -> Result<Self, RemoteError> {
-		let profile = SV_EXEC_REMOTE_PROFILE.get(ctx);
-		generic_profile(&profile)?;
-		Self::snapshot(ctx, profile)
+		Self::snapshot(ctx)
 	}
 
 	pub(crate) fn for_adw(ctx: &Ctx) -> Result<Self, RemoteError> {
-		Self::snapshot(ctx, SV_EXEC_REMOTE_PROFILE.get(ctx))
+		Self::snapshot(ctx)
 	}
 
-	fn snapshot(ctx: &Ctx, profile: Str) -> Result<Self, RemoteError> {
+	fn snapshot(ctx: &Ctx) -> Result<Self, RemoteError> {
 		let endpoint_text = SV_EXEC_REMOTE_ENDPOINT.get(ctx);
 		let image = SV_EXEC_REMOTE_IMAGE.get(ctx);
 		if endpoint_text.is_empty() || image.is_empty() || !image.contains("@sha256:") {
@@ -376,15 +453,27 @@ impl ExecutionSettings {
 			endpoint,
 			image,
 			credential_source: SV_EXEC_REMOTE_CREDENTIAL.get(ctx),
-			profile,
+			profile: SV_EXEC_REMOTE_PROFILE.get(ctx),
 			cache: SV_EXEC_REMOTE_CACHE.get(ctx),
+			credential_header: SV_EXEC_REMOTE_CREDENTIAL_HEADER.get(ctx),
+			arch_spelling: SV_EXEC_REMOTE_ARCH_SPELLING.get(ctx),
+			fixed_properties: SV_EXEC_REMOTE_FIXED_PROPERTIES.get(ctx),
+			refuse_action_cache: SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.get(ctx),
 			deny_globs: SV_EXEC_UPLOAD_EXCLUDE.get(ctx),
 			allow_paths: SV_EXEC_UPLOAD_ALLOW.get(ctx),
 		})
 	}
 
-	fn generic_profile(&self) -> Result<(Profile, CachePolicy), RemoteError> {
-		Ok((generic_profile(&self.profile)?, self.cache.parse().unwrap_or_default()))
+	/// Builds the REAPI profile and validated cache policy from this snapshot.
+	pub(crate) fn resolved_profile(&self) -> Result<(Profile, CachePolicy), RemoteError> {
+		profile_from_operator_data(
+			self.profile.clone(),
+			&self.credential_header,
+			&self.arch_spelling,
+			&self.fixed_properties,
+			&self.cache,
+			self.refuse_action_cache,
+		)
 	}
 
 	pub(crate) fn profile_name(&self) -> &str {
@@ -393,6 +482,10 @@ impl ExecutionSettings {
 
 	pub(crate) fn cache_name(&self) -> &str {
 		&self.cache
+	}
+
+	pub(crate) fn refuse_action_cache(&self) -> bool {
+		self.refuse_action_cache
 	}
 
 	pub(crate) fn endpoint_text(&self) -> &str {
@@ -516,11 +609,6 @@ impl ExecutionSettings {
 	}
 
 	/// Builds the backend configuration for the validated destination.
-	///
-	/// This is the single vendor seam: generic callers pass the allowlisted
-	/// profile to [`Self::connect`], while ADW passes its operator-selected
-	/// profile here and attaches vendor-only fields before
-	/// [`Self::connect_config`].
 	pub(crate) fn config(
 		&self,
 		pins: &RepoPins,
@@ -551,7 +639,7 @@ impl ExecutionSettings {
 		pins: &RepoPins,
 		credential: Credential,
 	) -> Result<ReapiBackend<EnvironmentInputs>, RemoteError> {
-		let (profile, cache) = self.generic_profile()?;
+		let (profile, cache) = self.resolved_profile()?;
 		self
 			.connect_config(environment, self.config(pins, profile, cache, credential))
 			.await
@@ -582,7 +670,6 @@ fn resume_config(profile: Profile, cache: CachePolicy, credential: Credential) -
 		cache,
 		platform_properties: BTreeMap::new(),
 		toolchains: BTreeMap::new(),
-		buildbuddy_canceller: None,
 	}
 }
 
@@ -647,7 +734,7 @@ impl ResumeConnection {
 		if handle.backend.as_str() != BACKEND_NAME {
 			return Err(RemoteError::UnknownBackend { backend: handle.backend.clone() });
 		}
-		let (profile, cache) = settings.generic_profile()?;
+		let (profile, cache) = settings.resolved_profile()?;
 		let (credential, environment) = if let Some(credential) = settings.environment_credential()? {
 			(credential, None)
 		} else {
@@ -731,17 +818,7 @@ mod tests {
 	}
 
 	#[test]
-	fn generic_composer_allowlists_only_reapi() {
-		for profile in ["buildbuddy", "other", ""] {
-			let ctx = context("grpcs://example.com");
-			SV_EXEC_REMOTE_PROFILE
-				.set(&ctx, Str::new_static(profile))
-				.unwrap();
-			assert!(
-				matches!(ExecutionSettings::generic(&ctx), Err(RemoteError::UnsupportedProfile)),
-				"{profile} was not refused",
-			);
-		}
+	fn unset_profile_convars_equal_the_portable_reapi_profile() {
 		let ctx = context("grpcs://example.com");
 		SV_EXEC_REMOTE_PROFILE
 			.set(&ctx, Str::new_static("reapi"))
@@ -751,10 +828,77 @@ mod tests {
 			.unwrap();
 		let (profile, cache) = ExecutionSettings::generic(&ctx)
 			.unwrap()
-			.generic_profile()
+			.resolved_profile()
 			.unwrap();
 		assert_eq!(profile, Profile::reapi());
 		assert_eq!(cache, CachePolicy::Read);
+	}
+
+	#[test]
+	fn operator_convars_reproduce_the_former_buildbuddy_profile_fields() {
+		let ctx = context("grpcs://example.com");
+		SV_EXEC_REMOTE_PROFILE
+			.set(&ctx, Str::new_static("operator"))
+			.unwrap();
+		SV_EXEC_REMOTE_CREDENTIAL_HEADER
+			.set(&ctx, Str::new_static("x-buildbuddy-api-key"))
+			.unwrap();
+		SV_EXEC_REMOTE_ARCH_SPELLING
+			.set(&ctx, Str::new_static("short"))
+			.unwrap();
+		SV_EXEC_REMOTE_FIXED_PROPERTIES
+			.set(&ctx, Str::new_static("workload-isolation-type=oci"))
+			.unwrap();
+		SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.set(&ctx, true).unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("off"))
+			.unwrap();
+		let (profile, cache) = ExecutionSettings::generic(&ctx)
+			.unwrap()
+			.resolved_profile()
+			.unwrap();
+		assert_eq!(profile.name.as_str(), "operator");
+		assert_eq!(profile.credential_header.as_deref(), Some("x-buildbuddy-api-key"));
+		assert_eq!(profile.arch, ArchSpelling::Short);
+		assert_eq!(profile.image_property.as_str(), "container-image");
+		assert_eq!(
+			profile
+				.fixed
+				.get("workload-isolation-type")
+				.map(Str::as_str),
+			Some("oci")
+		);
+		assert_eq!(cache, CachePolicy::Off);
+	}
+
+	#[test]
+	fn refuse_action_cache_rejects_non_off_cache_policy() {
+		let ctx = context("grpcs://example.com");
+		SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.set(&ctx, true).unwrap();
+		SV_EXEC_REMOTE_CACHE
+			.set(&ctx, Str::new_static("read"))
+			.unwrap();
+		let err = ExecutionSettings::generic(&ctx)
+			.unwrap()
+			.resolved_profile()
+			.unwrap_err();
+		assert!(matches!(err, RemoteError::CachePolicyConflict), "got {err:?}");
+	}
+
+	#[test]
+	fn fixed_properties_parse_comma_separated_pairs() {
+		let fixed = parse_fixed_properties(" a=1 , b=two,c=3 ").unwrap();
+		assert_eq!(fixed.get("a").map(Str::as_str), Some("1"));
+		assert_eq!(fixed.get("b").map(Str::as_str), Some("two"));
+		assert_eq!(fixed.get("c").map(Str::as_str), Some("3"));
+		assert!(matches!(
+			parse_fixed_properties("no-equals"),
+			Err(RemoteError::InvalidFixedProperties)
+		));
+		assert!(matches!(
+			parse_fixed_properties("=empty-key"),
+			Err(RemoteError::InvalidFixedProperties)
+		));
 	}
 
 	#[test]
@@ -779,7 +923,6 @@ mod tests {
 			name:  Str::new_static("PATH"),
 			value: Str::new_static("/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"),
 		}]);
-		assert!(config.buildbuddy_canceller.is_none());
 	}
 
 	#[test]
@@ -812,7 +955,6 @@ mod tests {
 		assert_eq!(config.cache, CachePolicy::Read);
 		assert!(config.platform_properties.is_empty());
 		assert!(config.toolchains.is_empty());
-		assert!(config.buildbuddy_canceller.is_none());
 	}
 
 	#[tokio::test]

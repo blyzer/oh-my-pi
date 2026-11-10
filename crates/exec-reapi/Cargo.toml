@@ -11,9 +11,6 @@ readme = "README.md"
 
 [features]
 default = ["test-server"]
-# BuildBuddy's proprietary invocation-cancel RPC (`BuildBuddyService.CancelExecutions`):
-# the one vendor-specific wire behaviour, gated so the generic client carries none.
-buildbuddy-cancel = []
 # Generates the tonic *server* traits for the vendored REAPI services. Only the
 # in-process fake server of this crate's own tests uses them; the self
 # dev-dependency below turns it on for `cargo test`, so no production build

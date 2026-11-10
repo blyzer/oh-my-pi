@@ -49,27 +49,23 @@ pub struct Toolchain {
 #[derive(Debug, Clone)]
 pub struct Config {
 	/// Operator identity for this backend.
-	pub id:                   BackendId,
+	pub id:                  BackendId,
 	/// REAPI instance name.
-	pub instance:             Str,
+	pub instance:            Str,
 	/// Service profile (portable REAPI or another profile expressed as data).
-	pub profile:              Profile,
+	pub profile:             Profile,
 	/// Credential written only to the profile's metadata header.
-	pub credential:           Option<Credential>,
+	pub credential:          Option<Credential>,
 	/// Platform offered by this backend.
-	pub platform:             Platform,
+	pub platform:            Platform,
 	/// Enforced posture offered by this backend.
-	pub enforced:             Posture,
+	pub enforced:            Posture,
 	/// Action-cache policy.
-	pub cache:                CachePolicy,
+	pub cache:               CachePolicy,
 	/// Extra action platform properties.
-	pub platform_properties:  BTreeMap<Str, Str>,
+	pub platform_properties: BTreeMap<Str, Str>,
 	/// Toolchain mapping supplied by the composing layer.
-	pub toolchains:           BTreeMap<Str, Toolchain>,
-	/// Optional BuildBuddy invocation canceller (buildbuddy-cancel feature
-	/// only).
-	#[cfg(feature = "buildbuddy-cancel")]
-	pub buildbuddy_canceller: Option<crate::BuildBuddyCanceller>,
+	pub toolchains:          BTreeMap<Str, Toolchain>,
 }
 
 /// A connected generic REAPI backend.
@@ -79,19 +75,17 @@ pub struct ReapiBackend<S> {
 }
 
 struct BackendInner<S> {
-	source:               S,
-	profile:              Profile,
-	credential:           Option<Credential>,
-	instance:             Str,
-	clients:              Clients,
-	caps:                 Capabilities,
-	backend_caps:         BackendCapabilities,
-	cache:                CachePolicy,
-	platform_properties:  BTreeMap<Str, Str>,
-	toolchains:           BTreeMap<Str, Toolchain>,
-	id:                   BackendId,
-	#[cfg(feature = "buildbuddy-cancel")]
-	buildbuddy_canceller: Option<crate::BuildBuddyCanceller>,
+	source:              S,
+	profile:             Profile,
+	credential:          Option<Credential>,
+	instance:            Str,
+	clients:             Clients,
+	caps:                Capabilities,
+	backend_caps:        BackendCapabilities,
+	cache:               CachePolicy,
+	platform_properties: BTreeMap<Str, Str>,
+	toolchains:          BTreeMap<Str, Toolchain>,
+	id:                  BackendId,
 }
 
 #[derive(Clone)]
@@ -206,8 +200,6 @@ where
 				platform_properties: config.platform_properties,
 				toolchains: config.toolchains,
 				id: config.id,
-				#[cfg(feature = "buildbuddy-cancel")]
-				buildbuddy_canceller: config.buildbuddy_canceller,
 			}),
 		})
 	}
@@ -251,8 +243,6 @@ where
 				platform_properties: config.platform_properties,
 				toolchains: config.toolchains,
 				id: config.id,
-				#[cfg(feature = "buildbuddy-cancel")]
-				buildbuddy_canceller: config.buildbuddy_canceller,
 			}),
 		}
 	}
@@ -1120,17 +1110,7 @@ where
 	fn cancel(&self) -> impl Future<Output = CancelOutcome> + Send + '_ {
 		let backend = self.backend.clone();
 		let operation = self.operation.clone();
-		#[cfg(feature = "buildbuddy-cancel")]
-		let invocation_id = self.id.clone();
 		async move {
-			#[cfg(feature = "buildbuddy-cancel")]
-			if let Some(canceller) = &backend.inner.buildbuddy_canceller {
-				return match canceller.cancel_invocation(invocation_id.as_str()).await {
-					Ok(()) => CancelOutcome::Requested,
-					Err(error) if error.code() == Code::Unimplemented => CancelOutcome::Unsupported,
-					Err(_) => CancelOutcome::Failed,
-				};
-			}
 			let Some(name) = operation.lock().clone() else {
 				return CancelOutcome::Unsupported;
 			};
@@ -1518,21 +1498,19 @@ mod tests {
 			.await
 			.unwrap();
 		let config = Config {
-			id: BackendId::new_static("reapi"),
-			instance: Str::empty(),
-			profile: Profile::reapi(),
-			credential: None,
-			platform: Platform::LINUX_X86_64,
-			enforced: Posture {
+			id:                  BackendId::new_static("reapi"),
+			instance:            Str::empty(),
+			profile:             Profile::reapi(),
+			credential:          None,
+			platform:            Platform::LINUX_X86_64,
+			enforced:            Posture {
 				write:    WriteScope::ReadOnly,
 				network:  NetworkScope::Unrestricted,
 				approval: ApprovalScope::Yolo,
 			},
-			cache: CachePolicy::Off,
+			cache:               CachePolicy::Off,
 			platform_properties: BTreeMap::new(),
-			toolchains: BTreeMap::new(),
-			#[cfg(feature = "buildbuddy-cancel")]
-			buildbuddy_canceller: None,
+			toolchains:          BTreeMap::new(),
 		};
 		ReapiBackend::from_channel(
 			channel,

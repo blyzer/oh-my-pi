@@ -1,10 +1,11 @@
 //! Remote Execution API v2 backend for [`omp_exec`] (ADR 0040, Slice 1 PR 1b).
 //!
 //! The crate speaks the standard REAPI over gRPC. Anything specific to one
-//! service (the API-key header, platform property names, isolation and
-//! recycling properties) is profile data supplied by the composing crate, and
-//! the only vendor wire code is the invocation-cancel call behind the
-//! `buildbuddy-cancel` feature.
+//! service (the API-key header, platform property names, isolation properties)
+//! is profile data supplied by the composing crate. Cancel uses the standard
+//! `Operations.CancelOperation` RPC; until a Delegated cancel fallback lands,
+//! services that leave that RPC unimplemented are bounded by the action
+//! timeout.
 
 pub mod capabilities;
 pub mod cas;
@@ -17,12 +18,6 @@ pub mod tree;
 
 /// The execution backend and its profile-driven configuration.
 pub use execute::{Config as ExecuteConfig, ReapiBackend, Toolchain};
-
-#[cfg(feature = "buildbuddy-cancel")]
-pub mod buildbuddy_cancel;
-
-#[cfg(feature = "buildbuddy-cancel")]
-pub use buildbuddy_cancel::BuildBuddyCanceller;
 
 /// Generated bindings for the vendored protos.
 ///
@@ -95,30 +90,5 @@ pub mod proto {
 			/// `google.rpc`.
 			rpc, "google.rpc.rs"
 		}
-	}
-
-	/// The vendor service package. Its imported `invocation` package lives at
-	/// this generated tree's sibling root, matching prost's package paths.
-	#[cfg(feature = "buildbuddy-cancel")]
-	pub mod buildbuddy {
-		package! {
-			/// `buildbuddy.service`.
-			service, "proto-buildbuddy", "buildbuddy.service.rs"
-		}
-	}
-	#[cfg(feature = "buildbuddy-cancel")]
-	package! {
-		/// `invocation`.
-		invocation, "proto-buildbuddy", "invocation.rs"
-	}
-	#[cfg(feature = "buildbuddy-cancel")]
-	package! {
-		/// `context`.
-		context, "proto-buildbuddy", "context.rs"
-	}
-	#[cfg(feature = "buildbuddy-cancel")]
-	package! {
-		/// `user_id`.
-		user_id, "proto-buildbuddy", "user_id.rs"
 	}
 }

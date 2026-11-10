@@ -219,20 +219,19 @@ async fn make_backend(fake: Fake) -> ReapiBackend<FixedSource> {
 		.unwrap();
 	let caps = capabilities::interpret(&server_caps()).unwrap();
 	let config = ExecuteConfig {
-		id:                   BackendId::new_static("p13"),
-		instance:             Str::empty(),
-		profile:              omp_exec_reapi::profile::Profile::reapi(),
-		credential:           None,
-		platform:             Platform::LINUX_X86_64,
-		enforced:             Posture {
+		id:                  BackendId::new_static("p13"),
+		instance:            Str::empty(),
+		profile:             omp_exec_reapi::profile::Profile::reapi(),
+		credential:          None,
+		platform:            Platform::LINUX_X86_64,
+		enforced:            Posture {
 			write:    WriteScope::ReadOnly,
 			network:  NetworkScope::Unrestricted,
 			approval: ApprovalScope::Yolo,
 		},
-		cache:                CachePolicy::Off,
-		platform_properties:  BTreeMap::new(),
-		toolchains:           BTreeMap::new(),
-		buildbuddy_canceller: None,
+		cache:               CachePolicy::Off,
+		platform_properties: BTreeMap::new(),
+		toolchains:          BTreeMap::new(),
 	};
 	ReapiBackend::from_channel(channel, config, caps, FixedSource)
 }

@@ -1131,9 +1131,10 @@ Composed into a product path (Part L Slice 1 and the Slice 2 local path):
 
 - The ADW remote code phase. `crates/driver/src/adw/remote.rs:ProductionAdwHost::run_remote`
   captures inputs through envd, plans the command through `crates/exec/src/cargo_just.rs:CargoJust`,
-  and runs one `ReapiBackend` Action (`crates/exec-reapi/`) under the `reapi` or `buildbuddy`
-  profile. BuildBuddy invocation cancel is `omp_exec_reapi::buildbuddy_cancel::BuildBuddyCanceller`,
-  built with the `buildbuddy-cancel` feature.
+  and runs one `ReapiBackend` Action (`crates/exec-reapi/`) under an operator-data
+  `Profile` (name plus credential header, arch spelling, fixed properties, and
+  refuse-action-cache). Cancel uses standard `Operations.CancelOperation` / the action
+  timeout; proprietary cancel left core with the 2026-11-05 amendment's steps 1–3.
 - ADW placement and fallback. `crates/driver/src/adw/production.rs:ProductionAdwHost::run_command`
   sends a phase remote under `remote-only` and `remote-preferred` when
   `crates/driver/src/adw/remote.rs:eligible` accepts its `just` recipe. It falls back to local only
@@ -1157,10 +1158,12 @@ Composed into a product path (Part L Slice 1 and the Slice 2 local path):
   changes while the user decides. Only after approval does the tool connect and start the run through
   `JobBoard::start_execution`.
 - Operator convars in `crates/driver/src/exec_composer.rs`: `sv_exec_remote_endpoint`,
-  `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential`,
-  `sv_exec_remote_image`, `sv_exec_upload_exclude`, `sv_exec_upload_allow`. ADW placement
-  convars in `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`. The
-  agent capability convar in `crates/driver/src/remote_build.rs`: `sv_exec_agent_runs`.
+  `sv_exec_remote_cache`, `sv_exec_remote_profile`, `sv_exec_remote_credential_header`,
+  `sv_exec_remote_arch_spelling`, `sv_exec_remote_fixed_properties`,
+  `sv_exec_remote_refuse_action_cache`, `sv_exec_remote_credential`, `sv_exec_remote_image`,
+  `sv_exec_upload_exclude`, `sv_exec_upload_allow`. ADW placement convars in
+  `crates/driver/src/adw/remote.rs`: `sv_exec_policy`, `sv_exec_fallback_local`. The agent
+  capability convar in `crates/driver/src/remote_build.rs`: `sv_exec_agent_runs`.
 - Telemetry. The `omp.exec.execute`, `omp.exec.capture`, `omp.exec.upload`, `omp.exec.queue`,
   `omp.exec.run` and `omp.exec.download` spans are emitted. `ExecutedActionMetadata` fields are
   captured in `omp.exec.worker.*` tracing events (PR #351).
@@ -1173,10 +1176,9 @@ Present, but used by no product path:
 
 - `BuildReport` and `BuildStatus` (`crates/exec/src/report.rs`, PR #350). Nothing outside
   `crates/exec/` uses them.
-- The BuildBuddy Run API backend (`crates/exec-buildbuddy/`). No workspace crate depends on
-  `omp-exec-buildbuddy`.
 - The SSH backend (`crates/exec-ssh/`). `crates/driver/Cargo.toml` declares `omp-exec-ssh`, but no
-  driver source uses `omp_exec_ssh`.
+  driver source uses `omp_exec_ssh`. The orphan `omp-exec-buildbuddy` crate left the workspace
+  (dimension-1 steps 1–3); a future extensions repository may restore a Run API client.
 
 The assessment below records the tree as of 2026-11-04. The agent capability described above
 subsequently added an execution-job producer, so the claims below that no producer exists are

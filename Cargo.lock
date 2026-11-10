@@ -8593,27 +8593,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omp-exec-buildbuddy"
-version = "2.0.0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "omp-adw",
- "omp-core",
- "omp-exec",
- "omp-exec-reapi",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tonic",
-]
-
-[[package]]
 name = "omp-exec-local"
 version = "2.0.0"
 dependencies = [
