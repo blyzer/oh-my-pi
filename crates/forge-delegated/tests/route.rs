@@ -6,10 +6,10 @@ use bytes::Bytes;
 use futures::executor::block_on;
 use omp_core::Str;
 use omp_forge::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, CommitRef,
-	ComponentError, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue,
-	IssueDraft, IssueState, PathComponent, PushReceipt, PushRequest, RepoRef, Repository,
-	RequestState, SearchKind, SearchPage, SearchQuery,
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+	CommitRef, ComponentError, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp,
+	Issue, IssueDraft, IssueState, PathComponent, PushReceipt, PushRequest, RepoRef, Repository,
+	RequestState, ResourceKind, SearchKind, SearchPage, SearchQuery,
 };
 use omp_forge_delegated::{
 	ApprovalGate, Delegated, DelegatedBuilder, DenyAll, PermitAll, RegisterError,
@@ -143,6 +143,37 @@ impl ForgeHost for Memory {
 		let repo = repo.clone();
 		let label = self.label;
 		async move { Ok(issue(repo, number, label)) }
+	}
+
+	fn change_request_diff(
+		&self,
+		_repo: &RepoRef,
+		_number: u64,
+	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+		self.note(ForgeOp::ChangeRequestView);
+		let label = self.label;
+		async move { Ok(Str::new(format!("diff {label}"))) }
+	}
+
+	fn list_comments(
+		&self,
+		_repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+		let op = match kind {
+			ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+			ResourceKind::Issue => ForgeOp::IssueView,
+		};
+		self.note(op);
+		let label = self.label;
+		async move {
+			Ok(Arc::from([Comment {
+				author:     Str::new(label),
+				created_at: Str::new_static("2026-11-10T00:00:00Z"),
+				body:       Str::new(number.to_string()),
+			}]))
+		}
 	}
 
 	fn list_checks(
@@ -461,4 +492,32 @@ fn duplicate_and_invalid_hosts_are_rejected() {
 		other => panic!("unexpected {other:?}"),
 	}
 	let _ = builder.build();
+}
+
+#[test]
+fn diff_and_comments_route_as_view_reads() {
+	let (router, left, right) = router_with(PermitAll);
+	let a = repo("forge-a.example");
+	let diff = block_on(router.change_request_diff(&a, 7)).unwrap();
+	assert_eq!(diff.as_str(), "diff a");
+	let comments = block_on(router.list_comments(&a, 7, ResourceKind::Issue)).unwrap();
+	assert_eq!(comments.len(), 1);
+	assert_eq!(comments[0].author.as_str(), "a");
+	assert_eq!(comments[0].body.as_str(), "7");
+	assert_eq!(left.ops(), [ForgeOp::ChangeRequestView, ForgeOp::IssueView]);
+	assert!(right.ops().is_empty());
+
+	let missing = repo("missing.example");
+	match block_on(router.change_request_diff(&missing, 1)).unwrap_err() {
+		ForgeError::Unregistered { host, op } => {
+			assert_eq!(host.as_str(), "missing.example");
+			assert_eq!(op, ForgeOp::ChangeRequestView);
+		},
+		other => panic!("unexpected {other:?}"),
+	}
+	match block_on(router.list_comments(&missing, 1, ResourceKind::ChangeRequest)).unwrap_err() {
+		ForgeError::Unregistered { op, .. } => assert_eq!(op, ForgeOp::ChangeRequestView),
+		other => panic!("unexpected {other:?}"),
+	}
+	assert_eq!(left.ops(), [ForgeOp::ChangeRequestView, ForgeOp::IssueView]);
 }

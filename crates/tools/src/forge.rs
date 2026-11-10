@@ -529,9 +529,10 @@ mod tests {
 
 	use omp_core::Str;
 	use omp_forge::{
-		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, FileBody,
-		FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft, PushReceipt,
-		PushRequest, RepoRef, Repository, SearchKind, SearchPage, SearchQuery,
+		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+		FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
+		PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchKind, SearchPage,
+		SearchQuery,
 	};
 	use omp_tool::{Rev, Tool as _};
 	use parking_lot::Mutex;
@@ -586,6 +587,27 @@ mod tests {
 			_: u64,
 		) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
 			async { Err(ForgeError::Unsupported { op: ForgeOp::IssueView }) }
+		}
+
+		fn change_request_diff(
+			&self,
+			_: &RepoRef,
+			_: u64,
+		) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+			async { Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestView }) }
+		}
+
+		fn list_comments(
+			&self,
+			_: &RepoRef,
+			_: u64,
+			kind: ResourceKind,
+		) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+			let op = match kind {
+				ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+				ResourceKind::Issue => ForgeOp::IssueView,
+			};
+			async move { Err(ForgeError::Unsupported { op }) }
 		}
 
 		fn list_checks(

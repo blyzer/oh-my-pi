@@ -5,7 +5,10 @@
 //! an owner and a repository name follow it. Nested owners are the middle
 //! segments (`pr://code.example/org/team/widget/42` has owner `org/team`).
 //! The shorthand `pr://acme/widget/42` leaves the host absent. This parser
-//! never fills one in.
+//! never fills one in. A numbered read supplies the host itself: the
+//! production resolver uses its default host when the URL omitted one, and
+//! the checkout remote when the URL named only a number. List URLs that name
+//! a repository and no number are outside this parser.
 //!
 //! A change request may end in `/diff`, `/diff/all`, or `/diff/<index>`
 //! with `<index>` starting at 1. An issue URL rejects those selectors.

@@ -152,6 +152,19 @@ pub struct Issue {
 
 const _: () = assert!(size_of::<Issue>() <= 192, "Issue must stay compact");
 
+/// One conversation comment on a change request or an issue.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Comment {
+	/// Author login. Empty when the forge has none.
+	pub author:     Str,
+	/// Creation time as the forge reported it. Empty when absent.
+	pub created_at: Str,
+	/// Comment body. Empty when the forge has none.
+	pub body:       Str,
+}
+
+const _: () = assert!(size_of::<Comment>() <= 72, "Comment must stay three strings");
+
 /// Fields required to create an issue.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IssueDraft {

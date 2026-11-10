@@ -11,9 +11,10 @@ use std::{mem::size_of, sync::Arc};
 
 use omp_core::{FastHashMap, Str, StrExt};
 use omp_forge::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest,
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
 	ComponentError, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue,
-	IssueDraft, PushReceipt, PushRequest, RepoRef, Repository, SearchPage, SearchQuery, check_host,
+	IssueDraft, PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage,
+	SearchQuery, check_host,
 };
 
 use crate::{ApprovalGate, RegisterError};
@@ -101,6 +102,25 @@ where
 	async fn view_issue(&self, repo: &RepoRef, number: u64) -> Result<Issue, ForgeError> {
 		let host = self.adapter_for(ForgeOp::IssueView, repo)?;
 		host.view_issue(repo, number).await
+	}
+
+	async fn change_request_diff(&self, repo: &RepoRef, number: u64) -> Result<Str, ForgeError> {
+		let host = self.adapter_for(ForgeOp::ChangeRequestView, repo)?;
+		host.change_request_diff(repo, number).await
+	}
+
+	async fn list_comments(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> Result<Arc<[Comment]>, ForgeError> {
+		let op = match kind {
+			ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+			ResourceKind::Issue => ForgeOp::IssueView,
+		};
+		let host = self.adapter_for(op, repo)?;
+		host.list_comments(repo, number, kind).await
 	}
 
 	async fn list_checks(

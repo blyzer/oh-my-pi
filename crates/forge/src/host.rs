@@ -10,12 +10,14 @@
 //! not touch a worktree. Creating a change request or an issue mutates the
 //! forge record.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
+
+use omp_core::Str;
 
 use crate::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, FileBody,
-	FileQuery, ForgeChecks, ForgeError, Issue, IssueDraft, PushReceipt, PushRequest, RepoRef,
-	Repository, SearchPage, SearchQuery,
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+	FileBody, FileQuery, ForgeChecks, ForgeError, Issue, IssueDraft, PushReceipt, PushRequest,
+	RepoRef, Repository, ResourceKind, SearchPage, SearchQuery,
 };
 
 /// A forge a caller can read and write through the contract.
@@ -55,6 +57,27 @@ pub trait ForgeHost: Clone + Send + Sync + 'static {
 		repo: &RepoRef,
 		number: u64,
 	) -> impl Future<Output = Result<Issue, ForgeError>> + Send;
+
+	/// Reads the unified diff text of one change request.
+	///
+	/// [`crate::ForgeOp::ChangeRequestView`] does not mutate. The caller keeps
+	/// selectors such as `/diff` and `/diff/<index>` and slices this text.
+	fn change_request_diff(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Str, ForgeError>> + Send;
+
+	/// Reads conversation comments on a change request or an issue.
+	///
+	/// The router classifies the read as [`crate::ForgeOp::ChangeRequestView`]
+	/// or [`crate::ForgeOp::IssueView`] from `kind`. Neither mutates.
+	fn list_comments(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send;
 
 	/// Reads checks on a change request or a commit.
 	///
@@ -108,12 +131,14 @@ pub trait ForgeHost: Clone + Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-	use std::future::Future;
+	use std::{future::Future, sync::Arc};
+
+	use omp_core::Str;
 
 	use crate::{
-		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, FileBody,
-		FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft, PushReceipt,
-		PushRequest, RepoRef, Repository, SearchPage, SearchQuery,
+		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+		FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
+		PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage, SearchQuery,
 	};
 
 	fn unsupported<T: Send>(op: ForgeOp) -> std::future::Ready<Result<T, ForgeError>> {
@@ -152,6 +177,27 @@ mod tests {
 			_number: u64,
 		) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
 			unsupported(ForgeOp::IssueView)
+		}
+
+		fn change_request_diff(
+			&self,
+			_repo: &RepoRef,
+			_number: u64,
+		) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+			unsupported(ForgeOp::ChangeRequestView)
+		}
+
+		fn list_comments(
+			&self,
+			_repo: &RepoRef,
+			_number: u64,
+			kind: ResourceKind,
+		) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+			let op = match kind {
+				ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+				ResourceKind::Issue => ForgeOp::IssueView,
+			};
+			unsupported(op)
 		}
 
 		fn list_checks(

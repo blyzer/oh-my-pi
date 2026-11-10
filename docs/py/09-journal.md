@@ -862,8 +862,8 @@ can bring a new address of that scheme into existence.
 | `SKILL` | `skill://` | yes | no | Skill content by name, traversal-confined. |
 | `RULE` | `rule://` | yes | no | Rule content by name. |
 | `OMP` | `omp://` | yes | no | Bundled harness documentation. |
-| `ISSUE` | `issue://` | yes | no | GitHub issues, cached. |
-| `PR` | `pr://` | yes | no | GitHub pull requests, cached. |
+| `ISSUE` | `issue://` | yes | no | Forge issues, cached. Numbered reads use the forge host. |
+| `PR` | `pr://` | yes | no | Forge change requests, cached. Numbered reads use the forge host. |
 | `SSH` | `ssh://` | yes | yes, via `omp.env` | Remote file read/write and host listing. |
 | `SECURITY` | `security://` | yes, when granted | no | Scan results, findings, coverage. Manifest-gated. |
 | `VAULT` | `vault://` | yes, when granted | yes, when granted | Obsidian vault files and operators. Manifest-gated. |

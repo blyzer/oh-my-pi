@@ -568,6 +568,14 @@ impl<'a> EnvironmentHost<'a> {
 		self.conflicts = Some(Arc::clone(&conflicts));
 		self.ensure_security_service();
 		let security = self.security.clone().expect("security service");
+		let github = GithubService::new(
+			self.workspace.root().to_path_buf(),
+			self.state_dir,
+			Arc::clone(&self.github_credentials),
+			Arc::clone(&self.github_cache),
+			self.blobs.clone(),
+		);
+		let forge = crate::github_adapter::forge_router(github);
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,
 			self.blobs.store().clone(),
@@ -576,6 +584,7 @@ impl<'a> EnvironmentHost<'a> {
 			self.workspace.root().to_path_buf(),
 			Arc::clone(&self.github_cache),
 			Arc::clone(&self.github_credentials),
+			forge,
 			mem::take(&mut self.url_resolvers),
 			self.host_resources.clone(),
 			self.session_authority.clone(),

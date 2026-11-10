@@ -2,6 +2,8 @@
 //!
 //! `GithubService` still performs the HTTP and git I/O. These wrappers speak
 //! the neutral contracts and are installed behind `Delegated` routers.
+//! `view_change_request`, `view_issue`, the unified diff, and the comment
+//! list are reads. Numbered `pr://` and `issue://` resources call them.
 //! `PermitAll` is intentional: the desk gate is the tool commit, and the
 //! routers are not exported, so a second approval would only repeat that gate.
 //!
@@ -22,10 +24,10 @@ use omp_ci::{
 use omp_ci_delegated::{Delegated as CiDelegated, PermitAll as CiPermitAll};
 use omp_core::{Str, sf};
 use omp_forge::{
-	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, CommitRef,
-	FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
-	PushReceipt, PushRequest, RepoRef, Repository, RequestState, SearchHit, SearchKind, SearchPage,
-	SearchQuery,
+	ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,
+	CommitRef, FileBody, FileQuery, ForgeChecks, ForgeError, ForgeHost, ForgeOp, Issue, IssueDraft,
+	IssueState, PushReceipt, PushRequest, RepoRef, Repository, RequestState, ResourceKind,
+	SearchHit, SearchKind, SearchPage, SearchQuery,
 };
 use omp_forge_delegated::{Delegated as ForgeDelegated, PermitAll as ForgePermitAll};
 use serde_json::Value;
@@ -170,9 +172,16 @@ fn map_forge(
 				name:  repo.name.clone(),
 				path:  Str::new(path.unwrap_or_default()),
 			},
-			ForgeOp::ChangeRequestCreate
+			ForgeOp::ChangeRequestView
+			| ForgeOp::ChangeRequestCreate
 			| ForgeOp::ChangeRequestCheckout
 			| ForgeOp::ChangeRequestPush => ForgeError::ChangeRequestNotFound {
+				host:   repo.host.clone(),
+				owner:  repo.owner.clone(),
+				name:   repo.name.clone(),
+				number: number.unwrap_or(0),
+			},
+			ForgeOp::IssueView | ForgeOp::IssueCreate => ForgeError::IssueNotFound {
 				host:   repo.host.clone(),
 				owner:  repo.owner.clone(),
 				name:   repo.name.clone(),
@@ -197,11 +206,23 @@ fn repository_from(repo: &RepoRef, value: &Value) -> Repository {
 	}
 }
 
-fn change_request_from(repo: &RepoRef, value: &Value) -> Result<ChangeRequest, ForgeError> {
+fn github_repo(op: ForgeOp, repo: &RepoRef) -> Result<github_url::GithubRepo, ForgeError> {
+	if repo.owner.contains('/') {
+		return Err(ForgeError::Unavailable { op });
+	}
+	github_url::GithubRepo::new(repo.host.as_str(), repo.owner.as_str(), repo.name.as_str())
+		.map_err(|_| ForgeError::Unavailable { op })
+}
+
+fn change_request_from(
+	repo: &RepoRef,
+	value: &Value,
+	op: ForgeOp,
+) -> Result<ChangeRequest, ForgeError> {
 	let number = value
 		.get("number")
 		.and_then(Value::as_u64)
-		.ok_or(ForgeError::Unavailable { op: ForgeOp::ChangeRequestCreate })?;
+		.ok_or(ForgeError::Unavailable { op })?;
 	let merged = value
 		.get("merged")
 		.and_then(Value::as_bool)
@@ -226,6 +247,38 @@ fn change_request_from(repo: &RepoRef, value: &Value) -> Result<ChangeRequest, F
 		base_commit: pointer_str(value, "/base/sha"),
 		web_url: json_str(value, "html_url"),
 	})
+}
+
+fn issue_from(repo: &RepoRef, value: &Value) -> Result<Issue, ForgeError> {
+	let number = value
+		.get("number")
+		.and_then(Value::as_u64)
+		.ok_or(ForgeError::Unavailable { op: ForgeOp::IssueView })?;
+	let state = if value.get("state").and_then(Value::as_str) == Some("closed") {
+		IssueState::Closed
+	} else {
+		IssueState::Open
+	};
+	Ok(Issue {
+		repo: repo.clone(),
+		number,
+		title: json_str(value, "title"),
+		body: json_str(value, "body"),
+		state,
+		web_url: json_str(value, "html_url"),
+	})
+}
+
+fn comment_from(value: &Value) -> Comment {
+	Comment {
+		author:     value
+			.pointer("/user/login")
+			.and_then(Value::as_str)
+			.map(Str::new)
+			.unwrap_or_else(Str::empty),
+		created_at: json_str(value, "created_at"),
+		body:       json_str(value, "body"),
+	}
 }
 
 fn checkout_from(repo: &RepoRef, value: &Value) -> Result<CheckoutReceipt, ForgeError> {
@@ -387,18 +440,87 @@ impl ForgeHost for GithubForgeAdapter {
 
 	fn view_change_request(
 		&self,
-		_repo: &RepoRef,
-		_number: u64,
+		repo: &RepoRef,
+		number: u64,
 	) -> impl Future<Output = Result<ChangeRequest, ForgeError>> + Send {
-		std::future::ready(Err(ForgeError::Unsupported { op: ForgeOp::ChangeRequestView }))
+		let service = Arc::clone(&self.service);
+		let repo = repo.clone();
+		async move {
+			let github = github_repo(ForgeOp::ChangeRequestView, &repo)?;
+			let token = CancellationToken::new();
+			let _guard = CancelOnDrop(token.clone());
+			let response = service
+				.pr_view(&github, number, &token)
+				.await
+				.map_err(|fault| {
+					map_forge(ForgeOp::ChangeRequestView, &repo, Some(number), None, fault)
+				})?;
+			change_request_from(&repo, &response.value, ForgeOp::ChangeRequestView)
+		}
 	}
 
 	fn view_issue(
 		&self,
-		_repo: &RepoRef,
-		_number: u64,
+		repo: &RepoRef,
+		number: u64,
 	) -> impl Future<Output = Result<Issue, ForgeError>> + Send {
-		std::future::ready(Err(ForgeError::Unsupported { op: ForgeOp::IssueView }))
+		let service = Arc::clone(&self.service);
+		let repo = repo.clone();
+		async move {
+			let github = github_repo(ForgeOp::IssueView, &repo)?;
+			let token = CancellationToken::new();
+			let _guard = CancelOnDrop(token.clone());
+			let response = service
+				.issue_view(&github, number, &token)
+				.await
+				.map_err(|fault| map_forge(ForgeOp::IssueView, &repo, Some(number), None, fault))?;
+			issue_from(&repo, &response.value)
+		}
+	}
+
+	fn change_request_diff(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+	) -> impl Future<Output = Result<Str, ForgeError>> + Send {
+		let service = Arc::clone(&self.service);
+		let repo = repo.clone();
+		async move {
+			let github = github_repo(ForgeOp::ChangeRequestView, &repo)?;
+			let token = CancellationToken::new();
+			let _guard = CancelOnDrop(token.clone());
+			let text = service
+				.pr_diff(&github, number, &token)
+				.await
+				.map_err(|fault| {
+					map_forge(ForgeOp::ChangeRequestView, &repo, Some(number), None, fault)
+				})?;
+			Ok(Str::new(text))
+		}
+	}
+
+	fn list_comments(
+		&self,
+		repo: &RepoRef,
+		number: u64,
+		kind: ResourceKind,
+	) -> impl Future<Output = Result<Arc<[Comment]>, ForgeError>> + Send {
+		let service = Arc::clone(&self.service);
+		let repo = repo.clone();
+		async move {
+			let op = match kind {
+				ResourceKind::ChangeRequest => ForgeOp::ChangeRequestView,
+				ResourceKind::Issue => ForgeOp::IssueView,
+			};
+			let github = github_repo(op, &repo)?;
+			let token = CancellationToken::new();
+			let _guard = CancelOnDrop(token.clone());
+			let rows = service
+				.list_comments(&github, number, &token)
+				.await
+				.map_err(|fault| map_forge(op, &repo, Some(number), None, fault))?;
+			Ok(rows.iter().map(comment_from).collect())
+		}
 	}
 
 	fn list_checks(
@@ -451,7 +573,7 @@ impl ForgeHost for GithubForgeAdapter {
 			let payload = execute(&service, params).await.map_err(|fault| {
 				map_forge(ForgeOp::ChangeRequestCreate, &draft.repo, None, None, fault)
 			})?;
-			change_request_from(&draft.repo, &payload.result)
+			change_request_from(&draft.repo, &payload.result, ForgeOp::ChangeRequestCreate)
 		}
 	}
 
@@ -735,7 +857,7 @@ mod tests {
 	use omp_ci::{CiError, CiHost as _, CiOp, CiProvider, CiStatus, RunRef, Trigger};
 	use omp_con::Ctx;
 	use omp_core::Str;
-	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, RepoRef};
+	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, IssueState, RepoRef, RequestState};
 	use serde_json::json;
 
 	use super::{ci_status, forge_router, pipeline_from_actions};
@@ -848,5 +970,119 @@ mod tests {
 		assert_eq!(ci_status(Some("completed"), Some("success")), CiStatus::Success);
 		assert_eq!(ci_status(Some("completed"), Some("cancelled")), CiStatus::Canceled);
 		assert_eq!(ci_status(Some("completed"), Some("skipped")), CiStatus::Skipped);
+	}
+
+	fn view_repo() -> RepoRef {
+		RepoRef::try_new("github.com", "acme", "widget").unwrap()
+	}
+
+	fn http_fault(status: u16) -> crate::github_params::Fault {
+		crate::github_params::Fault {
+			code:                 Str::new_static("github_http_error"),
+			message:              Str::new_static("GitHub API request failed"),
+			status:               Some(status),
+			rate_limit_remaining: None,
+			rate_limit_reset:     None,
+			retry_after_seconds:  None,
+		}
+	}
+
+	#[test]
+	fn pull_request_json_maps_onto_a_change_request() {
+		let repo = view_repo();
+		let open = super::change_request_from(
+			&repo,
+			&json!({
+				"number": 7,
+				"title": "Fix the widget",
+				"body": "details",
+				"state": "open",
+				"draft": true,
+				"merged": false,
+				"base": {"ref": "main", "sha": "aaa"},
+				"head": {"ref": "topic", "sha": "bbb"},
+				"html_url": "https://github.com/acme/widget/pull/7"
+			}),
+			ForgeOp::ChangeRequestView,
+		)
+		.expect("open pull request");
+		assert_eq!(open.number, 7);
+		assert_eq!(open.title.as_str(), "Fix the widget");
+		assert_eq!(open.body.as_str(), "details");
+		assert_eq!(open.state, RequestState::Open);
+		assert!(open.draft);
+		assert_eq!(open.base_ref.as_str(), "main");
+		assert_eq!(open.head_commit.as_str(), "bbb");
+
+		let merged = super::change_request_from(
+			&repo,
+			&json!({"number": 8, "title": "Landed", "state": "closed", "merged": true}),
+			ForgeOp::ChangeRequestView,
+		)
+		.expect("merged pull request");
+		assert_eq!(merged.state, RequestState::Merged);
+		assert!(merged.body.is_empty());
+
+		let closed = super::change_request_from(
+			&repo,
+			&json!({"number": 9, "title": "Dropped", "state": "closed", "merged": false}),
+			ForgeOp::ChangeRequestView,
+		)
+		.expect("closed pull request");
+		assert_eq!(closed.state, RequestState::Closed);
+	}
+
+	#[test]
+	fn issue_json_maps_onto_an_issue() {
+		let repo = view_repo();
+		let opened = super::issue_from(
+			&repo,
+			&json!({
+				"number": 3,
+				"title": "Bug",
+				"body": "steps",
+				"state": "open",
+				"html_url": "https://github.com/acme/widget/issues/3"
+			}),
+		)
+		.expect("issue");
+		assert_eq!(opened.number, 3);
+		assert_eq!(opened.title.as_str(), "Bug");
+		assert_eq!(opened.body.as_str(), "steps");
+		assert_eq!(opened.state, IssueState::Open);
+		assert_eq!(opened.web_url.as_str(), "https://github.com/acme/widget/issues/3");
+
+		let closed =
+			super::issue_from(&repo, &json!({"number": 4, "title": "Done", "state": "closed"}))
+				.expect("closed issue");
+		assert_eq!(closed.state, IssueState::Closed);
+		assert!(closed.body.is_empty());
+	}
+
+	#[test]
+	fn comment_json_keeps_author_time_and_body() {
+		let comment = super::comment_from(&json!({
+			"user": {"login": "octocat"},
+			"created_at": "2026-11-10T00:00:00Z",
+			"body": "looks good"
+		}));
+		assert_eq!(comment.author.as_str(), "octocat");
+		assert_eq!(comment.created_at.as_str(), "2026-11-10T00:00:00Z");
+		assert_eq!(comment.body.as_str(), "looks good");
+		let anonymous = super::comment_from(&json!({}));
+		assert!(anonymous.author.is_empty());
+		assert!(anonymous.body.is_empty());
+	}
+
+	#[test]
+	fn missing_views_are_not_found_rather_than_unsupported() {
+		let repo = view_repo();
+		let missing =
+			super::map_forge(ForgeOp::ChangeRequestView, &repo, Some(7), None, http_fault(404));
+		assert!(matches!(missing, ForgeError::ChangeRequestNotFound { number: 7, .. }), "{missing}");
+		let missing = super::map_forge(ForgeOp::IssueView, &repo, Some(3), None, http_fault(404));
+		assert!(matches!(missing, ForgeError::IssueNotFound { number: 3, .. }), "{missing}");
+		let rejected = super::map_forge(ForgeOp::IssueView, &repo, Some(3), None, http_fault(500));
+		assert!(matches!(rejected, ForgeError::Rejected { status: 500, .. }), "{rejected}");
 	}
 }
