@@ -13,6 +13,7 @@ readme = "README.md"
 default = []
 local-tts = ["omp-ai/local-tts"]
 cap-ssh = ["dep:omp-ssh"]
+cap-computer = ["dep:omp-desktop", "omp-tools/cap-computer"]
 
 [dependencies]
 async-stream.workspace = true
@@ -39,7 +40,7 @@ omp-dom.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
-omp-desktop.workspace = true
+omp-desktop = { workspace = true, optional = true }
 omp-env.workspace = true
 omp-exec.workspace = true
 omp-ext.workspace = true

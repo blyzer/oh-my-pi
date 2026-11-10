@@ -714,11 +714,9 @@ mod tests {
 	use omp_tool::{Effects, ExecEffects};
 
 	use super::*;
-	use crate::{
-		admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable},
-		blobs::BlobHost,
-		computer::ComputerSessionHost,
-	};
+	use crate::admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable};
+	#[cfg(feature = "cap-computer")]
+	use crate::{blobs::BlobHost, computer::ComputerSessionHost};
 
 	#[test]
 	fn typed_con_projection_round_trips() {
@@ -858,6 +856,9 @@ mod tests {
 	/// still asks exactly as every `computer` call did: desktop reads rank as
 	/// `exec` until the owner decides how they are approved. Only an explicit
 	/// `yolo` runs it unprompted.
+	///
+	/// The host is `omp-desktop`, so this proof exists only with `cap-computer`.
+	#[cfg(feature = "cap-computer")]
 	#[test]
 	fn a_read_only_computer_call_keeps_the_exec_tier() {
 		let scratch = tempfile::tempdir().expect("scratch");
