@@ -511,7 +511,9 @@ jobs:
     name: Lint workspace (Linux)
     needs: format
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Clippy plus `just check-minimal-caps` (default `omp-app` and the
+    # all-`cap-*`-off profile, different feature unification).
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -572,86 +574,29 @@ jobs:
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked --keep-going
 
-      # Only pushes write. A pull request's entry is readable by that pull
-      # request alone, and those entries evicted the branch entries every pull
-      # request restores from (docs/research/ci-test-acceleration.md §4).
-      - name: Save Cargo cache
-        if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-
-  # ADR 0049 Phase 3: both the default `omp` profile (all `cap-*` on) and the
-  # minimal profile (`local` only) must typecheck. The recipe also proves the
-  # selected-unification `omp-envd` tree drops omp-desktop, omp-webview,
-  # omp-audio, and omp-ssh when those caps are off. Not a ruleset-required
-  # check yet; add it once it has reported green on a pull request.
-  minimal_caps:
-    name: Minimal and default capability profiles
-    needs: format
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Select pinned Rust toolchain
-        run: |
-          test "$(uname -m)" = x86_64
-          rustup show active-toolchain
-
-      - name: Install native build tools
-        timeout-minutes: 10
-        run: |
-          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
-            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y pipx zstd
-          command -v uv >/dev/null || pipx install uv
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          command -v just >/dev/null || cargo install --locked --version 1.58.0 just
-
-      - name: Cache embedded Python
-        id: python-cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: vendor/python
-          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
-
-      - name: Prepare embedded Python
-        if: steps.python-cache.outputs.cache-hit != 'true'
-        run: crates/py/scripts/fetch-python.sh
-
-      - name: Verify embedded Python toolchain
-        run: test -f vendor/python/pyo3-config.txt
-
-      - name: Restore Cargo cache
-        id: cargo-cache
+      # ADR 0049 Phase 3. Both the default `omp` profile and the minimal
+      # profile (every `cap-*` off) have to build. The recipe also requires
+      # the selected `omp-envd` graph to omit omp-desktop, omp-webview,
+      # omp-audio, and omp-ssh. It stays in this required job so both
+      # profiles gate merges without a second matrix entry.
+      - name: Restore pinned just
+        id: just-bin
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-minimal-caps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            cargo-minimal-caps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
-            cargo-minimal-caps-${{ runner.os }}-${{ runner.arch }}-
-            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
-            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-
-
-      - uses: ./.github/actions/source-mtimes
-        with:
-          matched-key: ${{ steps.cargo-cache.outputs.cache-matched-key }}
-
-      - name: Check default and minimal capability profiles
+            ~/.cargo/bin/just
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-about
+          key: compliance-tools-${{ runner.os }}-${{ runner.arch }}-just-1.58.0-cargo-deny-0.20.2-cargo-about-0.8.2
+      - name: Install pinned just
+        if: steps.just-bin.outputs.cache-hit != 'true'
+        run: cargo install --locked --version 1.58.0 just
+      - name: Check default and minimal omp profiles
         run: just check-minimal-caps
 
+      # Only pushes write. A pull request's entry is readable by that pull
+      # request alone, and those entries evicted the branch entries every pull
+      # request restores from (docs/research/ci-test-acceleration.md §4).
       - name: Save Cargo cache
         if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
