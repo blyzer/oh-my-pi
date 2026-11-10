@@ -150,6 +150,8 @@ impl EnvServer {
 		schedules: DurableScheduleActor,
 		authority: Arc<AuthorityTable>,
 		state_dir: &Path,
+		#[cfg(feature = "cap-forge")]
+		forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 	) -> Self {
 		let host_info = HostInfoHost::new(state_dir);
 		let workspace_roots =
@@ -194,6 +196,8 @@ impl EnvServer {
 			repository_revision: AtomicU64::new(0),
 			presence,
 			state_dir: state_dir.to_path_buf(),
+			#[cfg(feature = "cap-forge")]
+			forge_devices,
 		}
 	}
 
@@ -438,6 +442,8 @@ impl EnvServer {
 			schedules,
 			authority,
 			state_dir,
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices,
 		))
 	}
 
@@ -738,6 +744,8 @@ impl EnvServer {
 			schedules,
 			authority,
 			state_dir,
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices,
 		))
 	}
 
@@ -970,6 +978,8 @@ impl EnvServer {
 			schedules,
 			authority,
 			state_dir,
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices,
 		))
 	}
 
@@ -1288,6 +1298,12 @@ impl EnvServer {
 	/// Blob authority shared with the forge router.
 	pub(crate) fn blob_host(&self) -> crate::blobs::BlobHost {
 		self.blobs.clone()
+	}
+
+	/// Live forge device client bound to the mounted `forge/*` catalog.
+	#[cfg(feature = "cap-forge")]
+	pub(crate) fn forge_devices(&self) -> crate::github_adapter::LiveForgeDeviceClient {
+		self.forge_devices.clone()
 	}
 
 	/// Returns the session generation fencing CONTROL connections.

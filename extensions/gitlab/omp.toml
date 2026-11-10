@@ -1,0 +1,29 @@
+id = "omp.gitlab"
+name = "GitLab forge"
+version = "0.1.0"
+omp_api = 1
+description = "GitLab T2 forge adapter (ADR 0049 D2.8) via dyn forge/* devices"
+entry = "omp_gitlab"
+capabilities = ["env.net.fetch"]
+
+# Dynamic parent for forge/* leaves (mounted at extension_activate).
+[[declarations]]
+id = "forge"
+kind = "soft"
+module = "omp_gitlab"
+key = "forge@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "mount_forge_leaves"
+kind = "hook"
+module = "omp_gitlab"
+key = "extension_activate/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
+
+[requires]
+python = ">=3.14"

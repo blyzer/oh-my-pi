@@ -1394,6 +1394,7 @@ impl ProjectEnvironment {
 			Arc::clone(&self.github_credentials),
 			self.lifecycle.server.blob_host(),
 			tool_settings::ForgeCacheSettings::from_con(con).policy(),
+			self.lifecycle.server.forge_devices(),
 		)
 	}
 

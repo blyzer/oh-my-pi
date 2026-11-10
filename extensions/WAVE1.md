@@ -7,10 +7,15 @@ maintainers / this tree.
 
 | Extension | Role | ADR |
 |---|---|---|
-| **gitlab** | GitLab forge adapter proving `omp-forge` (D2.8) via dyn `forge/*` over toolhost (D2.3 DONE — schema + envd bridge; adapter body OPEN) | [0049](../docs/adr/0049-tiered-integration-architecture.md), [schema](../docs/adr/0049-forge-dyn-device-schema.md) |
+| **gitlab** | GitLab forge adapter proving `omp-forge` (D2.8) via dyn `forge/*` over toolhost | [0049](../docs/adr/0049-tiered-integration-architecture.md), [schema](../docs/adr/0049-forge-dyn-device-schema.md) |
 
-Scaffold only today: see [`gitlab/README.md`](gitlab/README.md). The adapter
-body is **not** implemented yet.
+**D2.8 progress:** read-path adapter body + live `ForgeDeviceClient` wiring
+landed under [`gitlab/`](gitlab/). Mapping unit tests cover fixture →
+`ChangeRequest`/`Issue` shapes. `gitlab.com` is registered on the dyn forge
+arm. Remaining: auto host-claim for self-hosted GitLab, write ops, SessionHost
+sharing the bound client for `forge@1`, GitHub T2 + delete `github.rs`. Full
+contract stability still awaits GitHub T2 parity. See
+[`gitlab/README.md`](gitlab/README.md).
 
 ## May grow
 

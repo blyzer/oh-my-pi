@@ -650,6 +650,82 @@ impl DeviceControlFactory {
 			)
 			.await
 	}
+
+	/// Host-issued forge bridge: look up a mounted leaf and dispatch
+	/// `omp.devices.call` (same destination as [`Self::invoke`], without a
+	/// nested CONTROL parent).
+	///
+	/// Used by [`crate::github_adapter::LiveForgeDeviceClient`] once bound via
+	/// [`Self::forge_invoker`].
+	#[cfg(feature = "cap-forge")]
+	pub async fn call_mounted(
+		&self,
+		path: &str,
+		args: JsonValue,
+	) -> Result<JsonValue, omp_forge::ForgeError> {
+		use crate::github_adapter::forge_op_for_path;
+
+		let op = forge_op_for_path(path);
+		let args = args.as_object().cloned().ok_or(omp_forge::ForgeError::Unavailable { op })?;
+		let matches = self
+			.catalog
+			.snapshot()
+			.leaves
+			.iter()
+			.filter(|leaf| leaf.name.as_str() == path && leaf.mounted)
+			.cloned()
+			.collect::<Vec<_>>();
+		let [leaf] = matches.as_slice() else {
+			return Err(omp_forge::ForgeError::Unavailable { op });
+		};
+		let mut callback_args = JsonMap::new();
+		callback_args.insert(String::from("path"), JsonValue::String(path.to_string()));
+		callback_args.insert(String::from("args"), JsonValue::Object(args));
+		callback_args
+			.insert(String::from("family"), JsonValue::String(leaf.value.entry.family.to_string()));
+		callback_args.insert(String::from("rev"), JsonValue::from(leaf.value.entry.rev));
+		self
+			.callbacks
+			.dispatch_host(
+				Arc::clone(&leaf.value.identity),
+				"omp.devices.call",
+				callback_args,
+				CallbackConcurrency::Serialized,
+				time::Duration::from_secs(30),
+				Some(Str::new(path)),
+			)
+			.await
+			.map_err(|_| omp_forge::ForgeError::Unavailable { op })
+	}
+
+	/// Catalog-backed [`crate::github_adapter::ForgeDeviceInvoker`] for the
+	/// live forge client.
+	#[cfg(feature = "cap-forge")]
+	#[must_use]
+	pub fn forge_invoker(self: &Arc<Self>) -> Arc<dyn crate::github_adapter::ForgeDeviceInvoker> {
+		Arc::new(DeviceCatalogForgeInvoker { devices: Arc::clone(self) })
+	}
+}
+
+/// [`ForgeDeviceInvoker`] that forwards to [`DeviceControlFactory::call_mounted`].
+#[cfg(feature = "cap-forge")]
+struct DeviceCatalogForgeInvoker {
+	devices: Arc<DeviceControlFactory>,
+}
+
+#[cfg(feature = "cap-forge")]
+impl crate::github_adapter::ForgeDeviceInvoker for DeviceCatalogForgeInvoker {
+	fn invoke(
+		&self,
+		path: &str,
+		args: JsonValue,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<JsonValue, omp_forge::ForgeError>> + Send + '_>,
+	> {
+		let devices = Arc::clone(&self.devices);
+		let path = path.to_owned();
+		Box::pin(async move { devices.call_mounted(&path, args).await })
+	}
 }
 
 fn device_catalog_json(entry: &DynamicDeviceCatalogEntry) -> JsonValue {

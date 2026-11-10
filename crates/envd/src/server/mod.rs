@@ -440,6 +440,9 @@ pub struct EnvServer {
 	repository_revision:     AtomicU64,
 	presence:                PresenceRegistry,
 	state_dir:               PathBuf,
+	/// Live forge device client (bound to the device catalog under cap-forge).
+	#[cfg(feature = "cap-forge")]
+	forge_devices:           crate::github_adapter::LiveForgeDeviceClient,
 }
 
 #[derive(Clone)]

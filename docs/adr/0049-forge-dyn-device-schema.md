@@ -47,21 +47,29 @@ documenting `FileBody.content` as bytes).
 `ForgeBackend::Dyn(DynForgeAdapter::new(client))` for an ASCII host name
 (e.g. `gitlab.com`) on the same `Delegated` builder as `github.com`.
 
-`ForgeDeviceClient` is the injectable invoke surface (tests use a fake;
-production will call mounted devices via `omp.devices.call`). Automatic
-discovery from the extension device catalog / host claims is **not** wired
-yet — `forge_router` documents a TODO at that hook point.
+`ForgeDeviceClient` is the injectable invoke surface. Production uses
+`LiveForgeDeviceClient` (late-bound `ForgeDeviceInvoker`);
+`DeviceControlFactory::forge_invoker` looks up mounted leaves and dispatches
+`omp.devices.call` (same destination as `DeviceControlFactory::invoke`, via
+`NestedCallbackDispatcher::dispatch_host`). Tests may inject a fake client or
+a recording invoker. `forge_router` always registers `gitlab.com` on the Dyn
+arm. Automatic discovery of additional hosts from the extension device
+catalog / host claims is **not** wired yet — TODO at that hook point.
 
 ## Evidence
 
 Unit tests in `crates/envd/src/github_adapter/dyn_forge.rs` prove Delegated
-routes `gitlab.example` to the dyn adapter, which calls the fake client and
-returns `ChangeRequest` / `Issue` for `view_change_request` / `view_issue`.
-The `github.com` arm still wins for that host.
+routes dyn hosts through a fake / live client and returns `ChangeRequest` /
+`Issue` for `view_change_request` / `view_issue`. The `github.com` arm still
+wins for that host. `forge_router` registers `gitlab.com` even when the live
+client is unbound (`Unavailable`, not `Unregistered`).
 
-## What remains for GitLab T2 (D2.8)
+## GitLab T2 (D2.8) status
 
-- Python body under `extensions/gitlab/` that mounts these paths and speaks
-  GitLab HTTP.
-- Live `ForgeDeviceClient` wiring from envd device invoke / exthost claims.
-- Optional `omp.toml` once those mounts are real.
+- **Done (read path):** `extensions/gitlab/` mounts the read leaves above at
+  `extension_activate`, maps GitLab REST onto `omp_forge` serde shapes, and
+  documents adapter-data credentials (`GITLAB_TOKEN` / `GITLAB_HOST` /
+  `GITLAB_API_URL`). Live client + `gitlab.com` registration in envd.
+- **Remaining:** auto host-claim for self-hosted GitLab, write ops, SessionHost
+  bound-client threading for `forge@1`, GitHub T2 parity before deleting
+  `envd/src/github.rs`. Full contract stability still awaits that parity.

@@ -1,0 +1,19 @@
+{
+  "id": 1001,
+  "iid": 7,
+  "project_id": 42,
+  "title": "Fix the widget",
+  "description": "details",
+  "state": "opened",
+  "draft": false,
+  "work_in_progress": false,
+  "source_branch": "topic",
+  "target_branch": "main",
+  "sha": "bbb222",
+  "diff_refs": {
+    "base_sha": "aaa111",
+    "head_sha": "bbb222",
+    "start_sha": "aaa111"
+  },
+  "web_url": "https://gitlab.com/acme/widget/-/merge_requests/7"
+}

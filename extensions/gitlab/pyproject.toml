@@ -1,0 +1,13 @@
+[project]
+name = "omp-gitlab"
+version = "0.1.0"
+description = "GitLab T2 forge adapter for omp (ADR 0049 D2.8)"
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omp_gitlab"]

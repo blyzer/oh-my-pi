@@ -14,6 +14,9 @@ pub(in crate::server) struct ProductionControlBindings {
 	pub(in crate::server) callbacks: Arc<CallbackDispatcherSlot>,
 	pub(in crate::server) registry:  Arc<RegistryControlFactory>,
 	pub(in crate::server) hooks:     Arc<HookControlFactory>,
+	/// Live forge device client bound to the device catalog (cap-forge).
+	#[cfg(feature = "cap-forge")]
+	pub(in crate::server) forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 }
 
 pub(in crate::server) struct WeakExtensionCallbackDispatcher {
@@ -913,12 +916,19 @@ pub(in crate::server) fn production_control_authorities(
 	);
 	let registry_owner = RegistryControlFactory::new(manifests.as_ref().clone());
 	let callbacks = CallbackDispatcherSlot::new();
-	let devices: Arc<dyn ControlAuthorityFactory> = DeviceControlFactory::new(
+	let device_factory = DeviceControlFactory::new(
 		Arc::clone(&registry_owner),
 		callbacks.clone(),
 		Arc::new(ProductionDeviceCatalogObserver),
 		Arc::new(ProductionDeviceInvocationAdmission),
 	);
+	#[cfg(feature = "cap-forge")]
+	let forge_devices = {
+		let client = crate::github_adapter::LiveForgeDeviceClient::default();
+		client.bind(device_factory.forge_invoker());
+		client
+	};
+	let devices: Arc<dyn ControlAuthorityFactory> = device_factory;
 	let extension_settings = extensions
 		.iter()
 		.map(|extension| {
@@ -999,5 +1009,7 @@ pub(in crate::server) fn production_control_authorities(
 		callbacks,
 		registry: registry_owner,
 		hooks,
+		#[cfg(feature = "cap-forge")]
+		forge_devices,
 	}
 }

@@ -20,13 +20,15 @@
 //!
 //! Under `cap-forge`, the router holds a [`ForgeBackend`] enum so a dyn
 //! `forge/*` device host (T2) can sit beside GitHub without boxing
-//! [`ForgeHost`] futures (ADR 0049 D2.3).
+//! [`ForgeHost`] futures (ADR 0049 D2.3). Production registers
+//! [`GITLAB_HOST`] on the Dyn arm via [`LiveForgeDeviceClient`] (D2.8).
 
 #[cfg(feature = "cap-forge")]
 mod dyn_forge;
 #[cfg(feature = "cap-forge")]
 pub(crate) use dyn_forge::{
-	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, UnavailableForgeClient, forge_device_path,
+	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
+	LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path, forge_op_for_path,
 	paths as forge_device_paths, register_dyn_forge_host,
 };
 
@@ -86,30 +88,45 @@ pub(crate) struct GithubCiAdapter {
 	service: Arc<GithubService>,
 }
 
-/// Routes `forge@1` through [`ForgeBackend`] (GitHub today; dyn hosts via
-/// [`register_dyn_forge_host`]).
+/// Routes `forge@1` through [`ForgeBackend`] (GitHub + dyn GitLab).
 ///
 /// See the module docs for `PermitAll` and host registration.
 ///
-/// # Dyn host registration
+/// # Host registration
 ///
-/// Automatic discovery from the extension device catalog / host claims is
-/// not wired yet (TODO, ADR 0049 D2.3). Call [`register_dyn_forge_host`] on
-/// a builder when a T2 extension advertises an ASCII host name.
+/// - `github.com` (and the checkout host when it is GitHub) →
+///   [`ForgeBackend::Github`]
+/// - [`GITLAB_HOST`] (and the checkout host when it is `gitlab.com`) →
+///   [`ForgeBackend::Dyn`] over `devices`
+///
+/// `devices` may be unbound ([`LiveForgeDeviceClient`] returns
+/// [`omp_forge::ForgeError::Unavailable`] until
+/// [`LiveForgeDeviceClient::bind`]); registration still happens so Delegated
+/// can reach the dyn arm. Automatic discovery of additional dyn hosts from
+/// the device catalog / extension host claims remains TODO (ADR 0049 D2.8).
 #[cfg(feature = "cap-forge")]
 pub(crate) fn forge_router(
 	service: Arc<GithubService>,
+	devices: LiveForgeDeviceClient,
 ) -> ForgeDelegated<ForgeBackend, ForgePermitAll> {
 	let adapter = ForgeBackend::Github(GithubForgeAdapter { service: Arc::clone(&service) });
 	let mut builder = ForgeDelegated::builder(ForgePermitAll);
 	builder
 		.register(github_url::GITHUB_HOST, adapter.clone())
 		.expect("github.com is a forge host");
+	register_dyn_forge_host(&mut builder, GITLAB_HOST, devices.clone())
+		.expect("gitlab.com is a forge host");
 	register_checkout_host(&service, |host| {
+		if host.eq_ignore_ascii_case(github_url::GITHUB_HOST)
+			|| host.eq_ignore_ascii_case(GITLAB_HOST)
+		{
+			return;
+		}
+		// Self-hosted GitLab (and other forges) stay on the Github arm only
+		// when the checkout host was historically treated as GitHub Enterprise.
+		// Catalog host-claim discovery for arbitrary dyn hosts is TODO.
 		let _ = builder.register(host, adapter.clone());
 	});
-	// TODO(ADR 0049 D2.3): register dyn hosts from mounted forge/* device
-	// catalog claims once exthost advertises host→device bindings.
 	builder.build()
 }
 
@@ -169,6 +186,7 @@ struct CheckoutForgeInner {
 	credentials: Arc<GithubCredentialBridge>,
 	blobs:       BlobHost,
 	policy:      ForgeCachePolicy,
+	devices:     LiveForgeDeviceClient,
 	built:       Mutex<Option<BuiltForge>>,
 }
 
@@ -191,6 +209,7 @@ impl CheckoutForge {
 		credentials: Arc<GithubCredentialBridge>,
 		blobs: BlobHost,
 		policy: ForgeCachePolicy,
+		devices: LiveForgeDeviceClient,
 	) -> Self {
 		Self {
 			inner: Arc::new(CheckoutForgeInner {
@@ -199,6 +218,7 @@ impl CheckoutForge {
 				credentials,
 				blobs,
 				policy,
+				devices,
 				built: Mutex::new(None),
 			}),
 		}
@@ -259,7 +279,10 @@ impl CheckoutForge {
 			Arc::new(cache),
 			self.inner.blobs.clone(),
 		);
-		let built = BuiltForge { router: forge_router(Arc::clone(&service)), service };
+		let built = BuiltForge {
+			router: forge_router(Arc::clone(&service), self.inner.devices.clone()),
+			service,
+		};
 		*slot = Some(built.clone());
 		Some(built)
 	}
@@ -1095,7 +1118,7 @@ mod tests {
 	#[cfg(feature = "cap-ci")]
 	use super::{ci_status, pipeline_from_actions};
 	#[cfg(feature = "cap-forge")]
-	use super::forge_router;
+	use super::{GITLAB_HOST, LiveForgeDeviceClient, forge_router};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
 		tool_settings::ForgeCacheSettings,
@@ -1128,12 +1151,24 @@ mod tests {
 	#[tokio::test]
 	async fn unregistered_host_is_not_sent_to_github() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router = forge_router(service(dir.path()));
+		let router = forge_router(service(dir.path()), LiveForgeDeviceClient::default());
 		let repo = RepoRef::try_new("gitlab.example", "acme", "widget").unwrap();
 		let error = router.view_repo(&repo).await.expect_err("unregistered");
 		assert!(
 			matches!(error, ForgeError::Unregistered { ref host, op: ForgeOp::RepoView } if host == "gitlab.example"),
 			"{error}"
+		);
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[tokio::test]
+	async fn gitlab_com_is_registered_dyn_even_when_unbound() {
+		let router = forge_router(service(tempfile::tempdir().expect("temp").path()), LiveForgeDeviceClient::default());
+		let repo = RepoRef::try_new(GITLAB_HOST, "acme", "widget").unwrap();
+		let error = router.view_repo(&repo).await.expect_err("unbound live client");
+		assert!(
+			matches!(error, ForgeError::Unavailable { op: ForgeOp::RepoView }),
+			"gitlab.com must be registered on the dyn arm: {error}"
 		);
 	}
 
@@ -1370,6 +1405,7 @@ mod tests {
 			Arc::new(GithubCredentialBridge::new()),
 			blobs,
 			ForgeCacheSettings::from_con(&Ctx::new()).policy(),
+			LiveForgeDeviceClient::default(),
 		);
 		assert!(
 			forge

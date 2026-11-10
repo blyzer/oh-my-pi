@@ -9,7 +9,11 @@
 //!
 //! Schema source of truth: `docs/adr/0049-forge-dyn-device-schema.md`.
 
-use std::{future::Future, sync::Arc};
+use std::{
+	future::Future,
+	pin::Pin,
+	sync::Arc,
+};
 
 use omp_core::Str;
 use omp_forge::{
@@ -18,11 +22,18 @@ use omp_forge::{
 	PushReceipt, PushRequest, RepoRef, Repository, ResourceKind, SearchPage, SearchQuery,
 };
 use omp_forge_delegated::{DelegatedBuilder, PermitAll, RegisterError};
+use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use strum::IntoStaticStr as _;
 
 use super::GithubForgeAdapter;
+
+/// Canonical GitLab SaaS host registered on the production forge router (D2.8).
+///
+/// Env-var names and other self-hosted hosts remain adapter data; automatic
+/// host-claim discovery from the device catalog is still TODO.
+pub const GITLAB_HOST: &str = "gitlab.com";
 
 /// Device paths under `forge/*`.
 ///
@@ -76,9 +87,10 @@ pub fn forge_device_path(op: ForgeOp) -> Str {
 
 /// Invokes one mounted `forge/<op>` dyn device.
 ///
-/// Production will call through device catalog / `omp.devices.call`. Tests
-/// inject a fake. The trait returns an unboxed future; [`DynForgeAdapter`]
-/// stays generic over the client so [`ForgeHost`] futures stay unboxed.
+/// Production uses [`LiveForgeDeviceClient`] (catalog / `omp.devices.call`).
+/// Tests may inject a fake. The trait returns an unboxed future;
+/// [`DynForgeAdapter`] stays generic over the client so [`ForgeHost`] futures
+/// stay unboxed.
 pub trait ForgeDeviceClient: Clone + Send + Sync + 'static {
 	/// Calls the device at `path` with JSON `args`.
 	///
@@ -91,23 +103,96 @@ pub trait ForgeDeviceClient: Clone + Send + Sync + 'static {
 	) -> impl Future<Output = Result<Value, ForgeError>> + Send;
 }
 
-/// Placeholder client for the production [`ForgeBackend`] type parameter.
+/// Object-safe invoker behind [`LiveForgeDeviceClient`].
 ///
-/// The production router registers only [`ForgeBackend::Github`] today. Dyn
-/// hosts are registered through [`register_dyn_forge_host`] with a real
-/// client (tests) or, later, a live device invoker. Constructing
-/// [`DynForgeAdapter`] with this placeholder and calling it yields
-/// [`ForgeError::Unavailable`].
+/// Cold I/O boundary: one allocation per forge device round-trip (extension
+/// callback / network). Production installs
+/// [`super::super::tools::DeviceControlFactory`]'s catalog path; tests install
+/// a recording fake.
+pub trait ForgeDeviceInvoker: Send + Sync + 'static {
+	/// Invokes the mounted device at `path`.
+	fn invoke(
+		&self,
+		path: &str,
+		args: Value,
+	) -> Pin<Box<dyn Future<Output = Result<Value, ForgeError>> + Send + '_>>;
+}
+
+/// Maps a `forge/<op>` path to a [`ForgeOp`] for error reporting.
+#[must_use]
+pub fn forge_op_for_path(path: &str) -> ForgeOp {
+	path
+		.strip_prefix("forge/")
+		.and_then(|name| name.parse().ok())
+		.unwrap_or(ForgeOp::RepoView)
+}
+
+/// Live production [`ForgeDeviceClient`]: dispatches mounted `forge/*` devices.
+///
+/// Holds a late-bound [`ForgeDeviceInvoker`]. Until [`Self::bind`] installs one
+/// (or after [`Self::unbind`]), every call returns
+/// [`ForgeError::Unavailable`]. The production router still registers
+/// [`GITLAB_HOST`] so Delegated can reach the dyn arm; Unavailable until the
+/// GitLab extension mounts devices (or the invoker is bound) is intentional.
+///
+/// Bind from composition once [`crate::tools::DeviceControlFactory`] exists:
+/// `client.bind(devices.forge_invoker())`. That invoker looks up mounted leaves
+/// and dispatches `omp.devices.call` — the same destination as
+/// `DeviceControlFactory::invoke`.
+#[derive(Clone, Default)]
+pub struct LiveForgeDeviceClient {
+	invoker: Arc<RwLock<Option<Arc<dyn ForgeDeviceInvoker>>>>,
+}
+
+impl LiveForgeDeviceClient {
+	/// Installs the catalog-backed (or test) invoker.
+	pub fn bind(&self, invoker: Arc<dyn ForgeDeviceInvoker>) {
+		*self.invoker.write() = Some(invoker);
+	}
+
+	/// Clears the invoker (devices unmounted / session teardown).
+	pub fn unbind(&self) {
+		*self.invoker.write() = None;
+	}
+
+	/// Whether an invoker is currently bound.
+	#[must_use]
+	pub fn is_bound(&self) -> bool {
+		self.invoker.read().is_some()
+	}
+}
+
+impl ForgeDeviceClient for LiveForgeDeviceClient {
+	fn call(
+		&self,
+		path: &str,
+		args: Value,
+	) -> impl Future<Output = Result<Value, ForgeError>> + Send {
+		let invoker = self.invoker.read().clone();
+		let path = path.to_owned();
+		async move {
+			let Some(invoker) = invoker else {
+				return Err(ForgeError::Unavailable { op: forge_op_for_path(&path) });
+			};
+			invoker.invoke(&path, args).await
+		}
+	}
+}
+
+/// Placeholder client that always returns [`ForgeError::Unavailable`].
+///
+/// Prefer [`LiveForgeDeviceClient`] for production [`ForgeBackend`]. Kept for
+/// tests that want a permanently-dead dyn arm without a bind slot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnavailableForgeClient;
 
 impl ForgeDeviceClient for UnavailableForgeClient {
 	fn call(
 		&self,
-		_path: &str,
+		path: &str,
 		_args: Value,
 	) -> impl Future<Output = Result<Value, ForgeError>> + Send {
-		std::future::ready(Err(ForgeError::Unavailable { op: ForgeOp::RepoView }))
+		std::future::ready(Err(ForgeError::Unavailable { op: forge_op_for_path(path) }))
 	}
 }
 
@@ -348,9 +433,9 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 ///
 /// Enums before `dyn`: GitHub stays a native arm; T2 extensions ride
 /// [`DynForgeAdapter`]. Both arms forward with `match`, so [`ForgeHost`]
-/// futures stay unboxed.
+/// futures stay unboxed. The default client is [`LiveForgeDeviceClient`].
 #[derive(Clone)]
-pub enum ForgeBackend<C = UnavailableForgeClient> {
+pub enum ForgeBackend<C = LiveForgeDeviceClient> {
 	/// In-tree GitHub HTTP/git adapter.
 	Github(GithubForgeAdapter),
 	/// Dyn-device-backed host (`forge/*` over toolhost).
@@ -512,9 +597,10 @@ impl<C: ForgeDeviceClient> ForgeHost for ForgeBackend<C> {
 /// Registers a dyn-backed forge host on a [`DelegatedBuilder`].
 ///
 /// This is the seam T2 extensions (and tests) use to place a host such as
-/// `gitlab.com` beside `github.com`. Automatic discovery from the extension
-/// device catalog / host claims is not wired yet; call this from composition
-/// once a client and host name are known.
+/// [`GITLAB_HOST`] beside `github.com`. The production [`super::forge_router`]
+/// registers [`GITLAB_HOST`] with a [`LiveForgeDeviceClient`]. Automatic
+/// discovery of additional hosts from the extension device catalog / host
+/// claims is not wired yet (TODO, ADR 0049 D2.8).
 ///
 /// # Errors
 ///
@@ -544,11 +630,11 @@ mod tests {
 	};
 	use omp_forge_delegated::{Delegated, PermitAll};
 	use parking_lot::Mutex;
-	use serde_json::Value;
+	use serde_json::{Value, json};
 
 	use super::{
-		DynForgeAdapter, ForgeBackend, ForgeDeviceClient, forge_device_path, paths,
-		register_dyn_forge_host,
+		DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
+		LiveForgeDeviceClient, forge_device_path, forge_op_for_path, paths, register_dyn_forge_host,
 	};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_adapter::GithubForgeAdapter,
@@ -759,5 +845,83 @@ mod tests {
 			!matches!(error, ForgeError::Unregistered { .. }),
 			"github.com must stay registered: {error}"
 		);
+	}
+
+	struct RecordingInvoker {
+		calls: Arc<Mutex<Vec<(String, Value)>>>,
+		cr:    ChangeRequest,
+		issue: Issue,
+	}
+
+	impl ForgeDeviceInvoker for RecordingInvoker {
+		fn invoke(
+			&self,
+			path: &str,
+			args: Value,
+		) -> std::pin::Pin<
+			Box<dyn Future<Output = Result<Value, ForgeError>> + Send + '_>,
+		> {
+			self.calls.lock().push((path.to_string(), args));
+			let result = match path {
+				paths::CHANGE_REQUEST_VIEW => Ok(serde_json::to_value(&self.cr).expect("cr")),
+				paths::ISSUE_VIEW => Ok(serde_json::to_value(&self.issue).expect("issue")),
+				paths::REPO_VIEW
+				| paths::CHANGE_REQUEST_DIFF
+				| paths::LIST_COMMENTS => {
+					Err(ForgeError::Unsupported { op: forge_op_for_path(path) })
+				},
+				other => Err(ForgeError::Unavailable { op: forge_op_for_path(other) }),
+			};
+			Box::pin(std::future::ready(result))
+		}
+	}
+
+	#[tokio::test]
+	async fn live_client_unbound_is_unavailable() {
+		let client = LiveForgeDeviceClient::default();
+		assert!(!client.is_bound());
+		let error = client
+			.call(paths::ISSUE_VIEW, json!({}))
+			.await
+			.expect_err("unbound");
+		assert!(matches!(error, ForgeError::Unavailable { op: ForgeOp::IssueView }));
+	}
+
+	#[tokio::test]
+	async fn live_client_bound_invoker_serves_gitlab_host() {
+		let host = GITLAB_HOST;
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let client = LiveForgeDeviceClient::default();
+		client.bind(Arc::new(RecordingInvoker {
+			calls: Arc::clone(&calls),
+			cr: sample_cr(host),
+			issue: sample_issue(host),
+		}));
+		assert!(client.is_bound());
+
+		let dir = tempfile::tempdir().expect("temp");
+		let github = GithubForgeAdapter { service: github_service(dir.path()) };
+		let mut builder = Delegated::<ForgeBackend<LiveForgeDeviceClient>, _>::builder(PermitAll);
+		builder
+			.register("github.com", ForgeBackend::Github(github))
+			.expect("github");
+		register_dyn_forge_host(&mut builder, GITLAB_HOST, client).expect("gitlab.com");
+		let router = builder.build();
+
+		let repo = sample_repo(host);
+		let cr = router
+			.view_change_request(&repo, 7)
+			.await
+			.expect("change request via live client");
+		assert_eq!(cr.number, 7);
+		assert_eq!(cr.title.as_str(), "Fix the widget");
+
+		let issue = router.view_issue(&repo, 3).await.expect("issue via live client");
+		assert_eq!(issue.number, 3);
+
+		let recorded = calls.lock().clone();
+		assert_eq!(recorded.len(), 2);
+		assert_eq!(recorded[0].0, paths::CHANGE_REQUEST_VIEW);
+		assert_eq!(recorded[1].0, paths::ISSUE_VIEW);
 	}
 }
