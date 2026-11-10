@@ -476,7 +476,7 @@ pub struct ToolSettings {
 	/// Extra dyn-forge hosts from [`SV_FORGE_DYN_HOSTS`] (raw list text).
 	///
 	/// Resolved together with `GITLAB_HOST` by
-	/// [`crate::github_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
+	/// [`crate::forge_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
 	/// and `github.com` are always registered on Dyn regardless.
 	#[serde(skip_serializing_if = "Str::is_empty")]
 	pub forge_dyn_hosts: Str,

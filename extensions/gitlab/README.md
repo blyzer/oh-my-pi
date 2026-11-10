@@ -54,7 +54,8 @@ ceilings remain `log_stream` only.
 - Full automatic device-catalog host-claim discovery remains a smaller TODO
 - Checkout / push return plan / push-prep via `extensions/forge/` mounts (ADR D2.4; no local git here)
 - In-core `github.rs` deleted; `github_url.rs` neutralized to `forge_url.rs`;
-  residue is Class C / `GithubRefs` (`github_adapter` rename still open)
+  crate module `github_adapter` → `forge_adapter` done; residue is Class C /
+  `GithubRefs`
 
 ## Proofs
 
@@ -72,5 +73,5 @@ cargo nextest run -p omp-envd --features cap-forge,cap-ci \
 - Mount owners: [`../forge/`](../forge/), [`../ci/`](../ci/)
 - Schemas: [`docs/adr/0049-forge-dyn-device-schema.md`](../../docs/adr/0049-forge-dyn-device-schema.md),
   [`docs/adr/0049-ci-dyn-device-schema.md`](../../docs/adr/0049-ci-dyn-device-schema.md)
-- Bridges: `crates/envd/src/github_adapter/dyn_forge.rs`, `dyn_ci.rs`
+- Bridges: `crates/envd/src/forge_adapter/dyn_forge.rs`, `dyn_ci.rs`
 - Contracts: `crates/forge`, `crates/ci`

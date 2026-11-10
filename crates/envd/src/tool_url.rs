@@ -39,13 +39,13 @@ use super::{
 	vault::VaultService,
 };
 #[cfg(feature = "cap-forge")]
-use crate::github_adapter;
+use crate::forge_adapter;
 use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
 
 /// Forge router the production `pr://` and `issue://` resolvers read through.
 #[cfg(feature = "cap-forge")]
 type SchemeForge =
-	omp_forge_delegated::Delegated<github_adapter::ForgeBackend, omp_forge_delegated::PermitAll>;
+	omp_forge_delegated::Delegated<forge_adapter::ForgeBackend, omp_forge_delegated::PermitAll>;
 
 #[derive(Clone, Copy, Debug)]
 enum RegistryResource {

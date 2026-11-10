@@ -41,8 +41,9 @@ leaves (`forge/search_change_requests`, `forge/search_issues`) + list-URL /
 deleted; forge/CI routers are Dyn-only. **DONE:** `github_url.rs`
 neutralized to `forge_url.rs` (credentials / `pr://` / `issue://` /
 `infer_repo`). Intentional residue: Class C, autocomplete `GithubRefs`.
-Follow-up: `github_adapter` → `forge_adapter`. Remaining: full automatic
-device-catalog host-claim discovery (smaller TODO). See package READMEs.
+**DONE:** crate module `github_adapter` → `forge_adapter` (`dyn_forge` /
+`dyn_ci` filenames kept). Remaining: full automatic device-catalog host-claim
+discovery (smaller TODO). See package READMEs.
 
 ## May grow
 

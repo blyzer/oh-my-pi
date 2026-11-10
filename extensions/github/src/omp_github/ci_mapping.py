@@ -1,7 +1,7 @@
 """Pure GitHub Actions JSON → ``omp_ci`` serde shapes.
 
 No network. Mirrors ``pipeline_from_actions`` / ``ci_status`` in
-``crates/envd/src/github_adapter/mod.rs``. Field names match ``crates/ci``
+``crates/envd/src/forge_adapter/mod.rs``. Field names match ``crates/ci``
 serde (snake_case).
 """
 

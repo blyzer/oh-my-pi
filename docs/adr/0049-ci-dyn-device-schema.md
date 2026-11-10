@@ -1,11 +1,11 @@
 # Dyn `ci/*` device schema (ADR 0049 follow-up to D2.3)
 
 Source of truth for the T2 CI device bridge. Rustdoc on
-`omp_envd::github_adapter` (`dyn_ci`) and `omp-ci` point here.
+`omp_envd::forge_adapter` (`dyn_ci`) and `omp-ci` point here.
 
 T2 CI backends implement the [`CiHost`](../../crates/ci/src/host.rs) leaf
 set by answering `omp.devices.call` on `ci/<op>` paths. Core holds a
-[`DynCiAdapter`](../../crates/envd/src/github_adapter/dyn_ci.rs) that
+[`DynCiAdapter`](../../crates/envd/src/forge_adapter/dyn_ci.rs) that
 dispatches each `CiHost` method to those paths. The production router holds
 an enum `CiBackend { Github(...), Dyn(...) }` so heterogeneous hosts stay
 unboxed (AGENTS: enums before `dyn`).
@@ -70,8 +70,8 @@ a recording invoker.
 
 Production `ci_router`:
 
-- registers [`CI_GITHUB_HOST`](../../crates/envd/src/github_adapter/dyn_ci.rs)
-  (`github.com`) and [`CI_DYN_HOST`](../../crates/envd/src/github_adapter/dyn_ci.rs)
+- registers [`CI_GITHUB_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
+  (`github.com`) and [`CI_DYN_HOST`](../../crates/envd/src/forge_adapter/dyn_ci.rs)
   (`gitlab.com`) on the **Dyn** arm with the same live client;
 - registers unlisted checkout hosts on the same Dyn arm (honest Unavailable
   without mounts);
@@ -79,8 +79,8 @@ Production `ci_router`:
 
 ## Evidence
 
-Unit tests in `crates/envd/src/github_adapter/dyn_ci.rs` and
-`github_adapter/mod.rs` prove Delegated routes dyn hosts through a fake /
+Unit tests in `crates/envd/src/forge_adapter/dyn_ci.rs` and
+`forge_adapter/mod.rs` prove Delegated routes dyn hosts through a fake /
 live client for `status` / `log_stream`, and that production `ci_router`
 registers `github.com` on Dyn. Python mapping tests under
 `extensions/github/tests` and `extensions/gitlab/tests` cover Actions /
@@ -95,5 +95,6 @@ GitLab fixtures → `Pipeline` / `LogPage`. `ci_router` still advertises
   GitLab CI backends) and flipping `github.com` CI to Dyn.
 - **DONE:** D2.4 forge checkout/push and deletion of in-core `github.rs` /
   `GithubCiAdapter`. Residue: Class C, `GithubRefs`.
-- **DONE:** `github_url.rs` neutralized to `forge_url.rs`. Follow-up:
-  `github_adapter` → `forge_adapter`.
+- **DONE:** `github_url.rs` neutralized to `forge_url.rs`.
+- **DONE:** crate module `github_adapter` → `forge_adapter` (`dyn_ci.rs`
+  filename kept).
