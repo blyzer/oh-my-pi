@@ -1,0 +1,20 @@
+[
+  {
+    "id": 7,
+    "name": "test",
+    "status": "failed",
+    "web_url": "https://gitlab.com/acme/widget/-/jobs/7"
+  },
+  {
+    "id": 8,
+    "name": "lint",
+    "status": "success",
+    "web_url": "https://gitlab.com/acme/widget/-/jobs/8"
+  },
+  {
+    "id": 9,
+    "name": "deploy",
+    "status": "manual",
+    "web_url": "https://gitlab.com/acme/widget/-/jobs/9"
+  }
+]

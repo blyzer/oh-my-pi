@@ -25,13 +25,18 @@ use strum::IntoStaticStr as _;
 
 use super::GithubCiAdapter;
 
-/// Documented Dyn CI host always registered beside the Github arm.
+/// Canonical GitLab SaaS host on the dyn CI arm (ADR 0049 T2 CI).
 ///
-/// Production [`super::ci_router`] keeps `github.com` on
-/// [`CiBackend::Github`]. This host rides [`CiBackend::Dyn`] with a
-/// [`LiveCiDeviceClient`] (Unavailable until a T2 CI extension mounts
-/// `ci/*`). Flipping `github.com` CI to Dyn waits on that extension body.
+/// Production [`super::ci_router`] registers this host (and
+/// [`CI_GITHUB_HOST`]) on [`CiBackend::Dyn`] with a shared
+/// [`LiveCiDeviceClient`]. Catalog mounts live in `extensions/ci/`.
 pub const CI_DYN_HOST: &str = "gitlab.com";
+
+/// Canonical GitHub SaaS host on the dyn CI arm once the T2 CI extension
+/// mounts `ci/*` (ADR 0049). Same bound [`LiveCiDeviceClient`] as
+/// [`CI_DYN_HOST`]. In-core [`GithubCiAdapter`] remains for unlisted
+/// checkout hosts (GHE) that are not on the Dyn arm.
+pub const CI_GITHUB_HOST: &str = "github.com";
 
 /// Device paths under `ci/*`.
 ///
@@ -115,8 +120,9 @@ pub fn ci_op_for_path(path: &str) -> CiOp {
 /// Holds a late-bound [`CiDeviceInvoker`]. Until [`Self::bind`] installs one
 /// (or after [`Self::unbind`]), every call returns
 /// [`CiError::Unavailable`]. The production router still registers
-/// [`CI_DYN_HOST`] so Delegated can reach the dyn arm; Unavailable until a
-/// CI extension mounts devices (or the invoker is bound) is intentional.
+/// [`CI_GITHUB_HOST`] and [`CI_DYN_HOST`] so Delegated can reach the dyn arm;
+/// Unavailable until a CI extension mounts devices (or the invoker is bound)
+/// is intentional.
 ///
 /// Bind from composition once [`crate::tools::DeviceControlFactory`] exists:
 /// `client.bind(devices.ci_invoker())`. That invoker looks up mounted leaves
@@ -411,11 +417,11 @@ impl<C: CiDeviceClient> CiHost for CiBackend<C> {
 /// Registers a dyn-backed CI host on a [`DelegatedBuilder`].
 ///
 /// This is the seam T2 extensions (and tests) use to place a host such as
-/// [`CI_DYN_HOST`] on the Dyn arm. The production [`super::ci_router`]
-/// registers [`CI_DYN_HOST`] with a [`LiveCiDeviceClient`]. Catalog mounts
-/// for `ci/*` wait on a T2 CI extension body. Automatic discovery of
-/// additional hosts from the extension device catalog / host claims is not
-/// wired yet.
+/// [`CI_GITHUB_HOST`] / [`CI_DYN_HOST`] on the Dyn arm. The production
+/// [`super::ci_router`] registers both SaaS hosts with a shared
+/// [`LiveCiDeviceClient`]. Catalog mounts for `ci/*` are owned by
+/// `extensions/ci/` (`omp.ci`). Automatic discovery of additional hosts from
+/// the extension device catalog / host claims is not wired yet.
 ///
 /// `capabilities` is the Delegated ceiling (`Capabilities::allows`); dyn
 /// device answers cannot widen it.
@@ -454,8 +460,8 @@ mod tests {
 	use serde_json::{Value, json};
 
 	use super::{
-		CI_DYN_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter, LiveCiDeviceClient,
-		ci_device_path, ci_op_for_path, paths, register_dyn_ci_host,
+		CI_DYN_HOST, CI_GITHUB_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter,
+		LiveCiDeviceClient, ci_device_path, ci_op_for_path, paths, register_dyn_ci_host,
 	};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_adapter::GithubCiAdapter,
@@ -636,7 +642,10 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn github_arm_still_selected_for_github_com() {
+	async fn github_backend_arm_skips_dyn_client_when_registered() {
+		// Enum routing proof: an explicit Github-arm registration does not
+		// touch the dyn client. Production `ci_router` places github.com on
+		// Dyn instead (see `github_com_ci_is_registered_dyn_*` in mod tests).
 		let hits = Arc::new(AtomicUsize::new(0));
 		#[derive(Clone)]
 		struct Counting(Arc<AtomicUsize>);
@@ -655,18 +664,51 @@ mod tests {
 		let caps = github_caps();
 		let mut builder = Delegated::<CiBackend<Counting>, _>::builder(PermitAll);
 		builder
-			.register("github.com", CiBackend::Github(github), caps)
+			.register(CI_GITHUB_HOST, CiBackend::Github(github), caps)
 			.expect("github");
 		register_dyn_ci_host(&mut builder, "gitlab.example", Counting(Arc::clone(&hits)), caps)
 			.expect("gitlab");
 		let router = builder.build();
-		let run = sample_run("github.com", "1", None);
+		let run = sample_run(CI_GITHUB_HOST, "1", None);
 		let error = router.status(&run).await.expect_err("no live github");
-		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for github.com");
+		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for Github arm");
 		assert!(
 			!matches!(error, CiError::Unregistered { .. }),
 			"github.com must stay registered: {error}"
 		);
+	}
+
+	#[tokio::test]
+	async fn github_com_on_dyn_arm_uses_device_client() {
+		let host = CI_GITHUB_HOST;
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let fake = FakeClient {
+			calls:    Arc::clone(&calls),
+			pipeline: sample_pipeline(host),
+			log:      sample_log(host),
+		};
+		let caps = github_caps();
+		let mut builder = Delegated::<CiBackend<FakeClient>, _>::builder(PermitAll);
+		register_dyn_ci_host(&mut builder, host, fake, caps).expect("github.com dyn");
+		let router = builder.build();
+
+		let pipeline = router
+			.status(&sample_run(host, "42", None))
+			.await
+			.expect("status");
+		assert_eq!(pipeline.id.as_str(), "42");
+		assert_eq!(pipeline.status, CiStatus::Failure);
+
+		let page = router
+			.log_stream(&sample_run(host, "42", Some("7")))
+			.await
+			.expect("log");
+		assert_eq!(page.text.as_str(), "boom\n");
+
+		let recorded = calls.lock().clone();
+		assert_eq!(recorded.len(), 2);
+		assert_eq!(recorded[0].0, paths::STATUS);
+		assert_eq!(recorded[1].0, paths::LOG_STREAM);
 	}
 
 	struct RecordingInvoker {

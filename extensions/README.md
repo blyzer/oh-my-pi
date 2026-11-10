@@ -34,5 +34,6 @@ See [WAVE1.md](WAVE1.md).
 | Path | Role |
 |---|---|
 | [`forge/`](forge/) | Sole `forge/*` mount owner; dispatches by `repo.host` |
-| [`github/`](github/) | GitHub T2 backend (`omp_github`) |
-| [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab`) |
+| [`ci/`](ci/) | Sole `ci/*` mount owner; dispatches by provider host |
+| [`github/`](github/) | GitHub T2 backend (`omp_github` forge + Actions CI) |
+| [`gitlab/`](gitlab/) | GitLab T2 backend (`omp_gitlab` forge + GitLab CI) |

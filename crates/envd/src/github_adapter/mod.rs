@@ -14,9 +14,11 @@
 //! Github arm (GHE). There is no fallback that sends every host to GitHub.
 //!
 //! Catalog mounts for `forge/<op>` are owned by the `omp.forge` extension
-//! (host-dispatch to `omp_github` / `omp_gitlab`). In-core
-//! [`GithubForgeAdapter`] / `github.rs` remain for CI, list-URL helpers, and
-//! checkout/push via [`GithubService`] until Dyn parity allows deletion.
+//! (host-dispatch to `omp_github` / `omp_gitlab`). Catalog mounts for
+//! `ci/<op>` are owned by the `omp.ci` extension (host-dispatch to
+//! `omp_github.ci` / `omp_gitlab.ci`). In-core [`GithubForgeAdapter`] /
+//! [`GithubCiAdapter`] / `github.rs` remain for list-URL helpers, checkout /
+//! push, and unlisted GHE CI checkout hosts until Dyn parity allows deletion.
 //!
 //! The CI registration advertises `log_stream` only. Status stays allowed
 //! because the contract does not flag it. Cancel, rerun, trigger, artifacts,
@@ -32,10 +34,9 @@
 //! host-claim discovery remains a smaller TODO.
 //!
 //! Under `cap-ci`, the CI router holds a [`CiBackend`] enum the same way
-//! (ADR 0049 `ci/*` bridge). Production keeps `github.com` on the Github arm
-//! and registers [`CI_DYN_HOST`] (`gitlab.com`) on Dyn via
-//! [`LiveCiDeviceClient`]. Flipping `github.com` CI to Dyn waits on a T2 CI
-//! extension body.
+//! (ADR 0049 `ci/*` bridge). Production registers [`CI_GITHUB_HOST`]
+//! (`github.com`) and [`CI_DYN_HOST`] (`gitlab.com`) on Dyn via a shared
+//! [`LiveCiDeviceClient`]. Unlisted checkout hosts stay on the Github arm.
 
 #[cfg(feature = "cap-ci")]
 mod dyn_ci;
@@ -50,9 +51,9 @@ use std::{
 
 #[cfg(feature = "cap-ci")]
 pub(crate) use dyn_ci::{
-	CI_DYN_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter, LiveCiDeviceClient,
-	UnavailableCiClient, ci_device_path, ci_op_for_path, paths as ci_device_paths,
-	register_dyn_ci_host,
+	CI_DYN_HOST, CI_GITHUB_HOST, CiBackend, CiDeviceClient, CiDeviceInvoker, DynCiAdapter,
+	LiveCiDeviceClient, UnavailableCiClient, ci_device_path, ci_op_for_path,
+	paths as ci_device_paths, register_dyn_ci_host,
 };
 #[cfg(feature = "cap-forge")]
 pub(crate) use dyn_forge::{
@@ -240,22 +241,22 @@ pub(crate) fn forge_router(
 	builder.build()
 }
 
-/// Routes `ci@1` through [`CiBackend`] (Github arm + dyn T2 arm).
+/// Routes `ci@1` through [`CiBackend`] (dyn T2 arm + Github arm for GHE).
 ///
 /// See the module docs for `PermitAll` and host registration.
 ///
 /// # Host registration
 ///
-/// - `github.com` → [`CiBackend::Github`] (unchanged `ci@1` path)
-/// - [`CI_DYN_HOST`] (`gitlab.com`) → [`CiBackend::Dyn`] over `devices`
+/// - [`CI_GITHUB_HOST`] (`github.com`) → [`CiBackend::Dyn`] over `devices`
+/// - [`CI_DYN_HOST`] (`gitlab.com`) → [`CiBackend::Dyn`] over the same client
 /// - checkout host from `infer_repo` when it differs:
-///   - [`CI_DYN_HOST`] → already registered (Dyn)
+///   - already a Dyn SaaS host → skip
 ///   - else → Github arm (GHE / unlisted)
 ///
 /// `devices` may be unbound ([`LiveCiDeviceClient`] returns
 /// [`omp_ci::CiError::Unavailable`] until [`LiveCiDeviceClient::bind`]);
-/// [`CI_DYN_HOST`] is still registered so Delegated can reach the dyn arm.
-/// Flipping `github.com` CI to Dyn waits on a T2 CI extension body.
+/// both SaaS hosts are still registered so Delegated can reach the dyn arm.
+/// Catalog mounts are owned by `extensions/ci/` (`omp.ci`).
 #[cfg(feature = "cap-ci")]
 pub(crate) fn ci_router(
 	service: Arc<GithubService>,
@@ -264,16 +265,16 @@ pub(crate) fn ci_router(
 	let adapter = GithubCiAdapter { service: Arc::clone(&service) };
 	let caps = github_capabilities();
 	let mut builder = CiDelegated::builder(CiPermitAll);
-	builder
-		.register(
-			github_url::GITHUB_HOST,
-			CiBackend::Github(adapter.clone()),
-			caps,
-		)
-		.expect("github.com is a CI provider");
-	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices, caps).expect("dyn ci host");
+	register_dyn_ci_host(
+		&mut builder,
+		CI_GITHUB_HOST,
+		devices.clone(),
+		caps,
+	)
+	.expect("github.com dyn ci host");
+	register_dyn_ci_host(&mut builder, CI_DYN_HOST, devices, caps).expect("gitlab.com dyn ci host");
 	register_checkout_host(&service, |host| {
-		if host.eq_ignore_ascii_case(CI_DYN_HOST) {
+		if host.eq_ignore_ascii_case(CI_DYN_HOST) || host.eq_ignore_ascii_case(CI_GITHUB_HOST) {
 			return;
 		}
 		let _ = builder.register(host, CiBackend::Github(adapter.clone()), caps);
@@ -1249,7 +1250,9 @@ mod tests {
 
 	use omp_cache::forge_cache::ForgeCache;
 	#[cfg(feature = "cap-ci")]
-	use omp_ci::{CiError, CiHost as _, CiOp, CiProvider, CiStatus, RunRef, Trigger};
+	use omp_ci::{
+		CiError, CiHost as _, CiOp, CiProvider, CiStatus, Job, LogPage, Pipeline, RunRef, Trigger,
+	};
 	use omp_con::Ctx;
 	use omp_core::Str;
 	#[cfg(feature = "cap-forge")]
@@ -1262,7 +1265,9 @@ mod tests {
 		forge_device_paths, forge_router,
 	};
 	#[cfg(feature = "cap-ci")]
-	use super::{CI_DYN_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions};
+	use super::{
+		CI_DYN_HOST, CI_GITHUB_HOST, LiveCiDeviceClient, ci_status, pipeline_from_actions,
+	};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
 		tool_settings::ForgeCacheSettings,
@@ -1544,8 +1549,11 @@ mod tests {
 	#[tokio::test]
 	async fn ci_writes_and_artifacts_are_not_capable() {
 		let dir = tempfile::tempdir().expect("temp");
-		let router =
-			super::ci_router(service(dir.path()), LiveCiDeviceClient::default());
+		// Bound invoker so capabilities() can answer; registration ceilings
+		// still gate writes before the dyn client runs.
+		let client = LiveCiDeviceClient::default();
+		client.bind(Arc::new(RecordingCiCapsInvoker));
+		let router = super::ci_router(service(dir.path()), client);
 		let run = run("42");
 		let provider = run.provider.clone();
 		for op in [
@@ -1581,6 +1589,33 @@ mod tests {
 	}
 
 	#[cfg(feature = "cap-ci")]
+	struct RecordingCiCapsInvoker;
+
+	#[cfg(feature = "cap-ci")]
+	impl super::CiDeviceInvoker for RecordingCiCapsInvoker {
+		fn invoke(
+			&self,
+			path: &str,
+			_args: serde_json::Value,
+		) -> std::pin::Pin<
+			Box<dyn std::future::Future<Output = Result<serde_json::Value, CiError>> + Send + '_>,
+		> {
+			use omp_ci::Capabilities;
+			let result = match path {
+				"ci/capabilities" => Ok(serde_json::to_value(Capabilities {
+					log_stream: true,
+					..Capabilities::none()
+				})
+				.expect("caps")),
+				other => Err(CiError::Unavailable {
+					op: super::ci_op_for_path(other),
+				}),
+			};
+			Box::pin(std::future::ready(result))
+		}
+	}
+
+	#[cfg(feature = "cap-ci")]
 	#[tokio::test]
 	async fn gitlab_com_ci_is_registered_dyn_even_when_unbound() {
 		let router = super::ci_router(
@@ -1594,6 +1629,105 @@ mod tests {
 			matches!(error, CiError::Unavailable { op: CiOp::Status }),
 			"gitlab.com must be registered on the dyn CI arm: {error}"
 		);
+	}
+
+	#[cfg(feature = "cap-ci")]
+	#[tokio::test]
+	async fn github_com_ci_is_registered_dyn_even_when_unbound() {
+		let router = super::ci_router(
+			service(tempfile::tempdir().expect("temp").path()),
+			LiveCiDeviceClient::default(),
+		);
+		let run =
+			RunRef::try_new(CiProvider::try_new(CI_GITHUB_HOST).unwrap(), "1", None).unwrap();
+		let error = router.status(&run).await.expect_err("unbound live client");
+		assert!(
+			matches!(error, CiError::Unavailable { op: CiOp::Status }),
+			"github.com must be registered on the dyn CI arm: {error}"
+		);
+		assert!(
+			!matches!(error, CiError::Unregistered { .. }),
+			"github.com must not fall off the router: {error}"
+		);
+	}
+
+	#[cfg(feature = "cap-ci")]
+	#[tokio::test]
+	async fn github_com_ci_status_and_log_via_bound_client() {
+		use parking_lot::Mutex;
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		struct Recording {
+			calls: Arc<Mutex<Vec<String>>>,
+			hits:  Arc<AtomicUsize>,
+		}
+
+		impl super::CiDeviceInvoker for Recording {
+			fn invoke(
+				&self,
+				path: &str,
+				_args: serde_json::Value,
+			) -> std::pin::Pin<
+				Box<
+					dyn std::future::Future<Output = Result<serde_json::Value, CiError>> + Send + '_,
+				>,
+			> {
+				self.hits.fetch_add(1, Ordering::SeqCst);
+				self.calls.lock().push(path.to_owned());
+				let host = CI_GITHUB_HOST;
+				let result = match path {
+					"ci/status" => {
+						let pipeline = Pipeline::new(
+							CiProvider::try_new(host).unwrap(),
+							"42",
+							"ci",
+							CiStatus::Failure,
+							[Job::new("7", "test", CiStatus::Failure)],
+						);
+						Ok(serde_json::to_value(pipeline).expect("pipeline"))
+					},
+					"ci/log_stream" => {
+						let page = LogPage::new(
+							RunRef::try_new(
+								CiProvider::try_new(host).unwrap(),
+								"42",
+								Some(Str::new("7")),
+							)
+							.unwrap(),
+							"boom\n",
+							true,
+						);
+						Ok(serde_json::to_value(page).expect("log"))
+					},
+					other => Err(CiError::Unavailable {
+						op: super::ci_op_for_path(other),
+					}),
+				};
+				Box::pin(std::future::ready(result))
+			}
+		}
+
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		let hits = Arc::new(AtomicUsize::new(0));
+		let client = LiveCiDeviceClient::default();
+		client.bind(Arc::new(Recording {
+			calls: Arc::clone(&calls),
+			hits:  Arc::clone(&hits),
+		}));
+		let router = super::ci_router(
+			service(tempfile::tempdir().expect("temp").path()),
+			client,
+		);
+		let run = run("42");
+		let pipeline = router.status(&run).await.expect("status via dyn");
+		assert_eq!(pipeline.id.as_str(), "42");
+		assert_eq!(pipeline.status, CiStatus::Failure);
+		let mut scoped = run.clone();
+		scoped.job = Some(Str::new("7"));
+		let page = router.log_stream(&scoped).await.expect("log via dyn");
+		assert_eq!(page.text.as_str(), "boom\n");
+		assert_eq!(hits.load(Ordering::SeqCst), 2);
+		assert_eq!(calls.lock().as_slice(), ["ci/status", "ci/log_stream"]);
 	}
 
 	#[cfg(feature = "cap-ci")]

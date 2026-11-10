@@ -2,13 +2,13 @@ id = "omp.gitlab"
 name = "GitLab forge"
 version = "0.1.0"
 omp_api = 1
-description = "GitLab T2 forge backend (ADR 0049 D2.8); catalog mounts live in omp.forge"
+description = "GitLab T2 forge + CI backend (ADR 0049); mounts live in omp.forge / omp.ci"
 entry = "omp_gitlab"
 capabilities = ["env.net.fetch"]
 
-# Backend only — do not declare a forge parent here. DynForgeAdapter calls fixed
-# paths forge/<op>; a second mount owner would collide with omp.forge. See
-# extensions/forge/ (host-dispatching catalog) and extensions/WAVE1.md.
+# Backend only — do not declare a forge or ci parent here. Dyn adapters call
+# fixed paths; a second mount owner would collide. See extensions/forge/,
+# extensions/ci/, and extensions/WAVE1.md.
 
 [requires]
 python = ">=3.14"
