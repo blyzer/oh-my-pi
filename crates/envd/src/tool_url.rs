@@ -32,24 +32,20 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 
+#[cfg(feature = "cap-forge")]
+use super::github_url::{GithubResolver, GithubScheme};
 use super::{
-	github_url::GithubCredentialBridge,
-	mcp::McpService,
-	security_scan::SecurityScanService,
+	github_url::GithubCredentialBridge, mcp::McpService, security_scan::SecurityScanService,
 	vault::VaultService,
 };
 #[cfg(feature = "cap-forge")]
-use super::github_url::{GithubResolver, GithubScheme};
-use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
-#[cfg(feature = "cap-forge")]
 use crate::github_adapter;
+use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
 
 /// Forge router the production `pr://` and `issue://` resolvers read through.
 #[cfg(feature = "cap-forge")]
-type SchemeForge = omp_forge_delegated::Delegated<
-	github_adapter::ForgeBackend,
-	omp_forge_delegated::PermitAll,
->;
+type SchemeForge =
+	omp_forge_delegated::Delegated<github_adapter::ForgeBackend, omp_forge_delegated::PermitAll>;
 
 #[derive(Clone, Copy, Debug)]
 enum RegistryResource {
@@ -283,9 +279,7 @@ impl Resolve for UrlResolver {
 	) -> Result<ResolvedRead, Fault> {
 		match self {
 			#[cfg(feature = "cap-forge")]
-			Self::Issue(resolver) | Self::Pr(resolver) => {
-				resolver.read_with_diags(resource, selector).await
-			},
+			Self::Issue(resolver) | Self::Pr(resolver) => resolver.read_with_diags(resource, selector).await,
 			_ => self
 				.read(resource, selector)
 				.await

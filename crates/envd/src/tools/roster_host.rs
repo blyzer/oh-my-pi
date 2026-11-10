@@ -96,7 +96,10 @@ pub(super) struct SessionHost<'a> {
 	blobs:              &'a BlobHost,
 	project_root:       &'a Path,
 	state_dir:          &'a Path,
-	forge_cache:       Arc<ForgeCache>,
+	forge_cache:        Arc<ForgeCache>,
+	/// Session-bound forge device client (same slot as CheckoutForge / CONTROL).
+	#[cfg(feature = "cap-forge")]
+	forge_devices:      crate::github_adapter::LiveForgeDeviceClient,
 	#[cfg(feature = "cap-media")]
 	image_config:       media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")]
@@ -123,6 +126,7 @@ impl<'a> SessionHost<'a> {
 		state_dir: &'a Path,
 		telemetry: &'a Arc<omp_cache::telemetry_cache::TelemetryIndex>,
 		forge_cache: Arc<ForgeCache>,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 		#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 		#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
 	) -> Self {
@@ -145,6 +149,8 @@ impl<'a> SessionHost<'a> {
 			project_root,
 			state_dir,
 			forge_cache,
+			#[cfg(feature = "cap-forge")]
+			forge_devices,
 			#[cfg(feature = "cap-media")]
 			image_config,
 			#[cfg(feature = "cap-media")]
@@ -257,10 +263,7 @@ impl SessionInstall for SessionHost<'_> {
 
 	#[cfg(feature = "cap-forge")]
 	fn forge_router(&mut self) -> Self::ForgeRouter {
-		crate::github_adapter::forge_router(
-			self.ensure_github(),
-			crate::github_adapter::LiveForgeDeviceClient::default(),
-		)
+		crate::github_adapter::forge_router(self.ensure_github(), self.forge_devices.clone())
 	}
 
 	#[cfg(feature = "cap-ci")]
@@ -420,7 +423,11 @@ pub(super) struct EnvironmentHost<'a> {
 	py_eval:             bool,
 	skills:              Option<Arc<ManagedSkills>>,
 	github_credentials:  Arc<GithubCredentialBridge>,
-	forge_cache:        Arc<ForgeCache>,
+	forge_cache:         Arc<ForgeCache>,
+	/// Session-bound forge device client (same slot as SessionHost /
+	/// CheckoutForge).
+	#[cfg(feature = "cap-forge")]
+	forge_devices:       crate::github_adapter::LiveForgeDeviceClient,
 	url_resolvers:       Vec<Arc<dyn ContentResolver>>,
 	host_resources:      Option<Arc<dyn HostResources>>,
 	session_authority:   Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -475,6 +482,7 @@ impl<'a> EnvironmentHost<'a> {
 		skills: Option<Arc<ManagedSkills>>,
 		github_credentials: Arc<GithubCredentialBridge>,
 		forge_cache: Arc<ForgeCache>,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 		url_resolvers: Vec<Arc<dyn ContentResolver>>,
 		host_resources: Option<Arc<dyn HostResources>>,
 		session_authority: Option<Arc<dyn omp_contract::SessionAuthority>>,
@@ -508,6 +516,8 @@ impl<'a> EnvironmentHost<'a> {
 			skills,
 			github_credentials,
 			forge_cache,
+			#[cfg(feature = "cap-forge")]
+			forge_devices,
 			url_resolvers,
 			host_resources,
 			session_authority,
@@ -581,10 +591,7 @@ impl<'a> EnvironmentHost<'a> {
 				Arc::clone(&self.forge_cache),
 				self.blobs.clone(),
 			);
-			crate::github_adapter::forge_router(
-				github,
-				crate::github_adapter::LiveForgeDeviceClient::default(),
-			)
+			crate::github_adapter::forge_router(github, self.forge_devices.clone())
 		};
 		self.resolvers = Some(production_url_resolvers(
 			conflicts,
@@ -1103,5 +1110,139 @@ impl EnvironmentInstall for EnvironmentHost<'_> {
 			time::Duration::from_millis(self.shell_settings.auto_background.threshold_ms),
 		);
 		self.register(shell, row)
+	}
+}
+
+#[cfg(all(test, feature = "cap-forge"))]
+mod forge_bind_tests {
+	use std::{future::Future, sync::Arc};
+
+	use omp_cache::{forge_cache::ForgeCache, telemetry_cache::TelemetryIndex};
+	use omp_con::Ctx;
+	use omp_core::Str;
+	use omp_forge::{ChangeRequest, ForgeError, ForgeHost as _, ForgeOp, RepoRef, RequestState};
+	use omp_tool::{Registry, ToolsPolicy};
+	use omp_tools::roster::SessionInstall;
+	use parking_lot::Mutex;
+	use serde_json::Value;
+
+	use super::SessionHost;
+	use crate::{
+		blobs::BlobHost,
+		github_adapter::{
+			ForgeDeviceInvoker, GITLAB_HOST, LiveForgeDeviceClient, forge_device_paths as paths,
+			forge_op_for_path,
+		},
+		tool_settings::{ForgeCacheSettings, ToolSettings},
+	};
+
+	struct RecordingInvoker {
+		calls: Arc<Mutex<Vec<(String, Value)>>>,
+		cr:    ChangeRequest,
+	}
+
+	impl ForgeDeviceInvoker for RecordingInvoker {
+		fn invoke(
+			&self,
+			path: &str,
+			args: Value,
+		) -> std::pin::Pin<Box<dyn Future<Output = Result<Value, ForgeError>> + Send + '_>> {
+			self.calls.lock().push((path.to_string(), args));
+			let result = match path {
+				paths::CHANGE_REQUEST_VIEW => Ok(serde_json::to_value(&self.cr).expect("cr")),
+				other => Err(ForgeError::Unavailable { op: forge_op_for_path(other) }),
+			};
+			Box::pin(std::future::ready(result))
+		}
+	}
+
+	fn sample_cr(host: &str) -> ChangeRequest {
+		ChangeRequest {
+			repo:        RepoRef::try_new(host, "acme", "widget").unwrap(),
+			number:      7,
+			title:       Str::new_static("Fix the widget"),
+			body:        Str::new_static("details"),
+			state:       RequestState::Open,
+			draft:       false,
+			base_ref:    Str::new_static("main"),
+			head_ref:    Str::new_static("topic"),
+			head_commit: Str::new_static("bbb"),
+			base_commit: Str::new_static("aaa"),
+			web_url:     Str::new_static("https://gitlab.com/acme/widget/-/merge_requests/7"),
+		}
+	}
+
+	#[tokio::test]
+	async fn session_host_forge_router_uses_bound_client() {
+		let scratch = tempfile::tempdir().expect("temp");
+		let blobs = BlobHost::open(scratch.path().join("blobs")).expect("blobs");
+		let telemetry = Arc::new(
+			TelemetryIndex::open(
+				&scratch.path().join("telemetry"),
+				&scratch.path().join("telemetry.sqlite3"),
+			)
+			.expect("telemetry"),
+		);
+		let forge_cache = Arc::new(
+			ForgeCache::open(
+				scratch.path().join("forge-cache.sqlite3"),
+				ForgeCacheSettings::from_con(&Ctx::new()).policy(),
+			)
+			.expect("forge cache"),
+		);
+		let tool_settings = ToolSettings::default();
+		let mut registry = Registry::new();
+
+		let devices = LiveForgeDeviceClient::default();
+		assert!(!devices.is_bound());
+		let calls = Arc::new(Mutex::new(Vec::new()));
+		devices.bind(Arc::new(RecordingInvoker {
+			calls: Arc::clone(&calls),
+			cr:    sample_cr(GITLAB_HOST),
+		}));
+		assert!(devices.is_bound());
+
+		let mut host = SessionHost::new(
+			&mut registry,
+			ToolsPolicy::Auto,
+			&tool_settings,
+			None,
+			None,
+			None,
+			None,
+			&blobs,
+			scratch.path(),
+			scratch.path(),
+			&telemetry,
+			forge_cache,
+			devices.clone(),
+			#[cfg(feature = "cap-media")]
+			crate::media_devices::ImageConfig::default(),
+			#[cfg(feature = "cap-media")]
+			crate::media_tts::SpeechConfig::default(),
+		);
+
+		let router = host.forge_router();
+		let repo = RepoRef::try_new(GITLAB_HOST, "acme", "widget").unwrap();
+		let cr = router
+			.view_change_request(&repo, 7)
+			.await
+			.expect("gitlab.com must reach the bound invoker");
+		assert_eq!(cr.number, 7);
+		assert_eq!(cr.title.as_str(), "Fix the widget");
+		let recorded = calls.lock().clone();
+		assert_eq!(recorded.len(), 1);
+		assert_eq!(recorded[0].0, paths::CHANGE_REQUEST_VIEW);
+		assert_eq!(recorded[0].1["number"], 7);
+
+		// Shared bind slot with CheckoutForge / CONTROL: unbind tears down the
+		// same client the SessionHost router closed over.
+		devices.unbind();
+		assert!(!devices.is_bound());
+		let error = router
+			.view_change_request(&repo, 7)
+			.await
+			.expect_err("unbound client");
+		assert!(matches!(error, ForgeError::Unavailable { op: ForgeOp::ChangeRequestView }));
 	}
 }

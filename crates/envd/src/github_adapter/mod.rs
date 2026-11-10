@@ -25,13 +25,6 @@
 
 #[cfg(feature = "cap-forge")]
 mod dyn_forge;
-#[cfg(feature = "cap-forge")]
-pub(crate) use dyn_forge::{
-	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
-	LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path, forge_op_for_path,
-	paths as forge_device_paths, register_dyn_forge_host,
-};
-
 use std::{
 	future::Future,
 	path::{Path, PathBuf},
@@ -39,6 +32,12 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(feature = "cap-forge")]
+pub(crate) use dyn_forge::{
+	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
+	LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path, forge_op_for_path,
+	paths as forge_device_paths, register_dyn_forge_host,
+};
 #[cfg(feature = "cap-forge")]
 use omp_cache::forge_cache::{ForgeCache, ForgeCachePolicy};
 #[cfg(feature = "cap-ci")]
@@ -1115,10 +1114,10 @@ mod tests {
 	use omp_forge::{ForgeError, ForgeHost as _, ForgeOp, IssueState, RepoRef, RequestState};
 	use serde_json::json;
 
-	#[cfg(feature = "cap-ci")]
-	use super::{ci_status, pipeline_from_actions};
 	#[cfg(feature = "cap-forge")]
 	use super::{GITLAB_HOST, LiveForgeDeviceClient, forge_router};
+	#[cfg(feature = "cap-ci")]
+	use super::{ci_status, pipeline_from_actions};
 	use crate::{
 		blobs::BlobHost, github::GithubService, github_url::GithubCredentialBridge,
 		tool_settings::ForgeCacheSettings,
@@ -1163,9 +1162,15 @@ mod tests {
 	#[cfg(feature = "cap-forge")]
 	#[tokio::test]
 	async fn gitlab_com_is_registered_dyn_even_when_unbound() {
-		let router = forge_router(service(tempfile::tempdir().expect("temp").path()), LiveForgeDeviceClient::default());
+		let router = forge_router(
+			service(tempfile::tempdir().expect("temp").path()),
+			LiveForgeDeviceClient::default(),
+		);
 		let repo = RepoRef::try_new(GITLAB_HOST, "acme", "widget").unwrap();
-		let error = router.view_repo(&repo).await.expect_err("unbound live client");
+		let error = router
+			.view_repo(&repo)
+			.await
+			.expect_err("unbound live client");
 		assert!(
 			matches!(error, ForgeError::Unavailable { op: ForgeOp::RepoView }),
 			"gitlab.com must be registered on the dyn arm: {error}"

@@ -970,10 +970,8 @@ mod tests {
 		});
 		ctx.run("sv_forge_cache_enabled false")
 			.expect("cache enablement");
-		ctx.run("sv_forge_cache_soft_ttl_sec 15")
-			.expect("soft TTL");
-		ctx.run("sv_forge_cache_hard_ttl_sec 90")
-			.expect("hard TTL");
+		ctx.run("sv_forge_cache_soft_ttl_sec 15").expect("soft TTL");
+		ctx.run("sv_forge_cache_hard_ttl_sec 90").expect("hard TTL");
 		assert_eq!(ForgeCacheSettings::from_con(&ctx), ForgeCacheSettings {
 			enabled:      false,
 			soft_ttl_sec: 15,

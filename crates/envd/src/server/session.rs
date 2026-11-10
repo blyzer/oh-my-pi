@@ -150,8 +150,7 @@ impl EnvServer {
 		schedules: DurableScheduleActor,
 		authority: Arc<AuthorityTable>,
 		state_dir: &Path,
-		#[cfg(feature = "cap-forge")]
-		forge_devices: crate::github_adapter::LiveForgeDeviceClient,
+		#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 	) -> Self {
 		let host_info = HostInfoHost::new(state_dir);
 		let workspace_roots =
@@ -366,6 +365,8 @@ impl EnvServer {
 			con,
 			session_id.as_str(),
 			Arc::clone(&forge_cache),
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices.clone(),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -668,6 +669,8 @@ impl EnvServer {
 			con,
 			session_id.as_str(),
 			Arc::clone(&forge_cache),
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices.clone(),
 			&mcp,
 			Arc::clone(&mcp_manager),
 			&workspace,
@@ -908,6 +911,8 @@ impl EnvServer {
 			state_dir,
 			&telemetry,
 			Arc::clone(&forge_cache),
+			#[cfg(feature = "cap-forge")]
+			control_bindings.forge_devices.clone(),
 			ext_hosts.as_ref(),
 			py_eval,
 			con,

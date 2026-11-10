@@ -308,9 +308,7 @@ impl GithubService {
 			.cache
 			.invalidate_repo(repo.identity())
 			.map(|_| ())
-			.map_err(|_| {
-				fault("forge_cache_failed", "forge cache invalidation failed after mutation")
-			})
+			.map_err(|_| fault("forge_cache_failed", "forge cache invalidation failed after mutation"))
 	}
 
 	/// Project root the service infers a checkout from.
