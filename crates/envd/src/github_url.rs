@@ -33,9 +33,9 @@ use omp_ai::{
 #[cfg(feature = "cap-forge")]
 use omp_cache::forge_cache::{ForgeCache, ForgeCacheKey, ForgeCacheStatus, ForgeResourceKind};
 use omp_catalog::AuthSpecId;
-use omp_core::{SecretString, Str, sf};
 #[cfg(feature = "cap-forge")]
 use omp_core::CowBytes;
+use omp_core::{SecretString, Str, sf};
 #[cfg(feature = "cap-forge")]
 use omp_forge::{
 	Comment, DiffSelector, ForgeError, ForgeHost, RepoRef, ResourceKind, ResourceSelector,
@@ -1358,14 +1358,13 @@ fn http_fault(error: impl Display) -> Fault {
 }
 #[cfg(test)]
 mod tests {
+	#[cfg(feature = "cap-forge")]
+	use std::future::Future;
 	use std::sync::Arc;
 
 	#[cfg(feature = "cap-forge")]
-	use std::future::Future;
-
-	use omp_core::ExposeSecret as _;
-	#[cfg(feature = "cap-forge")]
 	use omp_cache::forge_cache::ForgeCachePolicy;
+	use omp_core::ExposeSecret as _;
 	#[cfg(feature = "cap-forge")]
 	use omp_forge::{
 		ChangeRequest, ChangeRequestDraft, CheckTarget, CheckoutReceipt, CheckoutRequest, Comment,

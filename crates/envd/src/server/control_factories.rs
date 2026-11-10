@@ -9,11 +9,11 @@ use super::{
 pub(in crate::server) type ProductionResolverTable = ResolverTable<UrlResolver>;
 
 pub(in crate::server) struct ProductionControlBindings {
-	pub(in crate::server) factory:   Arc<HostControlAuthorityFactory>,
-	pub(in crate::server) resources: Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
-	pub(in crate::server) callbacks: Arc<CallbackDispatcherSlot>,
-	pub(in crate::server) registry:  Arc<RegistryControlFactory>,
-	pub(in crate::server) hooks:     Arc<HookControlFactory>,
+	pub(in crate::server) factory:       Arc<HostControlAuthorityFactory>,
+	pub(in crate::server) resources:     Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
+	pub(in crate::server) callbacks:     Arc<CallbackDispatcherSlot>,
+	pub(in crate::server) registry:      Arc<RegistryControlFactory>,
+	pub(in crate::server) hooks:         Arc<HookControlFactory>,
 	/// Live forge device client bound to the device catalog (cap-forge).
 	#[cfg(feature = "cap-forge")]
 	pub(in crate::server) forge_devices: crate::github_adapter::LiveForgeDeviceClient,

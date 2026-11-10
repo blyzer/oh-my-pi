@@ -43,9 +43,8 @@ invent partial mutations.
 
 - Automatic host-claim discovery for self-hosted GitLab (non-`gitlab.com`) from
   the device catalog — still TODO at `forge_router`
-- `forge@1` SessionHost composition still builds a separate unbound
-  `LiveForgeDeviceClient` today; `CheckoutForge` / control bindings hold the
-  production bound client
+- **DONE:** SessionHost / URL-resolver `forge_router` share the session’s bound
+  `LiveForgeDeviceClient` with CheckoutForge / CONTROL (no second unbound client)
 - Write ops; GitHub T2 parity + deletion of `envd/src/github.rs`
 - Full contract stability still awaits GitHub T2 parity (ADR wording)
 

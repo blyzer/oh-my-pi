@@ -666,7 +666,10 @@ impl DeviceControlFactory {
 		use crate::github_adapter::forge_op_for_path;
 
 		let op = forge_op_for_path(path);
-		let args = args.as_object().cloned().ok_or(omp_forge::ForgeError::Unavailable { op })?;
+		let args = args
+			.as_object()
+			.cloned()
+			.ok_or(omp_forge::ForgeError::Unavailable { op })?;
 		let matches = self
 			.catalog
 			.snapshot()
@@ -707,7 +710,8 @@ impl DeviceControlFactory {
 	}
 }
 
-/// [`ForgeDeviceInvoker`] that forwards to [`DeviceControlFactory::call_mounted`].
+/// [`ForgeDeviceInvoker`] that forwards to
+/// [`DeviceControlFactory::call_mounted`].
 #[cfg(feature = "cap-forge")]
 struct DeviceCatalogForgeInvoker {
 	devices: Arc<DeviceControlFactory>,
@@ -719,9 +723,8 @@ impl crate::github_adapter::ForgeDeviceInvoker for DeviceCatalogForgeInvoker {
 		&self,
 		path: &str,
 		args: JsonValue,
-	) -> std::pin::Pin<
-		Box<dyn Future<Output = Result<JsonValue, omp_forge::ForgeError>> + Send + '_>,
-	> {
+	) -> std::pin::Pin<Box<dyn Future<Output = Result<JsonValue, omp_forge::ForgeError>> + Send + '_>>
+	{
 		let devices = Arc::clone(&self.devices);
 		let path = path.to_owned();
 		Box::pin(async move { devices.call_mounted(&path, args).await })
@@ -1063,6 +1066,7 @@ fn register_session_base(
 	state_dir: &Path,
 	telemetry: &Arc<TelemetryIndex>,
 	forge_cache: Arc<ForgeCache>,
+	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 	tool_settings: &ToolSettings,
 	#[cfg(feature = "cap-media")] image_config: media_devices::ImageConfig,
 	#[cfg(feature = "cap-media")] speech_config: SpeechConfig,
@@ -1088,6 +1092,8 @@ fn register_session_base(
 		state_dir,
 		telemetry,
 		forge_cache,
+		#[cfg(feature = "cap-forge")]
+		forge_devices,
 		#[cfg(feature = "cap-media")]
 		image_config,
 		#[cfg(feature = "cap-media")]
@@ -1417,6 +1423,7 @@ pub(crate) fn session_registry(
 	state_dir: &Path,
 	telemetry: &Arc<TelemetryIndex>,
 	forge_cache: Arc<ForgeCache>,
+	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 	workers: &ExtHostSupervisor,
 	py_eval: bool,
 	con: &Ctx,
@@ -1450,6 +1457,8 @@ pub(crate) fn session_registry(
 		state_dir,
 		telemetry,
 		forge_cache,
+		#[cfg(feature = "cap-forge")]
+		forge_devices,
 		tool_settings,
 		#[cfg(feature = "cap-media")]
 		image_config(con),
@@ -1534,6 +1543,7 @@ pub(crate) fn production_registry<
 	con: &Ctx,
 	session_id: &str,
 	forge_cache: Arc<ForgeCache>,
+	#[cfg(feature = "cap-forge")] forge_devices: crate::github_adapter::LiveForgeDeviceClient,
 	mcp: &Arc<McpService>,
 	mcp_manager: Arc<McpManager>,
 	workspace: &WorkspaceHost,
@@ -1603,6 +1613,8 @@ pub(crate) fn production_registry<
 			state_dir,
 			telemetry,
 			Arc::clone(&forge_cache),
+			#[cfg(feature = "cap-forge")]
+			forge_devices.clone(),
 			tool_settings,
 			#[cfg(feature = "cap-media")]
 			image_config(con),
@@ -1641,6 +1653,8 @@ pub(crate) fn production_registry<
 		skills,
 		Arc::clone(&github_credentials),
 		forge_cache,
+		#[cfg(feature = "cap-forge")]
+		forge_devices,
 		url_resolvers,
 		host_resources,
 		session_authority,
@@ -3240,6 +3254,8 @@ mod tests {
 				)
 				.expect("forge cache"),
 			),
+			#[cfg(feature = "cap-forge")]
+			crate::github_adapter::LiveForgeDeviceClient::default(),
 			&tool_settings,
 			#[cfg(feature = "cap-media")]
 			image_config(&con),
@@ -3312,10 +3328,7 @@ mod tests {
 			"forge is absent from the construction table when cap-forge is off"
 		);
 		#[cfg(not(feature = "cap-ci"))]
-		assert!(
-			!names.contains("ci"),
-			"ci is absent from the construction table when cap-ci is off"
-		);
+		assert!(!names.contains("ci"), "ci is absent from the construction table when cap-ci is off");
 		#[cfg(not(feature = "cap-media"))]
 		assert!(
 			!names.contains("tts"),

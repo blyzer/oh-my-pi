@@ -9,11 +9,7 @@
 //!
 //! Schema source of truth: `docs/adr/0049-forge-dyn-device-schema.md`.
 
-use std::{
-	future::Future,
-	pin::Pin,
-	sync::Arc,
-};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use omp_core::Str;
 use omp_forge::{
@@ -231,11 +227,7 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 		let repo = repo.clone();
 		async move {
 			this
-				.invoke_decode(
-					ForgeOp::RepoView,
-					paths::REPO_VIEW,
-					json!({ "repo": repo }),
-				)
+				.invoke_decode(ForgeOp::RepoView, paths::REPO_VIEW, json!({ "repo": repo }))
 				.await
 		}
 	}
@@ -358,7 +350,9 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 		async move {
 			let op = query.kind.op();
 			let path = forge_device_path(op);
-			this.invoke_decode(op, path.as_str(), json!({ "query": query })).await
+			this
+				.invoke_decode(op, path.as_str(), json!({ "query": query }))
+				.await
 		}
 	}
 
@@ -419,11 +413,7 @@ impl<C: ForgeDeviceClient> ForgeHost for DynForgeAdapter<C> {
 		let this = self.clone();
 		async move {
 			this
-				.invoke_decode(
-					ForgeOp::IssueCreate,
-					paths::ISSUE_CREATE,
-					json!({ "draft": draft }),
-				)
+				.invoke_decode(ForgeOp::IssueCreate, paths::ISSUE_CREATE, json!({ "draft": draft }))
 				.await
 		}
 	}
@@ -623,10 +613,11 @@ mod tests {
 		},
 	};
 
+	use omp_cache::forge_cache::ForgeCache;
+	use omp_con::Ctx;
 	use omp_core::Str;
 	use omp_forge::{
-		ChangeRequest, ForgeError, ForgeHost as _, ForgeOp, Issue, IssueState, RepoRef,
-		RequestState,
+		ChangeRequest, ForgeError, ForgeHost as _, ForgeOp, Issue, IssueState, RepoRef, RequestState,
 	};
 	use omp_forge_delegated::{Delegated, PermitAll};
 	use parking_lot::Mutex;
@@ -640,8 +631,6 @@ mod tests {
 		blobs::BlobHost, github::GithubService, github_adapter::GithubForgeAdapter,
 		github_url::GithubCredentialBridge, tool_settings::ForgeCacheSettings,
 	};
-	use omp_cache::forge_cache::ForgeCache;
-	use omp_con::Ctx;
 
 	#[derive(Clone)]
 	struct FakeClient {
@@ -678,27 +667,27 @@ mod tests {
 
 	fn sample_cr(host: &str) -> ChangeRequest {
 		ChangeRequest {
-			repo: sample_repo(host),
-			number: 7,
-			title: Str::new_static("Fix the widget"),
-			body: Str::new_static("details"),
-			state: RequestState::Open,
-			draft: false,
-			base_ref: Str::new_static("main"),
-			head_ref: Str::new_static("topic"),
+			repo:        sample_repo(host),
+			number:      7,
+			title:       Str::new_static("Fix the widget"),
+			body:        Str::new_static("details"),
+			state:       RequestState::Open,
+			draft:       false,
+			base_ref:    Str::new_static("main"),
+			head_ref:    Str::new_static("topic"),
 			head_commit: Str::new_static("bbb"),
 			base_commit: Str::new_static("aaa"),
-			web_url: Str::new_static("https://gitlab.example/acme/widget/-/merge_requests/7"),
+			web_url:     Str::new_static("https://gitlab.example/acme/widget/-/merge_requests/7"),
 		}
 	}
 
 	fn sample_issue(host: &str) -> Issue {
 		Issue {
-			repo: sample_repo(host),
-			number: 3,
-			title: Str::new_static("Bug"),
-			body: Str::new_static("steps"),
-			state: IssueState::Open,
+			repo:    sample_repo(host),
+			number:  3,
+			title:   Str::new_static("Bug"),
+			body:    Str::new_static("steps"),
+			state:   IssueState::Open,
 			web_url: Str::new_static("https://gitlab.example/acme/widget/-/issues/3"),
 		}
 	}
@@ -741,7 +730,7 @@ mod tests {
 		let calls = Arc::new(Mutex::new(Vec::new()));
 		let fake = FakeClient {
 			calls: Arc::clone(&calls),
-			cr: sample_cr(host),
+			cr:    sample_cr(host),
 			issue: sample_issue(host),
 		};
 		let dir = tempfile::tempdir().expect("temp");
@@ -801,7 +790,7 @@ mod tests {
 		let host = "gitlab.example";
 		let fake = FakeClient {
 			calls: Arc::new(Mutex::new(Vec::new())),
-			cr: sample_cr(host),
+			cr:    sample_cr(host),
 			issue: sample_issue(host),
 		};
 		let adapter = DynForgeAdapter::new(fake);
@@ -839,7 +828,10 @@ mod tests {
 			.expect("gitlab");
 		let router = builder.build();
 		let repo = RepoRef::try_new("github.com", "acme", "widget").unwrap();
-		let error = router.view_issue(&repo, 1).await.expect_err("no live github");
+		let error = router
+			.view_issue(&repo, 1)
+			.await
+			.expect_err("no live github");
 		assert_eq!(hits.load(Ordering::SeqCst), 0, "dyn client must not run for github.com");
 		assert!(
 			!matches!(error, ForgeError::Unregistered { .. }),
@@ -858,16 +850,12 @@ mod tests {
 			&self,
 			path: &str,
 			args: Value,
-		) -> std::pin::Pin<
-			Box<dyn Future<Output = Result<Value, ForgeError>> + Send + '_>,
-		> {
+		) -> std::pin::Pin<Box<dyn Future<Output = Result<Value, ForgeError>> + Send + '_>> {
 			self.calls.lock().push((path.to_string(), args));
 			let result = match path {
 				paths::CHANGE_REQUEST_VIEW => Ok(serde_json::to_value(&self.cr).expect("cr")),
 				paths::ISSUE_VIEW => Ok(serde_json::to_value(&self.issue).expect("issue")),
-				paths::REPO_VIEW
-				| paths::CHANGE_REQUEST_DIFF
-				| paths::LIST_COMMENTS => {
+				paths::REPO_VIEW | paths::CHANGE_REQUEST_DIFF | paths::LIST_COMMENTS => {
 					Err(ForgeError::Unsupported { op: forge_op_for_path(path) })
 				},
 				other => Err(ForgeError::Unavailable { op: forge_op_for_path(other) }),
@@ -894,7 +882,7 @@ mod tests {
 		let client = LiveForgeDeviceClient::default();
 		client.bind(Arc::new(RecordingInvoker {
 			calls: Arc::clone(&calls),
-			cr: sample_cr(host),
+			cr:    sample_cr(host),
 			issue: sample_issue(host),
 		}));
 		assert!(client.is_bound());
@@ -916,7 +904,10 @@ mod tests {
 		assert_eq!(cr.number, 7);
 		assert_eq!(cr.title.as_str(), "Fix the widget");
 
-		let issue = router.view_issue(&repo, 3).await.expect("issue via live client");
+		let issue = router
+			.view_issue(&repo, 3)
+			.await
+			.expect("issue via live client");
 		assert_eq!(issue.number, 3);
 
 		let recorded = calls.lock().clone();

@@ -70,6 +70,7 @@ client is unbound (`Unavailable`, not `Unregistered`).
   `extension_activate`, maps GitLab REST onto `omp_forge` serde shapes, and
   documents adapter-data credentials (`GITLAB_TOKEN` / `GITLAB_HOST` /
   `GITLAB_API_URL`). Live client + `gitlab.com` registration in envd.
-- **Remaining:** auto host-claim for self-hosted GitLab, write ops, SessionHost
-  bound-client threading for `forge@1`, GitHub T2 parity before deleting
-  `envd/src/github.rs`. Full contract stability still awaits that parity.
+- **Remaining:** auto host-claim for self-hosted GitLab, write ops, GitHub T2
+  parity before deleting `envd/src/github.rs`. SessionHost bound-client
+  threading for `forge@1` is DONE. Full contract stability still awaits GitHub
+  T2 parity.

@@ -12,9 +12,7 @@ use std::{
 
 use bytes::BytesMut;
 use flume::Receiver;
-use omp_contract::{
-	EnvEvent, GateError, HookEvent, HookGate, HookPatch, HookPhase, KernelSender,
-};
+use omp_contract::{EnvEvent, GateError, HookEvent, HookGate, HookPatch, HookPhase, KernelSender};
 pub use omp_core::{ActivateReason, LifecyclePhase, Principal, RestartReason, sf};
 use omp_core::{InvocationPhase, Provenance, Str};
 use omp_ext::config::{SettingSchema, StaticDeclaration, StaticDeclarations};
