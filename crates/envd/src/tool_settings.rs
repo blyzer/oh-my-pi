@@ -343,12 +343,13 @@ omp_con::var! {
 			"legacy.path": "forge.cache.hardTtlSec",
 		},
 	};
-	/// Extra ASCII hosts registered on the dyn forge arm (beside `gitlab.com`).
+	/// Extra ASCII hosts registered on the dyn forge arm (beside `gitlab.com`
+	/// and `github.com`, which are always Dyn).
 	///
-	/// Comma- or whitespace-separated. Self-hosted GitLab (and other T2 dyn
-	/// forges) must appear here or in the adapter env `GITLAB_HOST`; otherwise
-	/// a non-`github.com` checkout host still lands on the Github arm (GHE).
-	/// `github.com` is never moved to Dyn even if listed.
+	/// Comma- or whitespace-separated. Self-hosted GitLab / GHE (and other T2
+	/// dyn forges) must appear here or in the adapter env `GITLAB_HOST`;
+	/// otherwise a non-listed checkout host still lands on the Github arm
+	/// (GHE assumption).
 	pub static SV_FORGE_DYN_HOSTS = sv_forge_dyn_hosts: Str {
 		default: Str::default(),
 		flags: archive,
@@ -476,7 +477,7 @@ pub struct ToolSettings {
 	///
 	/// Resolved together with `GITLAB_HOST` by
 	/// [`crate::github_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
-	/// is always registered in core regardless.
+	/// and `github.com` are always registered on Dyn regardless.
 	#[serde(skip_serializing_if = "Str::is_empty")]
 	pub forge_dyn_hosts: Str,
 }

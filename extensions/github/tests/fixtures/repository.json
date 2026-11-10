@@ -1,0 +1,9 @@
+{
+  "id": 42,
+  "name": "widget",
+  "full_name": "acme/widget",
+  "default_branch": "main",
+  "clone_url": "https://github.com/acme/widget.git",
+  "html_url": "https://github.com/acme/widget",
+  "description": "A widget"
+}

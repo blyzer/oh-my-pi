@@ -7,12 +7,16 @@
 //! `PermitAll` is intentional: the desk gate is the tool commit, and the
 //! routers are not exported, so a second approval would only repeat that gate.
 //!
-//! Hosts are registered explicitly. `github.com` is always on the Github arm.
-//! Dyn hosts come from [`ForgeDynHosts`]: always `gitlab.com`, plus
-//! `sv_forge_dyn_hosts` and adapter env `GITLAB_HOST`. The checkout host from
-//! `infer_repo` joins the Dyn arm when it is in that set; otherwise a
-//! non-`github.com` checkout still lands on the Github arm (GHE). There is no
-//! fallback that sends every host to GitHub.
+//! Hosts are registered explicitly. Dyn hosts come from [`ForgeDynHosts`]:
+//! always `gitlab.com` and `github.com`, plus `sv_forge_dyn_hosts` and adapter
+//! env `GITLAB_HOST`. The checkout host from `infer_repo` joins the Dyn arm
+//! when it is in that set; otherwise a non-listed checkout still lands on the
+//! Github arm (GHE). There is no fallback that sends every host to GitHub.
+//!
+//! Catalog mounts for `forge/<op>` are owned by the `omp.forge` extension
+//! (host-dispatch to `omp_github` / `omp_gitlab`). In-core
+//! [`GithubForgeAdapter`] / `github.rs` remain for CI, list-URL helpers, and
+//! checkout/push via [`GithubService`] until Dyn parity allows deletion.
 //!
 //! The CI registration advertises `log_stream` only. Status stays allowed
 //! because the contract does not flag it. Cancel, rerun, trigger, artifacts,
@@ -22,10 +26,10 @@
 //! reads the branch's change request through `view_change_request` on it.
 //!
 //! Under `cap-forge`, the router holds a [`ForgeBackend`] enum so a dyn
-//! `forge/*` device host (T2) can sit beside GitHub without boxing
-//! [`ForgeHost`] futures (ADR 0049 D2.3). Production registers Dyn hosts via
-//! [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog host-claim
-//! discovery remains a smaller TODO.
+//! `forge/*` device host (T2) can sit beside the in-core Github arm without
+//! boxing [`ForgeHost`] futures (ADR 0049 D2.3). Production registers Dyn
+//! hosts via [`LiveForgeDeviceClient`] (D2.8). Full automatic device-catalog
+//! host-claim discovery remains a smaller TODO.
 
 #[cfg(feature = "cap-forge")]
 mod dyn_forge;
@@ -38,9 +42,9 @@ use std::{
 
 #[cfg(feature = "cap-forge")]
 pub(crate) use dyn_forge::{
-	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITLAB_HOST,
-	LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path, forge_op_for_path,
-	paths as forge_device_paths, register_dyn_forge_host,
+	DynForgeAdapter, ForgeBackend, ForgeDeviceClient, ForgeDeviceInvoker, GITHUB_DYN_HOST,
+	GITLAB_HOST, LiveForgeDeviceClient, UnavailableForgeClient, forge_device_path,
+	forge_op_for_path, paths as forge_device_paths, register_dyn_forge_host,
 };
 #[cfg(feature = "cap-forge")]
 use omp_cache::forge_cache::{ForgeCache, ForgeCachePolicy};
@@ -85,13 +89,13 @@ use crate::{
 
 /// Hosts registered on the dyn forge arm (ADR 0049 D2.8).
 ///
-/// Always includes [`GITLAB_HOST`]. Additional hosts come from the
-/// `sv_forge_dyn_hosts` convar (comma/whitespace-separated ASCII hosts) and
-/// from adapter env `GITLAB_HOST` when set and non-empty. `github.com` is
-/// never treated as Dyn even if listed — it stays on the Github arm.
+/// Always includes [`GITLAB_HOST`] and [`GITHUB_DYN_HOST`]. Additional hosts
+/// come from the `sv_forge_dyn_hosts` convar (comma/whitespace-separated ASCII
+/// hosts) and from adapter env `GITLAB_HOST` when set and non-empty.
 ///
-/// Self-hosted GitLab must appear via the convar or `GITLAB_HOST`; otherwise a
-/// non-github checkout host still registers on the Github arm (GHE).
+/// Self-hosted GitLab or GHE must appear via the convar (or `GITLAB_HOST` for
+/// GitLab); otherwise a non-listed checkout host still registers on the Github
+/// arm (GHE assumption for unlisted hosts).
 #[cfg(feature = "cap-forge")]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ForgeDynHosts {
@@ -118,6 +122,7 @@ impl ForgeDynHosts {
 	pub fn from_sources(convar: &str, gitlab_host_env: Option<&str>) -> Self {
 		let mut hosts = SmallVec::<Str, 4>::new();
 		push_dyn_host(&mut hosts, GITLAB_HOST);
+		push_dyn_host(&mut hosts, GITHUB_DYN_HOST);
 		for host in split_dyn_hosts(convar) {
 			push_dyn_host(&mut hosts, host);
 		}
@@ -136,7 +141,7 @@ impl ForgeDynHosts {
 			.any(|known| known.as_str().eq_ignore_ascii_case(host))
 	}
 
-	/// Dyn hosts in registration order (`gitlab.com` first).
+	/// Dyn hosts in registration order (`gitlab.com`, then `github.com`, …).
 	#[must_use]
 	pub fn iter(&self) -> impl Iterator<Item = &str> + Clone + '_ {
 		self.hosts.iter().map(Str::as_str)
@@ -154,7 +159,7 @@ fn split_dyn_hosts(raw: &str) -> impl Iterator<Item = &str> + '_ {
 #[cfg(feature = "cap-forge")]
 fn push_dyn_host(hosts: &mut SmallVec<Str, 4>, host: &str) {
 	let host = host.trim();
-	if host.is_empty() || host.eq_ignore_ascii_case(github_url::GITHUB_HOST) {
+	if host.is_empty() {
 		return;
 	}
 	if hosts
@@ -180,21 +185,19 @@ pub(crate) struct GithubCiAdapter {
 	service: Arc<GithubService>,
 }
 
-/// Routes `forge@1` through [`ForgeBackend`] (GitHub + dyn GitLab).
+/// Routes `forge@1` through [`ForgeBackend`] (dyn T2 + in-core GHE arm).
 ///
 /// See the module docs for `PermitAll` and host registration.
 ///
 /// # Host registration
 ///
-/// - `github.com` → [`ForgeBackend::Github`]
-/// - every host in [`ForgeDynHosts`] (always [`GITLAB_HOST`], plus
-///   `sv_forge_dyn_hosts` / `GITLAB_HOST`) → [`ForgeBackend::Dyn`] over
-///   `devices`
+/// - every host in [`ForgeDynHosts`] (always [`GITLAB_HOST`] +
+///   [`GITHUB_DYN_HOST`], plus `sv_forge_dyn_hosts` / `GITLAB_HOST`) →
+///   [`ForgeBackend::Dyn`] over `devices`
 /// - checkout host from `infer_repo` when it differs:
 ///   - ∈ Dyn set → already registered (Dyn)
-///   - `github.com` → already registered (Github)
-///   - else → Github arm (GHE). Self-hosted GitLab must be listed via convar or
-///     `GITLAB_HOST`.
+///   - else → Github arm (GHE). Self-hosted GitLab / GHE must be listed via
+///     convar (or `GITLAB_HOST`) to reach Dyn.
 ///
 /// `devices` may be unbound ([`LiveForgeDeviceClient`] returns
 /// [`omp_forge::ForgeError::Unavailable`] until
@@ -209,18 +212,15 @@ pub(crate) fn forge_router(
 ) -> ForgeDelegated<ForgeBackend, ForgePermitAll> {
 	let adapter = ForgeBackend::Github(GithubForgeAdapter { service: Arc::clone(&service) });
 	let mut builder = ForgeDelegated::builder(ForgePermitAll);
-	builder
-		.register(github_url::GITHUB_HOST, adapter.clone())
-		.expect("github.com is a forge host");
 	for host in dyn_hosts.iter() {
 		register_dyn_forge_host(&mut builder, host, devices.clone()).expect("dyn forge host");
 	}
 	register_checkout_host(&service, |host| {
-		if dyn_hosts.contains(host) || host.eq_ignore_ascii_case(github_url::GITHUB_HOST) {
+		if dyn_hosts.contains(host) {
 			return;
 		}
-		// GHE only when the checkout host is not in the Dyn set. Self-hosted
-		// GitLab must be listed via `sv_forge_dyn_hosts` or `GITLAB_HOST`.
+		// GHE (or other unlisted checkout) on the in-core Github arm. Listed
+		// Dyn hosts — including github.com / gitlab.com — already registered.
 		let _ = builder.register(host, adapter.clone());
 	});
 	builder.build()
@@ -1220,8 +1220,8 @@ mod tests {
 
 	#[cfg(feature = "cap-forge")]
 	use super::{
-		ForgeDeviceInvoker, ForgeDynHosts, GITLAB_HOST, LiveForgeDeviceClient, forge_device_paths,
-		forge_router,
+		ForgeDeviceInvoker, ForgeDynHosts, GITHUB_DYN_HOST, GITLAB_HOST, LiveForgeDeviceClient,
+		forge_device_paths, forge_router,
 	};
 	#[cfg(feature = "cap-ci")]
 	use super::{ci_status, pipeline_from_actions};
@@ -1260,22 +1260,31 @@ mod tests {
 
 	#[cfg(feature = "cap-forge")]
 	#[test]
-	fn forge_dyn_hosts_always_includes_gitlab_com() {
+	fn forge_dyn_hosts_always_includes_gitlab_and_github_com() {
 		let hosts = ForgeDynHosts::from_sources("", None);
 		assert!(hosts.contains(GITLAB_HOST));
-		assert!(!hosts.contains("github.com"));
+		assert!(hosts.contains(GITHUB_DYN_HOST));
 		assert_eq!(hosts.iter().next(), Some(GITLAB_HOST));
+		assert_eq!(hosts.iter().nth(1), Some(GITHUB_DYN_HOST));
 	}
 
 	#[cfg(feature = "cap-forge")]
 	#[test]
-	fn forge_dyn_hosts_parses_convar_and_skips_github() {
+	fn forge_dyn_hosts_parses_convar_and_keeps_github() {
 		let hosts =
 			ForgeDynHosts::from_sources("gitlab.example.com, github.com forge.internal", None);
 		assert!(hosts.contains("gitlab.example.com"));
 		assert!(hosts.contains("forge.internal"));
-		assert!(!hosts.contains("github.com"));
+		assert!(hosts.contains(GITHUB_DYN_HOST));
 		assert!(hosts.contains(GITLAB_HOST));
+		// Dedup: listing github.com in the convar must not double-register.
+		assert_eq!(
+			hosts
+				.iter()
+				.filter(|host| host.eq_ignore_ascii_case(GITHUB_DYN_HOST))
+				.count(),
+			1
+		);
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -1284,10 +1293,12 @@ mod tests {
 		let hosts = ForgeDynHosts::from_sources("", Some("gitlab.example.com"));
 		assert!(hosts.contains("gitlab.example.com"));
 		assert!(hosts.contains(GITLAB_HOST));
+		assert!(hosts.contains(GITHUB_DYN_HOST));
 		let ignored = ForgeDynHosts::from_sources("", Some(""));
 		assert!(!ignored.contains("gitlab.example.com"));
-		let skipped_github = ForgeDynHosts::from_sources("", Some("github.com"));
-		assert!(!skipped_github.contains("github.com"));
+		// github.com is always Dyn; passing it as GITLAB_HOST is a no-op dedup.
+		let listed = ForgeDynHosts::from_sources("", Some("github.com"));
+		assert!(listed.contains(GITHUB_DYN_HOST));
 	}
 
 	#[cfg(feature = "cap-forge")]
@@ -1320,6 +1331,25 @@ mod tests {
 		assert!(
 			matches!(error, ForgeError::Unavailable { op: ForgeOp::RepoView }),
 			"gitlab.com must be registered on the dyn arm: {error}"
+		);
+	}
+
+	#[cfg(feature = "cap-forge")]
+	#[tokio::test]
+	async fn github_com_is_registered_dyn_even_when_unbound() {
+		let router = forge_router(
+			service(tempfile::tempdir().expect("temp").path()),
+			LiveForgeDeviceClient::default(),
+			&default_dyn_hosts(),
+		);
+		let repo = RepoRef::try_new(GITHUB_DYN_HOST, "acme", "widget").unwrap();
+		let error = router
+			.view_repo(&repo)
+			.await
+			.expect_err("unbound live client");
+		assert!(
+			matches!(error, ForgeError::Unavailable { op: ForgeOp::RepoView }),
+			"github.com must be registered on the dyn arm: {error}"
 		);
 	}
 
@@ -1383,17 +1413,14 @@ mod tests {
 		assert_eq!(recorded[0].0, forge_device_paths::CHANGE_REQUEST_VIEW);
 		assert_eq!(recorded[0].1["number"], 7);
 
-		// github.com still uses the Github arm (no dyn invoke).
-		let github_repo = RepoRef::try_new("github.com", "acme", "widget").unwrap();
-		let error = router
+		// github.com is also on the Dyn arm (same bound client).
+		let github_repo = RepoRef::try_new(GITHUB_DYN_HOST, "acme", "widget").unwrap();
+		let github_cr = router
 			.view_change_request(&github_repo, 1)
 			.await
-			.expect_err("no live github");
-		assert_eq!(calls.lock().len(), 1, "github.com must not hit the dyn client");
-		assert!(
-			!matches!(error, ForgeError::Unregistered { .. }),
-			"github.com stays registered: {error}"
-		);
+			.expect("github.com must hit the dyn arm");
+		assert_eq!(github_cr.number, 7);
+		assert_eq!(calls.lock().len(), 2, "github.com must hit the dyn client");
 	}
 
 	#[cfg(feature = "cap-forge")]

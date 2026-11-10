@@ -1,0 +1,11 @@
+{
+  "number": 7,
+  "title": "Fix the widget",
+  "body": "details",
+  "state": "open",
+  "draft": false,
+  "merged": false,
+  "base": {"ref": "main", "sha": "aaa111"},
+  "head": {"ref": "topic", "sha": "bbb222"},
+  "html_url": "https://github.com/acme/widget/pull/7"
+}

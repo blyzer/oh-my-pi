@@ -1,0 +1,14 @@
+id = "omp.github"
+name = "GitHub forge"
+version = "0.1.0"
+omp_api = 1
+description = "GitHub T2 forge backend (ADR 0049 D2.8); catalog mounts live in omp.forge"
+entry = "omp_github"
+capabilities = ["env.net.fetch"]
+
+# Backend only — do not declare a forge parent here. DynForgeAdapter calls fixed
+# paths forge/<op>; a second mount owner would collide with omp.forge. See
+# extensions/forge/ (host-dispatching catalog) and extensions/WAVE1.md.
+
+[requires]
+python = ">=3.14"

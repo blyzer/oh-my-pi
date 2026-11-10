@@ -1,0 +1,9 @@
+{
+  "repo": {
+    "host": "github.com",
+    "owner": "acme",
+    "name": "widget"
+  },
+  "title": "Bug",
+  "body": "steps"
+}
