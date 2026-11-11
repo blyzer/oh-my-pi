@@ -2,9 +2,10 @@
 
 Shared vocabulary for the agent kernel and the project environment.
 
-Approvals, hook gates, the object-safe Director surface, session routing
-views, environment events, approval posture, and the eval parent-bridge
-traits live here. `omp-agent` implements the kernel over them.
+Approvals, hook gates, the typed hook-event catalog, the object-safe
+Director surface, session routing views, environment events, approval
+posture, and the eval parent-bridge traits live here. `omp-agent`
+implements the kernel over them.
 `omp-envd` admits tools and hosts extensions over them. `omp-driver`
 composes both and names these types directly.
 
@@ -29,3 +30,9 @@ Posture (`ApprovalMode`, `ApprovalPosture`, `SandboxState`) and the eval
 parent bridge (`ParentSessionHost`, `BridgeHost`) are the same kind of
 shared vocabulary. Decision logic that needs the live sandbox probe or the
 Python worker stays in `omp-envd` and speaks these types.
+
+The hook-event catalog (`HOOK_EVENTS`) is one `HookEventDescriptor` per
+`HookEventId`: the frozen wire identity, the payload schema revision, and the
+typed payload's name. `tests/hook_catalog.rs` holds it to the protobuf enum,
+the Python `omp.events` and `omp.hooks` catalogs, and the Claude plugin hook
+seams in `omp-ext`.
