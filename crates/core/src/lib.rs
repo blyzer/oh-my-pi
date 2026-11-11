@@ -27,6 +27,7 @@ pub mod fs;
 pub mod hash32;
 pub mod location;
 pub mod logging;
+#[cfg(feature = "open")]
 pub mod open;
 pub mod path;
 pub mod phase;

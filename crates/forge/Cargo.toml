@@ -11,7 +11,7 @@ readme = "README.md"
 
 [dependencies]
 bytes.workspace = true
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["schemars"] }
 schemars.workspace = true
 serde.workspace = true
 smallvec.workspace = true
