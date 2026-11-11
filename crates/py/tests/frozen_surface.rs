@@ -48,7 +48,7 @@ for suffix in (
     "agents", "context", "policy", "limits", "telemetry", "provider",
     "env", "ui", "hooks", "events", "prompts", "packages",
     "sessions", "journal", "artifacts", "index", "diagnostics", "urls", "devices",
-    "scribe",
+    "scribe", "schemes",
 ):
     module = importlib.import_module(f"omp.{suffix}")
     for name in module.__all__:

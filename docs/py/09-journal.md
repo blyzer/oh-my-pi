@@ -1,6 +1,6 @@
 # Journal patches, sessions, and the URL namespace
 
-`omp.journal` · `omp.sessions` · `omp.artifacts` · `omp.urls` · `omp.state_dir`
+`omp.journal` · `omp.sessions` · `omp.artifacts` · `omp.urls` · `omp.schemes` · `omp.state_dir`
 
 > **Rewritten.** An earlier revision of this chapter documented an extension-owned typed
 > append log: `@entry_kind`, `journal.append` / `append_many` / `append_atomic` /
@@ -931,6 +931,48 @@ set.
 **Resolved (2026-08-20 ruling):** `SelectorError` remains one class under `UrlError`,
 shared by artifact and URL readers. `UrlError` itself derives from both `omp.OmpError` and
 `ValueError`.
+
+### `omp.schemes`
+
+Extension-declared URL schemes ([ADR 0050](../adr/0050-extension-declared-url-schemes.md)).
+An extension claims its schemes in the manifest `schemes` table
+([00-overview.md](00-overview.md)) and registers them at activation. **Inert until
+ADR 0050 S2:** registrations are validated and stored; nothing binds a resolver yet,
+`omp.urls.schemes()` keeps returning the built-in table, and a declared scheme still
+parses as the `UNKNOWN` member of `omp.Scheme`. The host checks each registration against the
+manifest's claims when S2 binds it.
+
+#### `omp.schemes.Declaration(name, description=None, immutable=False, writable=False)`
+
+Frozen value mirroring one manifest `[[schemes]]` entry. `name` is normalized to its one
+canonical spelling, with no aliases: lowercased with ASCII-only folding (U+212A KELVIN
+SIGN is not folded to `k`), then matched in full against `^[a-z][a-z0-9+.-]*$` (a
+trailing newline is a miss), at most `omp.schemes.MAX_SCHEME_BYTES` (64) bytes, and never
+a built-in wire name of the URL vocabulary that `omp.urls` loads, `https` and `pr`
+included. `description` is at most `omp.schemes.MAX_DESCRIPTION_BYTES` (4096) UTF-8
+bytes. **Raises** `TypeError` for a wrongly typed field.
+
+#### `omp.schemes.register(*declarations) -> tuple[omp.schemes.Declaration, ...]`
+
+Registers `omp.schemes.Declaration` values or bare spellings, additively across calls.
+A spelling repeated after normalization raises `omp.schemes.DuplicateSchemeError`; more
+than `omp.schemes.MAX_SCHEMES` (32) in total raises `omp.schemes.SchemeLimitError`. A
+refused call registers nothing.
+
+#### `omp.schemes.declared() -> tuple[omp.schemes.Declaration, ...]`
+
+This extension's registrations, in registration order: the declared-scheme listing,
+separate from the built-in `omp.urls.schemes()` table.
+
+#### Exceptions
+
+| Exception | Base | Raised when |
+|---|---|---|
+| `omp.schemes.SchemeError` | `omp.UrlError` | Base for a refused declaration. |
+| `omp.schemes.SchemeGrammarError` | `omp.schemes.SchemeError` | The spelling misses the grammar after ASCII lowercasing. |
+| `omp.schemes.BuiltinSchemeError` | `omp.schemes.SchemeError` | The spelling is a built-in wire name. |
+| `omp.schemes.DuplicateSchemeError` | `omp.schemes.SchemeError` | The spelling is already declared. |
+| `omp.schemes.SchemeLimitError` | `omp.schemes.SchemeError` | A byte limit or the 32-scheme count is exceeded. |
 
 ### `omp.state_dir`
 
