@@ -473,8 +473,8 @@ enum SkillRoot {
 	/// One relative path under the project root.
 	ProjectRoot(&'static str),
 	/// The contained `skills` directory of every Agent Plugins package directly
-	/// under one relative path of the project root.
-	ProjectPlugins(&'static str),
+	/// under each project container of [`AGENT_PLUGIN_DIRS`], in that order.
+	ProjectPlugins,
 	/// The same under one relative path of the configuration root.
 	ConfigPlugins(&'static str),
 	/// `sv_skills_custom_directories`, in order.
@@ -501,7 +501,7 @@ struct SkillSourceRule {
 /// and the final managed rule keeping their places. Claude and Codex
 /// enumerate their opted-in user source before the project source; native and
 /// `.agent[s]` retain project-first order.
-const SKILL_SOURCES: [SkillSourceRule; 16] = [
+const SKILL_SOURCES: [SkillSourceRule; 14] = [
 	SkillSourceRule {
 		provider: "native",
 		root:     SkillRoot::Ancestors(&[".omp/skills"]),
@@ -528,19 +528,7 @@ const SKILL_SOURCES: [SkillSourceRule; 16] = [
 	},
 	SkillSourceRule {
 		provider: "agent-plugins",
-		root:     SkillRoot::ProjectPlugins(AGENT_PLUGIN_DIRS[0]),
-		level:    SkillLevel::Project,
-		gate:     SkillGate::Always,
-	},
-	SkillSourceRule {
-		provider: "agent-plugins",
-		root:     SkillRoot::ProjectPlugins(AGENT_PLUGIN_DIRS[1]),
-		level:    SkillLevel::Project,
-		gate:     SkillGate::Always,
-	},
-	SkillSourceRule {
-		provider: "agent-plugins",
-		root:     SkillRoot::ProjectPlugins(AGENT_PLUGIN_DIRS[2]),
+		root:     SkillRoot::ProjectPlugins,
 		level:    SkillLevel::Project,
 		gate:     SkillGate::Always,
 	},
@@ -626,8 +614,12 @@ impl SkillSourceRule {
 				.collect(),
 			SkillRoot::Config(relative) => vec![(config_root.join(relative), level)],
 			SkillRoot::ProjectRoot(relative) => vec![(project_root.join(relative), level)],
-			SkillRoot::ProjectPlugins(relative) => {
-				agent_plugin_skill_roots(&[(project_root.join(relative), level)])
+			SkillRoot::ProjectPlugins => {
+				let containers = AGENT_PLUGIN_DIRS
+					.iter()
+					.map(|relative| (project_root.join(relative), level))
+					.collect::<Vec<_>>();
+				agent_plugin_skill_roots(&containers)
 			},
 			SkillRoot::ConfigPlugins(relative) => {
 				agent_plugin_skill_roots(&[(config_root.join(relative), level)])
@@ -1789,18 +1781,38 @@ mod tests {
 		let project = repo.join("pkg");
 		fs::create_dir_all(repo.join(".git")).unwrap();
 		fs::create_dir_all(&project).unwrap();
-		let (project_plugin, config_plugin) =
-			(project.join(".agent/plugins/portable"), config.join("agent/plugins/shared"));
-		for plugin in [&project_plugin, &config_plugin] {
-			fs::create_dir_all(plugin.join("skills")).unwrap();
-			fs::write(
-				plugin.join("plugin.json"),
-				r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"portable"}"#,
-			)
-			.unwrap();
+		let (project_level, user_level) = (SkillLevel::Project, SkillLevel::User);
+		// Package containers in discovery order with their packages in creation
+		// order; the sources of one container are expected sorted by name.
+		let containers: [(PathBuf, SkillLevel, &[&str]); 5] = [
+			(project.join(".omp/extensions"), project_level, &["ext"]),
+			(project.join(".agent/plugins"), project_level, &["zeta", "alpha"]),
+			(project.join(".agents/plugins"), project_level, &["mid", "beta"]),
+			(config.join("extensions"), user_level, &["cfgext"]),
+			(config.join("agent/plugins"), user_level, &["shared"]),
+		];
+		let mut plugin_rungs: Vec<Rung> = Vec::new();
+		for (container, level, names) in &containers {
+			for name in *names {
+				let plugin = container.join(name);
+				fs::create_dir_all(plugin.join("skills")).unwrap();
+				fs::write(
+					plugin.join("plugin.json"),
+					format!(
+						r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}"}}"#
+					),
+				)
+				.unwrap();
+			}
+			let mut sorted = names.to_vec();
+			sorted.sort_unstable();
+			plugin_rungs.extend(
+				sorted
+					.into_iter()
+					.map(|name| (None, "agent-plugins", container.join(name).join("skills"), *level)),
+			);
 		}
 		let custom = vec![root.join("custom-a"), root.join("custom-b")];
-		let (project_level, user_level) = (SkillLevel::Project, SkillLevel::User);
 		let mut rungs: Vec<Rung> = vec![
 			(NATIVE_PROJECT, "native", project.join(".omp/skills"), project_level),
 			(NATIVE_PROJECT, "native", repo.join(".omp/skills"), project_level),
@@ -1808,9 +1820,8 @@ mod tests {
 			(CLAUDE_USER, "claude", home.join(".claude/skills"), user_level),
 			(CLAUDE_PROJECT, "claude", project.join(".claude/skills"), project_level),
 			(CLAUDE_PROJECT, "claude", repo.join(".claude/skills"), project_level),
-			(None, "agent-plugins", project_plugin.join("skills"), project_level),
-			(None, "agent-plugins", config_plugin.join("skills"), user_level),
 		];
+		rungs.extend(plugin_rungs);
 		for dir in [&project, &repo] {
 			rungs.push((AGENTS_PROJECT, "agents", dir.join(".agent/skills"), project_level));
 			rungs.push((AGENTS_PROJECT, "agents", dir.join(".agents/skills"), project_level));
@@ -1856,26 +1867,33 @@ mod tests {
 		let tree = tempfile::tempdir().unwrap();
 		let ladder = ladder(&tree.path().canonicalize().unwrap());
 		// Seven independent flags gate `sources()`: 2^7 combinations.
-		for mask in 0..128_u32 {
-			let policy = policy_for(mask, &ladder.custom);
-			let produced = sources(&ladder.project, &ladder.home, &ladder.config, &policy)
-				.into_iter()
-				.map(|source| (source.provider.as_str().to_owned(), source.root, source.level))
-				.collect::<Vec<_>>();
-			let expected = ladder
-				.rungs
-				.iter()
-				.filter(|(gate, ..)| gate.is_none_or(|bit| (mask >> bit) & 1 == 1))
-				.map(|(_, provider, root, level)| ((*provider).to_owned(), root.clone(), *level))
-				.collect::<Vec<_>>();
-			assert_eq!(produced, expected, "policy mask {mask:#09b}");
-			// Marketplace plugin sources are spliced in by `ordered_sources`,
-			// never produced by the provider table.
-			assert!(
-				produced
+		// Seven independent flags gate `sources()`: 2^7 combinations, with and
+		// without custom directories.
+		for custom in [ladder.custom.clone(), Vec::new()] {
+			for mask in 0..128_u32 {
+				let policy = policy_for(mask, &custom);
+				let produced = sources(&ladder.project, &ladder.home, &ladder.config, &policy)
+					.into_iter()
+					.map(|source| (source.provider.as_str().to_owned(), source.root, source.level))
+					.collect::<Vec<_>>();
+				let expected = ladder
+					.rungs
 					.iter()
-					.all(|(provider, ..)| provider != CLAUDE_PLUGINS_PROVIDER)
-			);
+					.filter(|(gate, provider, ..)| {
+						(*provider != "custom" || !custom.is_empty())
+							&& gate.is_none_or(|bit| (mask >> bit) & 1 == 1)
+					})
+					.map(|(_, provider, root, level)| ((*provider).to_owned(), root.clone(), *level))
+					.collect::<Vec<_>>();
+				assert_eq!(produced, expected, "policy mask {mask:#09b}, {} custom", custom.len());
+				// Marketplace plugin sources are spliced in by `ordered_sources`,
+				// never produced by the provider table.
+				assert!(
+					produced
+						.iter()
+						.all(|(provider, ..)| provider != CLAUDE_PLUGINS_PROVIDER)
+				);
+			}
 		}
 	}
 
@@ -1919,7 +1937,13 @@ mod tests {
 				},
 				// A package container yields only the contained `skills` directory
 				// of a manifest-checked Agent Plugins package.
-				SkillRoot::ProjectPlugins(relative) | SkillRoot::ConfigPlugins(relative) => {
+				SkillRoot::ProjectPlugins => {
+					assert_eq!(rule.provider, "agent-plugins");
+					for relative in AGENT_PLUGIN_DIRS {
+						assert!(contained(relative), "{relative}");
+					}
+				},
+				SkillRoot::ConfigPlugins(relative) => {
 					assert!(contained(relative), "{relative}");
 					assert_eq!(rule.provider, "agent-plugins");
 				},
@@ -1930,13 +1954,29 @@ mod tests {
 			}
 		}
 		// ADR 0036 and ADR 0046 item 5: discovery reads data and never loads or
-		// runs foreign code, so this module holds no process or dynamic-load API.
-		let production = include_str!("skills.rs")
-			.split("#[cfg(test)]")
-			.next()
-			.unwrap();
-		for needle in ["std::process", "Command::new", "libloading", "dlopen", "dlsym", "exec("] {
-			assert!(!production.contains(needle), "skills discovery must not use {needle}");
+		// runs foreign code, so the production half of this module holds no
+		// process-spawn or dynamic-load API. The test module is cut at its exact
+		// opening, and comment lines are skipped.
+		let (production, _) = include_str!("skills.rs")
+			.split_once("\n#[cfg(test)]\nmod tests {")
+			.expect("test module marker");
+		let code = production
+			.lines()
+			.filter(|line| !line.trim_start().starts_with("//"))
+			.collect::<Vec<_>>()
+			.join("\n");
+		let forbidden = [
+			"std::process",
+			"tokio::process",
+			"Command::new",
+			"CommandExt",
+			"libloading",
+			"dlopen",
+			"dlsym",
+			"libc::exec",
+		];
+		for needle in forbidden {
+			assert!(!code.contains(needle), "skills discovery must not use {needle}");
 		}
 	}
 }
