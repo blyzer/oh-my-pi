@@ -33,7 +33,12 @@ runs:
       shell: bash
       env:
         PYTHON_KEY: ${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+        # Toolchain alone left a warm target across Cargo.lock moves; fingerprints
+        # then pointed at deleted `debug/build/*/out/*.rlib` and ld64.lld failed
+        # with "cannot open". Key the tree by lockfile too so lock changes get a
+        # fresh dir and the previous tree is evicted as stale.
         TOOLCHAIN_KEY: ${{ hashFiles('rust-toolchain.toml') }}
+        LOCK_KEY: ${{ hashFiles('Cargo.lock') }}
         MIN_FREE_GB: ${{ inputs.min-free-gb }}
       run: |
         case "$(uname -s)" in
@@ -41,11 +46,11 @@ runs:
           *) state="${XDG_CACHE_HOME:-$HOME/.cache}/omp-ci/$RUNNER_NAME" ;;
         esac
         python="$state/python-$PYTHON_KEY"
-        target="$state/target-$TOOLCHAIN_KEY"
+        target="$state/target-$TOOLCHAIN_KEY-$LOCK_KEY"
         mkdir -p "$python" vendor
         find "$state" -mindepth 1 -maxdepth 1 \( \
           \( -name 'python-*' ! -name "python-$PYTHON_KEY" \) -o \
-          \( -name 'target-*' ! -name "target-$TOOLCHAIN_KEY" \) \
+          \( -name 'target-*' ! -name "target-$TOOLCHAIN_KEY-$LOCK_KEY" \) \
           \) -print0 | while IFS= read -r -d '' dir; do
           echo "::notice::Evicted stale build state: $dir"
           rm -rf "$dir"

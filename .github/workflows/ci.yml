@@ -414,8 +414,25 @@ jobs:
       # unit). Features are unified workspace-wide (.cargo/config.toml
       # [resolver]), so the `--exclude omp-e2e` and `-p omp-e2e` runs below
       # find these artifacts fresh.
+      #
+      # On the self-hosted Mac, CARGO_TARGET_DIR is a warm tree outside the
+      # checkout. A half-written tree leaves fingerprints that point at missing
+      # `debug/build/*/out/*.rlib`; ld64.lld then fails with "cannot open".
+      # Retry once after discarding that warm dir (hosted runners have no
+      # CARGO_TARGET_DIR override and skip the wipe).
       - name: Build test binaries
-        run: cargo nextest run --profile ci --workspace --no-run --locked
+        run: |
+          set -euo pipefail
+          if cargo nextest run --profile ci --workspace --no-run --locked; then
+            exit 0
+          fi
+          if [ -z "${CARGO_TARGET_DIR:-}" ] || [ ! -d "${CARGO_TARGET_DIR}" ]; then
+            exit 1
+          fi
+          echo "::warning::Warm target failed to link; discarding ${CARGO_TARGET_DIR} and retrying once"
+          rm -rf "${CARGO_TARGET_DIR}"
+          mkdir -p "${CARGO_TARGET_DIR}"
+          cargo nextest run --profile ci --workspace --no-run --locked
 
       - name: Test workspace
         run: cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
