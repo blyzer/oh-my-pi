@@ -160,6 +160,8 @@ remote-heavy:
 # on the self-hosted Mac and hands these commands to `scripts/remote-verify.sh <recipe>`
 # (docs/research/ci-macos-runner-fallback.md). Each runs the commands of that job's
 # github-hosted steps; keep the two in sync. The runner script prepares vendor/python first.
+# ci.yml wires ci-lintx-ratchet and ci-runtime-spec (both proven on BuildBuddy). ci-lint-linux,
+# ci-p9-p10-linux and ci-p7-linux are not wired yet: their jobs stay on ubuntu-24.04 until proven.
 
 # `lintx_ratchet` in CI: lintx's own tests, then the error-formatting ratchet.
 [group('remote')]

@@ -62,9 +62,9 @@ key fails rather than passing.
 | `push_verified` | Mac | `gh api` and `jq` |
 | `lintx_ratchet` (Error-formatting ratchet) | Mac, then BuildBuddy `ci-lintx-ratchet` | Builds and tests lintx |
 | `runtime_spec` (Runtime symbol and dependency contracts) | Mac, then BuildBuddy `ci-runtime-spec` | `cargo -Zscript` builds omp-core and omp-tool |
-| `lint_linux` (Lint workspace (Linux)) | Mac, then BuildBuddy `ci-lint-linux` | Workspace clippy and `check-minimal-caps` |
-| `p9_p10_linux` (Acceptance proofs P9, P10 and tool sources (Linux)) | Mac, then BuildBuddy `ci-p9-p10-linux` | nextest e2e proofs |
-| `p7_linux` (Terminal proof P7 (Linux PTY)) | Mac, then BuildBuddy `ci-p7-linux` | nextest PTY proof |
+| `lint_linux` (Lint workspace (Linux)) | Hosted `ubuntu-24.04` in either mode | `just ci-lint-linux` is not proven on BuildBuddy yet |
+| `p9_p10_linux` (Acceptance proofs P9, P10 and tool sources (Linux)) | Hosted `ubuntu-24.04` in either mode | `just ci-p9-p10-linux` is not proven on BuildBuddy yet |
+| `p7_linux` (Terminal proof P7 (Linux PTY)) | Hosted `ubuntu-24.04` in either mode | `just ci-p7-linux` (PTY) is not proven on BuildBuddy yet |
 | `remote_linux` (Remote Linux verification (BuildBuddy)) | Mac, then BuildBuddy as before | Already remote; only its client moves |
 | `remote_seed` | Mac, then BuildBuddy as before | Manual dispatch on `omp2` only |
 | `rust`, `lint_macos` | Unchanged | Not Linux jobs |
