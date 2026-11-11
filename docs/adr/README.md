@@ -107,4 +107,4 @@ Update the section, `STATUS.md`, and `TASKS.md` in the same change that moves th
 - [0047](0047-agent-build-execution-model.md) — Agents build through a capability-shaped `omp-exec`
 - [0048](0048-schema-and-serialization-boundaries.md) — Schema and serialization boundaries
 - [0049](0049-tiered-integration-architecture.md) — Tiered integration architecture: lean core, generic capability crates, neutral contracts, vendors as extensions
-- [0050](0050-extension-declared-url-schemes.md) — Extension-declared URL schemes, served through the unknown-scheme fallback; proposed, requires owner review
+- [0050](0050-extension-declared-url-schemes.md) — Extension-declared URL schemes, served through the unknown-scheme fallback; accepted by the owner 2026-11-11 with conditions
