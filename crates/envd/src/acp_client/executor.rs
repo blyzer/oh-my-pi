@@ -12,7 +12,7 @@
 
 use std::{ffi::OsString, time::Duration};
 
-use omp_agent::delegated::{
+use omp_contract::delegated::{
 	AuthStatus, Capabilities, DelegatedExecutor, ExecutorError, ExecutorId, Feature, FeatureSet,
 	ProbeReport, SessionInfo, SessionRequest,
 };
@@ -135,9 +135,9 @@ fn capabilities_for(id: ExecutorId) -> Capabilities {
 }
 
 /// An open version range: ACP versioning is protocol-level, not CLI-level.
-const fn open_version_range() -> omp_agent::delegated::VersionRange {
-	omp_agent::delegated::VersionRange {
-		min_inclusive: omp_agent::delegated::CliVersion::new(0, 0, 0),
+const fn open_version_range() -> omp_contract::delegated::VersionRange {
+	omp_contract::delegated::VersionRange {
+		min_inclusive: omp_contract::delegated::CliVersion::new(0, 0, 0),
 		max_exclusive: None,
 	}
 }
@@ -162,7 +162,7 @@ impl DelegatedExecutor for AcpExecutor {
 			Ok(mut child) => {
 				let _ = child.kill().await;
 				Ok(ProbeReport {
-					version: omp_agent::delegated::CliVersion::new(0, 0, 0),
+					version: omp_contract::delegated::CliVersion::new(0, 0, 0),
 					auth:    AuthStatus::Unknown,
 				})
 			},

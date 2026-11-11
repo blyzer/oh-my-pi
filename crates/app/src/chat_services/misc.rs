@@ -12,19 +12,18 @@ use omp_chat::overlays::services::{
 	ApprovalPostureRow, CleanseOutcome, CleanseRequest, CleanseRun, MemoryOp, Pending, ServiceError,
 	ServiceResult, SshHostRow, SshHostSpec,
 };
+use omp_contract::posture::{Provenance, SandboxState, call_approval_mode};
 use omp_core::{Str, project_file::Containment, sf};
 use omp_driver::cleanse::{
 	CleanseArgs, CleanseStatus, TargetChoice,
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
 };
-use omp_envd::{
-	admission::{Provenance, SandboxState, call_approval_mode},
-	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
-};
+use omp_envd::admission::probe_sandbox;
 use omp_ext::workspace_trust::{
 	WorkspaceTrust,
 	inventory::{PROJECT_DIR, SECRETS_FILE},
 };
+use omp_ssh::{AuthPolicy, HostConfig, HostPaths, HostStore};
 use omp_tool::Confinement;
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +46,7 @@ pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
 		.with_workspace_trust(state.workspace_trust)
 		.with_approval_mode_override(state.approval_override);
-	let sandbox = SandboxState::probe(&state.con, &state.project);
+	let sandbox = probe_sandbox(&state.con, &state.project);
 	let configured = settings.configured_approval();
 	let in_force =
 		|confinement| -> &'static str { call_approval_mode(configured, sandbox, confinement).into() };
@@ -275,7 +274,7 @@ pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult
 		SHARE_JSON_BUDGET,
 	);
 	let sealed = omp_driver::share::seal(&projection).map_err(failed)?;
-	let bridge = Arc::new(omp_envd::github_url::GithubCredentialBridge::new());
+	let bridge = Arc::new(omp_envd::forge_url::ForgeCredentialBridge::new());
 	let _ = bridge.bind(Arc::clone(&stack.credential_authority));
 	let store = omp_driver::share::DirectShareStore::new(&settings.share.server_url, bridge)
 		.map_err(failed)?;

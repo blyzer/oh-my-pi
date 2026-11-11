@@ -9,8 +9,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 use omp_core::{Str, project_file::Containment};
 use omp_driver::workspace_trust::evaluate_workspace;
-use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore, SshService};
 use omp_ext::workspace_trust::WorkspaceTrust;
+use omp_ssh::{AuthPolicy, HostConfig, HostPaths, HostStore, SshService};
 
 /// Native SSH command options.
 #[derive(Clone, Debug, Args)]

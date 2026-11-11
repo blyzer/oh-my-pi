@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use omp_agent::{ApprovalBook, ApprovalRoute, ApprovalSpec, ApprovalTicket};
+use omp_contract::{ApprovalBook, ApprovalRoute, ApprovalSpec, ApprovalTicket};
 use omp_core::{InvocationPhase, LifecyclePhase, Principal, Str, sf};
 use omp_envd::{
 	exthost::{

@@ -443,7 +443,7 @@ fn cancel_notification_serializes_correctly() {
 mod executor_tests {
 	use std::{path::PathBuf, time::Duration};
 
-	use omp_agent::delegated::{
+	use omp_contract::delegated::{
 		ApprovalPosture, CliSessionId, DelegatedEvent, DelegatedExecutor, DelegatedSession,
 		ExecutorError, ExecutorId, FrameFault, NetworkPosture, PermissionAnswer, PromptRole,
 		PromptSection, SandboxPosture, SessionRequest, UnknownAuth,
@@ -475,7 +475,7 @@ mod executor_tests {
 
 	fn strict_request(cwd: &'static str) -> SessionRequest {
 		SessionRequest {
-			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			mode:         omp_contract::delegated::ExecutionMode::CliManaged,
 			workdir:      PathBuf::from(cwd),
 			policy:       ACP_POLICY,
 			resume:       None,
@@ -483,11 +483,11 @@ mod executor_tests {
 		}
 	}
 
-	fn simple_prompt() -> omp_agent::delegated::DelegatedPrompt {
+	fn simple_prompt() -> omp_contract::delegated::DelegatedPrompt {
 		let sections =
 			vec![PromptSection { role: PromptRole::User, text: Str::new_static("hello world") }];
 		let bands = [omp_core::Hash32::new([0u8; 32]); 4];
-		omp_agent::delegated::DelegatedPrompt::from_sections(sections, bands)
+		omp_contract::delegated::DelegatedPrompt::from_sections(sections, bands)
 	}
 
 	struct MockPeer {
@@ -619,7 +619,9 @@ mod executor_tests {
 	}
 
 	/// Drains events until the first `Permission`, skipping lifecycle events.
-	async fn next_permission(session: &mut AcpDelegatedSession) -> omp_agent::delegated::PromptId {
+	async fn next_permission(
+		session: &mut AcpDelegatedSession,
+	) -> omp_contract::delegated::PromptId {
 		loop {
 			let event = session.next_event().await.expect("event");
 			if let DelegatedEvent::Permission(req) = event {
@@ -633,17 +635,17 @@ mod executor_tests {
 	#[test]
 	fn strictest_is_supported_looser_is_not() {
 		assert!(is_supported(ACP_POLICY));
-		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+		assert!(!is_supported(omp_contract::delegated::DelegatedPolicy::new(
 			SandboxPosture::WorkspaceWrite,
 			NetworkPosture::Disabled,
 			ApprovalPosture::AlwaysAsk,
 		)));
-		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+		assert!(!is_supported(omp_contract::delegated::DelegatedPolicy::new(
 			SandboxPosture::ReadOnly,
 			NetworkPosture::Open,
 			ApprovalPosture::AlwaysAsk,
 		)));
-		assert!(!is_supported(omp_agent::delegated::DelegatedPolicy::new(
+		assert!(!is_supported(omp_contract::delegated::DelegatedPolicy::new(
 			SandboxPosture::ReadOnly,
 			NetworkPosture::Disabled,
 			ApprovalPosture::Yolo,
@@ -866,10 +868,10 @@ mod executor_tests {
 		profile: AcpProfile,
 		notices: &[&str],
 		error: &str,
-	) -> omp_agent::delegated::RemoteFailure {
+	) -> omp_contract::delegated::RemoteFailure {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session_with(&request, profile).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 		let script = async {
 			let id = request_id(&peer.recv().await);
 			for notice in notices {
@@ -890,7 +892,7 @@ mod executor_tests {
 	}
 
 	/// Runs one turn with no profile; see [`prompt_failure_after`].
-	async fn prompt_failure(error: &str) -> omp_agent::delegated::RemoteFailure {
+	async fn prompt_failure(error: &str) -> omp_contract::delegated::RemoteFailure {
 		prompt_failure_after(AcpProfile::default(), &[], error).await
 	}
 
@@ -917,7 +919,7 @@ mod executor_tests {
 		)
 		.await;
 		assert!(
-			matches!(failure, omp_agent::delegated::RemoteFailure::AuthRequired),
+			matches!(failure, omp_contract::delegated::RemoteFailure::AuthRequired),
 			"got: {failure:?}"
 		);
 	}
@@ -947,7 +949,7 @@ mod executor_tests {
 			)
 			.await;
 			assert!(
-				matches!(failure, omp_agent::delegated::RemoteFailure::Internal),
+				matches!(failure, omp_contract::delegated::RemoteFailure::Internal),
 				"{notice} gave {failure:?}"
 			);
 		}
@@ -979,7 +981,7 @@ mod executor_tests {
 				matches!(
 					result,
 					Err(ExecutorError::Protocol {
-						violation: omp_agent::delegated::ProtocolViolation::RequestRejected { .. },
+						violation: omp_contract::delegated::ProtocolViolation::RequestRejected { .. },
 						..
 					})
 				),
@@ -994,7 +996,7 @@ mod executor_tests {
 	async fn prompt_missing_login_ends_the_turn_as_auth_required() {
 		let failure = prompt_failure(MISSING_LOGIN).await;
 		assert!(
-			matches!(failure, omp_agent::delegated::RemoteFailure::AuthRequired),
+			matches!(failure, omp_contract::delegated::RemoteFailure::AuthRequired),
 			"got: {failure:?}"
 		);
 	}
@@ -1013,7 +1015,7 @@ mod executor_tests {
 		] {
 			let failure = prompt_failure(error).await;
 			assert!(
-				matches!(failure, omp_agent::delegated::RemoteFailure::Internal),
+				matches!(failure, omp_contract::delegated::RemoteFailure::Internal),
 				"{error} gave {failure:?}"
 			);
 		}
@@ -1025,7 +1027,7 @@ mod executor_tests {
 		let (agent_read, _aw) = duplex(1024);
 		let (_cr, client_write) = duplex(1024);
 		let request = SessionRequest {
-			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			mode:         omp_contract::delegated::ExecutionMode::CliManaged,
 			workdir:      PathBuf::from("relative/path"),
 			policy:       ACP_POLICY,
 			resume:       None,
@@ -1049,9 +1051,9 @@ mod executor_tests {
 		let (agent_read, _aw) = duplex(1024);
 		let (_cr, client_write) = duplex(1024);
 		let request = SessionRequest {
-			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			mode:         omp_contract::delegated::ExecutionMode::CliManaged,
 			workdir:      PathBuf::from("/tmp"),
-			policy:       omp_agent::delegated::DelegatedPolicy::new(
+			policy:       omp_contract::delegated::DelegatedPolicy::new(
 				SandboxPosture::WorkspaceWrite,
 				NetworkPosture::Disabled,
 				ApprovalPosture::AlwaysAsk,
@@ -1079,7 +1081,7 @@ mod executor_tests {
 		let mut peer =
 			MockPeer { client_rx: LineReader::new(client_read, 64 * 1024), agent_tx: agent_write };
 		let request = SessionRequest {
-			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			mode:         omp_contract::delegated::ExecutionMode::CliManaged,
 			workdir:      PathBuf::from("/tmp"),
 			policy:       ACP_POLICY,
 			resume:       Some(CliSessionId::new("old-sess")),
@@ -1105,7 +1107,7 @@ mod executor_tests {
 		let (agent_read, agent_write) = duplex(256 * 1024);
 		let (client_read, client_write) = duplex(256 * 1024);
 		let request = SessionRequest {
-			mode:         omp_agent::delegated::ExecutionMode::CliManaged,
+			mode:         omp_contract::delegated::ExecutionMode::CliManaged,
 			workdir:      PathBuf::from("/tmp"),
 			policy:       ACP_POLICY,
 			resume:       Some(CliSessionId::new("old")),
@@ -1150,9 +1152,9 @@ mod executor_tests {
 			PromptSection { role: PromptRole::User, text: Str::new_static("hello world") },
 		];
 		let bands = [omp_core::Hash32::new([7u8; 32]); 4];
-		let prompt = omp_agent::delegated::DelegatedPrompt::from_sections(sections, bands);
+		let prompt = omp_contract::delegated::DelegatedPrompt::from_sections(sections, bands);
 		let expected = prompt.digest();
-		let input = omp_agent::delegated::TurnInput { prompt };
+		let input = omp_contract::delegated::TurnInput { prompt };
 		let peer_fut = async {
 			let line = peer.recv().await;
 			let v: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -1180,7 +1182,7 @@ mod executor_tests {
 	async fn every_event_of_a_turn_carries_the_id_start_turn_returned() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 
 		let peer_fut = async {
 			let line = peer.recv().await;
@@ -1200,7 +1202,9 @@ mod executor_tests {
 			let event = session.next_event().await.expect("event");
 			let done = matches!(
 				event,
-				DelegatedEvent::Lifecycle(omp_agent::delegated::LifecycleEvent::TurnCompleted { .. })
+				DelegatedEvent::Lifecycle(
+					omp_contract::delegated::LifecycleEvent::TurnCompleted { .. }
+				)
 			);
 			assert_eq!(
 				event.turn(),
@@ -1221,7 +1225,7 @@ mod executor_tests {
 	async fn permission_allow_once_selects_allow_once() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 
 		// The peer sends the permission request, then immediately replies to
 		// session/prompt — the answer arrives asynchronously via session.answer().
@@ -1256,7 +1260,7 @@ mod executor_tests {
 	async fn permission_deny_selects_reject_once() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 
 		let peer_fut = async {
 			let pl = peer.recv().await;
@@ -1288,7 +1292,7 @@ mod executor_tests {
 	async fn permission_unknown_option_sends_cancelled() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 
 		let peer_fut = async {
 			let pl = peer.recv().await;
@@ -1322,7 +1326,7 @@ mod executor_tests {
 	async fn cancel_mid_turn_sends_session_cancel_notification() {
 		let request = strict_request("/tmp");
 		let (mut session, mut peer) = open_session(&request).await;
-		let input = omp_agent::delegated::TurnInput { prompt: simple_prompt() };
+		let input = omp_contract::delegated::TurnInput { prompt: simple_prompt() };
 
 		// The peer reads session/prompt and holds it; the session is now live.
 		// start_turn returns after sending the prompt request.
@@ -1445,31 +1449,31 @@ mod executor_tests {
 
 	#[tokio::test]
 	async fn start_session_end_to_end() {
-		use omp_agent::delegated::{Capabilities, ExecutionMode, start_session};
+		use omp_contract::delegated::{Capabilities, ExecutionMode, start_session};
 
 		struct MemExec {
 			caps: Capabilities,
 			tx:   flume::Sender<MockPeer>,
 		}
 
-		impl omp_agent::delegated::DelegatedExecutor for MemExec {
+		impl omp_contract::delegated::DelegatedExecutor for MemExec {
 			type Session = AcpDelegatedSession;
 
 			fn capabilities(&self) -> &Capabilities {
 				&self.caps
 			}
 
-			async fn probe(&self) -> Result<omp_agent::delegated::ProbeReport, ExecutorError> {
-				Ok(omp_agent::delegated::ProbeReport {
-					version: omp_agent::delegated::CliVersion::new(0, 0, 0),
-					auth:    omp_agent::delegated::AuthStatus::Unknown,
+			async fn probe(&self) -> Result<omp_contract::delegated::ProbeReport, ExecutorError> {
+				Ok(omp_contract::delegated::ProbeReport {
+					version: omp_contract::delegated::CliVersion::new(0, 0, 0),
+					auth:    omp_contract::delegated::AuthStatus::Unknown,
 				})
 			}
 
 			async fn open<'a>(
 				&'a self,
 				request: &'a SessionRequest,
-			) -> Result<(Self::Session, omp_agent::delegated::SessionInfo), ExecutorError> {
+			) -> Result<(Self::Session, omp_contract::delegated::SessionInfo), ExecutorError> {
 				let (agent_read, agent_write) = duplex(256 * 1024);
 				let (client_read, client_write) = duplex(256 * 1024);
 				let mut peer = MockPeer {
@@ -1513,7 +1517,7 @@ mod executor_tests {
 mod child_env_tests {
 	use std::{ffi::OsStr, fs};
 
-	use omp_agent::delegated::{DelegatedExecutor, ExecutionMode, SessionRequest, UnknownAuth};
+	use omp_contract::delegated::{DelegatedExecutor, ExecutionMode, SessionRequest, UnknownAuth};
 
 	use crate::{acp_client::AcpExecutor, child_env::ChildEnv};
 
@@ -1521,7 +1525,7 @@ mod child_env_tests {
 		SessionRequest {
 			mode:         ExecutionMode::CliManaged,
 			workdir:      dir.to_path_buf(),
-			policy:       omp_agent::delegated::DelegatedPolicy::STRICTEST,
+			policy:       omp_contract::delegated::DelegatedPolicy::STRICTEST,
 			resume:       None,
 			unknown_auth: UnknownAuth::Proceed,
 		}

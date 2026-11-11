@@ -86,7 +86,8 @@ fn every_native_registered_card_accepts_its_tool_contract() {
 	update_is_typed::<tools::debug::Update>();
 	update_is_typed::<tools::edit::EditUpdate>();
 	update_is_typed::<tools::eval::Update>();
-	update_is_typed::<tools::github::Update>();
+	update_is_typed::<tools::ci::Update>();
+	update_is_typed::<tools::forge::Update>();
 	update_is_typed::<tools::glob::Update>();
 	update_is_typed::<tools::goal::Update>();
 	update_is_typed::<tools::grep::Update>();
@@ -159,10 +160,13 @@ fn every_native_registered_card_accepts_its_tool_contract() {
 			"status": {"outcome": "complete", "exit_code": 0, "duration_ms": 0, "exception": null}
 		}),
 	);
-	renders_typed::<tools::github::Params, tools::github::Payload, tools::github::Fault>(
-		"github",
-		json!({"op": "repo_view", "result": {}, "output": "", "artifact": null, "useless": false,
-			"rate_limit_remaining": null, "rate_limit_reset": null}),
+	renders_typed::<tools::forge::Params, tools::forge::Payload, tools::forge::Fault>(
+		"forge",
+		json!({"op": "repo_view", "result": {}, "output": "", "useless": false}),
+	);
+	renders_typed::<tools::ci::Params, tools::ci::Payload, tools::ci::Fault>(
+		"ci",
+		json!({"op": "status", "result": {}, "output": "", "useless": false}),
 	);
 	renders_typed::<tools::glob::Params, tools::glob::Payload, tools::glob::Fault>(
 		"glob",
@@ -355,10 +359,14 @@ fn typed_outcomes_are_not_shadowed_by_projection_json() {
 	);
 	assert!(legacy_goal.contains("legacy"), "{legacy_goal}");
 
-	let github = renders_typed::<tools::github::Params, tools::github::Payload, tools::github::Fault>(
-		"github",
-		json!({"op":"search_prs","result":{},"output":"#42 production result","artifact":null,
-			"useless":false,"rate_limit_remaining":null,"rate_limit_reset":null}),
+	let forge = renders_typed::<tools::forge::Params, tools::forge::Payload, tools::forge::Fault>(
+		"forge",
+		json!({"op":"search_change_requests","result":{},"output":"#42 production result","useless":false}),
 	);
-	assert!(github.contains("#42 production result"), "{github}");
+	assert!(forge.contains("#42 production result"), "{forge}");
+	let ci = renders_typed::<tools::ci::Params, tools::ci::Payload, tools::ci::Fault>(
+		"ci",
+		json!({"op":"status","result":{},"output":"pipeline 42","useless":false}),
+	);
+	assert!(ci.contains("pipeline 42"), "{ci}");
 }

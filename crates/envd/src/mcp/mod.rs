@@ -4,30 +4,12 @@
 //! invocation, URI resolution, UI, and Python CONTROL therefore observe one
 //! definition epoch without a process-global singleton.
 
-pub mod auth_authority;
-pub mod client;
 pub mod config;
-pub mod config_store;
-pub(crate) mod config_values;
 pub mod control;
 pub mod device;
-pub(crate) mod discovery;
-pub(crate) mod filter;
-pub(crate) mod header_policy;
-pub(crate) mod http;
-pub(crate) mod invoke;
-pub mod json_rpc;
-pub(crate) mod legacy_sse;
 pub mod manager;
-pub mod oauth;
-pub(crate) mod prompts;
-pub(crate) mod resources;
-pub(crate) mod settings;
 pub mod smithery;
-pub(crate) mod stdio;
-pub(crate) mod timeout;
 pub mod transport;
-
 use std::{
 	collections::{BTreeMap, VecDeque},
 	fmt,
@@ -39,6 +21,8 @@ use std::{
 };
 
 use bytes::Bytes;
+pub use config::{auth_authority, config_store, oauth};
+pub(crate) use config::{config_values, discovery, filter, settings};
 use flume::Receiver;
 use futures::future::BoxFuture;
 use omp_cache::mcp_cache::{McpCacheError, McpDefinitionCache};
@@ -52,6 +36,8 @@ use omp_tool::{
 use parking_lot::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
+pub use transport::{client, json_rpc};
+pub(crate) use transport::{http, invoke, legacy_sse, prompts, resources, stdio, timeout};
 
 use self::config::ConfigSourceKind;
 pub use self::settings::{McpSettings, ProjectMcpPolicy};
@@ -1020,6 +1006,7 @@ mod config_tests {
 		time::Duration,
 	};
 
+	use omp_contract::EnvEventSink;
 	use omp_ext::workspace_trust::inventory::MCP_PROJECT_FILES;
 
 	use super::*;
@@ -1107,7 +1094,7 @@ mod config_tests {
 			McpManager::new(Arc::clone(&service), Arc::new(RejectConnector), Arc::from([]), project);
 		service.bind_manager(&manager);
 		let (session, notices) = flume::unbounded();
-		manager.bind_literal_notice_sink(session);
+		manager.bind_literal_notice_sink(std::sync::Arc::new(session));
 
 		service
 			.start_native_configs(ProjectMcpPolicy::Trusted)
@@ -1115,9 +1102,7 @@ mod config_tests {
 			.expect("project config starts");
 
 		let posted = notices.drain().collect::<Vec<_>>();
-		let [omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice { name, data, .. })] =
-			posted.as_slice()
-		else {
+		let [omp_contract::EnvEvent::TypedNotice { name, data, .. }] = posted.as_slice() else {
 			panic!("one typed literal-value notice reaches the session, got {}", posted.len());
 		};
 		assert_eq!(name.as_str(), config_values::LITERAL_VALUE_NOTICE);

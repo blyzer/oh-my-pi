@@ -99,8 +99,8 @@ Explicitly **not** recovered, per the Locked Deviations:
 ## Owner rulings (2026-11-09)
 
 The owner accepted this record together with ADR 0049.
-1. **Roster composition:** driver owns it through `compose_kernel`. envd iterates the construction table and enumerates no names (AGENTS.md names driver as the composer).
-2. **envd's `omp-agent` dependency:** not intentional. It is removed through the contract crate (item 2; ADR 0045 ENVD-02).
+1. **Roster composition:** driver owns it through `compose_kernel`. envd iterates the construction table and enumerates no names (AGENTS.md names driver as the composer). Landed: `omp_tools::roster` is the static table (`BuiltinRosterEntry`: identity, locus phase, `protect_core`, presentation and claims classes, optional settings key, bridge bits). `SelectedRoster` is selected in `compose_kernel` and stored on `RegistryBridges`. Session, environment, and remote declaration installers walk that selection. `task` and `hub` are the composer phase. A `RosterExtension` is how a test capability registers without an envd edit (`crates/roster-probe`). ENVD-03/04 file splits are not part of this change.
+2. **envd's `omp-agent` dependency:** not intentional. ENVD-02 removed it. The shared types live in `omp-contract`, which `omp-agent`, `omp-envd`, and `omp-driver` depend on. `crates/envd/Cargo.toml` no longer names `omp-agent`.
 3. **Catalog-driven default adapter arm:** compatible with typed wire structs, provided payloads stay typed prost/serde structs and only rendering falls back to the default arm.
 
 ## Implementation gate

@@ -1,0 +1,9 @@
+{
+  "repo": {
+    "host": "gitlab.com",
+    "owner": "acme",
+    "name": "widget"
+  },
+  "title": "Bug",
+  "body": "steps"
+}

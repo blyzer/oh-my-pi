@@ -2,9 +2,9 @@
 
 use std::{io, mem, path::PathBuf, process, time::SystemTime};
 
+use omp_exec::IdentityError;
 use omp_proto::env::v1;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// PID plus an operating-system start generation, preventing PID-reuse
 /// adoption.
@@ -69,32 +69,6 @@ impl ProcessIdentity {
 	}
 }
 
-/// Process identity inspection failure.
-#[derive(Debug, Error)]
-pub enum IdentityError {
-	/// PID was invalid or no longer exists.
-	#[error("process {pid} does not exist")]
-	NotFound {
-		/// Missing PID.
-		pid: u32,
-	},
-	/// Operating-system identity query failed.
-	#[error("failed to inspect process {pid}")]
-	Inspect {
-		/// Queried PID.
-		pid:    u32,
-		/// Platform I/O failure.
-		#[source]
-		source: io::Error,
-	},
-	/// The operating system returned an incomplete identity record.
-	#[error("process {pid} returned incomplete identity metadata")]
-	Incomplete {
-		/// Queried PID.
-		pid: u32,
-	},
-}
-
 fn unix_millis(time: SystemTime) -> u64 {
 	time
 		.duration_since(SystemTime::UNIX_EPOCH)
@@ -107,6 +81,8 @@ fn unix_millis(time: SystemTime) -> u64 {
 #[cfg(target_os = "macos")]
 mod platform {
 	use std::{ffi::OsString, mem::size_of, os::unix::ffi::OsStringExt as _, time::Duration};
+
+	use omp_exec::IdentityError;
 
 	use super::*;
 
@@ -164,6 +140,8 @@ mod platform {
 mod platform {
 	use std::{fs, os::unix::fs::MetadataExt as _, time::Duration};
 
+	use omp_exec::IdentityError;
+
 	use super::*;
 
 	pub fn capture(pid: u32) -> Result<ProcessIdentity, IdentityError> {
@@ -207,6 +185,7 @@ mod platform {
 mod platform {
 	use std::{ffi::OsString, os::windows::ffi::OsStringExt as _, ptr};
 
+	use omp_exec::IdentityError;
 	use windows_sys::Win32::{
 		Foundation::{CloseHandle, FILETIME, HANDLE},
 		System::Threading::{

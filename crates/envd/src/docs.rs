@@ -24,6 +24,8 @@ use omp_proto::{
 	},
 	lsp::{Diagnostic, Severity},
 };
+#[cfg(feature = "cap-ssh")]
+use omp_ssh::SshService;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 #[cfg(unix)]
@@ -35,7 +37,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{ssh::SshService, vault::VaultService};
+use super::vault::VaultService;
 use crate::{
 	docserver::{
 		client::{TerminalEventReceiver, terminal_event_channel},
@@ -599,6 +601,7 @@ impl fmt::Debug for Inner {
 /// the sessions directory holding every session's `local://` scratch root.
 #[derive(Clone, Debug)]
 pub(super) struct ResourceMutationServices {
+	#[cfg(feature = "cap-ssh")]
 	pub(super) ssh:            SshService,
 	pub(super) vault:          VaultService,
 	pub(super) local_sessions: PathBuf,

@@ -216,11 +216,11 @@ declaration that needs dynamic values into the user-level `~/.o2/mcp.json`.
 ## Codex app-server adapter (codex_app_server module)
 
 `codex_app_server` implements the delegated-executor contract of
-`omp_agent::delegated` (ADR 0043) for the official Codex CLI. It lives here,
+`omp_contract::delegated` (ADR 0043) for the official Codex CLI. It lives here,
 not in `omp-agent`, because it owns a resident child process and reuses
 `child_tree` for process-group isolation and TERM → grace → KILL teardown, the
-same code the MCP stdio transport uses; `omp-envd` depends on `omp-agent`, so
-the contract cannot hold the implementation.
+same code the MCP stdio transport uses. `omp-contract` sits below `omp-envd`
+and cannot hold the process implementation.
 
 - Transport: a private `codex app-server --listen stdio://` per session,
   newline-delimited JSON-RPC, explicit arguments and working directory. OMP

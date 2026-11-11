@@ -15,7 +15,7 @@
 
 use std::{ffi::OsString, process::Stdio, time::Duration};
 
-use omp_agent::delegated::{
+use omp_contract::delegated::{
 	AuthStatus, Capabilities, CliVersion, DelegatedExecutor, ExecutorError, ExecutorId, Feature,
 	FeatureSet, ProbeReport, SessionInfo, SessionRequest, VersionRange,
 };
@@ -171,7 +171,7 @@ impl DelegatedExecutor for CodexExecutor {
 			Ok(info) => Ok((session, info)),
 			Err(error) => {
 				// A failed handshake never leaks the child.
-				let _ = omp_agent::delegated::DelegatedSession::terminate(&mut session).await;
+				let _ = omp_contract::delegated::DelegatedSession::terminate(&mut session).await;
 				Err(error)
 			},
 		}

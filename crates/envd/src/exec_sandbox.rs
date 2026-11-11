@@ -1571,22 +1571,20 @@ fn carve_out_paths(root: &Path, resolved_root: &Path, name: &str) -> io::Result<
 	Ok(paths)
 }
 
-impl SandboxUnavailable {
-	/// Classifies a failed compile as a platform limit or a refused policy.
-	pub(crate) fn classify(error: &SandboxError) -> Self {
-		match error {
-			SandboxError::UnsupportedHost { .. } => Self::UnsupportedHost,
-			SandboxError::BackendUnavailable { .. } => Self::BackendUnavailable,
-			_ => Self::PolicyRejected,
-		}
+/// Classifies a failed compile as a platform limit or a refused policy.
+pub(crate) fn classify_unavailable(error: &SandboxError) -> SandboxUnavailable {
+	match error {
+		SandboxError::UnsupportedHost { .. } => SandboxUnavailable::UnsupportedHost,
+		SandboxError::BackendUnavailable { .. } => SandboxUnavailable::BackendUnavailable,
+		_ => SandboxUnavailable::PolicyRejected,
 	}
+}
 
-	/// Whether commands may still run, unsandboxed and under approval.
-	///
-	/// A refused policy is a configuration fault that keeps failing closed.
-	pub(crate) const fn runs_unsandboxed(self) -> bool {
-		!matches!(self, Self::PolicyRejected)
-	}
+/// Whether commands may still run, unsandboxed and under approval.
+///
+/// A refused policy is a configuration fault that keeps failing closed.
+pub(crate) const fn runs_unsandboxed(cause: SandboxUnavailable) -> bool {
+	!matches!(cause, SandboxUnavailable::PolicyRejected)
 }
 
 /// Constructs the sandbox `settings` ask for, once, and reports what applies.
@@ -1601,7 +1599,7 @@ pub(crate) fn probe(settings: &SandboxSettings, workspace_root: &Path) -> Sandbo
 	match ExecSandbox::compile(settings, workspace_root, true, SandboxConsumer::Probe) {
 		Ok(Some(_)) => SandboxState::Active,
 		Ok(None) => SandboxState::Off,
-		Err(error) => SandboxState::Unavailable { cause: SandboxUnavailable::classify(&error) },
+		Err(error) => SandboxState::Unavailable { cause: classify_unavailable(&error) },
 	}
 }
 
@@ -2247,13 +2245,12 @@ mod tests {
 
 	#[test]
 	fn construction_failures_classify_as_platform_limits_or_refused_policy() {
-		let unsupported =
-			SandboxUnavailable::classify(&SandboxError::UnsupportedHost { os: "plan9" });
+		let unsupported = classify_unavailable(&SandboxError::UnsupportedHost { os: "plan9" });
 		assert_eq!(unsupported, SandboxUnavailable::UnsupportedHost);
-		assert!(unsupported.runs_unsandboxed());
-		let refused = SandboxUnavailable::classify(&SandboxError::EmptyEnvironmentPattern);
+		assert!(runs_unsandboxed(unsupported));
+		let refused = classify_unavailable(&SandboxError::EmptyEnvironmentPattern);
 		assert_eq!(refused, SandboxUnavailable::PolicyRejected);
-		assert!(!refused.runs_unsandboxed(), "a refused policy keeps failing the session open");
+		assert!(!runs_unsandboxed(refused), "a refused policy keeps failing the session open");
 	}
 
 	#[test]

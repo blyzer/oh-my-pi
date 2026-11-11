@@ -108,7 +108,7 @@ impl KernelHandle {
 		SessionEndpoint {
 			id:        Str::new(self.id.as_str()),
 			name:      self.name.clone(),
-			up:        self.up.clone(),
+			up:        Arc::new(omp_agent::UpMailbox(self.up.clone())),
 			snapshot:  Arc::clone(&self.snapshot),
 			topology:  self.topology.clone(),
 			autoreply: self.autoreply.clone(),
@@ -489,14 +489,16 @@ impl SessionAuthority for SessionRegistry {
 			.get(SessionId::from_ref(from.id.as_str()))
 			.filter(|live| {
 				live.name == from.name
-					&& live.up.same_channel(&from.up)
+					&& omp_agent::up_same_channel(&live.up, from.up.as_ref())
 					&& live.topology == from.topology
 			})?;
 		let live_to = state
 			.by_id
 			.get(SessionId::from_ref(to.id.as_str()))
 			.filter(|live| {
-				live.name == to.name && live.up.same_channel(&to.up) && live.topology == to.topology
+				live.name == to.name
+					&& omp_agent::up_same_channel(&live.up, to.up.as_ref())
+					&& live.topology == to.topology
 			})?;
 		if live_from.topology.role == SessionRole::Main
 			|| live_to.topology.role == SessionRole::Main

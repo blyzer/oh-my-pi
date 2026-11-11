@@ -2,8 +2,8 @@
 //!
 //! The adapter lives in `omp-envd`, not `omp-agent`, because it owns a
 //! resident child process and reuses [`crate::child_tree`] for isolation and
-//! teardown (`omp-envd` depends on `omp-agent`, never the other way round).
-//! The backend-neutral contract it implements is `omp_agent::delegated`.
+//! teardown. `omp-contract` sits below `omp-envd` and does not own the process.
+//! The backend-neutral contract it implements is `omp_contract::delegated`.
 //!
 //! - `wire`: typed serde structs for exactly the messages the first slice
 //!   needs. Nothing is built with `json!` or walked as an untyped value.

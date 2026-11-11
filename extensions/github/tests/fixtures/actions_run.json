@@ -1,0 +1,26 @@
+{
+  "run": {
+    "id": 42,
+    "name": "ci",
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/acme/widget/actions/runs/42",
+    "head_sha": "abc123"
+  },
+  "jobs": [
+    {
+      "id": 7,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "action_required",
+      "html_url": "https://github.com/acme/widget/actions/runs/42/jobs/7"
+    },
+    {
+      "id": 8,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/acme/widget/actions/runs/42/jobs/8"
+    }
+  ]
+}

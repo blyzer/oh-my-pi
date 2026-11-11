@@ -166,4 +166,5 @@ Task graph: the Kata epic `nkas` (tasks `haza` through `0vgw`).
   - **Exit 1:** a maintained Codex ACP route that loses nothing on the gaps above (system prompt on `turn/start`, approval and network policy mapping). The module is then deleted and Codex becomes an ACP launch profile.
   - **Exit 2:** a delegated-executor extension contract is built for another reason. The module then moves behind it.
   - The exits are checked at ADR 0049 Phase 4.
+  - **Phase 4 check (tip `3dba669808`):** both exits fail; the module stays. Exit 1: `delegated_acp.rs` has no Codex profile (only dsh / Devin / Grok); gaps still hold — system text via `thread/inject_items` (`codex_app_server/session.rs`), not a `turn/start` system-prompt field (`wire.rs` `TurnStartParams`); approval `write` and network `scoped` stay `PolicyUnmappable` (`policy.rs` / `session.rs`). Exit 2: no delegated-executor extension contract exists yet (`DelegatedBackend` and the extensions repository remain open). Do not add a fake Codex ACP profile that would regress the gaps.
 - This ruling decides placement only. This record's own acceptance is still open.

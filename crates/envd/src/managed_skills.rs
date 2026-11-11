@@ -13,7 +13,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use omp_agent::{GateError, HookEvent, HookGate, HookPatch};
+use omp_contract::{GateError, HookEvent, HookGate, HookPatch};
 use omp_core::Str;
 use omp_proto::toolhost::v1::HookEventId;
 use omp_tools::manage_skill::{

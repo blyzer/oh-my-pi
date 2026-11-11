@@ -1,0 +1,19 @@
+id = "omp.hover-cards"
+name = "Hover cards"
+version = "0.1.0"
+omp_api = 1
+description = "Declarative hover, lift, and detail-overlay treatment for transcript cards."
+entry = "omp_hover_cards.hover_cards"
+capabilities = ["ui.dialogs"]
+
+[[declarations]]
+id = "hover_card"
+kind = "soft"
+module = "omp_hover_cards.hover_cards"
+key = "hover-card@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"

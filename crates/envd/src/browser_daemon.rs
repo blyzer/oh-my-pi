@@ -1,4 +1,9 @@
 //! Supervised, session-owned browser automation over `omp-webview`.
+//!
+//! Compiled only with `omp-envd`'s `cap-browser` feature, which links
+//! `omp-webview`. `SV_BROWSER_ENABLED` lives in this module and cannot
+//! reinstall the tool when the feature is off. Chat cards use
+//! `omp_tools::browser` and do not need this module.
 
 use std::{
 	collections::HashMap,

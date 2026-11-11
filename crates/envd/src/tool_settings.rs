@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use omp_cache::github_cache::GithubCachePolicy;
+use omp_cache::forge_cache::ForgeCachePolicy;
 use omp_con::{Ctx, Kv, Span, Value};
 use omp_core::{Duration, Str};
 use omp_tool::{Confinement, Effects};
@@ -14,8 +14,6 @@ pub use super::admission::ApprovalMode;
 use super::admission::{
 	ApprovalPolicy, ConfiguredApproval, Provenance, ResolvedApproval, SandboxState, resolve_approval,
 };
-
-omp_con::con_enum!(ApprovalMode);
 
 omp_con::var! {
 	/// Per-tool availability overrides.
@@ -308,48 +306,65 @@ omp_con::var! {
 		min: 1,
 		flags: archive,
 	};
-	/// Cache rendered issue and pull-request views so repeated reads are free.
-	pub static SV_GITHUB_CACHE_ENABLED = sv_github_cache_enabled: bool {
+	/// Cache rendered issue and change-request views so repeated reads are free.
+	pub static SV_FORGE_CACHE_ENABLED = sv_forge_cache_enabled: bool {
 		default: true,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub View Cache",
-			"legacy.path": "github.cache.enabled",
+			"ui.group": "Forge",
+			"ui.label": "Forge View Cache",
+			"legacy.path": "forge.cache.enabled",
 		},
 	};
-	/// Within this window, cached issue and pull-request views are returned without a network refresh.
-	pub static SV_GITHUB_CACHE_SOFT_TTL_SEC = sv_github_cache_soft_ttl_sec: i64 {
+	/// Within this window, cached issue and change-request views are returned without a network refresh.
+	pub static SV_FORGE_CACHE_SOFT_TTL_SEC = sv_forge_cache_soft_ttl_sec: i64 {
 		default: 300,
 		min: 0,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub Cache Soft TTL",
+			"ui.group": "Forge",
+			"ui.label": "Forge Cache Soft TTL",
 			"ui.unit": "s",
-			"legacy.path": "github.cache.softTtlSec",
+			"legacy.path": "forge.cache.softTtlSec",
 		},
 	};
-	/// Past this window, a cached issue or pull-request view is discarded instead of used as stale fallback.
-	pub static SV_GITHUB_CACHE_HARD_TTL_SEC = sv_github_cache_hard_ttl_sec: i64 {
+	/// Past this window, a cached issue or change-request view is discarded instead of used as stale fallback.
+	pub static SV_FORGE_CACHE_HARD_TTL_SEC = sv_forge_cache_hard_ttl_sec: i64 {
 		default: 604800,
 		min: 0,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
-			"ui.group": "GitHub",
-			"ui.label": "GitHub Cache Hard TTL",
+			"ui.group": "Forge",
+			"ui.label": "Forge Cache Hard TTL",
 			"ui.unit": "s",
-			"legacy.path": "github.cache.hardTtlSec",
+			"legacy.path": "forge.cache.hardTtlSec",
+		},
+	};
+	/// Extra ASCII hosts registered on the dyn forge / CI arms (beside
+	/// `gitlab.com` and `github.com`, which are always Dyn).
+	///
+	/// Comma- or whitespace-separated. Self-hosted GitLab / GHE (and other T2
+	/// dyn forges) must appear here or in adapter env `GITLAB_HOST` /
+	/// `GITHUB_HOST`; otherwise a non-listed checkout host still lands on Dyn
+	/// at router build (honest Unavailable without mounts).
+	pub static SV_FORGE_DYN_HOSTS = sv_forge_dyn_hosts: Str {
+		default: Str::default(),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Forge",
+			"ui.label": "Dyn Forge Hosts",
+			"legacy.path": "forge.dynHosts",
 		},
 	};
 }
 
-/// Typed GitHub cache policy resolved from the control context.
+/// Typed forge cache policy resolved from the control context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GithubCacheSettings {
+pub struct ForgeCacheSettings {
 	/// Whether reads and writes may use the persistent cache.
 	pub enabled:      bool,
 	/// Fresh-hit window in seconds.
@@ -358,21 +373,21 @@ pub struct GithubCacheSettings {
 	pub hard_ttl_sec: u64,
 }
 
-impl GithubCacheSettings {
-	/// Resolves the GitHub cache policy from archived convars.
+impl ForgeCacheSettings {
+	/// Resolves the forge cache policy from archived convars.
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self {
-			enabled:      SV_GITHUB_CACHE_ENABLED.get(ctx),
-			soft_ttl_sec: SV_GITHUB_CACHE_SOFT_TTL_SEC.get(ctx) as u64,
-			hard_ttl_sec: SV_GITHUB_CACHE_HARD_TTL_SEC.get(ctx) as u64,
+			enabled:      SV_FORGE_CACHE_ENABLED.get(ctx),
+			soft_ttl_sec: SV_FORGE_CACHE_SOFT_TTL_SEC.get(ctx) as u64,
+			hard_ttl_sec: SV_FORGE_CACHE_HARD_TTL_SEC.get(ctx) as u64,
 		}
 	}
 
 	/// Converts the resolved settings into the cache engine's typed policy.
 	#[must_use]
-	pub fn policy(self) -> GithubCachePolicy {
-		GithubCachePolicy::new(
+	pub fn policy(self) -> ForgeCachePolicy {
+		ForgeCachePolicy::new(
 			self.enabled,
 			std::time::Duration::from_secs(self.soft_ttl_sec),
 			std::time::Duration::from_secs(self.hard_ttl_sec),
@@ -458,6 +473,13 @@ pub struct ToolSettings {
 	pub abort_on_fabricated_tool_result: bool,
 	/// Maximum repeated equivalent tool calls before the loop guard trips.
 	pub loop_guard_limit: u32,
+	/// Extra dyn-forge / CI hosts from [`SV_FORGE_DYN_HOSTS`] (raw list text).
+	///
+	/// Resolved together with `GITLAB_HOST` / `GITHUB_HOST` by
+	/// [`crate::forge_adapter::ForgeDynHosts`]. Empty by default; `gitlab.com`
+	/// and `github.com` are always registered on Dyn regardless.
+	#[serde(skip_serializing_if = "Str::is_empty")]
+	pub forge_dyn_hosts: Str,
 }
 
 impl Default for ToolSettings {
@@ -498,6 +520,7 @@ impl Default for ToolSettings {
 			intent_tracing: true,
 			abort_on_fabricated_tool_result: true,
 			loop_guard_limit: 8,
+			forge_dyn_hosts: Str::default(),
 		}
 	}
 }
@@ -560,6 +583,7 @@ impl ToolSettings {
 			intent_tracing: SV_TOOLS_INTENT_TRACING.get(ctx),
 			abort_on_fabricated_tool_result: SV_TOOLS_ABORT_ON_FABRICATED_RESULT.get(ctx),
 			loop_guard_limit: SV_TOOLS_LOOP_GUARD_LIMIT.get(ctx),
+			forge_dyn_hosts: SV_FORGE_DYN_HOSTS.get(ctx),
 		}
 	}
 
@@ -716,11 +740,9 @@ mod tests {
 	use omp_tool::{Effects, ExecEffects};
 
 	use super::*;
-	use crate::{
-		admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable},
-		blobs::BlobHost,
-		computer::ComputerSessionHost,
-	};
+	use crate::admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable};
+	#[cfg(feature = "cap-computer")]
+	use crate::{blobs::BlobHost, computer::ComputerSessionHost};
 
 	#[test]
 	fn typed_con_projection_round_trips() {
@@ -860,6 +882,9 @@ mod tests {
 	/// still asks exactly as every `computer` call did: desktop reads rank as
 	/// `exec` until the owner decides how they are approved. Only an explicit
 	/// `yolo` runs it unprompted.
+	///
+	/// The host is `omp-desktop`, so this proof exists only with `cap-computer`.
+	#[cfg(feature = "cap-computer")]
 	#[test]
 	fn a_read_only_computer_call_keeps_the_exec_tier() {
 		let scratch = tempfile::tempdir().expect("scratch");
@@ -962,24 +987,34 @@ mod tests {
 	}
 
 	#[test]
-	fn github_cache_group_convars_reach_the_runtime_projection() {
+	fn forge_cache_group_convars_reach_the_runtime_projection() {
 		let ctx = Ctx::new();
-		assert_eq!(GithubCacheSettings::from_con(&ctx), GithubCacheSettings {
+		assert_eq!(ForgeCacheSettings::from_con(&ctx), ForgeCacheSettings {
 			enabled:      true,
 			soft_ttl_sec: 300,
 			hard_ttl_sec: 604_800,
 		});
-		ctx.run("sv_github_cache_enabled false")
+		ctx.run("sv_forge_cache_enabled false")
 			.expect("cache enablement");
-		ctx.run("sv_github_cache_soft_ttl_sec 15")
-			.expect("soft TTL");
-		ctx.run("sv_github_cache_hard_ttl_sec 90")
-			.expect("hard TTL");
-		assert_eq!(GithubCacheSettings::from_con(&ctx), GithubCacheSettings {
+		ctx.run("sv_forge_cache_soft_ttl_sec 15").expect("soft TTL");
+		ctx.run("sv_forge_cache_hard_ttl_sec 90").expect("hard TTL");
+		assert_eq!(ForgeCacheSettings::from_con(&ctx), ForgeCacheSettings {
 			enabled:      false,
 			soft_ttl_sec: 15,
 			hard_ttl_sec: 90,
 		});
+	}
+
+	#[test]
+	fn forge_dyn_hosts_convar_reaches_tool_settings() {
+		let ctx = Ctx::new();
+		assert!(ToolSettings::from_con(&ctx).forge_dyn_hosts.is_empty());
+		ctx.run("sv_forge_dyn_hosts \"gitlab.example.com, forge.internal\"")
+			.expect("dyn hosts");
+		assert_eq!(
+			ToolSettings::from_con(&ctx).forge_dyn_hosts.as_str(),
+			"gitlab.example.com, forge.internal"
+		);
 	}
 
 	#[test]

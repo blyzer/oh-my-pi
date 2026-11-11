@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "SSH execution backend for omp-exec through envd's native SSH authority"
+description = "SSH execution backend for omp-exec through omp-ssh"
 readme = "README.md"
 
 [dependencies]
@@ -14,9 +14,9 @@ bytes.workspace = true
 flume.workspace = true
 omp-adw.workspace = true
 omp-core.workspace = true
-omp-envd.workspace = true
-tokio-util.workspace = true
 omp-exec.workspace = true
+omp-ssh.workspace = true
+tokio-util.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

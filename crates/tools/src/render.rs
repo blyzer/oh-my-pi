@@ -6,6 +6,10 @@ use omp_tool::{
 	render::{RenderRegistry, RenderRegistryError},
 };
 
+#[cfg(feature = "cap-ci")]
+use self::misc::CiRenderer;
+#[cfg(feature = "cap-forge")]
+use self::misc::ForgeRenderer;
 use self::{
 	agentic::GoalRenderer,
 	ast::{AstEditRenderer, AstGrepRenderer},
@@ -15,7 +19,7 @@ use self::{
 	fs::{ReadRenderer, WriteRenderer},
 	hub::HubRenderer,
 	interaction::{AskRenderer, ThinkRenderer, TodoRenderer},
-	misc::{BrowserRenderer, ComputerRenderer, GithubRenderer},
+	misc::{BrowserRenderer, ComputerRenderer},
 	search::{GlobRenderer, GrepRenderer},
 	web::WebSearchRenderer,
 };
@@ -28,7 +32,7 @@ pub mod ast;
 pub mod codeintel;
 /// Native ask, todo, and think renderer views.
 pub mod interaction;
-/// Native GitHub, browser, and computer renderer views.
+/// Native forge, CI, browser, and computer renderer views.
 pub mod misc;
 
 /// Native edit renderer views.
@@ -92,8 +96,10 @@ pub struct BuiltinRendererIdentities {
 	pub debug:      Option<ToolIdentity>,
 	/// Identity of the native durable goal tool, when enabled.
 	pub goal:       Option<ToolIdentity>,
-	/// Identity of the native GitHub device, when enabled.
-	pub github:     Option<ToolIdentity>,
+	/// Identity of the native forge device, when enabled.
+	pub forge:      Option<ToolIdentity>,
+	/// Identity of the native CI device, when enabled.
+	pub ci:         Option<ToolIdentity>,
 	/// Identity of the native browser device, when enabled.
 	pub browser:    Option<ToolIdentity>,
 	/// Identity of the native computer device, when enabled.
@@ -161,8 +167,13 @@ pub fn register_builtin_renderers(
 	if let Some(identity) = identities.goal {
 		registry.register(identity, GoalRenderer)?;
 	}
-	if let Some(identity) = identities.github {
-		registry.register(identity, GithubRenderer)?;
+	#[cfg(feature = "cap-forge")]
+	if let Some(identity) = identities.forge {
+		registry.register(identity, ForgeRenderer)?;
+	}
+	#[cfg(feature = "cap-ci")]
+	if let Some(identity) = identities.ci {
+		registry.register(identity, CiRenderer)?;
 	}
 	if let Some(identity) = identities.browser {
 		registry.register(identity, BrowserRenderer)?;
@@ -201,7 +212,8 @@ pub fn live_renderers(tools: &Registry) -> Result<RenderRegistry, RenderRegistry
 		lsp:        identity("lsp"),
 		debug:      identity("debug"),
 		goal:       identity("goal"),
-		github:     identity("github"),
+		forge:      identity("forge"),
+		ci:         identity("ci"),
 		browser:    identity("browser"),
 		computer:   identity("computer"),
 	})?;
@@ -276,26 +288,33 @@ pub(crate) mod test_support {
 	/// Full identity set covering every built-in renderer.
 	pub(crate) fn identities() -> BuiltinRendererIdentities {
 		BuiltinRendererIdentities {
-			edit:       Some(identity("edit", 41)),
-			grep:       Some(identity("grep", 42)),
+			edit: Some(identity("edit", 41)),
+			grep: Some(identity("grep", 42)),
 			web_search: Some(identity("web_search", 48)),
-			glob:       Some(identity("glob", 43)),
-			shell:      Some(identity("bash", 44)),
-			hub:        Some(identity("hub", 45)),
-			write:      Some(identity("write", 45)),
-			read:       Some(identity("read", 46)),
-			eval:       Some(identity("eval", 47)),
-			ast_grep:   Some(identity("ast_grep", 50)),
-			ast_edit:   Some(identity("ast_edit", 51)),
-			ask:        Some(identity("ask", 52)),
-			todo:       Some(identity("todo", 53)),
-			think:      Some(identity("think", 54)),
-			lsp:        Some(identity("lsp", 55)),
-			debug:      Some(identity("debug", 56)),
-			goal:       Some(identity("goal", 57)),
-			github:     Some(identity("github", 58)),
-			browser:    Some(identity("browser", 59)),
-			computer:   Some(identity("computer", 60)),
+			glob: Some(identity("glob", 43)),
+			shell: Some(identity("bash", 44)),
+			hub: Some(identity("hub", 45)),
+			write: Some(identity("write", 45)),
+			read: Some(identity("read", 46)),
+			eval: Some(identity("eval", 47)),
+			ast_grep: Some(identity("ast_grep", 50)),
+			ast_edit: Some(identity("ast_edit", 51)),
+			ask: Some(identity("ask", 52)),
+			todo: Some(identity("todo", 53)),
+			think: Some(identity("think", 54)),
+			lsp: Some(identity("lsp", 55)),
+			debug: Some(identity("debug", 56)),
+			goal: Some(identity("goal", 57)),
+			#[cfg(feature = "cap-forge")]
+			forge: Some(identity("forge", 58)),
+			#[cfg(not(feature = "cap-forge"))]
+			forge: None,
+			#[cfg(feature = "cap-ci")]
+			ci: Some(identity("ci", 61)),
+			#[cfg(not(feature = "cap-ci"))]
+			ci: None,
+			browser: Some(identity("browser", 59)),
+			computer: Some(identity("computer", 60)),
 		}
 	}
 
@@ -325,28 +344,30 @@ mod tests {
 	#[test]
 	fn registers_every_builtin_at_only_its_exact_revision() {
 		let (registry, identities) = registry(identities());
-		for identity in [
-			identities.edit.as_ref().unwrap(),
-			identities.grep.as_ref().unwrap(),
-			identities.web_search.as_ref().unwrap(),
-			identities.glob.as_ref().unwrap(),
-			identities.shell.as_ref().unwrap(),
-			identities.hub.as_ref().unwrap(),
-			identities.write.as_ref().unwrap(),
-			identities.read.as_ref().unwrap(),
-			identities.eval.as_ref().unwrap(),
-			identities.ast_grep.as_ref().unwrap(),
-			identities.ast_edit.as_ref().unwrap(),
-			identities.ask.as_ref().unwrap(),
-			identities.todo.as_ref().unwrap(),
-			identities.think.as_ref().unwrap(),
-			identities.lsp.as_ref().unwrap(),
-			identities.debug.as_ref().unwrap(),
-			identities.goal.as_ref().unwrap(),
-			identities.github.as_ref().unwrap(),
-			identities.browser.as_ref().unwrap(),
-			identities.computer.as_ref().unwrap(),
-		] {
+		let expected = [
+			identities.edit.as_ref(),
+			identities.grep.as_ref(),
+			identities.web_search.as_ref(),
+			identities.glob.as_ref(),
+			identities.shell.as_ref(),
+			identities.hub.as_ref(),
+			identities.write.as_ref(),
+			identities.read.as_ref(),
+			identities.eval.as_ref(),
+			identities.ast_grep.as_ref(),
+			identities.ast_edit.as_ref(),
+			identities.ask.as_ref(),
+			identities.todo.as_ref(),
+			identities.think.as_ref(),
+			identities.lsp.as_ref(),
+			identities.debug.as_ref(),
+			identities.goal.as_ref(),
+			identities.forge.as_ref(),
+			identities.ci.as_ref(),
+			identities.browser.as_ref(),
+			identities.computer.as_ref(),
+		];
+		for identity in expected.into_iter().flatten() {
 			assert!(
 				registry
 					.get(identity)

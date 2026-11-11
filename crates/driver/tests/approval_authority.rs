@@ -37,12 +37,12 @@ use omp_ai::{
 	FinishReason, RequestId, ResponseMeta, ToolCall, ToolCallId, ToolResultContent, Usage,
 };
 use omp_catalog::{ProviderId, RouteId};
+use omp_contract::posture::ApprovalMode;
 use omp_core::Str;
 use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
-	tool_settings::ApprovalMode,
 };
 use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::kind;
@@ -1878,7 +1878,7 @@ mod fetch_host_grants {
 			let (mailbox, up) = flume::unbounded();
 			let blobs = BlobStore::open(scratch.join(format!("{journal}-blobs"))).expect("blobs");
 			let host = Host {
-				executor: EnvToolExecutor::new(client, ApprovalRoute::to_kernel(mailbox, None)),
+				executor: EnvToolExecutor::new(client, omp_agent::kernel_approval_route(mailbox, None)),
 				up,
 				desk: ApprovalDesk::new(KernelEvents::default()),
 				session: Session::create_with_blob_store(

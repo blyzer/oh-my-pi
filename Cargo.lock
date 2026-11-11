@@ -7732,9 +7732,11 @@ dependencies = [
  "globset",
  "insta",
  "jiff",
+ "linkme",
  "omp-ai",
  "omp-catalog",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-exec",
@@ -7865,12 +7867,14 @@ dependencies = [
  "omp-chat",
  "omp-collab",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-driver",
  "omp-edit",
  "omp-env",
  "omp-envd",
+ "omp-exec",
  "omp-ext",
  "omp-gui",
  "omp-http",
@@ -7889,6 +7893,7 @@ dependencies = [
  "omp-session",
  "omp-shell",
  "omp-shell-builtins",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8115,6 +8120,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-ci"
+version = "2.0.0"
+dependencies = [
+ "omp-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "omp-ci-delegated"
+version = "2.0.0"
+dependencies = [
+ "futures",
+ "omp-ci",
+ "omp-core",
+ "parking_lot",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "omp-collab"
 version = "2.0.0"
 dependencies = [
@@ -8153,6 +8181,36 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "omp-contract"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "flume",
+ "futures",
+ "linkme",
+ "omp-ai",
+ "omp-catalog",
+ "omp-con",
+ "omp-core",
+ "omp-dom",
+ "omp-ext",
+ "omp-journal",
+ "omp-proto",
+ "omp-session",
+ "omp-tool",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "strum",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -8264,6 +8322,7 @@ dependencies = [
  "omp-catalog",
  "omp-collab",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-dom",
  "omp-env",
@@ -8282,6 +8341,7 @@ dependencies = [
  "omp-secrets",
  "omp-serve",
  "omp-session",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8443,21 +8503,27 @@ dependencies = [
  "miette",
  "nix 0.31.3",
  "notify",
- "omp-agent",
+ "omp-adw",
  "omp-ai",
  "omp-ar",
  "omp-ast",
  "omp-audio",
  "omp-cache",
  "omp-catalog",
+ "omp-ci",
+ "omp-ci-delegated",
  "omp-con",
+ "omp-contract",
  "omp-core",
  "omp-desktop",
  "omp-dom",
  "omp-edit",
  "omp-env",
  "omp-exec",
+ "omp-exec-local",
  "omp-ext",
+ "omp-forge",
+ "omp-forge-delegated",
  "omp-http",
  "omp-journal",
  "omp-memory",
@@ -8471,6 +8537,7 @@ dependencies = [
  "omp-session",
  "omp-shell",
  "omp-shell-builtins",
+ "omp-ssh",
  "omp-tool",
  "omp-tools",
  "omp-vcs",
@@ -8485,8 +8552,6 @@ dependencies = [
  "reqwest 0.13.5",
  "ring",
  "rusqlite",
- "russh",
- "russh-sftp",
  "rustix 1.1.5",
  "schemars",
  "serde",
@@ -8513,34 +8578,18 @@ dependencies = [
 name = "omp-exec"
 version = "2.0.0"
 dependencies = [
+ "bytes",
  "omp-adw",
  "omp-core",
+ "omp-journal",
+ "omp-proto",
+ "omp-sandbox",
  "proptest",
+ "prost",
  "serde",
  "serde_json",
  "strum",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "omp-exec-buildbuddy"
-version = "2.0.0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "omp-adw",
- "omp-core",
- "omp-exec",
- "omp-exec-reapi",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tonic",
 ]
 
 [[package]]
@@ -8550,12 +8599,9 @@ dependencies = [
  "bytes",
  "omp-adw",
  "omp-core",
- "omp-envd",
  "omp-exec",
  "omp-proto",
- "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "url",
 ]
 
@@ -8595,8 +8641,8 @@ dependencies = [
  "flume",
  "omp-adw",
  "omp-core",
- "omp-envd",
  "omp-exec",
+ "omp-ssh",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -8623,6 +8669,32 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "omp-forge"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "omp-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "strum",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "omp-forge-delegated"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "omp-core",
+ "omp-forge",
+ "parking_lot",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -8839,6 +8911,23 @@ dependencies = [
 [[package]]
 name = "omp-py-link"
 version = "2.0.0"
+
+[[package]]
+name = "omp-roster-probe"
+version = "2.0.0"
+dependencies = [
+ "futures",
+ "omp-con",
+ "omp-core",
+ "omp-envd",
+ "omp-ext",
+ "omp-tool",
+ "omp-tools",
+ "schemars",
+ "serde",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "omp-rpc"
@@ -9103,6 +9192,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-ssh"
+version = "2.0.0"
+dependencies = [
+ "flume",
+ "omp-core",
+ "omp-ext",
+ "parking_lot",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "omp-tool"
 version = "2.0.0"
 dependencies = [
@@ -9147,10 +9255,12 @@ dependencies = [
  "omp-ai",
  "omp-ar",
  "omp-ast",
+ "omp-ci",
  "omp-con",
  "omp-core",
  "omp-edit",
  "omp-env",
+ "omp-forge",
  "omp-macros",
  "omp-memory",
  "omp-proto",

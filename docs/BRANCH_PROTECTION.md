@@ -9,7 +9,7 @@ code; apply them once in the GitHub UI.
 
 | Workflow | What it does | Gating |
 |---|---|---|
-| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below) |
+| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint (including `just check-minimal-caps` for the default and all-`cap-*`-off profiles), workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below) |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
 `Package macOS` runs only by manual dispatch. P8's macOS recording uses hosted `macos-15`.
@@ -77,6 +77,11 @@ Use the job names exactly as the checks list of a pull request shows them:
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
 queue. Add it to the ruleset once it has reported green on a pull request;
 existing required checks keep their names.
+
+`Lint workspace (Linux)` also runs `just check-minimal-caps` (ADR 0049 Phase 3):
+default `omp-app`, then `omp-app` with every `cap-*` off, then the selected
+`omp-envd` absence proof for `omp-desktop`, `omp-webview`, `omp-audio`, and
+`omp-ssh`. That stays inside the existing required check. No new ruleset name.
 
 `Lint workspace (macOS)` is the only macOS clippy pass. It runs on its own
 runner in parallel with `Rust workspace and acceptance proofs`, which no longer

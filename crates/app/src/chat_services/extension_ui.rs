@@ -13,14 +13,15 @@ use std::{future::Future, pin::Pin, sync::Arc, task::Poll};
 
 use async_trait::async_trait;
 use omp_chat::{
-	ExtensionStatus, HostAction, HostMailbox,
+	ExtensionSlot, ExtensionStatus, HostAction, HostMailbox, extension_slots,
 	overlays::{
 		CancelledPanel, PanelCall, PanelEvent, PanelOpener,
 		ask::AskDialog,
 		ext_input::{FIELD, InputDialog, InputSpec},
+		ext_overlay::{ExtOverlay, OverlayState},
 	},
 };
-use omp_con::{Ctx, RegItem};
+use omp_con::{Ctx, DynamicCmdSpec, RegItem, Severity};
 use omp_core::{Str, Ulid};
 use omp_driver::{
 	collab::session::{CollabCommandHandle, HostUiRequestError},
@@ -99,6 +100,7 @@ pub struct ChatUiOwner {
 	ask:         AskRoute,
 	collab:      Option<CollabCommandHandle>,
 	dialog_gate: tokio::sync::Mutex<()>,
+	overlays:    parking_lot::Mutex<std::collections::HashMap<Str, OverlayState>>,
 }
 
 impl ChatUiOwner {
@@ -106,7 +108,13 @@ impl ChatUiOwner {
 	/// environment's `ask` route.
 	#[must_use]
 	pub fn new(con: Arc<Ctx>, ask: AskRoute, collab: Option<CollabCommandHandle>) -> Self {
-		Self { con, ask, collab, dialog_gate: tokio::sync::Mutex::new(()) }
+		Self {
+			con,
+			ask,
+			collab,
+			dialog_gate: tokio::sync::Mutex::new(()),
+			overlays: parking_lot::Mutex::new(std::collections::HashMap::new()),
+		}
 	}
 
 	/// Factory the Environment binds per authenticated extension connection.
@@ -266,6 +274,73 @@ impl ChatUiOwner {
 		}))
 	}
 
+	async fn open_overlay(
+		&self,
+		mut fields: Map<String, Value>,
+	) -> Result<UiControlResult, ControlProtocolError> {
+		let content = fields
+			.remove("content")
+			.ok_or_else(|| protocol("invalid_ui_request", "overlay requires content"))?;
+		let source = match content {
+			Value::String(source) => source,
+			Value::Object(object) => object
+				.get("source")
+				.and_then(Value::as_str)
+				.map(str::to_owned)
+				.ok_or_else(|| {
+					protocol("invalid_ui_request", "overlay content.source must be a string")
+				})?,
+			_ => {
+				return Err(protocol(
+					"invalid_ui_request",
+					"overlay content must be a string or Tml object",
+				));
+			},
+		};
+		// Reject interactive / malformed TML at the bridge.
+		if omp_tui::Ui::from_extension_markup(
+			source.as_str(),
+			source.len().clamp(1, usize::from(u16::MAX)) as u16,
+			omp_tui::UiContext::default(),
+		)
+		.is_err()
+		{
+			return Err(protocol("invalid_ui_request", "overlay content is invalid TML"));
+		}
+		let options = fields.remove("options").unwrap_or(Value::Null);
+		let modal = options
+			.get("modal")
+			.and_then(Value::as_bool)
+			.unwrap_or(true);
+		let watch = match fields.remove("watch") {
+			Some(Value::Array(items)) => items
+				.into_iter()
+				.filter_map(|item| item.as_str().map(Str::new))
+				.collect::<Vec<_>>(),
+			_ => Vec::new(),
+		};
+		let id = Str::new(format!("ext-overlay-{}", Ulid::generate()));
+		let state = OverlayState::new();
+		self.overlays.lock().insert(id.clone(), state.clone());
+		let panel_id = id.clone();
+		let panel_source = source;
+		let panel_watch = watch;
+		self
+			.mailbox()?
+			.post(HostAction::Open(PanelOpener::new(move |cx| {
+				Ok(Box::new(ExtOverlay::open(
+					panel_id.clone(),
+					panel_source.as_str(),
+					cx.viewport,
+					cx.ui,
+					state.clone(),
+					panel_watch.clone(),
+					modal,
+				)) as Box<dyn omp_chat::overlays::Panel>)
+			})));
+		Ok(UiControlResult::Value(json!({ "id": id })))
+	}
+
 	async fn run_dialog(
 		&self,
 		kind: &str,
@@ -412,7 +487,7 @@ impl AskPresenter for ChatUiOwner {
 impl UiControlOwner for ChatUiOwner {
 	async fn request(
 		&self,
-		_context: ControlRequestContext,
+		context: ControlRequestContext,
 		request: UiControlRequest,
 	) -> Result<UiControlResult, ControlProtocolError> {
 		match request {
@@ -496,24 +571,109 @@ impl UiControlOwner for ChatUiOwner {
 			UiControlRequest::SetHiddenThinkingLabel { .. } => {
 				Err(protocol("unsupported_operation", "the chat host has no hidden-thinking label"))
 			},
-			UiControlRequest::Overlay { .. }
-			| UiControlRequest::OverlayValues { .. }
-			| UiControlRequest::OverlayWait { .. }
-			| UiControlRequest::OverlayEvents { .. }
-			| UiControlRequest::OverlayClose { .. } => Err(protocol(
-				"unsupported_operation",
-				"retained extension overlays are not implemented by the chat host",
-			)),
-			UiControlRequest::DynamicMount { .. } => Err(protocol(
-				"unsupported_operation",
-				"dynamic command mounts are not implemented by the chat host",
-			)),
+			UiControlRequest::Overlay { fields } => self.open_overlay(fields).await,
+			UiControlRequest::OverlayValues { id } => {
+				let values = self
+					.overlays
+					.lock()
+					.get(&id)
+					.map(|state| Value::Object(state.values()))
+					.unwrap_or_else(|| json!({}));
+				Ok(UiControlResult::Value(values))
+			},
+			UiControlRequest::OverlayWait { id } => {
+				let state = self
+					.overlays
+					.lock()
+					.get(&id)
+					.cloned()
+					.ok_or_else(|| protocol("overlay_missing", "unknown overlay id"))?;
+				while !state.closed() {
+					tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+				}
+				let outcome =
+					state
+						.outcome()
+						.unwrap_or(omp_chat::overlays::ext_overlay::OverlayOutcome {
+							cancelled: true,
+							reason:    Some(Str::new_static("dismissed")),
+						});
+				Ok(UiControlResult::Value(json!({
+					"accepted": !outcome.cancelled,
+					"value": null,
+					"values": [],
+					"answers": null,
+					"reason": outcome.reason,
+				})))
+			},
+			UiControlRequest::OverlayEvents { id } => {
+				let events = self
+					.overlays
+					.lock()
+					.get(&id)
+					.map(|state| state.events())
+					.unwrap_or_default();
+				Ok(UiControlResult::Value(json!(events)))
+			},
+			UiControlRequest::OverlayClose { id } => {
+				if let Some(state) = self.overlays.lock().remove(&id) {
+					state.close_for_host();
+					self.mailbox()?.post(HostAction::ClosePanel(id));
+				}
+				Ok(UiControlResult::Ack)
+			},
+			UiControlRequest::DynamicMount { generation, commands } => {
+				if generation != context.connection.host_generation {
+					return Err(protocol(
+						"StaleGeneration",
+						"dynamic_mount generation does not match the live host generation",
+					));
+				}
+				let mut names = Vec::new();
+				for command in &commands {
+					let Some(object) = command.as_object() else {
+						return Err(protocol(
+							"invalid_ui_request",
+							"dynamic_mount command entries must be objects",
+						));
+					};
+					let name = object
+						.get("name")
+						.and_then(Value::as_str)
+						.filter(|name| !name.is_empty())
+						.ok_or_else(|| {
+							protocol("invalid_ui_request", "dynamic_mount command is missing name")
+						})?;
+					let desc = object
+						.get("description")
+						.and_then(Value::as_str)
+						.unwrap_or_default();
+					let command_name = Str::new(name);
+					match self.con.register_dynamic_cmd(DynamicCmdSpec {
+						name:    command_name.clone(),
+						desc:    Str::new(desc),
+						handler: extension_dynamic_command,
+					}) {
+						Ok(()) => names.push(command_name),
+						Err(omp_con::ConError::Duplicate { .. }) => {
+							return Err(protocol(
+								"duplicate_command",
+								format!("dynamic command `{name}` is already registered"),
+							));
+						},
+						Err(error) => {
+							return Err(protocol("convar", crate::fault(error)));
+						},
+					}
+				}
+				Ok(UiControlResult::Value(json!(names)))
+			},
 		}
 	}
 
 	async fn effect(
 		&self,
-		_context: ControlRequestContext,
+		context: ControlRequestContext,
 		effect: Value,
 	) -> Result<(), ControlProtocolError> {
 		let kind = effect
@@ -589,12 +749,89 @@ impl UiControlOwner for ChatUiOwner {
 				self.mailbox()?.post(HostAction::ExtensionStatus(event));
 				Ok(())
 			},
+			"mount" => {
+				let body = effect
+					.get("body")
+					.and_then(Value::as_object)
+					.ok_or_else(|| protocol("invalid_effect", "mount requires an object body"))?;
+				let event =
+					extension_slots::mount_from_effect(context.connection.extension.as_str(), body)
+						.map_err(|message| protocol("invalid_effect", message))?;
+				self.mailbox()?.post(HostAction::ExtensionSlot(event));
+				Ok(())
+			},
+			"unmount" => {
+				let body = effect
+					.get("body")
+					.and_then(Value::as_object)
+					.ok_or_else(|| protocol("invalid_effect", "unmount requires an object body"))?;
+				let key = body
+					.get("key")
+					.and_then(Value::as_str)
+					.filter(|key| !key.is_empty())
+					.ok_or_else(|| {
+						protocol("invalid_effect", "unmount requires a non-empty body.key")
+					})?;
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Unmount {
+						extension: context.connection.extension.clone(),
+						key:       Str::new(key),
+					}));
+				Ok(())
+			},
+			"patch" => {
+				let body = effect
+					.get("body")
+					.and_then(Value::as_object)
+					.ok_or_else(|| protocol("invalid_effect", "patch requires an object body"))?;
+				let event =
+					extension_slots::patch_from_effect(context.connection.extension.as_str(), body)
+						.map_err(|message| protocol("invalid_effect", message))?;
+				self.mailbox()?.post(HostAction::ExtensionSlot(event));
+				Ok(())
+			},
+			"focus_slot" => {
+				let key = effect
+					.get("body")
+					.and_then(|body| body.get("key"))
+					.and_then(Value::as_str)
+					.filter(|key| !key.is_empty())
+					.ok_or_else(|| {
+						protocol("invalid_effect", "focus_slot requires a non-empty body.key")
+					})?;
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Focus {
+						extension: context.connection.extension.clone(),
+						key:       Str::new(key),
+					}));
+				Ok(())
+			},
+			"blur_slot" => {
+				self
+					.mailbox()?
+					.post(HostAction::ExtensionSlot(ExtensionSlot::Blur));
+				Ok(())
+			},
 			other => Err(protocol(
 				"unsupported_operation",
 				format!("UI effect `{other}` is not implemented by the chat host"),
 			)),
 		}
 	}
+}
+
+fn extension_dynamic_command(
+	ctx: &Ctx,
+	name: &str,
+	_args: &[omp_con::Arg],
+) -> omp_con::ConResult<()> {
+	ctx.reply(
+		Severity::Info,
+		&format!("extension command `/{name}` is registered; dispatch reaches the extension host"),
+	);
+	Ok(())
 }
 
 /// One decoded `SelectItem`.
@@ -1244,6 +1481,153 @@ mod tests {
 		let mut multi = single;
 		multi.multi = true;
 		assert!(remote_select(&[multi]).is_none(), "multi-step asks remain local");
+	}
+
+	#[tokio::test]
+	async fn mount_effect_posts_typed_slot_action() {
+		let (owner, ctx, _ask) = owner();
+		owner
+			.effect(
+				context(),
+				json!({
+					"kind": "mount",
+					"body": {
+						"key": "welcome",
+						"placement": "header",
+						"content": { "source": "<text>hello</text>" },
+						"options": { "order": 40 },
+					},
+				}),
+			)
+			.await
+			.expect("mount");
+		owner
+			.effect(context(), json!({ "kind": "unmount", "body": { "key": "welcome" } }))
+			.await
+			.expect("unmount");
+		let actions = ctx
+			.user::<HostMailbox>()
+			.expect("mailbox")
+			.drain()
+			.collect::<Vec<_>>();
+		assert!(
+			matches!(
+				actions.first(),
+				Some(HostAction::ExtensionSlot(ExtensionSlot::Mount { key, placement, .. }))
+					if key == "welcome"
+						&& *placement == omp_chat::SlotPlacement::Header
+			),
+			"{actions:?}",
+		);
+		assert!(matches!(
+			actions.get(1),
+			Some(HostAction::ExtensionSlot(ExtensionSlot::Unmount { key, .. }))
+				if key == "welcome"
+		));
+		assert!(
+			owner
+				.effect(
+					context(),
+					json!({
+						"kind": "mount",
+						"body": {
+							"key": "bad",
+							"placement": "header",
+							"content": {
+								"source": "<md><button id=unsafe when=active>x</button></md>",
+							},
+						},
+					}),
+				)
+				.await
+				.is_err(),
+			"invalid TML is rejected at the app bridge",
+		);
+	}
+
+	#[tokio::test]
+	async fn overlay_open_values_and_close() {
+		let (owner, ctx, _ask) = owner();
+		let request = owner.request(context(), UiControlRequest::Overlay {
+			fields: json!({
+				"content": { "source": "<box title='Hi'><text>body</text></box>" },
+				"options": { "modal": true },
+				"watch": [],
+			})
+			.as_object()
+			.cloned()
+			.expect("object"),
+		});
+		let host = tokio::task::spawn_blocking(move || {
+			std::thread::sleep(Duration::from_millis(50));
+			let mailbox = ctx.user::<HostMailbox>().expect("mailbox");
+			let ui = UiContext::default();
+			let dom = omp_dom::Dom::new();
+			let services: Arc<dyn omp_chat::overlays::Services> =
+				Arc::new(omp_chat::overlays::services::NoServices);
+			let cx = omp_chat::overlays::PanelCx {
+				dom:      &dom,
+				con:      &ctx,
+				ui:       &ui,
+				viewport: Size { width: 80, height: 24 },
+				services: &services,
+			};
+			let opener = mailbox
+				.drain()
+				.find_map(|action| match action {
+					HostAction::Open(opener) => Some(opener),
+					_ => None,
+				})
+				.expect("overlay opener");
+			let mut panel = opener.open(&cx).expect("opens");
+			assert_eq!(panel.key(Key::Esc), PanelEvent::Close);
+		});
+		let (result, host) = tokio::join!(request, host);
+		host.expect("host thread");
+		let UiControlResult::Value(value) = result.expect("overlay opens") else {
+			panic!("overlay returns id");
+		};
+		let id = value["id"].as_str().expect("id").to_owned();
+		let values = owner
+			.request(context(), UiControlRequest::OverlayValues { id: Str::new(id.clone()) })
+			.await
+			.expect("values");
+		assert!(matches!(values, UiControlResult::Value(_)));
+		owner
+			.request(context(), UiControlRequest::OverlayClose { id: Str::new(id) })
+			.await
+			.expect("close");
+	}
+
+	#[tokio::test]
+	async fn dynamic_mount_accepts_live_generation_and_rejects_stale() {
+		let (owner, _ctx, _ask) = owner();
+		let live = owner
+			.request(context(), UiControlRequest::DynamicMount {
+				generation: 1,
+				commands:   vec![json!({
+					"name": "foreign-prompt",
+					"aliases": ["fp"],
+					"description": "Imported prompt",
+					"args": [],
+					"hint": "/foreign-prompt",
+					"dynamic_completions": false,
+				})],
+			})
+			.await
+			.expect("live generation");
+		let UiControlResult::Value(value) = live else {
+			panic!("dynamic_mount returns mounted names");
+		};
+		assert_eq!(value, json!(["foreign-prompt"]));
+		let stale = owner
+			.request(context(), UiControlRequest::DynamicMount {
+				generation: 99,
+				commands:   vec![json!({ "name": "other", "description": "" })],
+			})
+			.await
+			.expect_err("stale generation");
+		assert_eq!(stale.code.as_str(), "StaleGeneration");
 	}
 
 	#[tokio::test]

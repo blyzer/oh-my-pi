@@ -163,6 +163,8 @@ const V1_TOOL_NAMES: &[&str] = &[
 const V1_TOOL_ALIASES: &[(&str, &str)] = &[("search", "grep"), ("find", "glob")];
 /// v1's `exec` pseudo-tool, which its executor expanded into these.
 const V1_EXEC: (&str, &[&str]) = ("exec", &["eval", "bash"]);
+/// v1's `github` tool, which this roster split into forge and CI.
+const V1_GITHUB: (&str, &[&str]) = ("github", &["forge", "ci"]);
 /// The subagent tool; v1 advertised it when `spawns` was set.
 const TASK_TOOL: &str = "task";
 /// Tools v1 appended to every explicit list: `yield` (`parseAgentFields`) and
@@ -412,8 +414,6 @@ impl Written {
 /// Unreadable user agents are left out here: the user-level step reports
 /// them.
 fn user_classes(v1: &V1Source) -> BTreeMap<Str, Written> {
-	let lsp = omp_tools::lsp::spec().name;
-	let roster = Roster { lsp: lsp.as_str() };
 	// An unlistable `profiles/` is reported by `plan`; the default profile
 	// still counts.
 	let profiles = v1.profiles().unwrap_or_default();
@@ -438,7 +438,7 @@ fn user_classes(v1: &V1Source) -> BTreeMap<Str, Written> {
 			if !seen.insert(agent.name.clone()) {
 				continue;
 			}
-			let Ok(converted) = convert(&agent, &roster, None, task_role) else {
+			let Ok(converted) = convert(&agent, None, task_role) else {
 				continue;
 			};
 			let class = classes.entry(agent.name).or_default();
@@ -462,13 +462,11 @@ fn import_dir(
 	if files.is_empty() {
 		return (vec![whole(Some(source), ImportOutcome::NothingToImport)], false);
 	}
-	let lsp = omp_tools::lsp::spec().name;
-	let roster = Roster { lsp: lsp.as_str() };
 	let mut seen = BTreeSet::<Str>::new();
 	let mut entries = Vec::new();
 	let mut failed = false;
 	for file in files {
-		match import_file(&file, destination, mode, &roster, &mut seen, &mut entries) {
+		match import_file(&file, destination, mode, &mut seen, &mut entries) {
 			Ok(()) => {},
 			Err(error) => {
 				failed = true;
@@ -494,19 +492,11 @@ fn agent_files(dir: &Path) -> Result<Vec<PathBuf>, AgentsImportError> {
 	Ok(files)
 }
 
-/// v2 tool names a v1 tool can map onto: the native builtin roster plus the
-/// environment's `lsp` tool.
-struct Roster<'a> {
-	lsp: &'a str,
-}
-
-impl Roster<'_> {
-	fn has(&self, name: &str) -> bool {
-		name == self.lsp
-			|| omp_tools::builtin_tool_identities()
-				.iter()
-				.any(|tool| tool.name == name)
-	}
+/// Whether `name` is a listed v2 built-in, including `lsp` and `browser`.
+fn is_v2_tool(name: &str) -> bool {
+	omp_tools::builtin_tool_identities()
+		.iter()
+		.any(|tool| tool.name == name)
 }
 
 /// v1 agent frontmatter (`parseAgentFields`). Every key this step does not
@@ -620,7 +610,6 @@ fn import_file(
 	file: &Path,
 	destination: &Destination,
 	mode: ImportMode,
-	roster: &Roster<'_>,
 	seen: &mut BTreeSet<Str>,
 	entries: &mut Vec<ImportEntry>,
 ) -> Result<(), AgentsImportError> {
@@ -675,7 +664,7 @@ fn import_file(
 		return Ok(());
 	}
 	let converted =
-		convert(&agent, roster, destination.replaces.get(&name).copied(), destination.task_role)?;
+		convert(&agent, destination.replaces.get(&name).copied(), destination.task_role)?;
 	let cfg_path = destination.cfg_dir.join(format!("{name}.cfg"));
 	let rule_path = destination
 		.rules_dir
@@ -725,7 +714,6 @@ fn import_file(
 /// replaces them.
 fn convert(
 	agent: &V1Agent<'_>,
-	roster: &Roster<'_>,
 	replaces: Option<Written>,
 	task_role: TaskRole,
 ) -> Result<Converted, AgentsImportError> {
@@ -814,6 +802,8 @@ fn convert(
 					.unwrap_or(tool);
 				if canonical == V1_EXEC.0 {
 					listed.extend(V1_EXEC.1.iter().copied().map(Str::new_static));
+				} else if canonical == V1_GITHUB.0 {
+					listed.extend(V1_GITHUB.1.iter().copied().map(Str::new_static));
 				} else {
 					listed.push(Str::new(canonical));
 				}
@@ -824,7 +814,7 @@ fn convert(
 				if tool.as_str() == TASK_TOOL {
 					continue;
 				}
-				if !roster.has(&tool) {
+				if !is_v2_tool(tool.as_str()) {
 					notes.push(sf!("{name}: tool {tool}"));
 				} else if !advertised.contains(&tool) {
 					advertised.push(tool);

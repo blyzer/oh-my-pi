@@ -63,31 +63,40 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 	let lsp = identity("lsp", "");
 	let debug = identity("debug", "");
 	let goal = identity("goal", "");
-	let github =
-		ToolIdentity { name: Str::new_static("github"), rev: Rev { family: Str::default(), n: 3 } };
+	#[cfg(feature = "cap-forge")]
+	let forge = identity("forge", "");
+	#[cfg(feature = "cap-ci")]
+	let ci = identity("ci", "");
 	let browser = identity("browser", "");
 	let computer = identity("computer", "");
 	let identities = BuiltinRendererIdentities {
-		edit:       Some(edit.clone()),
-		grep:       Some(grep.clone()),
+		edit: Some(edit.clone()),
+		grep: Some(grep.clone()),
 		web_search: Some(web_search.clone()),
-		glob:       Some(glob.clone()),
-		shell:      Some(shell.clone()),
-		hub:        Some(hub.clone()),
-		write:      Some(write.clone()),
-		read:       Some(read.clone()),
-		eval:       Some(eval.clone()),
-		ast_grep:   Some(ast_grep.clone()),
-		ast_edit:   Some(ast_edit.clone()),
-		ask:        Some(ask.clone()),
-		todo:       Some(todo.clone()),
-		think:      Some(think.clone()),
-		lsp:        Some(lsp.clone()),
-		debug:      Some(debug.clone()),
-		goal:       Some(goal.clone()),
-		github:     Some(github.clone()),
-		browser:    Some(browser.clone()),
-		computer:   Some(computer.clone()),
+		glob: Some(glob.clone()),
+		shell: Some(shell.clone()),
+		hub: Some(hub.clone()),
+		write: Some(write.clone()),
+		read: Some(read.clone()),
+		eval: Some(eval.clone()),
+		ast_grep: Some(ast_grep.clone()),
+		ast_edit: Some(ast_edit.clone()),
+		ask: Some(ask.clone()),
+		todo: Some(todo.clone()),
+		think: Some(think.clone()),
+		lsp: Some(lsp.clone()),
+		debug: Some(debug.clone()),
+		goal: Some(goal.clone()),
+		#[cfg(feature = "cap-forge")]
+		forge: Some(forge.clone()),
+		#[cfg(not(feature = "cap-forge"))]
+		forge: None,
+		#[cfg(feature = "cap-ci")]
+		ci: Some(ci.clone()),
+		#[cfg(not(feature = "cap-ci"))]
+		ci: None,
+		browser: Some(browser.clone()),
+		computer: Some(computer.clone()),
 	};
 	let fixtures = [
 		crate::render::edit::gallery_fixtures(edit),
@@ -100,7 +109,14 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		crate::render::interaction::gallery_fixtures(ask, todo, think),
 		crate::render::codeintel::gallery_fixtures(lsp, debug),
 		crate::render::agentic::gallery_fixtures(goal),
-		crate::render::misc::gallery_fixtures(github, browser, computer),
+		crate::render::misc::gallery_fixtures(
+			#[cfg(feature = "cap-forge")]
+			forge,
+			#[cfg(feature = "cap-ci")]
+			ci,
+			browser,
+			computer,
+		),
 	]
 	.concat();
 	BuiltinRendererGallery { identities, fixtures }

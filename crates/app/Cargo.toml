@@ -22,9 +22,25 @@ path = "src/claude_trace.rs"
 required-features = ["claude-trace"]
 
 [features]
-default = ["local"]
+default = [
+	"local",
+	"cap-ssh",
+	"cap-computer",
+	"cap-browser",
+	"cap-media",
+	"cap-forge",
+	"cap-ci",
+]
 claude-trace = []
 local = ["omp-driver/local", "omp-ai/local"]
+cap-ssh = ["omp-envd/cap-ssh"]
+cap-computer = ["omp-envd/cap-computer"]
+cap-browser = ["omp-envd/cap-browser", "omp-driver/cap-browser"]
+# Forwards the environment host's media capability (`image_gen`, `tts`).
+# App and chat keep their own `omp-audio` edges for say and voice.
+cap-media = ["omp-envd/cap-media"]
+cap-forge = ["omp-envd/cap-forge", "omp-chat/cap-forge", "omp-tools/cap-forge"]
+cap-ci = ["omp-envd/cap-ci", "omp-chat/cap-ci", "omp-tools/cap-ci"]
 gui = ["dep:omp-gui"]
 local-all = [
 	"local-applefm",
@@ -60,6 +76,7 @@ indicatif.workspace = true
 miette.workspace = true
 omp-adw.workspace = true
 omp-agent.workspace = true
+omp-contract.workspace = true
 omp-ar.workspace = true
 omp-chat.workspace = true
 omp-collab.workspace = true
@@ -79,6 +96,7 @@ omp-journal.workspace = true
 omp-kb.workspace = true
 omp-memory.workspace = true
 omp-session.workspace = true
+omp-ssh.workspace = true
 omp-dom.workspace = true
 omp-serve.workspace = true
 omp-proto.workspace = true
@@ -129,6 +147,7 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true
+omp-exec.workspace = true
 flume.workspace = true
 insta.workspace = true
 omp-ai.workspace = true

@@ -19,7 +19,7 @@
 //! run commands inside the sandbox without asking, which is broader than
 //! OMP's `write`).
 
-use omp_agent::delegated::{ApprovalPosture, DelegatedPolicy, NetworkPosture, SandboxPosture};
+use omp_contract::delegated::{ApprovalPosture, DelegatedPolicy, NetworkPosture, SandboxPosture};
 
 use super::wire::{
 	ApprovalPolicy, PlainApproval, Reviewer, SandboxMode, SandboxPolicy, ThreadConfig, ThreadOpened,

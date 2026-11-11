@@ -180,6 +180,38 @@ check:
 check-pkg pkg:
     cargo check -p {{ pkg }} --locked
 
+# ADR 0049 Phase 3: default `omp` (`omp-app`, every `cap-*` on) and the
+# minimal profile (`local` only). Selected unification is required so the
+# workspace resolver cannot turn a cap back on through another member.
+# Each capability crate must be absent from `omp-envd` (cargo exit 101,
+# "did not match any packages"). Any other cargo failure fails the recipe.
+[group('build & check')]
+check-minimal-caps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    selected=(--locked --no-default-features --config 'resolver.feature-unification="selected"')
+    # Forge/CI contract crates are optional on omp-tools as well as envd, so
+    # selected unification leaves them (and the delegated routers) out of the
+    # envd graph when the caps are off. Family variants stay either way; the
+    # forge/ci modules and chat cards compile with the matching cap features
+    # (on by default in omp-app).
+    for pkg in omp-desktop omp-webview omp-audio omp-ssh omp-forge omp-forge-delegated omp-ci omp-ci-delegated; do
+        status=0
+        out=$(cargo tree -p omp-envd -i "$pkg" "${selected[@]}" 2>&1) || status=$?
+        if [[ "$status" -eq 0 ]]; then
+            printf 'error: %s is in the omp-envd graph with cap features off\n%s\n' "$pkg" "$out" >&2
+            exit 1
+        fi
+        if [[ "$status" -ne 101 || "$out" != *"did not match any packages"* ]]; then
+            printf 'error: unexpected cargo tree result for %s (exit %s)\n%s\n' "$pkg" "$status" "$out" >&2
+            exit 1
+        fi
+        printf 'absent from omp-envd (caps off): %s\n' "$pkg"
+    done
+    cargo check -p omp-app --locked
+    cargo check -p omp-app --no-default-features --features local --locked \
+        --config 'resolver.feature-unification="selected"'
+
 # Build the `omp` CLI/daemon binary (dev profile).
 [group('build & check')]
 build:
@@ -224,6 +256,16 @@ test-pkg pkg:
 [group('test')]
 test-ssh:
     scripts/ssh-loopback-fixture.sh cargo nextest run -p omp-exec-ssh --locked --run-ignored all
+
+# ADR 0049 D5: first-party extension conformance (manifests, unittests, frozen API smoke).
+[group('test')]
+test-extensions:
+    python3 scripts/check-extension-conformance.py
+
+# ADR 0049 D5: alias for the full extension conformance gate.
+[group('build & check')]
+check-extensions:
+    python3 scripts/check-extension-conformance.py
 
 # ---------------------------------------------------------------------------
 # E2E acceptance suite (crates/e2e, joined-system proofs P1-P12, P14)

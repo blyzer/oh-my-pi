@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use omp_agent::SessionAuthority;
+use omp_contract::SessionAuthority;
 use omp_core::{CowBytes, Str};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value};
 use omp_journal::blob::{BlobRef, BlobStore};

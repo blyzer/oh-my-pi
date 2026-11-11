@@ -1,4 +1,8 @@
+#![cfg(feature = "cap-browser")]
 //! End-to-end native browser-relay protocol, security, and lifetime contracts.
+//!
+//! Skipped unless `cap-browser` is on (`required-features` on the test target).
+//! The relay and `BrowserSettings` are not compiled into that build.
 
 use std::{
 	collections::VecDeque,

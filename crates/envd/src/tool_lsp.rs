@@ -13,6 +13,7 @@ use std::{
 use bytes::Bytes;
 use globset::Glob;
 use omp_core::{Str, sf};
+use omp_exec::ExecEvent;
 use omp_proto::{
 	document::v1::{
 		self as pb, commit_transaction_response, document_mutation, lsp_response, text_mutation,
@@ -34,7 +35,7 @@ use url::Url;
 
 use super::{
 	docs::{DocumentError, DocumentHost, lease_target},
-	exec::{ExecEvent, ExecHost},
+	exec::ExecHost,
 	tool_document::{read_whole, transaction_id},
 };
 use crate::docserver::{

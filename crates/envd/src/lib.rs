@@ -9,14 +9,23 @@ pub mod admission;
 /// Approval prompts relayed to the connection that issued a daemon command.
 mod approval_relay;
 pub mod blobs;
+/// Supervised browser automation, fetch, and relay. Compiled only with
+/// `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_daemon;
+/// Ephemeral browser fetch for inference search. Compiled only with
+/// `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_fetch;
+/// Native Chrome-extension CDP relay. Compiled only with `cap-browser`.
+#[cfg(feature = "cap-browser")]
 pub mod browser_relay;
 /// The environment a spawned child process is allowed to see.
 pub mod child_env;
 mod child_tree;
 /// Codex `app-server` adapter for the delegated-executor contract (ADR 0043).
 pub mod codex_app_server;
+#[cfg(feature = "cap-computer")]
 mod computer;
 pub mod daemon_policy;
 mod devices_host;
@@ -39,8 +48,12 @@ pub mod ext_git;
 pub mod exthost;
 /// The hosts a fetch reaches and the approval subjects keyed on them.
 pub mod fetch_host;
-mod github;
-pub mod github_url;
+#[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
+mod forge_adapter;
+#[cfg(feature = "cap-forge")]
+pub use forge_adapter::CheckoutForge;
+pub mod forge_url;
+mod forge_worktree;
 pub mod grep;
 pub mod host_info;
 pub mod host_settings;
@@ -55,7 +68,14 @@ pub mod lsp_settings;
 mod managed_skills;
 pub mod managed_skills_domain;
 pub mod mcp;
+/// Image generation, speech synthesis, and ask playback. Compiled only with
+/// `cap-media`, which links `omp-audio`.
+#[cfg(feature = "cap-media")]
 mod media_devices;
+/// Text-to-speech producer for the `tts` device. Compiled only with
+/// `cap-media`. `local-tts` selects Kokoro inside this module and does not
+/// compile it on its own.
+#[cfg(feature = "cap-media")]
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;
@@ -81,7 +101,6 @@ mod server;
 /// Hidden in-process shell child used by detached named processes.
 pub mod shell_child;
 pub mod site;
-pub mod ssh;
 #[cfg(all(test, unix))]
 mod test_process;
 mod tool_ast_grep;
@@ -133,16 +152,16 @@ use exthost::{
 	control::{ControlAuthority, ControlCompositionError, ControlConnectionIdentity},
 	dispatch::CallbackDispatcher,
 };
-use github_url::GithubCredentialBridge;
+use forge_url::ForgeCredentialBridge;
 use miette::IntoDiagnostic as _;
 #[cfg(unix)]
 use nix::{
 	sys::signal::{self, Signal},
 	unistd::{Pid, User},
 };
-use omp_agent::KernelSender;
 use omp_ai::auth::AuthControlHandle;
 use omp_con::Ctx;
+use omp_contract::KernelSender;
 use omp_core::{Str, Ulid, sf};
 use omp_env::{
 	AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames, project_state::DaemonPolicy,
@@ -219,39 +238,6 @@ omp_con::var! {
 			"legacy.path": "skills.includeSkills",
 		},
 	};
-	/// Default HTTP CDP discovery endpoint used when no tool-call endpoint is provided.
-	pub static SV_BROWSER_CDP_URL = sv_browser_cdp_url: Str {
-		default: Str::new_static(""),
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser CDP URL",
-			"legacy.path": "browser.cdpUrl",
-		},
-	};
-	/// Drive the user's Chrome tabs through the omp browser relay.
-	pub static SV_BROWSER_RELAY = sv_browser_relay: bool {
-		default: false,
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser Relay",
-			"legacy.path": "browser.relay",
-		},
-	};
-	/// omp browser relay endpoint.
-	pub static SV_BROWSER_RELAY_URL = sv_browser_relay_url: Str {
-		default: Str::new_static(""),
-		flags: archive,
-		meta: {
-			"ui.tab": "tools",
-			"ui.group": "Grep & Browser",
-			"ui.label": "Browser Relay URL",
-			"legacy.path": "browser.relayUrl",
-		},
-	};
 	/// Render non-JSON MCP text results as Markdown in the transcript.
 	pub static SV_MCP_RENDER_MARKDOWN_RESULTS = sv_mcp_render_markdown_results: bool {
 		default: true,
@@ -303,6 +289,47 @@ omp_con::var! {
 			"ui.label": "Tool Call Handler Timeout (ms)",
 			"ui.unit": "ms",
 			"legacy.path": "extensionHandlers.toolCallTimeoutMs",
+		},
+	};
+}
+
+// Browser CDP and relay settings. These convars exist only with `cap-browser`,
+// beside `SV_BROWSER_ENABLED` and `SV_BROWSER_HEADLESS` in `browser_daemon`.
+// With the feature off the construction table has no Browser row, so a setting
+// cannot reinstall it.
+#[cfg(feature = "cap-browser")]
+omp_con::var! {
+	/// Default HTTP CDP discovery endpoint used when no tool-call endpoint is provided.
+	pub static SV_BROWSER_CDP_URL = sv_browser_cdp_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser CDP URL",
+			"legacy.path": "browser.cdpUrl",
+		},
+	};
+	/// Drive the user's Chrome tabs through the omp browser relay.
+	pub static SV_BROWSER_RELAY = sv_browser_relay: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay",
+			"legacy.path": "browser.relay",
+		},
+	};
+	/// omp browser relay endpoint.
+	pub static SV_BROWSER_RELAY_URL = sv_browser_relay_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay URL",
+			"legacy.path": "browser.relayUrl",
 		},
 	};
 }
@@ -659,7 +686,7 @@ pub struct ProjectEnvironment {
 	reflection_bridge:   Arc<memory::ReflectionBridgeHost>,
 	eval_control:        EvalSessionControl,
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
-	github_credentials:  Arc<GithubCredentialBridge>,
+	github_credentials:  Arc<ForgeCredentialBridge>,
 	acp_documents:       AcpDocumentsBinding,
 	/// The route an attached session answers the daemon's relayed approval
 	/// prompts with; `None` for embedded and isolated compositions, whose host
@@ -1299,8 +1326,8 @@ impl ProjectEnvironment {
 	/// decided by their unreachable rules, which deny a sandbox amendment.
 	pub fn bind_approval_authority(
 		&self,
-		book: Option<Arc<omp_agent::ApprovalBook>>,
-		route: Option<omp_agent::ApprovalRoute>,
+		book: Option<Arc<omp_contract::ApprovalBook>>,
+		route: Option<omp_contract::ApprovalRoute>,
 	) {
 		if let Some(relay) = &self.approval_relay {
 			relay.write().clone_from(&route);
@@ -1348,8 +1375,24 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the Environment's provider credential projection.
-	pub fn github_credentials(&self) -> Arc<GithubCredentialBridge> {
+	pub fn github_credentials(&self) -> Arc<ForgeCredentialBridge> {
 		Arc::clone(&self.github_credentials)
+	}
+
+	/// Forge `Delegated` router for this checkout.
+	///
+	/// Chat's git watcher reads the branch's change request through
+	/// [`CheckoutForge::view_branch`], which calls `view_change_request` on
+	/// the same router `forge@1` uses. The router is built on the first read.
+	/// Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
+	pub fn checkout_forge(&self, con: &Ctx) -> CheckoutForge {
+		CheckoutForge::new(
+			self.lifecycle.server.project_root(),
+			self.lifecycle.server.state_dir().to_path_buf(),
+			self.lifecycle.server.forge_devices(),
+			forge_adapter::ForgeDynHosts::from_con(con),
+		)
 	}
 
 	/// Returns the authenticated session generation fencing CONTROL clients.
@@ -1388,7 +1431,7 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the live per-session admission hook gate.
-	pub fn admission_gate(&self) -> Arc<omp_agent::HookGate> {
+	pub fn admission_gate(&self) -> Arc<omp_contract::HookGate> {
 		self.lifecycle.server.admission_gate()
 	}
 
@@ -1421,7 +1464,7 @@ impl ProjectEnvironment {
 	/// registrar.
 	pub fn register_python_extensions(
 		&self,
-		registrar: &mut omp_agent::ExtensionRegistrar,
+		registrar: &mut omp_contract::ExtensionRegistrar,
 	) -> Result<Vec<exthost::PyComponent>, exthost::PyExtensionError> {
 		self.lifecycle.server.register_python_extensions(registrar)
 	}

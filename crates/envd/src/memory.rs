@@ -14,7 +14,7 @@ use std::{
 	sync::{Arc, OnceLock},
 };
 
-use omp_agent::{PromptMemoryInput, PromptMemorySlotInput};
+use omp_contract::{PromptMemoryInput, PromptMemorySlotInput};
 use omp_core::Str;
 use omp_memory::{
 	MemoryBackend, MemoryRuntime, RuntimeRegistry, config::MnemopiSettings, runtime::RuntimeStart,

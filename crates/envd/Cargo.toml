@@ -11,7 +11,15 @@ readme = "README.md"
 
 [features]
 default = []
+# Kokoro inside `omp-ai`. The envd `tts` device still requires `cap-media`:
+# `local-tts` alone does not compile `media_tts` or link `omp-audio`.
 local-tts = ["omp-ai/local-tts"]
+cap-ssh = ["dep:omp-ssh"]
+cap-computer = ["dep:omp-desktop", "omp-tools/cap-computer"]
+cap-browser = ["dep:omp-webview", "dep:tokio-tungstenite", "omp-tools/cap-browser"]
+cap-media = ["dep:omp-audio", "omp-tools/cap-media"]
+cap-forge = ["dep:omp-forge", "dep:omp-forge-delegated", "omp-tools/cap-forge"]
+cap-ci = ["dep:omp-ci", "dep:omp-ci-delegated", "omp-tools/cap-ci"]
 
 [dependencies]
 async-stream.workspace = true
@@ -30,17 +38,21 @@ im.workspace = true
 jiff.workspace = true
 miette.workspace = true
 nix.workspace = true
-omp-agent.workspace = true
+omp-contract.workspace = true
 omp-ast.workspace = true
-omp-audio.workspace = true
+omp-audio = { workspace = true, optional = true }
 omp-session.workspace = true
 omp-dom.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
-omp-desktop.workspace = true
+omp-desktop = { workspace = true, optional = true }
+omp-ci = { workspace = true, optional = true }
+omp-ci-delegated = { workspace = true, optional = true }
 omp-env.workspace = true
 omp-exec.workspace = true
+omp-forge = { workspace = true, optional = true }
+omp-forge-delegated = { workspace = true, optional = true }
 omp-ext.workspace = true
 bytecount.workspace = true
 grep-matcher.workspace = true
@@ -65,7 +77,7 @@ omp-tool.workspace = true
 omp-tools.workspace = true
 omp-vcs.workspace = true
 omp-walker.workspace = true
-omp-webview.workspace = true
+omp-webview = { workspace = true, optional = true }
 parking_lot.workspace = true
 prost.workspace = true
 pyo3.workspace = true
@@ -80,7 +92,7 @@ similar.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
@@ -90,9 +102,7 @@ zstd.workspace = true
 
 tracing.workspace = true
 
-russh.workspace = true
-
-russh-sftp.workspace = true
+omp-ssh = { workspace = true, optional = true }
 
 encoding_rs.workspace = true
 
@@ -118,9 +128,17 @@ rustix.workspace = true
 
 [dev-dependencies]
 # Hermetic `git` fixtures: tests never read the developer's git configuration.
+omp-adw.workspace = true
+omp-exec.workspace = true
+omp-exec-local.workspace = true
 omp-vcs = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
+
+[[test]]
+name = "browser_relay_contract"
+required-features = ["cap-browser"]
 
 [lints]
 workspace = true

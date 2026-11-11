@@ -6,14 +6,17 @@ pub mod ast_edit;
 pub mod ast_grep;
 pub mod bash;
 pub mod browser;
+#[cfg(feature = "cap-ci")]
+pub mod ci;
 pub mod computer;
 pub mod context_gauge;
 pub mod debug;
 pub mod edit;
 pub mod eval;
 pub(crate) mod fixtures;
+#[cfg(feature = "cap-forge")]
+pub mod forge;
 mod generic;
-pub mod github;
 pub mod glob;
 pub mod goal;
 pub mod grep;
@@ -673,7 +676,10 @@ impl CardRegistry {
 		registry.register(debug::DebugCard);
 		registry.register(edit::EditCard);
 		registry.register(eval::EvalCard);
-		registry.register(github::GithubCard);
+		#[cfg(feature = "cap-ci")]
+		registry.register(ci::CiCard);
+		#[cfg(feature = "cap-forge")]
+		registry.register(forge::ForgeCard);
 		registry.register(glob::GlobCard);
 		registry.register(goal::GoalCard);
 		registry.register(grep::GrepCard);

@@ -1,0 +1,20 @@
+[project]
+name = "omp-forge-ext"
+version = "0.1.0"
+description = "Host-dispatching dyn forge/* catalog (ADR 0049)"
+requires-python = ">=3.14"
+dependencies = [
+  "omp-github",
+  "omp-gitlab",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omp_forge_ext"]
+
+[tool.uv.sources]
+omp-github = { path = "../github" }
+omp-gitlab = { path = "../gitlab" }

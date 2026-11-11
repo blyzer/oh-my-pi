@@ -1,0 +1,19 @@
+id = "omp.spec-flow"
+name = "Spec flow"
+version = "0.1.0"
+omp_api = 1
+description = "Artifact-gated specification workflow with blob archival."
+entry = "omp_spec_flow"
+capabilities = ["env.doc.read", "env.doc.write", "env.blob"]
+
+[[declarations]]
+id = "flow"
+kind = "soft"
+module = "omp_spec_flow.device"
+key = "spec@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"

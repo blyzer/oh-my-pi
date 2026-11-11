@@ -386,7 +386,7 @@ mod admission {
 			patch: SandboxProfile,
 			scope: PolicyScope,
 			_reason: Str,
-			_approval: Option<omp_agent::ApprovalSpec>,
+			_approval: Option<omp_contract::ApprovalSpec>,
 		) -> Result<(), PolicyControlFailure> {
 			self.install(owner, session, patch, scope).await.map(|_| ())
 		}
@@ -642,7 +642,7 @@ impl DurablePolicyAuditSink {
 impl PolicyAuditSink for DurablePolicyAuditSink {
 	async fn approval_decided(
 		&self,
-		ticket: &omp_agent::ApprovalTicket,
+		ticket: &omp_contract::ApprovalTicket,
 	) -> Result<(), PolicyControlFailure> {
 		#[derive(Serialize)]
 		struct Record<'a> {
@@ -955,7 +955,7 @@ pub struct EnvdHostOwnerBackends {
 impl EnvdHostOwnerBackends {
 	/// Constructs the production bundle with envd's canonical worker ceilings
 	/// and fail-closed detected sandbox facilities.
-	pub fn production(data_dir: &Path, approvals: omp_agent::ApprovalRoute) -> Self {
+	pub fn production(data_dir: &Path, approvals: omp_contract::ApprovalRoute) -> Self {
 		Self::new(
 			data_dir,
 			detected_sandbox_capabilities(),
@@ -969,7 +969,7 @@ impl EnvdHostOwnerBackends {
 	pub fn new(
 		data_dir: &Path,
 		capabilities: SandboxCapabilities,
-		approvals: omp_agent::ApprovalRoute,
+		approvals: omp_contract::ApprovalRoute,
 		worker_layer_ceiling: u64,
 		worker_spawn_ceiling: u64,
 	) -> Self {
@@ -1007,7 +1007,7 @@ impl EnvdHostOwnerBackends {
 /// Creates a generation-binding policy owner factory.
 pub fn policy_control_factory(
 	runtime: Arc<dyn SandboxPolicyRuntime>,
-	approvals: omp_agent::ApprovalRoute,
+	approvals: omp_contract::ApprovalRoute,
 	audit: Arc<dyn PolicyAuditSink>,
 ) -> Arc<dyn ControlAuthorityFactory> {
 	Arc::new(move |identity| {

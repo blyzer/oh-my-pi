@@ -49,7 +49,7 @@ pub struct ServiceState {
 	pub project:           PathBuf,
 	/// The invocation's `--approval-mode` / `--yolo` override, which outranks
 	/// the convar.
-	pub approval_override: Option<omp_envd::tool_settings::ApprovalMode>,
+	pub approval_override: Option<omp_contract::posture::ApprovalMode>,
 	/// Agent Plugins roots the invocation named (`--plugin-dir`,
 	/// `--extension`): `/plugins approve` resolves their commands like the
 	/// session did.
@@ -99,6 +99,10 @@ pub struct ServiceState {
 	pub theme_catalog:     Arc<omp_tui::ThemeCatalog>,
 	/// Runtime the asynchronous feeds spawn onto.
 	pub runtime:           tokio::runtime::Handle,
+	/// Forge `Delegated` router for the checkout. Git watch reads the
+	/// branch's change request through it. Absent when `cap-forge` is off.
+	#[cfg(feature = "cap-forge")]
+	pub forge:             omp_envd::CheckoutForge,
 }
 
 /// Cloneable handles into the production authentication and usage stack.
@@ -111,7 +115,7 @@ pub struct StackHandles {
 	/// Provider usage fetchers.
 	pub usage:                omp_ai::operation::usage::UsageFetcherRegistry,
 	/// Combined credential authority (GitHub gist uploads for `/share`).
-	pub credential_authority: Arc<dyn omp_envd::github_url::CredentialAuthority>,
+	pub credential_authority: Arc<dyn omp_envd::forge_url::CredentialAuthority>,
 }
 
 impl StackHandles {
@@ -481,6 +485,35 @@ impl Services for AppServices {
 
 	fn dump_raw_sse(&self) -> ServiceResult<PathBuf> {
 		debug::dump_raw_sse(&self.state)
+	}
+
+	fn branch_change_request(
+		&self,
+		branch: &str,
+	) -> ServiceResult<Pending<Option<omp_chat::status_band::PullRequest>>> {
+		#[cfg(feature = "cap-forge")]
+		{
+			let forge = self.state.forge.clone();
+			let branch = Str::new(branch);
+			let (sender, receiver) = flume::bounded(1);
+			self.state.runtime.spawn(async move {
+				let found = forge.view_branch(branch.as_str()).await.map(|request| {
+					request.map(|request| omp_chat::status_band::PullRequest {
+						number: request.number,
+						url:    request.web_url,
+					})
+				});
+				let _ = sender.send(found.map_err(omp_chat::overlays::services::ServiceError::failed));
+			});
+			Ok(receiver)
+		}
+		#[cfg(not(feature = "cap-forge"))]
+		{
+			let _ = branch;
+			let (sender, receiver) = flume::bounded(1);
+			let _ = sender.send(Ok(None));
+			Ok(receiver)
+		}
 	}
 }
 

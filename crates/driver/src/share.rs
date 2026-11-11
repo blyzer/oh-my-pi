@@ -15,7 +15,7 @@ use http::{
 };
 use omp_ai::auth::HeaderPlacement;
 use omp_core::{Str, base64};
-use omp_envd::github_url::GithubCredentialBridge;
+use omp_envd::forge_url::ForgeCredentialBridge;
 use omp_secrets::redact::SecretRedactor;
 use ring::{
 	aead,
@@ -190,7 +190,7 @@ pub trait ShareStore {
 /// authority. This never shells out to `gh`.
 pub struct DirectShareStore {
 	http_base:   Url,
-	credentials: sync::Arc<GithubCredentialBridge>,
+	credentials: sync::Arc<ForgeCredentialBridge>,
 	client:      omp_http::Client,
 }
 
@@ -198,7 +198,7 @@ impl DirectShareStore {
 	/// Constructs the production store from a validated HTTP(S) share base.
 	pub fn new(
 		http_base: &str,
-		credentials: sync::Arc<GithubCredentialBridge>,
+		credentials: sync::Arc<ForgeCredentialBridge>,
 	) -> Result<Self, ShareError> {
 		let mut http_base = Url::parse(http_base.trim())?;
 		if !matches!(http_base.scheme(), "http" | "https")

@@ -13,7 +13,7 @@ use std::{
 };
 
 use flume::Receiver;
-use omp_agent::{SlotClass, SlotId};
+use omp_contract::{SlotClass, SlotId};
 use omp_core::{CowBytes, InvocationPhase, LifecyclePhase, SparseMap, Str, sf};
 use omp_proto::{
 	toolhost::{
@@ -630,6 +630,54 @@ impl NestedCallbackDispatcher {
 	/// Binds callback construction to the live extension-host dispatcher.
 	pub fn new(dispatcher: Arc<dyn CallbackDispatcher>) -> Self {
 		Self { dispatcher, next_id: AtomicU64::new(1) }
+	}
+
+	/// Host-issued device callback (forge dyn bridge).
+	///
+	/// Same destination as nested [`Self::dispatch`] (`omp.devices.call`), but
+	/// without a CONTROL parent invocation — `forge@1` is already a host tool
+	/// call when it reaches a dyn forge host.
+	pub async fn dispatch_host(
+		&self,
+		target: Arc<ControlConnectionIdentity>,
+		operation: &'static str,
+		arguments: serde_json::Map<String, serde_json::Value>,
+		policy: CallbackConcurrency,
+		timeout: Duration,
+		device: Option<Str>,
+	) -> Result<serde_json::Value, ControlProtocolError> {
+		let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
+		let invocation = sf!("{}:{}:{}", operation, target.host_generation, id);
+		let authority = ControlInvocationAuthority {
+			invocation,
+			phase: InvocationPhase::EffectsAuthorized,
+			session: sf!("forge-bridge"),
+			turn: None,
+			event: None,
+			call: None,
+			device,
+			effects: Box::new([]),
+			place_kind: sf!("host"),
+			lifecycle: LifecyclePhase::Active,
+			roots: Box::new([]),
+			remote: false,
+			has_ui: false,
+			headless: true,
+			settings: serde_json::Map::new(),
+			secret_settings: Box::new([]),
+			data: None,
+			direct_filesystem: None,
+		};
+		self
+			.dispatcher
+			.dispatch(target, ControlDispatch {
+				operation: sf!(operation),
+				arguments,
+				authority,
+				policy,
+				deadline: EventDeadline { at: Instant::now() + timeout },
+			})
+			.await
 	}
 
 	/// Dispatches one independently scoped callback. The new callback carries

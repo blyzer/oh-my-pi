@@ -1,0 +1,19 @@
+[
+  {
+    "number": 3,
+    "title": "Bug",
+    "body": "steps",
+    "state": "open",
+    "html_url": "https://github.com/acme/widget/issues/3"
+  },
+  {
+    "number": 4,
+    "title": "A pull request",
+    "body": "should be skipped for issues",
+    "state": "open",
+    "html_url": "https://github.com/acme/widget/pull/4",
+    "pull_request": {
+      "url": "https://api.github.com/repos/acme/widget/pulls/4"
+    }
+  }
+]

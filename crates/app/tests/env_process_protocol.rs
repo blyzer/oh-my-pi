@@ -5,7 +5,8 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use omp_envd::exec::{ExecError, ExecHost};
+use omp_envd::exec::ExecHost;
+use omp_exec::ExecError;
 use omp_proto::env::v1::{
 	CurrentWorktree, CurrentWorktreeResult, GetProcess, ProcessSpec, ReadyProbe, ReadyTcp,
 	RestartProcess, Script, StartProcess, WorktreeOp, WorktreeResult, ready_probe, worktree_op,

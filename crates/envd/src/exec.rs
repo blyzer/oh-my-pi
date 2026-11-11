@@ -22,9 +22,10 @@ use bytes::{Buf as _, Bytes, BytesMut};
 use flume::Receiver;
 use futures::future::try_join_all;
 use nix::errno::Errno;
-use omp_agent::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
+use omp_contract::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
 use omp_core::{Hash32, Str, sf};
+use omp_exec::{ExecError, ExecEvent, IdentityError, LeaseError};
 use omp_journal::blob::{BlobStage, BlobStore};
 use omp_proto::{
 	bounds::{FRAME_MAX_BYTES, FrameBoundsError, validate_worker_frame},
@@ -61,7 +62,7 @@ use url::Url;
 
 use super::{
 	admission,
-	admission::{GithubMutationTarget, SandboxUnavailable},
+	admission::GithubMutationTarget,
 	approval_relay::{EnvApprover, OwnedApprovals, RouteBinding},
 	devices_host::{CommandDevices, CommandIssuer, IssuerCell},
 	exec_network_diag::{
@@ -71,12 +72,11 @@ use super::{
 	exec_sandbox,
 	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
-	process_identity::{IdentityError, ProcessIdentity},
+	process_identity::ProcessIdentity,
 	process_log,
 	process_log::{LogChunk, ProcessLog},
 	process_store::{
-		DaemonLease, LeaseError, ProcessPhase, ProcessRecord, ProcessStore, ProcessStoreSnapshot,
-		RestartRecord, StoreError,
+		DaemonLease, ProcessPhase, ProcessRecord, ProcessStore, ProcessStoreSnapshot, RestartRecord,
 	},
 	reflection_relay::OwnedReflection,
 	sandbox_proxy::{BrokerDenial, EgressGrants},
@@ -109,143 +109,6 @@ impl WorkspaceEnvironmentDigest {
 	pub const fn as_bytes(&self) -> &[u8; 32] {
 		self.0.as_bytes()
 	}
-}
-
-/// Errors returned by the environment execution host.
-#[derive(Debug, thiserror::Error)]
-pub enum ExecError {
-	/// The requested session does not exist.
-	#[error("exec session was not found")]
-	SessionNotFound,
-	/// The requested execution does not exist or has already finished.
-	#[error("execution was not found")]
-	RunNotFound,
-	/// Final working-directory metadata is not retained for this execution.
-	#[error("execution final working directory was not found")]
-	FinalCwdNotFound,
-	/// Final working-directory metadata did not match the caller's fence.
-	#[error("execution final working-directory revision is stale")]
-	StaleFinalCwdRevision,
-	/// An exec-session request used an incompatible schema revision.
-	#[error("exec-session wire revision does not match the Environment schema")]
-	WireRevision,
-	/// A requested shell profile is not advertised by this backend.
-	#[error("shell profile {profile:?} is not supported by this backend")]
-	UnsupportedShellProfile {
-		/// Requested profile name.
-		profile: Str,
-	},
-	/// The control operation was outside the declared vocabulary.
-	#[error("exec control kind is invalid")]
-	InvalidControl,
-	/// A command-local environment delta used an invalid wire value.
-	#[error("command-local environment delta is invalid")]
-	InvalidRunEnvironment,
-	/// The requested named process does not exist.
-	#[error("named process {name:?} was not found")]
-	ProcessNotFound {
-		/// The missing process name.
-		name: Str,
-	},
-	/// A process with this name is already registered.
-	#[error("named process {name:?} already exists")]
-	ProcessExists {
-		/// The already-registered process name.
-		name: Str,
-	},
-	/// A named-process request targeted a retired generation.
-	#[error(
-		"named process {name:?} generation {requested} is stale; current generation is {current}"
-	)]
-	StaleProcessGeneration {
-		/// Stable process name.
-		name:      Str,
-		/// Generation carried by the request.
-		requested: u64,
-		/// Current retained generation.
-		current:   u64,
-	},
-	/// A request contained an unsupported signal name.
-	#[error("unsupported signal {signal:?}")]
-	UnsupportedSignal {
-		/// The unsupported signal name.
-		signal: Str,
-	},
-	/// A URI could not be used as a local working directory.
-	#[error("invalid working-directory URI {uri:?}")]
-	InvalidCwd {
-		/// The unusable working-directory URI.
-		uri: Str,
-	},
-	/// The shell engine rejected the requested operation.
-	#[error("shell execution failed: {0}")]
-	Shell(Str),
-	/// A named-process readiness probe was invalid or did not pass.
-	#[error("process readiness failed: {0}")]
-	Readiness(Str),
-	/// A readiness-probe reply frame failed the protobuf preflight, so it was
-	/// not decoded.
-	#[error("readiness probe reply frame rejected before decoding")]
-	ProbeFrame {
-		/// Preflight failure.
-		#[source]
-		source: FrameBoundsError,
-	},
-	/// A readiness-probe reply frame passed the preflight but is not a valid
-	/// `WorkerFrame`.
-	#[error("readiness probe reply frame is not a valid worker frame")]
-	ProbeDecode {
-		/// Protobuf decode failure.
-		#[source]
-		source: prost::DecodeError,
-	},
-	/// An operating-system process primitive failed.
-	#[error("process I/O failed: {0}")]
-	Io(#[from] io::Error),
-	/// The target actor has stopped.
-	#[error("exec session has closed")]
-	SessionClosed,
-	/// Shell output could not enter the content-addressed artifact store.
-	#[error(transparent)]
-	OutputStore(#[from] omp_journal::blob::Error),
-	/// A named process used an invalid durable name.
-	#[error("process name must be 1-48 ASCII letters, digits, dot, underscore, or hyphen")]
-	InvalidProcessName,
-	/// Detached processes cannot retain a pseudo-terminal.
-	#[error("detached processes cannot use a PTY")]
-	DetachedPty,
-	/// Durable process metadata could not be committed.
-	#[error(transparent)]
-	ProcessStore(#[from] StoreError),
-	/// A durable operating-system identity could not be captured.
-	#[error(transparent)]
-	ProcessIdentity(#[from] IdentityError),
-	/// Another daemon already owns the durable process namespace.
-	#[error(transparent)]
-	ProcessLease(#[from] LeaseError),
-	/// The configured command sandbox could not be compiled.
-	#[error("failed to enable sandbox mode {mode}")]
-	Sandbox {
-		/// Requested user-facing posture.
-		mode:   &'static str,
-		/// Typed sandbox compiler failure.
-		#[source]
-		source: omp_sandbox::SandboxError,
-	},
-}
-
-/// One ordered event emitted by an execution.
-#[derive(Clone, Debug)]
-pub enum ExecEvent {
-	/// The session dequeued this command and entered execution.
-	Started {
-		/// Opaque execution identifier assigned when the command was queued.
-		exec_id: Bytes,
-	},
-	/// Bytes written by stdout, stderr, or the PTY.
-	Output(OutputFrame),
-	/// The terminal execution status. No output follows it.
-	Exit(ExitEvent),
 }
 
 /// One event emitted by an attached named process.
@@ -301,6 +164,43 @@ impl Drop for ExecRun {
 	}
 }
 
+impl omp_exec::ExecRun for ExecRun {
+	fn id(&self) -> &[u8] {
+		&self.id
+	}
+
+	fn next_event(&self) -> impl std::future::Future<Output = Option<ExecEvent>> + Send {
+		async move { self.events.recv_async().await.ok() }
+	}
+
+	fn cancel(&self) {
+		self.control.cancel(CANCEL_GRACE);
+	}
+}
+
+impl omp_exec::ExecHost for ExecHost {
+	type Run = ExecRun;
+
+	fn open_session(
+		&self,
+		request: OpenSessionRequest,
+	) -> impl std::future::Future<Output = Result<OpenSessionResponse, ExecError>> + Send {
+		self.drive_open_session(request)
+	}
+
+	fn exec(
+		&self,
+		request: ExecRequest,
+		timeout: Option<Duration>,
+	) -> impl std::future::Future<Output = Result<(ExecStarted, ExecRun), ExecError>> + Send {
+		self.drive_exec(request, timeout)
+	}
+
+	fn close_session(&self, session: &[u8]) -> Result<CloseSessionResponse, ExecError> {
+		self.drive_close_session(session)
+	}
+}
+
 /// Snapshot plus future events returned by named-process attachment.
 pub struct ProcessAttachment {
 	/// Attachment acknowledgement.
@@ -328,7 +228,7 @@ struct HostInner {
 	processes:              Mutex<HashMap<Str, Arc<NamedProcess>>>,
 	starting:               Mutex<HashSet<Str>>,
 	environment:            Mutex<WorkspaceEnvironment>,
-	github_cache:           Mutex<Option<Arc<GithubCache>>>,
+	forge_cache:            Mutex<Option<Arc<ForgeCache>>>,
 	devices:                Mutex<Option<Arc<crate::devices_host::DynHost>>>,
 	output_store:           Mutex<Option<BlobStore>>,
 	persistence:            Mutex<Option<ProcessPersistence>>,
@@ -563,7 +463,7 @@ impl ExecHost {
 				processes:              Mutex::new(HashMap::new()),
 				starting:               Mutex::new(HashSet::new()),
 				environment:            Mutex::new(read_workspace_environment()),
-				github_cache:           Mutex::new(None),
+				forge_cache:            Mutex::new(None),
 				devices:                Mutex::new(None),
 				output_store:           Mutex::new(None),
 				persistence:            Mutex::new(None),
@@ -572,6 +472,31 @@ impl ExecHost {
 				sandbox_approval_route: Mutex::new(None),
 			}),
 		}
+	}
+
+	/// Inherent `open_session`, named so the [`omp_exec::ExecHost`] impl cannot
+	/// recurse into itself.
+	fn drive_open_session(
+		&self,
+		request: OpenSessionRequest,
+	) -> impl std::future::Future<Output = Result<OpenSessionResponse, ExecError>> + Send + '_ {
+		self.open_session(request)
+	}
+
+	/// Inherent `exec`, named so the [`omp_exec::ExecHost`] impl cannot recurse
+	/// into itself.
+	fn drive_exec(
+		&self,
+		request: ExecRequest,
+		timeout: Option<Duration>,
+	) -> impl std::future::Future<Output = Result<(ExecStarted, ExecRun), ExecError>> + Send + '_ {
+		self.exec(request, timeout)
+	}
+
+	/// Inherent `close_session`, named so the [`omp_exec::ExecHost`] impl cannot
+	/// recurse into itself.
+	fn drive_close_session(&self, session: &[u8]) -> Result<CloseSessionResponse, ExecError> {
+		self.close_session(session)
 	}
 
 	/// Configures sandbox policy for subsequently opened sessions and detached
@@ -640,7 +565,10 @@ impl ExecHost {
 			// state resolves a defaulted `yolo` to `write` and the shell to the
 			// `exec` tier. A sandbox the user asked for stays a hard error.
 			Err(source)
-				if !settings.explicit && SandboxUnavailable::classify(&source).runs_unsandboxed() =>
+				if !settings.explicit
+					&& crate::exec_sandbox::runs_unsandboxed(
+						crate::exec_sandbox::classify_unavailable(&source),
+					) =>
 			{
 				tracing::warn!(%source, "sandbox unavailable; commands run unsandboxed under approval");
 				Ok(None)
@@ -841,8 +769,8 @@ impl ExecHost {
 	}
 
 	/// Injects the production GitHub resource cache owned by the Environment.
-	pub fn with_github_cache(self, cache: Arc<GithubCache>) -> Self {
-		*self.inner.github_cache.lock() = Some(cache);
+	pub fn with_forge_cache(self, cache: Arc<ForgeCache>) -> Self {
+		*self.inner.forge_cache.lock() = Some(cache);
 		self
 	}
 
@@ -2913,7 +2841,7 @@ async fn finish_session_command(
 	if result == RunTerminal::Exited(0)
 		&& !command.github_targets.is_empty()
 		&& let Some(host) = command.host.upgrade()
-		&& let Some(cache) = host.github_cache.lock().clone()
+		&& let Some(cache) = host.forge_cache.lock().clone()
 	{
 		let active_repo = github_repository(working_dir);
 		let repos = command
@@ -2927,13 +2855,13 @@ async fn finish_session_command(
 	}
 	let mut status = result.status_with_projection(elapsed, spilled_output, projection);
 	status.diags = command.diags.lock().iter().map(wire_diag).collect();
-	let event = ExecEvent::Exit(ExitEvent {
+	let event = ExecEvent::Exit(Box::new(ExitEvent {
 		exec: command.exec.clone(),
 		status: Some(status),
 		final_cwd_uri,
 		final_cwd_revision,
 		props: Default::default(),
-	});
+	}));
 	// `send_async`, never `send`: the host queue is bounded, and an output
 	// burst that fills it leaves the blocking send parking the runtime thread
 	// that the only consumer needs in order to drain. On a current-thread
@@ -4687,9 +4615,9 @@ mod tests {
 
 	fn decision(
 		scope: ApprovalScope,
-		source: omp_agent::ApprovalSource,
-	) -> omp_agent::ApprovalDecision {
-		omp_agent::ApprovalDecision {
+		source: omp_contract::ApprovalSource,
+	) -> omp_contract::ApprovalDecision {
+		omp_contract::ApprovalDecision {
 			approved: true,
 			scope,
 			source,
@@ -4703,11 +4631,11 @@ mod tests {
 	/// prompt with `answer`, and returns the filed requirement and the grant.
 	async fn amend_through_route(
 		host: &ExecHost,
-		inbox: &omp_agent::ApprovalInbox,
+		inbox: &omp_contract::ApprovalInbox,
 		command: &str,
 		fact: &SandboxDenialFact,
 		scope: &str,
-		answer: omp_agent::ApprovalDecision,
+		answer: omp_contract::ApprovalDecision,
 	) -> (ApprovalSpec, Option<AmendmentGrant>) {
 		let approval = host.approve_sandbox_amendment(None, command, fact, scope);
 		tokio::pin!(approval);
@@ -4728,7 +4656,7 @@ mod tests {
 	#[tokio::test]
 	async fn jit_approval_names_only_the_detected_capability_and_exact_command() {
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let command = "printf ready; touch /private/blocked";
 		let fact = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
@@ -4738,7 +4666,7 @@ mod tests {
 			command,
 			&fact,
 			"/private",
-			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+			decision(ApprovalScope::Once, omp_contract::ApprovalSource::User),
 		)
 		.await;
 		assert_eq!(reason.kind, "sandbox_amendment");
@@ -4755,7 +4683,7 @@ mod tests {
 			command,
 			&fact,
 			"network api.example.test:443",
-			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+			decision(ApprovalScope::Once, omp_contract::ApprovalSource::User),
 		)
 		.await;
 		assert_eq!(reason.subject, "network api.example.test:443");
@@ -4774,9 +4702,9 @@ mod tests {
 	/// network fact extends the binding's grants.
 	#[tokio::test]
 	async fn network_amendments_offer_the_session_and_paths_stay_once() {
-		use omp_agent::ApprovalSource;
+		use omp_contract::ApprovalSource;
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let grants = host.egress_grants(None).expect("the bound route's grants");
 		let network = SandboxDenialFact::Network { host: sf!("pypi.org"), port: 443 };
@@ -4907,7 +4835,7 @@ mod tests {
 	fn rebinding_or_revoking_the_route_clears_its_egress_grants() {
 		let host = ExecHost::new();
 		assert!(host.egress_grants(None).is_none(), "no route, no binding");
-		let (route, _inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, _inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route.clone()));
 		let first = host.egress_grants(None).expect("bound grants");
 		first.insert("pypi.org", 443);
@@ -4941,7 +4869,7 @@ mod tests {
 		use v1::server_frame::Body;
 
 		let host = ExecHost::new();
-		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_contract::ApprovalBook::new()), None);
 		host.bind_sandbox_approval_route(Some(route));
 		let (responses, frames) = flume::bounded(4);
 		let approvals = crate::approval_relay::ConnectionApprovals::new(responses);

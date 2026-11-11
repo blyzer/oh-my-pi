@@ -7,16 +7,19 @@ pub mod host;
 pub(super) mod local;
 pub(crate) mod mcp;
 mod memory;
+#[cfg(feature = "cap-ssh")]
 pub(super) mod ssh;
 pub(super) mod vault;
 
 use std::{fmt::Display, path::PathBuf, sync::Arc};
 
-use omp_agent::{SessionAuthority, SessionEndpoint};
-use omp_cache::github_cache::GithubCache;
+use omp_cache::forge_cache::ForgeCache;
+use omp_contract::{SessionAuthority, SessionEndpoint};
 use omp_core::{CowBytes, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 use omp_journal::blob::{BlobRef, BlobStore};
+#[cfg(feature = "cap-ssh")]
+use omp_ssh::SshService;
 use omp_tool::FetchEffects;
 use omp_tools::read::{
 	Fault,
@@ -29,14 +32,20 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 
+#[cfg(feature = "cap-forge")]
+use super::forge_url::{ForgeResolver, ForgeScheme};
 use super::{
-	github_url::{GithubCredentialBridge, GithubResolver, GithubScheme},
-	mcp::McpService,
-	security_scan::SecurityScanService,
-	ssh::SshService,
+	forge_url::ForgeCredentialBridge, mcp::McpService, security_scan::SecurityScanService,
 	vault::VaultService,
 };
+#[cfg(feature = "cap-forge")]
+use crate::forge_adapter;
 use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
+
+/// Forge router the production `pr://` and `issue://` resolvers read through.
+#[cfg(feature = "cap-forge")]
+type SchemeForge =
+	omp_forge_delegated::Delegated<forge_adapter::ForgeBackend, omp_forge_delegated::PermitAll>;
 
 #[derive(Clone, Copy, Debug)]
 enum RegistryResource {
@@ -209,15 +218,19 @@ pub(super) enum UrlResolver {
 	Agent(RegistryResolver),
 	/// Read-only agent transcript index and bodies.
 	History(RegistryResolver),
-	/// Direct GitHub issue views.
-	Issue(GithubResolver),
-	/// Direct GitHub pull-request views and diffs.
-	Pr(GithubResolver),
+	/// Cached forge issues. Numbered reads use the delegated forge host.
+	#[cfg(feature = "cap-forge")]
+	Issue(ForgeResolver<SchemeForge>),
+	/// Cached forge change requests and diffs. Numbered reads use the delegated
+	/// forge host.
+	#[cfg(feature = "cap-forge")]
+	Pr(ForgeResolver<SchemeForge>),
 	/// Session-local scratch files.
 	Local(local::LocalResolver),
 	/// Active-session bounded memory projections.
 	Memory(memory::MemoryUrlResolver),
-	/// Configured native SSH hosts.
+	/// Configured native SSH hosts. Absent when `cap-ssh` is compiled out.
+	#[cfg(feature = "cap-ssh")]
 	Ssh(ssh::SshResolver),
 	/// Project-owned security scan reports and advisories.
 	Security(SecurityScanService),
@@ -244,9 +257,11 @@ impl Resolve for UrlResolver {
 			Self::Artifact(resolver) => resolver.read(resource, selector).await,
 			Self::Attachment(resolver) => resolver.read(resource, selector).await,
 			Self::Agent(resolver) | Self::History(resolver) => resolver.read(resource, selector).await,
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => resolver.read(resource, selector).await,
 			Self::Local(resolver) => resolver.read(resource, selector).await,
 			Self::Memory(resolver) => resolver.read(resource, selector).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.read(resource, selector).await,
 			Self::Security(resolver) => resolver.read(resource, selector).await,
 			Self::Vault(resolver) => resolver.read(resource, selector).await,
@@ -263,9 +278,8 @@ impl Resolve for UrlResolver {
 		selector: &'a ParsedSelector,
 	) -> Result<ResolvedRead, Fault> {
 		match self {
-			Self::Issue(resolver) | Self::Pr(resolver) => {
-				resolver.read_with_diags(resource, selector).await
-			},
+			#[cfg(feature = "cap-forge")]
+			Self::Issue(resolver) | Self::Pr(resolver) => resolver.read_with_diags(resource, selector).await,
 			_ => self
 				.read(resource, selector)
 				.await
@@ -284,9 +298,11 @@ impl Resolve for UrlResolver {
 			Self::Agent(resolver) | Self::History(resolver) => {
 				resolver.read_query(resource, query, selector).await
 			},
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.read_query(resource, query, selector).await
 			},
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.read_query(resource, query, selector).await,
 			Self::Security(resolver) if query.is_some() => {
 				resolver.read_query(resource, query, selector).await
@@ -306,6 +322,7 @@ impl Resolve for UrlResolver {
 		selector: &'a ParsedSelector,
 	) -> Result<ResolvedRead, Fault> {
 		match self {
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver
 					.read_query_with_diags(resource, query, selector)
@@ -337,6 +354,7 @@ impl Resolve for UrlResolver {
 			},
 			Self::Local(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Memory(resolver) => resolver.list(resource, max_entries, max_bytes).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Security(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Vault(resolver) => resolver.list(resource, max_entries, max_bytes).await,
@@ -347,6 +365,7 @@ impl Resolve for UrlResolver {
 			}),
 			Self::Content(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Docs(resolver) => resolver.list(resource, max_entries, max_bytes).await,
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Err(Fault::Invalid {
 				message: Str::new_static("GitHub list resources are read as Markdown."),
 			}),
@@ -364,10 +383,12 @@ impl Resolve for UrlResolver {
 			Self::Agent(resolver) => resolver.path(resource).await,
 			Self::Local(resolver) => resolver.path(resource).await,
 			Self::Content(resolver) => resolver.path(resource).await,
-			Self::Ssh(_) | Self::Vault(_) => Err(Fault::Invalid {
-				message: Str::new_static(
-					"Remote and vault resources have no local materializable path.",
-				),
+			#[cfg(feature = "cap-ssh")]
+			Self::Ssh(_) => Err(Fault::Invalid {
+				message: Str::new_static("Remote resources have no local materializable path."),
+			}),
+			Self::Vault(_) => Err(Fault::Invalid {
+				message: Str::new_static("Vault resources have no local materializable path."),
 			}),
 			Self::Mcp(_) => Err(Fault::Invalid {
 				message: Str::new_static("MCP resources have no local materializable path."),
@@ -391,13 +412,16 @@ impl Resolve for UrlResolver {
 			},
 			Self::Local(resolver) => resolver.complete(query, max_results).await,
 			Self::Memory(resolver) => resolver.complete(query, max_results).await,
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(resolver) => resolver.complete(query, max_results).await,
 			Self::Security(resolver) => resolver.complete(query, max_results).await,
 			Self::Vault(resolver) => resolver.complete(query, max_results).await,
 			Self::Mcp(resolver) => resolver.complete(query, max_results).await,
 			Self::Content(resolver) => resolver.complete(query, max_results).await,
 			Self::Docs(resolver) => resolver.complete(query, max_results).await,
-			Self::Issue(_) | Self::Pr(_) | Self::Conflict(_) => Ok(Vec::new()),
+			#[cfg(feature = "cap-forge")]
+			Self::Issue(_) | Self::Pr(_) => Ok(Vec::new()),
+			Self::Conflict(_) => Ok(Vec::new()),
 		}
 	}
 
@@ -419,9 +443,11 @@ impl Resolve for UrlResolver {
 	/// environment fetches nothing for it.
 	fn read_fetch(&self, resource: &str, query: Option<&str>) -> Option<FetchEffects> {
 		match self {
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => ssh::parse_resource(resource)
 				.is_ok()
 				.then_some(FetchEffects { credentials: true }),
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Some(FetchEffects { credentials: true }),
 			Self::Mcp(resolver) => resolver.read_fetch(resource, query),
 			Self::Host(_) => Some(FetchEffects { credentials: false }),
@@ -450,7 +476,10 @@ impl Resolve for UrlResolver {
 	/// [`Self::read_fetch`] describes.
 	fn walk_fetch(&self, _resource: &str) -> Option<FetchEffects> {
 		match self {
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => Some(FetchEffects { credentials: true }),
+			#[cfg(feature = "cap-forge")]
+			Self::Issue(_) | Self::Pr(_) => None,
 			Self::Host(_)
 			| Self::Artifact(_)
 			| Self::Attachment(_)
@@ -463,8 +492,6 @@ impl Resolve for UrlResolver {
 			| Self::Mcp(_)
 			| Self::Content(_)
 			| Self::Docs(_)
-			| Self::Issue(_)
-			| Self::Pr(_)
 			| Self::Conflict(_) => None,
 		}
 	}
@@ -478,9 +505,11 @@ impl UrlResolver {
 	/// resource it cannot name a host for.
 	pub(super) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<FetchHost> {
 		match self {
+			#[cfg(feature = "cap-forge")]
 			Self::Issue(resolver) | Self::Pr(resolver) => {
 				resolver.fetch_host(resource, query).map(FetchHost::github)
 			},
+			#[cfg(feature = "cap-ssh")]
 			Self::Ssh(_) => ssh::parse_resource(resource)
 				.ok()
 				.map(|(alias, _)| FetchHost::ssh(alias)),
@@ -515,13 +544,14 @@ pub(super) fn production_url_resolvers(
 	session_id: &str,
 	sessions_dir: PathBuf,
 	workspace_root: PathBuf,
-	github_cache: Arc<GithubCache>,
-	github_credentials: Arc<GithubCredentialBridge>,
+	forge_cache: Arc<ForgeCache>,
+	github_credentials: Arc<ForgeCredentialBridge>,
+	#[cfg(feature = "cap-forge")] forge: SchemeForge,
 	content: Vec<Arc<dyn ContentResolver>>,
 	host_resources: Option<Arc<dyn HostResources>>,
 	session_authority: Option<Arc<dyn SessionAuthority>>,
 	mcp: Arc<McpService>,
-	ssh: SshService,
+	#[cfg(feature = "cap-ssh")] ssh: SshService,
 	security: SecurityScanService,
 	vault: VaultService,
 ) -> Arc<ResolverTable<UrlResolver>> {
@@ -543,6 +573,7 @@ pub(super) fn production_url_resolvers(
 			)
 			.expect("memory URL resolver is unique");
 	}
+	#[cfg(feature = "cap-ssh")]
 	builder
 		.register(
 			SchemeEntry::new(Scheme::Ssh, true, false, "configured native SSH/SFTP hosts")
@@ -579,28 +610,35 @@ pub(super) fn production_url_resolvers(
 			UrlResolver::Mcp(mcp::McpUrlResolver::new(mcp)),
 		)
 		.expect("mcp URL resolver is unique");
-	builder
-		.register(
-			SchemeEntry::new(Scheme::Issue, true, false, "direct GitHub issues"),
-			UrlResolver::Issue(GithubResolver::new(
-				GithubScheme::Issue,
-				workspace_root.clone(),
-				Arc::clone(&github_cache),
-				Arc::clone(&github_credentials),
-			)),
-		)
-		.expect("issue URL resolver is unique");
-	builder
-		.register(
-			SchemeEntry::new(Scheme::Pr, true, false, "direct GitHub pull requests and diffs"),
-			UrlResolver::Pr(GithubResolver::new(
-				GithubScheme::PullRequest,
-				workspace_root,
-				github_cache,
-				github_credentials,
-			)),
-		)
-		.expect("pr URL resolver is unique");
+	#[cfg(feature = "cap-forge")]
+	{
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Issue, true, false, "cached forge issues"),
+				UrlResolver::Issue(ForgeResolver::new(
+					ForgeScheme::Issue,
+					workspace_root.clone(),
+					Arc::clone(&forge_cache),
+					Arc::clone(&github_credentials),
+					forge.clone(),
+				)),
+			)
+			.expect("issue URL resolver is unique");
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Pr, true, false, "cached forge change requests and diffs"),
+				UrlResolver::Pr(ForgeResolver::new(
+					ForgeScheme::PullRequest,
+					workspace_root.clone(),
+					forge_cache,
+					github_credentials,
+					forge,
+				)),
+			)
+			.expect("pr URL resolver is unique");
+	}
+	#[cfg(not(feature = "cap-forge"))]
+	let _ = (forge_cache, github_credentials);
 	builder
 		.register(
 			SchemeEntry::new(Scheme::Attachment, true, false, "latest user image attachments"),
@@ -919,7 +957,9 @@ fn source_fault(cause: impl std::fmt::Display) -> Fault {
 
 #[cfg(test)]
 mod tests {
-	use omp_agent::{SessionRole, SessionTopology, Up};
+	use std::sync::Arc;
+
+	use omp_contract::{EnvEvent, EnvEventSink, SessionRole, SessionTopology};
 	use omp_core::sf;
 	use omp_dom::{NodeSpec, Op, Txn};
 	use omp_journal::EntryId;
@@ -954,13 +994,13 @@ mod tests {
 	}
 
 	fn endpoint(id: &'static str, dom: &Dom) -> SessionEndpoint {
-		let (up, _rx) = flume::unbounded::<Up>();
+		let (up, _rx) = flume::unbounded::<EnvEvent>();
 		SessionEndpoint {
-			id: sf!(id),
-			name: sf!(id),
-			up,
-			snapshot: Arc::new(RwLock::new(dom.snapshot())),
-			topology: SessionTopology {
+			id:        sf!(id),
+			name:      sf!(id),
+			up:        Arc::new(up),
+			snapshot:  Arc::new(RwLock::new(dom.snapshot())),
+			topology:  SessionTopology {
 				role:      SessionRole::Main,
 				parent_id: None,
 				main_id:   sf!(id),

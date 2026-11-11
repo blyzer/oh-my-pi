@@ -15,7 +15,7 @@
 //! Any looser policy (`workspace-write`, `network-open`, `write`, `yolo`) is
 //! returned as [`ExecutorError::PolicyUnmappable`].
 
-use omp_agent::delegated::{ApprovalPosture, DelegatedPolicy, NetworkPosture, SandboxPosture};
+use omp_contract::delegated::{ApprovalPosture, DelegatedPolicy, NetworkPosture, SandboxPosture};
 
 /// The one policy ACP can honestly represent.
 pub const ACP_POLICY: DelegatedPolicy = DelegatedPolicy::STRICTEST;
@@ -50,7 +50,7 @@ mod tests {
 
 	#[test]
 	fn looser_policies_are_not_supported() {
-		use omp_agent::delegated::*;
+		use omp_contract::delegated::*;
 		let workspace = DelegatedPolicy::new(
 			SandboxPosture::WorkspaceWrite,
 			NetworkPosture::Disabled,

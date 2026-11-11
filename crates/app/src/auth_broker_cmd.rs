@@ -148,15 +148,15 @@ async fn remote_login(provider: &str, alias: &str, dry_run: bool) -> miette::Res
 			},
 			event = channel.next_event() => {
 				match event.into_diagnostic()? {
-					Some(omp_envd::ssh::InteractiveEvent::Stdout(bytes)) => {
+					Some(omp_ssh::InteractiveEvent::Stdout(bytes)) => {
 						stdout.write_all(bytes.as_ref()).await.into_diagnostic()?;
 						stdout.flush().await.into_diagnostic()?;
 					},
-					Some(omp_envd::ssh::InteractiveEvent::Stderr(bytes)) => {
+					Some(omp_ssh::InteractiveEvent::Stderr(bytes)) => {
 						stderr.write_all(bytes.as_ref()).await.into_diagnostic()?;
 						stderr.flush().await.into_diagnostic()?;
 					},
-					Some(omp_envd::ssh::InteractiveEvent::ExitStatus(status)) => break status,
+					Some(omp_ssh::InteractiveEvent::ExitStatus(status)) => break status,
 					None => return Err(miette!("remote authentication channel closed")),
 				}
 			},

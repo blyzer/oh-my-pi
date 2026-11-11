@@ -27,6 +27,7 @@ area/agent:
   - changed-files:
       - any-glob-to-any-file:
           - 'crates/agent/**'
+          - 'crates/contract/**'
           - 'crates/scribe/**'
           - 'crates/memory/**'
           - 'crates/snapcompact/**'
@@ -52,6 +53,7 @@ area/tools:
       - any-glob-to-any-file:
           - 'crates/tool/**'
           - 'crates/tools/**'
+          - 'crates/roster-probe/**'
           - 'crates/edit/**'
           - 'crates/ast/**'
           - 'crates/walker/**'
@@ -66,7 +68,14 @@ area/env:
           - 'crates/env/**'
           - 'crates/envd/**'
           - 'crates/exec/**'
+          - 'crates/ssh/**'
           - 'crates/sandbox/**'
+
+area/forge:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/forge/**'
+          - 'crates/forge-delegated/**'
 
 area/shell:
   - changed-files:
@@ -120,6 +129,8 @@ area/e2e:
 area/ci:
   - changed-files:
       - any-glob-to-any-file:
+          - 'crates/ci/**'
+          - 'crates/ci-delegated/**'
           - '.github/**'
           - '.cargo/**'
           - '.config/**'

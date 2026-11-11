@@ -62,6 +62,7 @@ use crate::{
 		Composer, ComposerAction, ComposerEscape, ComposerSettings, DoubleEscapeTarget, PasteOptions,
 		PasteOutcome, PrefixMode, SpaceHold, SpaceHoldEvent,
 	},
+	extension_slots::{ExtensionSlot, ExtensionSlots, SlotPlacement},
 	extension_status::{ExtensionStatus, ExtensionStatuses},
 	fault, fault_in,
 	gitwatch::{GitFacts, GitWatch},
@@ -731,6 +732,8 @@ pub(crate) struct Presenter {
 	pub(crate) local: LocalFacts,
 	/// Observer-local, sanitized extension status contributions.
 	pub(crate) extension_status: ExtensionStatuses,
+	/// Observer-local extension slot mounts (rails, bands, status segments).
+	pub(crate) extension_slots: ExtensionSlots,
 	pub(crate) composer: Composer,
 	pub(crate) overlays: Overlays,
 	pub(crate) turn_active: bool,
@@ -1130,7 +1133,8 @@ impl Presenter {
 		crate::commands::workspace::register_move_completer(&options.con, &options.services);
 		let mut overlays = Overlays::default();
 		overlays.sync_approval(&replica);
-		let (git_watch, git_facts) = GitWatch::start(&options.project).unzip();
+		let (git_watch, git_facts) =
+			GitWatch::start_with_services(&options.project, Arc::clone(&options.services)).unzip();
 		let mut local = LocalFacts::at_launch(git_watch.as_ref().map(GitWatch::launch));
 		local.sync_con(&options.con, &options.model);
 		local.sync_primary_billing(options.services.as_ref(), &options.model);
@@ -1139,6 +1143,7 @@ impl Presenter {
 		let mut active_time = ActiveTime::default();
 		active_time.set_running(Duration::ZERO, turn_active);
 		let extension_status = ExtensionStatuses::default();
+		let extension_slots = ExtensionSlots::default();
 		let mut wall_clock = WallClock::default();
 		let _ = wall_clock.refresh(Duration::ZERO, &local.status_appearance, &options.con);
 		let facts = status_facts(
@@ -1153,6 +1158,8 @@ impl Presenter {
 			None,
 			&options.con,
 			&extension_status,
+			&extension_slots,
+			Size { width, height: 24 },
 		);
 		let agents: AgentRoster = Arc::new(Mutex::new(agent_roster(&replica)));
 		let mut composer = Composer::new(
@@ -1225,6 +1232,7 @@ impl Presenter {
 			model: options.model,
 			local,
 			extension_status,
+			extension_slots,
 			composer,
 			overlays,
 			turn_active,
@@ -1538,17 +1546,44 @@ impl Presenter {
 		})
 	}
 
-	/// The editor band: the pinned error banner stacked over the composer
-	/// ( `errorBannerContainer` directly above `editorContainer`).
-	fn chrome_frame(&self, width: u16) -> Frame {
-		let composer = self.composer.frame();
-		let Some(banner) = self.banner_frame(width) else {
-			return composer.clone();
-		};
-		let rows = banner.size().height;
-		let mut frame = Frame::new(Size::new(width, rows.saturating_add(composer.size().height)));
-		frame.blit(&banner, 0, rows, 0, 0);
-		frame.blit(composer, 0, composer.size().height, 0, rows);
+	/// The editor band: optional extension above/below-editor mounts, the
+	/// pinned error banner, and the composer (`errorBannerContainer` above
+	/// `editorContainer`).
+	fn chrome_frame(&mut self, width: u16) -> Frame {
+		let viewport = Size { width, height: self.viewport_height.max(1) };
+		let above = self
+			.extension_slots
+			.frame(SlotPlacement::AboveEditor, viewport);
+		let below = self
+			.extension_slots
+			.frame(SlotPlacement::BelowEditor, viewport);
+		let composer = self.composer.frame().clone();
+		let banner = self.banner_frame(width);
+		let mut height = composer.size().height;
+		if let Some(frame) = above.as_ref() {
+			height = height.saturating_add(frame.size().height);
+		}
+		if let Some(frame) = banner.as_ref() {
+			height = height.saturating_add(frame.size().height);
+		}
+		if let Some(frame) = below.as_ref() {
+			height = height.saturating_add(frame.size().height);
+		}
+		let mut frame = Frame::new(Size::new(width, height));
+		let mut y = 0u16;
+		if let Some(above) = above.as_ref() {
+			frame.blit(above, 0, above.size().height, 0, y);
+			y = y.saturating_add(above.size().height);
+		}
+		if let Some(banner) = banner.as_ref() {
+			frame.blit(banner, 0, banner.size().height, 0, y);
+			y = y.saturating_add(banner.size().height);
+		}
+		frame.blit(&composer, 0, composer.size().height, 0, y);
+		y = y.saturating_add(composer.size().height);
+		if let Some(below) = below.as_ref() {
+			frame.blit(below, 0, below.size().height, 0, y);
+		}
 		frame
 	}
 
@@ -1658,6 +1693,7 @@ impl Presenter {
 			self.dismissed_error = None;
 			self.ask_notified = None;
 			self.extension_status.apply(ExtensionStatus::reset());
+			self.extension_slots.apply(ExtensionSlot::Reset, &self.ui);
 			if self.ask_open.take().is_some() {
 				self.overlays.close_id(crate::overlays::ask::ID);
 			}
@@ -1919,6 +1955,7 @@ impl Presenter {
 	fn sync_status(&mut self) -> bool {
 		self.sync_status_inputs();
 		let now = self.clock.elapsed();
+		let viewport = self.viewport();
 		let facts = status_facts(
 			&self.replica,
 			&self.model,
@@ -1931,6 +1968,8 @@ impl Presenter {
 			self.account_usage.usage(),
 			&self.con,
 			&self.extension_status,
+			&self.extension_slots,
+			viewport,
 		);
 		// The composer wears the rail while the plan Director is engaged.
 		// status row collapses the editor top gap (`EditorTopGap` /
@@ -3050,6 +3089,14 @@ impl Presenter {
 					Routed::Ignored
 				}
 			},
+			HostAction::ExtensionSlot(event) => {
+				if self.extension_slots.apply(event, &self.ui) {
+					let _ = self.sync_status();
+					Routed::Repaint
+				} else {
+					Routed::Ignored
+				}
+			},
 			HostAction::ExtensionTitle(title) => {
 				self.title.set_extension_title(title.as_str());
 				Routed::Ignored
@@ -3359,6 +3406,16 @@ impl Presenter {
 						Routed::Repaint
 					},
 					Err(error) => self.notice(error),
+				}
+			},
+			HostAction::ClosePanel(id) => {
+				if self.overlays.close_id(id.as_str()) {
+					let _ = self
+						.commands
+						.send(HostCommand::Overlay { id: id.clone(), open: false });
+					Routed::Repaint
+				} else {
+					Routed::Ignored
 				}
 			},
 			HostAction::Call(call) => {
@@ -5122,9 +5179,28 @@ impl Host {
 		let approval = self.presenter.approval_frame(size.width);
 		let overlay = self.presenter.overlay_frame(size);
 		let notice = self.presenter.status_frame(size.width);
+		let header = self
+			.presenter
+			.extension_slots
+			.frame(SlotPlacement::Header, size);
+		let footer = self
+			.presenter
+			.extension_slots
+			.frame(SlotPlacement::Footer, size);
+		let left_rail = self
+			.presenter
+			.extension_slots
+			.frame(SlotPlacement::SidebarLeft, size);
+		let right_rail = self
+			.presenter
+			.extension_slots
+			.frame(SlotPlacement::SidebarRight, size);
+		let reserved = self.presenter.extension_slots.reserved(size);
 		// The editor band: the pinned error banner (when any) over the
 		// composer, retired against and anchored as one chrome block.
-		let chrome = self.presenter.chrome_frame(size.width);
+		let chrome = self
+			.presenter
+			.chrome_frame(size.width.saturating_sub(reserved.total()));
 		let chrome_rows = chrome.size().height;
 		let composer = &self.presenter.composer;
 		let projection = self
@@ -5132,7 +5208,9 @@ impl Host {
 			.as_mut()
 			.expect("projection initialized before presentation");
 		projection.retire_under_pressure(chrome_rows, size.height);
-		let document = projection.document(&chrome, size);
+		let content_size =
+			Size { width: size.width.saturating_sub(reserved.total()), height: size.height };
+		let document = projection.document(&chrome, content_size);
 		//  status row sits directly above the editor and collapses the
 		// editor top gap (`EditorTopGap`): here the retry loader / notice /
 		// retry hint paints over the composer's gap row itself, wherever the
@@ -5140,13 +5218,14 @@ impl Host {
 		// tail — and below the banner when one is pinned.
 		let above_composer = size
 			.height
-			.saturating_sub(projection.composer_top(chrome_rows, size))
+			.saturating_sub(projection.composer_top(chrome_rows, content_size))
 			.saturating_sub(chrome_rows)
 			.saturating_add(composer.height())
 			.saturating_sub(1);
 		let document_options = OverlayOptions::default()
-			.width(Dim::Cells(size.width))
+			.width(Dim::Cells(content_size.width))
 			.anchor(OverlayAnchor::TopLeft)
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
 			.non_modal()
 			.z(10);
 		let approval_options = OverlayOptions::default()
@@ -5169,9 +5248,45 @@ impl Host {
 			// Clipboard/type refusals must remain visible while a modal owns
 			// focus; approvals still sit above notices at z=30.
 			.z(25);
+		let header_options = OverlayOptions::default()
+			.width(Dim::Cells(content_size.width))
+			.anchor(OverlayAnchor::TopLeft)
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
+			.non_modal()
+			.z(12);
+		let footer_options = OverlayOptions::default()
+			.width(Dim::Cells(content_size.width))
+			.anchor(OverlayAnchor::BottomLeft)
+			.margin(omp_tui::OverlayMargin { left: reserved.left, ..Default::default() })
+			.non_modal()
+			.z(12);
+		let left_rail_options = OverlayOptions::default()
+			.width(Dim::Cells(reserved.left))
+			.anchor(OverlayAnchor::TopLeft)
+			.non_modal()
+			.fill_height()
+			.z(11);
+		let right_rail_options = OverlayOptions::default()
+			.width(Dim::Cells(reserved.right))
+			.anchor(OverlayAnchor::TopRight)
+			.non_modal()
+			.fill_height()
+			.z(11);
 		let modal = approval.is_some() || (picker.is_some() && picker_modal);
 		let mut layers =
 			vec![Layer { frame: &document, options: &document_options, active: !modal }];
+		if let Some(frame) = header.as_ref() {
+			layers.push(Layer { frame, options: &header_options, active: false });
+		}
+		if let Some(frame) = footer.as_ref() {
+			layers.push(Layer { frame, options: &footer_options, active: false });
+		}
+		if let Some(frame) = left_rail.as_ref() {
+			layers.push(Layer { frame, options: &left_rail_options, active: false });
+		}
+		if let Some(frame) = right_rail.as_ref() {
+			layers.push(Layer { frame, options: &right_rail_options, active: false });
+		}
 		if let Some(frame) = notice.as_ref() {
 			layers.push(Layer { frame, options: &notice_options, active: false });
 		}
@@ -5860,6 +5975,8 @@ fn status_facts(
 	account_usage: Option<&crate::status_band::AccountUsage>,
 	con: &Ctx,
 	statuses: &ExtensionStatuses,
+	slots: &ExtensionSlots,
+	viewport: Size,
 ) -> StatusFacts {
 	let status = StatusLine::from_dom(dom);
 	// A live `ai_model` pick shows before its first turn journals it.
@@ -5917,9 +6034,13 @@ fn status_facts(
 		pull_request: local.pull_request.clone(),
 		worktree: local.worktree.clone(),
 		collab: None,
-		hook_status: statuses
-			.visible(CL_STATUS_LINE_SHOW_HOOK_STATUS.get(con))
-			.to_vec(),
+		hook_status: {
+			let mut hooks = statuses
+				.visible(CL_STATUS_LINE_SHOW_HOOK_STATUS.get(con))
+				.to_vec();
+			hooks.extend(slots.status_texts(viewport));
+			hooks
+		},
 		subagents,
 		background_jobs,
 		session_id,
@@ -6201,6 +6322,7 @@ pub fn render_surface(
 	let working = has_active_turn(&replica).then_some(Duration::ZERO);
 	let con = Ctx::new();
 	let statuses = ExtensionStatuses::default();
+	let slots = ExtensionSlots::default();
 	let facts = status_facts(
 		&replica,
 		model,
@@ -6213,6 +6335,8 @@ pub fn render_surface(
 		None,
 		&con,
 		&statuses,
+		&slots,
+		size,
 	);
 	let plan = facts.mode == Some(ModeChip::Plan);
 	let mut composer = Composer::new(

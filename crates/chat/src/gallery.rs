@@ -132,7 +132,7 @@ fn render_fixture(
 	let state_fixture = fixture.states[state.index()];
 	let call_id = format!("gallery-{}-{}", fixture.tool, state.index());
 	let tool_name = card_tool(fixture.tool);
-	let revision = if tool_name == "github" { 3 } else { 1 };
+	let revision = 1;
 	let call = if state == GalleryState::StreamingArgs {
 		let (call, sid) = session.call_streaming(tool_name, revision, call_id.as_str(), None)?;
 		if !state_fixture.args.is_empty() {
@@ -492,14 +492,17 @@ fn fixture_payload(
 			"output": "",
 			"data": value,
 		}),
-		"github" => serde_json::json!({
+		"forge" => serde_json::json!({
 			"op": args.get("op").cloned().unwrap_or_else(|| serde_json::json!("repo_view")),
 			"output": value.get("output").and_then(serde_json::Value::as_str).unwrap_or_default(),
 			"result": value,
-			"artifact": null,
 			"useless": false,
-			"rate_limit_remaining": null,
-			"rate_limit_reset": null,
+		}),
+		"ci" => serde_json::json!({
+			"op": args.get("op").cloned().unwrap_or_else(|| serde_json::json!("status")),
+			"output": value.get("output").and_then(serde_json::Value::as_str).unwrap_or_default(),
+			"result": value,
+			"useless": false,
 		}),
 		"goal" => {
 			let goal = value.get("goal").map(|goal| serde_json::json!({
@@ -1087,6 +1090,7 @@ mod tests {
 			"bash",
 			"browser",
 			"checkpoint",
+			"ci",
 			"computer",
 			"context_gauge",
 			"custom",
@@ -1096,7 +1100,7 @@ mod tests {
 			"edit_move",
 			"eval",
 			"eval_workpool",
-			"github",
+			"forge",
 			"glob",
 			"goal",
 			"grep",
@@ -1147,11 +1151,11 @@ mod tests {
 	}
 
 	#[test]
-	fn all_51_fixtures_use_projected_production_settlement() {
+	fn all_52_fixtures_use_projected_production_settlement() {
 		let sections = render_sections(None, &GalleryState::ALL, 100, false)
 			.expect("every fixture should fold through settle_projected/fail_projected");
-		assert_eq!(fixture_names().len(), 51);
-		assert_eq!(sections.len(), 51 * GalleryState::ALL.len());
+		assert_eq!(fixture_names().len(), 52);
+		assert_eq!(sections.len(), 52 * GalleryState::ALL.len());
 		assert!(
 			sections
 				.iter()

@@ -1,7 +1,8 @@
-//! `#<number>` GitHub references: a
+//! `#<number>` forge references: a
 //! standalone `#3164` token at the cursor offers `pr://3164` and
 //! `issue://3164`; a `pr`/`pull`/`issue` word before the `#` constrains the
-//! kind. No network at suggestion time.
+//! kind. No network at suggestion time. The inserted spellings stay `pr://`
+//! and `issue://`.
 
 use omp_core::{Str, sf};
 use omp_tui::{EditorCompletion, Icon, Suggestion, Suggestions};
@@ -13,13 +14,13 @@ const KINDS: [Kind; 2] = [
 	Kind {
 		qualifier:   "pr",
 		label:       "PR",
-		description: "GitHub pull request",
+		description: "Forge change request",
 		icon:        Icon::Pr,
 	},
 	Kind {
 		qualifier:   "issue",
 		label:       "Issue",
-		description: "GitHub issue",
+		description: "Forge issue",
 		icon:        Icon::Issue,
 	},
 ];
@@ -43,7 +44,7 @@ pub struct RefContext {
 	pub number:    Str,
 }
 
-/// Parses the GitHub reference token ending at `cursor`, if any.
+/// Parses the forge reference token ending at `cursor`, if any.
 #[must_use]
 pub fn ref_context(text: &str, cursor: usize) -> Option<RefContext> {
 	let before = text.get(..cursor)?;
@@ -85,7 +86,7 @@ pub fn ref_context(text: &str, cursor: usize) -> Option<RefContext> {
 	})
 }
 
-/// GitHub reference completion.
+/// Forge reference completion.
 pub struct GithubRefs;
 
 impl EditorCompletion for GithubRefs {

@@ -9,10 +9,10 @@ use std::{
 };
 
 use omp_core::Str;
+use omp_exec::{LeaseError, StoreError};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use super::process_identity::{IdentityError, ProcessIdentity};
+use super::process_identity::ProcessIdentity;
 
 /// Current on-disk metadata schema revision.
 pub const PROCESS_STORE_VERSION: u32 = 1;
@@ -374,50 +374,10 @@ fn lock_exclusive(file: &File) -> Result<(), LeaseError> {
 	}
 }
 
-/// Atomic process metadata failure.
-#[derive(Debug, Error)]
-pub enum StoreError {
-	/// Filesystem operation failed.
-	#[error("process metadata filesystem operation failed")]
-	Io(#[source] io::Error),
-	/// Snapshot serialization failed.
-	#[error("process metadata serialization failed")]
-	Encode(#[source] serde_json::Error),
-	/// Snapshot decoding failed.
-	#[error("process metadata decoding failed")]
-	Decode(#[source] serde_json::Error),
-	/// Current daemon identity could not be captured for a new store.
-	#[error("process metadata owner identity could not be established")]
-	Identity(#[source] IdentityError),
-	/// On-disk schema is not supported by this binary.
-	#[error("process metadata version {actual} is unsupported; expected {supported}")]
-	UnsupportedVersion {
-		/// On-disk version.
-		actual:    u32,
-		/// Current version.
-		supported: u32,
-	},
-}
-
-/// Exclusive durable-owner lease failure.
-#[derive(Debug, Error)]
-pub enum LeaseError {
-	/// Another live envd holds the operating-system lease.
-	#[error("another environment daemon owns the durable process lease")]
-	AlreadyOwned,
-	/// Lease filesystem operation failed.
-	#[error("durable process lease filesystem operation failed")]
-	Io(#[source] io::Error),
-	/// Current process identity could not be established.
-	#[error("durable process owner identity could not be established")]
-	Identity(#[from] IdentityError),
-	/// Lease identity serialization failed.
-	#[error("durable process owner identity serialization failed")]
-	Encode(#[source] serde_json::Error),
-}
-
 #[cfg(test)]
 mod tests {
+	use omp_exec::LeaseError;
+
 	use super::*;
 
 	fn record(name: &str, phase: ProcessPhase, started: u64, recent: u64) -> ProcessRecord {

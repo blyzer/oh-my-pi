@@ -12,7 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use omp_agent::{
+use omp_contract::{
 	ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket,
 	TicketState,
 };

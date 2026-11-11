@@ -113,17 +113,55 @@ The owner accepted Alternative F on 2026-10-28. Implementation is authorized und
 ## Amendment (2026-11-09): placement and backlog under ADR 0049
 
 [ADR 0049](0049-tiered-integration-architecture.md) sets the placement rule for the periphery that this record extracts. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors.
-- **ENVD-07 widened.** Moving `ssh` to its own crate also removes `omp-exec-ssh`'s dependency on `omp-envd`.
-- **ENVD-16 (new).** Move the `ExecHost` contract (`ExecError`, `ExecEvent`, `ExecHost`, `ExecRun`) into `omp-exec`, so `omp-exec-local` no longer depends on `omp-envd`.
-- **ENVD-08/09 realized as generic capability crates behind `cap-*` features.** The `github`/`github_url` item is not moved as a crate. It is replaced by the neutral `omp-forge`/`omp-ci` contracts and a `Delegated` adapter, with the GitHub adapter outside core (ADR 0049 Phase 4).
+- **ENVD-07 widened (landed).** `ssh` is `omp-ssh`. `omp-exec-ssh` does not depend on `omp-envd`. envd's `ssh://` reads stay behind `cap-ssh` (default-on in `omp-app`, off when that feature is absent). `russh` and `russh-sftp` are not dependencies of `omp-envd`.
+- **ENVD-16 (landed).** The `ExecHost` contract (`ExecError`, `ExecEvent`, and the `ExecHost` / `ExecRun` traits) is in `omp-exec`. envd implements the traits; the concrete session host stays in `crates/envd/src/exec.rs`. `omp-exec-local` does not depend on `omp-envd`.
+- **ENVD-08/09 realized as generic capability crates behind `cap-*` features.** The `github`/`github_url` item is not moved as a crate. Phase 4 PR5 replaces `github@3` with `forge@1` and `ci@1`, served from envd through `Delegated` adapters that still call `GithubService`. `cap-forge` and `cap-ci` are not added. Deleting `github.rs` and `github_url.rs` waits on GitLab T2 (ADR 0049 D2.8).
+- **ENVD-08 computer half (Phase 3 PR1).** `omp-desktop` is optional on `omp-envd` behind `cap-computer` (default-on in `omp-app`, off in envd's default features). The Computer construction-table row, `install_computer`, and the declare arm compile only with that feature. `omp_tools::computer` stays for chat cards.
+- **ENVD-08 browser half (Phase 3 PR2).** `omp-webview` is optional on `omp-envd` behind `cap-browser` (default-on in `omp-app`, off in envd's default features), together with `tokio-tungstenite`, which the relay is the only envd user of. The Browser construction-table row, `install_browser`, the declare arm, and the browser daemon, fetch, and relay modules compile only with that feature. `omp_tools::browser` stays for chat cards. `SV_BROWSER_ENABLED` exists only with the feature.
+- **ENVD-09 media/TTS half (Phase 3 PR3).** `omp-audio` is optional on `omp-envd` behind `cap-media` (default-on in `omp-app`, off in envd's default features). The ImageGen and Tts construction-table rows, `image_tool`, `speech_tool`, `ask_vocalizer`, and `media_devices` / `media_tts` compile only with that feature. Ask still registers without playback. `Family::ImageGen` and `Family::Tts` stay for chat cards. `omp-ai` links `omp-audio` only through `speech` (included by `realtime`); envd enables neither, so a selected envd build has no `omp-audio` edge. `local-tts` does not compile the envd device by itself.
 - Alternative F, the item-7 rulings and the evidence gates are unchanged.
 
 ## Status in omp
 
-**Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction, modularization and peripheral extraction remain open; containment is implemented and accepted by the W8 proofs.
+**Status: Partially implemented.** Alternative F is accepted. P8 W1-W9 evidence is complete; vocabulary extraction (ENVD-02), the `server.rs` split (ENVD-03), and the `tools.rs` / `mcp/` split (ENVD-04) landed. ENVD-03 moved `crates/envd/src/server.rs` to `crates/envd/src/server/` (`dispatch`, `control_factories`, `devices`, `diagnostics`, `connection`, `forward`, `runtime`, `session`, `identity`, `error`) with no public API change and each file under 5k lines. ENVD-04 moved `crates/envd/src/tools.rs` to `crates/envd/src/tools/` (`bridges`, `hooks`, `registry`, `roster_host`) and grouped `crates/envd/src/mcp/` into `transport/` and `config/`, re-exporting the previous `mcp::` paths. No public API change, no roster-table change, and each new module is under 5k lines. Phase 3 PR1 gates the computer host: `omp-desktop` is optional on `omp-envd` behind `cap-computer`, default-on in `omp-app`. Selected unification omits `omp-desktop` from the `omp-envd` graph. Phase 3 PR2 gates the browser host: `omp-webview` is optional on `omp-envd` behind `cap-browser`, default-on in `omp-app`. Selected unification omits `omp-webview` from the `omp-envd` graph. Phase 3 PR3 gates media: `omp-audio` is optional on `omp-envd` behind `cap-media`, default-on in `omp-app`. Selected unification omits `omp-audio` from the `omp-envd` graph. The rest of the periphery remains. Containment is implemented and accepted by the W8 proofs.
 
 - W8 containment is implemented and verified by the partition and real-daemon proofs:
   - `w8_probe_remote_close_leaves_stream_pending_then_drops_local_stream` passes in `omp-env`.
   - `w8_sigkill_daemon_leaves_remote_pending_then_drops_local` passes against the production daemon on macOS.
 - Owner answers in decision item 7 are recorded: host-side admission with envd enforcement, issuing-connection-only approval relay, bounded reflection relay, envd-owned MCP, digest-matched daemon sharing, deferred reconnect and deferred schedules. P8 W1-W9 baselines are complete through PR #450 and workflow run 41070076113.
 - `adr0045-slice-b.md` remains supporting investigation evidence.
+
+## Build-weight baseline (ADR 0049 Phase 0)
+
+P8 W1–W9 evidence in this record is the runtime baseline (PR #450, workflow run 41070076113; the recorder is `crates/e2e/tests/p8_baselines.rs`). ADR 0049 Phase 0 adds the build-weight baseline audit §12.3 rule 5 asks for. HTML reports from `cargo build --timings` are not committed. Each cold build used a fresh `CARGO_TARGET_DIR`. The incremental build reused the cold `omp` directory after one added line in `crates/envd/src/lib.rs` (`//! Phase 0 incremental fingerprint.`), then that line was removed. No code change remains.
+
+Measured 2026-11-09 03:36–04:02 America/Santo_Domingo on this Linux host: Intel Xeon, 4 vCPU (`nproc` 4), kernel 6.12.113+, `x86_64-unknown-linux-gnu`. Toolchain: rustc 1.99.0-nightly (1a98b1e13 2026-08-07), cargo 1.99.0-nightly (c79e8f894 2026-08-04). Profile `dev` (workspace members use the Cranelift backend; `debug = false`). Max concurrency reported by cargo: 6, with `jobs=4` and `ncpu=4`.
+
+| Build | Wall time | Total units | Fresh | Dirty |
+|---|---|---|---|---|
+| `cargo build --timings --bin omp --locked`, cold | 282.2s | 1433 | 0 | 1433 |
+| same, after the one-line `omp-envd` edit | 90.8s | 1433 | 1428 | 5 |
+| `cargo build --timings -p omp-envd --locked`, cold | 259.8s | 1398 | 0 | 1398 |
+| `cargo build --timings -p omp-exec-local --locked`, cold | 251.9s | 1399 | 0 | 1399 |
+| `cargo build --timings -p omp-exec-ssh --locked`, cold | 252.5s | 1399 | 0 | 1399 |
+
+The five dirty units in the incremental build, slowest first: `omp-envd` 53.10s, `omp-app` lib 23.02s, `omp-driver` 21.37s, `omp-app` bin `omp` 4.68s, `omp-exec-local` 0.74s.
+
+Ten slowest units, cold `omp` (1433 units): `omp-envd` 53.04s, `omp-ai` 51.10s, `omp-proto` 27.77s, `omp-app` 22.09s, `omp-driver` 20.93s, `omp-tools` 19.93s, `jj-lib` 17.59s, `tree-sitter-ocaml` build-script run 10.48s, `omp-catalog` 10.27s, `omp-tui` 10.24s.
+
+Ten slowest units, cold `omp-envd` (1398): `omp-ai` 53.18s, `omp-envd` 52.89s, `omp-proto` 29.17s, `jj-lib` 19.05s, `omp-tools` 18.54s, `tree-sitter-ocaml` build-script run 11.29s, `omp-catalog` 11.12s, `omp-shell-builtins` 10.79s, `x11rb-protocol` 8.00s, `anydoc` 7.97s.
+
+Ten slowest units, cold `omp-exec-local` (1399): `omp-ai` 51.51s, `omp-envd` 51.38s, `omp-proto` 27.61s, `jj-lib` 18.68s, `omp-tools` 17.48s, `omp-catalog` 10.67s, `tree-sitter-ocaml` build-script run 10.49s, `omp-shell-builtins` 10.47s, `anydoc` 7.75s, `x11rb-protocol` 7.69s.
+
+Ten slowest units, cold `omp-exec-ssh` (1399): `omp-ai` 51.63s, `omp-envd` 51.18s, `omp-proto` 27.28s, `jj-lib` 18.46s, `omp-tools` 17.50s, `omp-catalog` 10.81s, `tree-sitter-ocaml` build-script run 10.50s, `omp-shell-builtins` 10.32s, `x11rb-protocol` 7.83s, `anydoc` 7.79s.
+
+Closure counts are `cargo tree -p <crate> -e normal --prefix none --locked | sort -u | wc -l`. There is no package `omp`; the `omp` binary is package `omp-app`, and `-p omp` fails with "did not match any packages". On this cargo (1.99 nightly) the workspace `[resolver] feature-unification = "workspace"` makes `cargo tree -p <crate>` print every workspace member, so the command as written returns one number per target for all four crates: 1420 with no `--target`, 1428 with `--target x86_64-unknown-linux-gnu`, 1372 with `--target aarch64-apple-darwin`. The per-crate numbers below pass `--config 'resolver.feature-unification="selected"'` so `-p` selects one crate. This machine is Linux, not macOS. `aarch64-apple-darwin` is not installed; that column is cargo's resolution for the triple, not a count taken on a Mac.
+
+| Crate | Host, no `--target` | `--target x86_64-unknown-linux-gnu` | `--target aarch64-apple-darwin` (resolved, not a Mac) |
+|---|---|---|---|
+| `omp-app` (bin `omp`) | 1327 | 1335 | 1303 |
+| `omp-envd` | 1144 | 1152 | 1120 |
+| `omp-exec-local` | 1146 | 1154 | 1122 |
+| `omp-exec-ssh` | 1146 | 1154 | 1122 |
+
+ENVD-02 remeasured the host column with the same selected-unification command after `omp-contract` landed. `omp-app` is 1332 (was 1327). `omp-envd` is 1031 (was 1144) and has no normal-edge `omp-agent` dependency. The other two rows and the target columns were not remeasured. Cold and incremental timings were not re-run. The `omp-exec-ssh` 456-crate miss and the ≤300 budget are unchanged.

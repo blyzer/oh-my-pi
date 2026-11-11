@@ -21,7 +21,7 @@ use omp_envd::{
 	eval::{
 		BridgeHostError, BridgeProgressSink, EvalSessionConfig, ParentBindingLease, ParentSessionHost,
 	},
-	exec::{ExecEvent as HostExecEvent, ExecHost},
+	exec::ExecHost,
 	exthost::{
 		ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest, ToolDeclarationKey,
 	},
@@ -29,6 +29,7 @@ use omp_envd::{
 	worker::{ExtHostConfig, ExtHostSpec, HostKey},
 	workspace::{WorkspaceError, WorkspaceHost, WorkspaceSearchOptions},
 };
+use omp_exec::ExecEvent as HostExecEvent;
 use omp_ext::{
 	config::{StaticDeclaration, StaticDeclarations},
 	workspace_trust::WorkspaceTrust,

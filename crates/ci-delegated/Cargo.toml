@@ -1,0 +1,22 @@
+[package]
+name = "omp-ci-delegated"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "In-core CI host router: registry by provider host, CiHost forwarding, and approval gates on mutating operations"
+readme = "README.md"
+
+[dependencies]
+omp-core.workspace = true
+omp-ci.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+parking_lot.workspace = true
+
+[lints]
+workspace = true

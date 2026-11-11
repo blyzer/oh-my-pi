@@ -1,0 +1,8 @@
+{
+  "id": 42,
+  "name": "ci",
+  "status": "failed",
+  "web_url": "https://gitlab.com/acme/widget/-/pipelines/42",
+  "sha": "abc123",
+  "ref": "main"
+}

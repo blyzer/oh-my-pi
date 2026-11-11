@@ -8,10 +8,10 @@
 //! - [`session`]: the correlation table, framing (via [`crate::line_reader`]),
 //!   and cancel-safe `next_message`.
 //! - [`delegated_session`]: [`AcpDelegatedSession`] implementing
-//!   [`omp_agent::delegated::DelegatedSession`] over ACP.
+//!   [`omp_contract::delegated::DelegatedSession`] over ACP.
 //! - [`executor`]: [`AcpExecutor`] implementing
-//!   [`omp_agent::delegated::DelegatedExecutor`], spawning the agent over stdio
-//!   with [`crate::child_tree`] process-group teardown.
+//!   [`omp_contract::delegated::DelegatedExecutor`], spawning the agent over
+//!   stdio with [`crate::child_tree`] process-group teardown.
 //! - [`policy`]: the single ACP-mappable policy
 //!   ([`DelegatedPolicy::STRICTEST`]).
 //!

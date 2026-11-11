@@ -18,12 +18,13 @@ use std::{
 };
 
 use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
+use omp_contract::posture::{ApprovalMode, effective_approval_mode};
 use omp_core::{Str, StrMut, sf};
 use omp_env::EnvClient;
 use omp_envd::{
-	admission::{SandboxState, effective_approval_mode},
+	admission::probe_sandbox,
 	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
-	tool_settings::{ApprovalMode, ToolSettings},
+	tool_settings::ToolSettings,
 };
 use omp_exec::{
 	BackendId, Eligibility, EnvEntry, ExecutionBackend, ExecutionError, ExecutionEvent, ExecutionId,
@@ -405,7 +406,7 @@ impl AdwHost for ProductionAdwHost {
 	}
 
 	fn posture(&self) -> Result<Posture, Self::Error> {
-		let sandbox = SandboxState::probe(&self.ctx, &self.root);
+		let sandbox = probe_sandbox(&self.ctx, &self.root);
 		let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(&self.ctx);
 		// A requested sandbox that was not constructed confines nothing, so the
 		// posture is the host's, not the convar's.
@@ -791,7 +792,7 @@ requires = { network = "disabled" }
 			omp_con::Source::Config(sf!("test")),
 		)
 		.expect("temporary directories excluded");
-		if !SandboxState::probe(&ctx, &project_root).confines() {
+		if !probe_sandbox(&ctx, &project_root).confines() {
 			// No native sandbox on this host: posture reports `unconfined`, and
 			// the domain refuses the phase before dispatch.
 			return;

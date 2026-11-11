@@ -11,6 +11,15 @@ description = "Projection-only interactive chat actor for the OMP session DOM"
 [lints]
 workspace = true
 
+[features]
+# Typed forge/ci cards need the contract modules on omp-tools. Defaults are on
+# for root `cargo test -p omp-chat`. Workspace `omp-chat` sets
+# `default-features = false` so `omp-app --features local` under selected
+# unification can leave forge/ci out; app `cap-forge`/`cap-ci` turn them back on.
+default = ["cap-forge", "cap-ci"]
+cap-forge = ["omp-tools/cap-forge"]
+cap-ci = ["omp-tools/cap-ci"]
+
 [dependencies]
 bytes.workspace = true
 flume.workspace = true

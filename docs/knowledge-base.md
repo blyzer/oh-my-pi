@@ -179,7 +179,6 @@ crate's `Cargo.toml`.
 | `exec` | `omp-exec` | Build/test placement + adapters |
 | `exec-local` | `omp-exec-local` | Local ExecHost backend |
 | `exec-reapi` | `omp-exec-reapi` | REAPI v2 remote execution client |
-| `exec-buildbuddy` | `omp-exec-buildbuddy` | BuildBuddy Run API backend |
 | `exec-ssh` | `omp-exec-ssh` | SSH execution backend |
 
 ### Layer 4 — Session & daemons

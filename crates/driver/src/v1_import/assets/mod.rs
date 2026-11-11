@@ -11,7 +11,7 @@
 //! | `lsp.*`, `dap.*` (six spellings each)   | `agent/<same name>`        | `omp_envd` `discover_native_{lsp,dap}_sources`   |
 //! | `secrets.yml`                           | `secrets.yml` (not under `agent/`) | `omp-app` `secrets_files`                |
 //! | `mcp.json`, `.mcp.json`                 | `mcp.json` (merged)        | `omp_envd::mcp::McpConfigPaths::user`            |
-//! | `ssh.json`                              | `hosts.toml` (converted)   | `omp_envd::ssh::HostPaths::user`                 |
+//! | `ssh.json`                              | `hosts.toml` (converted)   | `omp_ssh::HostPaths::user`                       |
 //!
 //! The working directory's project `.omp/` is read by v2 at the same paths,
 //! except three v1-only files [`import_project_assets`] converts in place,
@@ -49,12 +49,12 @@ use omp_envd::{
 		},
 	},
 	mcp::{config::ConfigValidationError, config_store::ConfigStoreError},
-	ssh::SshError,
 };
 use omp_ext::workspace_trust::inventory::{
 	APPEND_SYSTEM_PROMPT_FILE, HOSTS_FILE, MCP_FILE, SECRETS_FILE, SYSTEM_PROMPT_FILE,
 	TITLE_SYSTEM_PROMPT_FILE,
 };
+use omp_ssh::SshError;
 use thiserror::Error;
 
 use super::{
