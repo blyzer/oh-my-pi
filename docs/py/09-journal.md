@@ -940,7 +940,9 @@ An extension claims its schemes in the manifest `schemes` table
 ADR 0050 S2:** registrations are validated and stored; nothing binds a resolver yet,
 `omp.urls.schemes()` keeps returning the built-in table, and a declared scheme still
 parses as the `UNKNOWN` member of `omp.Scheme`. The host checks each registration against the
-manifest's claims when S2 binds it.
+manifest's claims when S2 binds it. The package-root name `omp.schemes` used to be an
+unexported alias of the callable `omp.urls.schemes` with no users; that alias is dropped,
+so `omp.schemes` is now this module, and `omp.urls.schemes()` is unchanged.
 
 #### `omp.schemes.Declaration(name, description=None, immutable=False, writable=False)`
 

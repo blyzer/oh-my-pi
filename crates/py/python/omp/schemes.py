@@ -63,9 +63,12 @@ _declared: tuple[Declaration, ...] = ()
 def _canonical(spelling: object) -> str:
     if not isinstance(spelling, str):
         raise TypeError("scheme name must be str")
-    if len(spelling) > MAX_SCHEME_BYTES:
+    if not spelling:
+        raise SchemeGrammarError("URL scheme must not be empty")
+    size = len(spelling.encode("utf-8", "surrogatepass"))
+    if size > MAX_SCHEME_BYTES:
         raise SchemeLimitError(
-            f"URL scheme is longer than {MAX_SCHEME_BYTES} bytes"
+            f"URL scheme is {size} bytes; the limit is {MAX_SCHEME_BYTES}"
         )
     canonical = spelling.translate(_ASCII_LOWER)
     if _GRAMMAR.fullmatch(canonical) is None:

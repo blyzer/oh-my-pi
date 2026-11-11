@@ -109,6 +109,21 @@ longest = "a" * schemes.MAX_SCHEME_BYTES
 assert schemes.Declaration(longest).name == longest
 assert schemes.Declaration(longest.upper()).name == longest
 expect_raises(schemes.SchemeLimitError, lambda: schemes.Declaration(longest + "a"))
+multibyte_over = "a" * (schemes.MAX_SCHEME_BYTES - 1) + "\u00e9"
+assert len(multibyte_over) == schemes.MAX_SCHEME_BYTES
+expect_raises(schemes.SchemeLimitError, lambda: schemes.Declaration(multibyte_over))
+expect_raises(
+    schemes.SchemeLimitError,
+    lambda: schemes.Declaration("\u00e9" * (schemes.MAX_SCHEME_BYTES // 2 + 1)),
+)
+expect_raises(
+    schemes.SchemeLimitError,
+    lambda: schemes.Declaration("\ud800" * (schemes.MAX_SCHEME_BYTES // 3 + 1)),
+)
+multibyte_fits = "a" * (schemes.MAX_SCHEME_BYTES - 2) + "\u00e9"
+expect_raises(schemes.SchemeGrammarError, lambda: schemes.Declaration(multibyte_fits))
+empty = expect_raises(schemes.SchemeGrammarError, lambda: schemes.Declaration(""))
+assert "must not be empty" in str(empty), empty
 expect_raises(schemes.SchemeLimitError, lambda: schemes.Declaration(longest.upper() + "A"))
 
 fits = schemes.Declaration("widget", description="d" * schemes.MAX_DESCRIPTION_BYTES)
