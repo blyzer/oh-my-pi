@@ -28,7 +28,7 @@ jiff.workspace = true
 notify.workspace = true
 omp-agent.workspace = true
 omp-con.workspace = true
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["open"] }
 omp-dom.workspace = true
 omp-ai.workspace = true
 omp-journal.workspace = true

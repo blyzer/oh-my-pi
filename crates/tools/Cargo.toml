@@ -43,7 +43,7 @@ omp-ast.workspace = true
 omp-ar.workspace = true
 omp-con.workspace = true
 omp-ci = { workspace = true, optional = true }
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["schemars"] }
 omp-env.workspace = true
 omp-forge = { workspace = true, optional = true }
 omp-edit.workspace = true
