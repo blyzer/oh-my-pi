@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb (Debian, x86_64) to build, test and lint this workspace.
+# Runs once per fresh orb and again on a stale snapshot, so every step is
+# idempotent and cheap when its result is already present.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+# Pinned to the versions CI installs (.github/workflows/ci.yml).
+just_version=1.58.0
+nextest_version=0.9.146
+buf_version=1.73.0
+buf_sha256=8f2986298ad08f0cc1bf999b9797b7c383adf32d7edf0f73d6f1e1a701baeac1
+
+cargo_bin="$HOME/.cargo/bin"
+export PATH="$cargo_bin:$PATH"
+
+step() {
+	local label=$1
+	shift
+	local start=$SECONDS
+	echo "==> $label"
+	"$@"
+	echo "<== $label ($((SECONDS - start))s)"
+}
+
+# cmake + ninja: audiopus_sys builds its vendored Opus with CMake, and
+# .cargo/config.toml selects the Ninja generator. zstd: fetch-python.sh.
+install_apt_packages() {
+	local packages=(cmake ninja-build zstd pkg-config)
+	local missing=()
+	local package
+	for package in "${packages[@]}"; do
+		dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' \
+			|| missing+=("$package")
+	done
+	if [ "${#missing[@]}" -eq 0 ]; then
+		echo "all present: ${packages[*]}"
+		return
+	fi
+	sudo apt-get update -qq
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+}
+
+# rustup reads the pinned nightly and its components from rust-toolchain.toml.
+install_rust() {
+	if [ ! -x "$cargo_bin/rustup" ]; then
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+			| sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+	fi
+	rustup toolchain install
+	rustc --version
+}
+
+install_just() {
+	if [ "$(just --version 2>/dev/null)" = "just $just_version" ]; then
+		echo "just $just_version present"
+		return
+	fi
+	curl -fsSL "https://github.com/casey/just/releases/download/${just_version}/just-${just_version}-x86_64-unknown-linux-musl.tar.gz" \
+		| tar -xz -C "$cargo_bin" just
+}
+
+install_nextest() {
+	if cargo-nextest nextest --version 2>/dev/null | grep -q "^release: $nextest_version$"; then
+		echo "cargo-nextest $nextest_version present"
+		return
+	fi
+	curl -fsSL "https://get.nexte.st/${nextest_version}/linux" | tar -xz -C "$cargo_bin"
+}
+
+install_buf() {
+	if [ "$(buf --version 2>/dev/null)" = "$buf_version" ]; then
+		echo "buf $buf_version present"
+		return
+	fi
+	local tmp
+	tmp=$(mktemp)
+	curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${buf_version}/buf-Linux-x86_64" -o "$tmp"
+	printf '%s  %s\n' "$buf_sha256" "$tmp" | sha256sum --check --status
+	install -m 0755 "$tmp" "$cargo_bin/buf"
+	rm -f "$tmp"
+}
+
+# Login shells (Amp, supervised services) get cargo, rustup, just, nextest and buf.
+persist_cargo_path() {
+	local marker="# rustup: cargo bin on PATH"
+	if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+		printf '\n%s\n. "$HOME/.cargo/env"\n' "$marker" >>"$HOME/.bash_profile"
+	fi
+}
+
+# Vendored free-threaded CPython that omp-py links. fetch-python.sh skips the download
+# but still regenerates stdlib.bin (~15s) on every run, so skip it entirely while its
+# inputs match the last run; these are the files CI keys its vendor/python cache on.
+fetch_python() {
+	local stamp=vendor/python/.orb-setup.stamp
+	local fingerprint
+	fingerprint=$(cat crates/py/scripts/fetch-python.sh crates/py/scripts/pack-pymodules.py \
+		crates/py/scripts/gen-py-notices.py crates/py/requirements.txt | sha256sum)
+	if [ -f vendor/python/pyo3-config.txt ] && [ "$(cat "$stamp" 2>/dev/null)" = "$fingerprint" ]; then
+		echo "vendor/python up to date"
+		return
+	fi
+	crates/py/scripts/fetch-python.sh
+	echo "$fingerprint" >"$stamp"
+}
+
+fetch_crates() {
+	cargo fetch --locked
+	cargo fetch --locked --manifest-path tools/lintx/Cargo.toml
+}
+
+install_omp_tools() {
+	(cd .omp/tools && bun install --frozen-lockfile)
+}
+
+step "apt packages" install_apt_packages
+step "rust toolchain" install_rust
+step "just" install_just
+step "cargo-nextest" install_nextest
+step "buf" install_buf
+step "login shell PATH" persist_cargo_path
+step "embedded python" fetch_python
+step "cargo fetch" fetch_crates
+step ".omp/tools deps" install_omp_tools

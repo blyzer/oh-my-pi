@@ -45,3 +45,6 @@ __pycache__/
 .omp/config.toml.lock
 .omp/omp-*.md
 dist/
+
+# Amp orb portal registrations (written by `amp orb services ensure`)
+.amp/portals/*
