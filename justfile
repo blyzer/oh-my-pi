@@ -156,6 +156,47 @@ remote-heavy:
     cargo test --doc --workspace --exclude omp-e2e --locked
     CARGO_TARGET_DIR="$HOME/.cache/omp-target-clippy" cargo clippy --workspace --all-targets --locked
 
+# The Cargo bodies of the Linux CI jobs, for `vars.CI_LINUX_MODE` = `remote`: the job then runs
+# on the self-hosted Mac and hands these commands to `scripts/remote-verify.sh <recipe>`
+# (docs/research/ci-macos-runner-fallback.md). Each runs the commands of that job's
+# github-hosted steps; keep the two in sync. The runner script prepares vendor/python first.
+
+# `lintx_ratchet` in CI: lintx's own tests, then the error-formatting ratchet.
+[group('remote')]
+ci-lintx-ratchet: lintx-test lintx-ratchet
+
+# `runtime_spec` in CI: generate and validate the runtime symbol specification.
+[group('remote')]
+ci-runtime-spec:
+    cargo -Zscript scripts/check-spec.rs -- target/runtime-symbol-spec.json
+
+# `lint_linux` in CI: clippy with --keep-going (in the runner-home target `remote-heavy` uses), then both cap profiles.
+[group('remote')]
+ci-lint-linux:
+    test -f vendor/python/pyo3-config.txt
+    CARGO_TARGET_DIR="$HOME/.cache/omp-target-clippy" cargo clippy --workspace --all-targets --locked --keep-going
+    just check-minimal-caps
+
+# `p9_p10_linux` in CI: proofs P9, P10, P11 and P14, then the tool source routing check.
+[group('remote')]
+ci-p9-p10-linux:
+    test -f vendor/python/pyo3-config.txt
+    test -x vendor/python/install/bin/python3.14td
+    cargo nextest run --profile ci -p omp-e2e --locked \
+        --test p9_isolation \
+        --test p9_extension_control \
+        --test p10_lift_idempotence \
+        --test p11_collab_spectator \
+        --test p14_session_attach
+    cargo nextest run --profile ci -p omp-e2e --test tool_sources --locked
+
+# `p7_linux` in CI: terminal proof P7 on a Linux PTY.
+[group('remote')]
+ci-p7-linux:
+    test -f vendor/python/pyo3-config.txt
+    test -x vendor/python/install/bin/python3.14td
+    TERM=xterm-256color cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
+
 # Fail when a repo text surface (AGENTS.md, docs, .omp, crate READMEs) teaches a patch-script
 # recipe. AGENTS.md "Editing Discipline" binds every prompt and skill body authored here.
 [group('format & lint')]
