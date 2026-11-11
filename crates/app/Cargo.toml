@@ -81,7 +81,7 @@ omp-ar.workspace = true
 omp-chat.workspace = true
 omp-collab.workspace = true
 omp-con.workspace = true
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["open"] }
 omp-driver.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
