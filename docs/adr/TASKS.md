@@ -239,8 +239,8 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
   (`crates/agent/src/jobs.rs:1246-1257` TODO). The pieces it waited on exist: the
   versioned `ReattachHandle` (`crates/exec/src/handle.rs`, `01f8151003`) and the
   `WaitExecution` reattach in `crates/exec-reapi/src/execute.rs:ReapiBackend::reattach`.
-  It now waits on a `JobKind::Execution` producer, because without one no handle is
-  stored (ADR 0040 "Gap to acceptance", items 1 and 2). ADR 0039 Part B has no
+  It waited on a `JobKind::Execution` producer, because without one no handle was
+  stored. That producer exists in code since 2026-11-08 (ADR 0040 amendment 2026-11-11), so this dependency is met in code. ADR 0039 Part B has no
   reattach text and ADR 0039 R2 does not unblock it.
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).

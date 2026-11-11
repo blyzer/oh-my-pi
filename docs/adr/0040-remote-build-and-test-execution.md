@@ -1866,6 +1866,162 @@ cannot, an envd entry point for extension calls, and the composition enum that t
 already needs. It does not need Phase 0 changes 2 or 4. None of this is built.
 
 
+## Amendment (2026-11-11): the producer and reattach exist in code; what remains
+
+This amendment is proposed. Section 0 is verified fact and needs no decision. Sections 1 to 4 and 6 are recommendations for the owner and bind nothing until the owner accepts them. The record stays `proposed`, and nothing here accepts the 2026-10-31 production gate.
+
+Method. Every fact was read at `origin/omp2` `5b0cd838c9`, the PR base; line numbers refer to that commit. Short names: `jobs.rs` is `crates/agent/src/jobs.rs`, `tests/jobs.rs` is `crates/agent/tests/jobs.rs`, and `remote.rs` is `crates/driver/src/adw/remote.rs`. No Rust was built, run or changed. Test names were confirmed to exist by search; test bodies were read only where a row says so. Anything else is UNVERIFIED.
+
+### 0. Verified baseline
+
+The 2026-11-04 assessment in the Status section, its Gap list (lines 1259–1315) and its production-gate paragraph describe a tree that no longer exists. Git history shows that the producer, the agent tool, real reattach and restart settlement landed on 2026-11-08, after that assessment. The owner's decision of 2026-11-04 (open question 8) still stands: acceptance needs a producer and a real reattach. Both now exist in code. Acceptance and a live check do not.
+
+| Item | Where (base `5b0cd838c9`) | Evidence |
+|---|---|---|
+| Execution job kind | `jobs.rs:50` `JobKind::Execution` | Added in `8f90b08ae8` (2026-10-18). |
+| Producer | `jobs.rs:1024` `start_execution` | Journals the request (`insert_execution`, :1055), then the submission marker (`mark_execution_submitting`, :1073), then spawns `start_execution_run` (:1083; defined :1822). Production code: the `#[cfg(test)]` module begins at :2615. Added in `da1f9a0a25` (2026-11-08). |
+| Product caller | `remote_build.rs:181` `run`; :254 `jobs.start_execution` | The `remote_build` session tool. Composed only at `crates/driver/src/headless/kernel.rs:3169`, and only when `sv_exec_agent_runs` is set (`remote_build.rs:44–47`, default `false`). Added in `9d29d827bc` (2026-11-08). |
+| Approval proof | `jobs.rs:170` `AuthorizedExecution`; `remote_build.rs:354` `ask`, :401 `authorize` | Minted only by `from_session` (jobs.rs:176–218) from a decided, approved, journaled prompt that covers the network kind and the host. A timeout, an unreachable route or a non-user source approves nothing. One approval spends at most one start (`ApprovalSpent`, jobs.rs:262). |
+| Real reattach | `jobs.rs:1669` `reattach_execution`; `crates/app/src/jobs_cmd.rs:105` | Refuses before any backend contact (section 4), calls `backend.reattach` (jobs.rs:1704), then journals `jobs.resume` (`resume_txn`, :2104). Added in `8084b0964b` (2026-11-08). No `call backend.reattach` TODO remains in `crates`. |
+| Restart settlement | `jobs.rs:1212` (orphan step of `poll`, :1140); `orphaned_execution`, :2194 | Settles from the journal only: a stored handle gives `EffectsUnknown`; a marker without a handle gives `SubmissionUnknown`; neither gives `NotSubmitted`. Nothing on this path contacts a backend (doc of `orphaned_execution`). |
+| Accepted handle | `jobs.rs:1140` `poll`; production emission `crates/exec-reapi/src/execute.rs:937` | `poll` journals `Accepted` with the handle. The journal learns of acceptance on the next `poll`, not at acceptance (section 3, window 4). |
+| Settlement and spill | `jobs.rs:2375` `commit_settlement`; :2319 `bounded_output` | Output above the bound goes to `session.blobs().put`, and the journal keeps an `artifact://sha256/…` reference (:2319–2338). The typed `execution_result` is written at :2433 and read back by `resolve_execution_result` (:2365). |
+| Backend contract | `crates/exec/src/backend.rs:139` `ExecutionBackend`; :168 `ExecutionRun`; :124 `ReattachContext`; :47 `BackendCapabilities` | Generic and never `dyn`. A zero `remaining_deadline` is valid (doc of `ReattachContext`). |
+| Resume support | `crates/exec/src/handle.rs:24` `ResumeSupport`; `backend.rs:59` | `Unsupported` in `LocalBackend` (`crates/exec-local/src/lib.rs:56`) and `SshBackend` (`crates/exec-ssh/src/lib.rs:51`). `Reattach` in `ReapiBackend` (`crates/exec-reapi/src/execute.rs:186`, :228). No core backend reports `Snapshot`. |
+| Reattach handle | `crates/exec/src/handle.rs:59` `ReattachHandle` | `{schema, backend, operation, id}`, schema `V1`. `operation` is opaque to `omp-exec` (doc of the struct). |
+| Resume in REAPI | `crates/exec-reapi/src/execute.rs:333` `reattach`; :453 `reattach_request` | Calls `WaitExecution` with the stored operation name (:460) and bounds the wait by the remaining deadline (:468). |
+| BuildBuddy | no `crates/exec-buildbuddy` directory | Consistent with the 2026-11-05 amendment. |
+| Tests | `tests/jobs.rs` | 24 `Session::open` call sites. The execution tests reopen a file-backed journal (for example `tests/jobs.rs:1356`, :1607, :1942). |
+
+### 0.1 Statements this amendment supersedes
+
+The quoted text stays as written. The right-hand column says what replaces it.
+
+| Where | Stale text (quoted) | Replacement |
+|---|---|---|
+| ADR 0040:1191 | "`crates/session/src/components/jobs.rs:accept_execution` has no" | The function no longer exists (no match in `crates`). The producer is `start_execution` (jobs.rs:1024). |
+| ADR 0040:1196 | "The execution branch of the persistence code is unreachable from any product path." | Section 0, rows Producer and Settlement. |
+| ADR 0040:1205 | "Reattach is a stub." | Section 0, row Real reattach. |
+| ADR 0040:1208 | "has four implementations and no call" | `reattach_execution` (jobs.rs:1704) is the call site. |
+| ADR 0040:1210 | "but no test calls it." | Calls exist at `crates/exec-reapi/src/execute.rs:1706`, :1729, :1759 and :1784 (test bodies not read). |
+| ADR 0040:1213 | "A restart after acceptance does not record EffectsUnknown." | Section 0, row Restart settlement; `tests/jobs.rs:1341`. |
+| ADR 0040:1217 | "No test covers execution-job journal replay, accepted-action crash handling, or typed result persistence." | Section 3 and section 4 test names, all confirmed to exist. |
+| ADR 0040:1267 | "and no caller is specified." (Gap 1) | Section 1. |
+| ADR 0040:1777–1781 | "No product path calls that code" and "`reattach_execution` … is a stub." (2026-10-31) | Describes the tree on 2026-10-31. Section 0 replaces it. |
+| ADR 0040:1187 | "The 2026-10-31 production gate is unmet:" | Its code conditions now have tests (sections 3 and 4). Acceptance and the live check remain open (D1, D6). |
+| STATUS.md:52 | "No product path produces a `JobKind::Execution` job and `reattach_execution` is a stub." | Corrected in this PR. |
+| STATUS.md:71 | "settles an execution job `failed` without EffectsUnknown, though no product path creates such a job." | Corrected in this PR. |
+| TASKS.md:242–243 | "It now waits on a `JobKind::Execution` producer, because without one no handle is stored" | Corrected in this PR. The ADR 0039 item keeps its other blocker. |
+
+Still true and kept: ADR 0040:1194 "drops the handle carried by" (the `Accepted` arm at `remote.rs:163` keeps only a flag), and ADR 0040:1195 "owns no session journal and no job board" (the ADW driver names no `Session` or `JobBoard`; its only match is an error variant, `crates/driver/src/adw/production.rs:68`).
+
+### 1. Who calls the producer
+
+Decision: the agent tool is the producer. It already is: `RemoteBuildTool::run` (`remote_build.rs:181`). The operator command `omp jobs attach` is a resumer, not a producer. The ADW remote code phase is not a producer for Gaps 1–4.
+
+Reasons, all verified:
+
+1. Only `start_execution` journals a request, spends an approval and calls `backend.start`, and it does so only after the marker is journaled (jobs.rs:1024–1083). Another caller would have to reproduce the approval check and the journal order, and nothing would enforce either.
+2. `omp jobs attach` can resume only a handle that a producer has already journaled. `resumable` (jobs.rs:2068) refuses any job without an accepted handle. It cannot build an `ExecutionSubmission` (jobs.rs:251), so it is not a producer.
+3. The ADW remote phase has no session and no job board (section 0.1). Its policy, `AdwExecPolicy` (`remote.rs:55`), is operator configuration, not a per-run decided prompt, so it cannot mint `AuthorizedExecution`.
+4. The agent tool meets 2026-11-04 Gap 1 as written: a product caller mints the submission, journals it, and hands the run to the board.
+
+What the ADW remote code phase must change if its runs are to be durable (not required for Gaps 1–4; see D2):
+
+- Run inside a `Session` it owns, opened from the journal that `omp adw run` already has, and fail closed when there is none.
+- Replace the operator `remote-only` setting as the only approval with a prompt journaled in that session, and mint `AuthorizedExecution` from it with `from_session`.
+- Start through `JobBoard::start_execution`, and stop discarding the `Accepted` handle at `remote.rs:163`. The handle must reach the journal through `poll`.
+- Compose the backend through the `ExecutionSettings::connect` path that `EnvironmentHost::connect` uses (`remote_build.rs:126`, `type Backend = ReapiBackend<EnvironmentInputs>`), not a second composition.
+
+### 2. Types and where they live
+
+| Type | Home | Notes |
+|---|---|---|
+| `ExecutionRequest`, `BackendCapabilities`, `ExecutionBackend`, `ExecutionRun`, `ReattachContext` | `crates/exec` (`backend.rs:47, :124, :139, :168`) | Pure. Generic traits, never `dyn` (module doc of `backend.rs`). |
+| `ResumeSupport`, `ReattachHandle` | `crates/exec/src/handle.rs:24, :59` | Versioned handle (`schema: ReattachSchema::V1`) with an opaque `operation`. |
+| `ExecutionState`, `ExecutionResult`, `ExecutionEvent` | `crates/exec/src/result.rs:140, :109, :179` | `ExecutionState` has six variants: `Requested`, `Accepted`, `Settled`, `EffectsUnknown`, `SubmissionUnknown`, `NotSubmitted`. The 2026-10-31 list names four; the code is the reference. |
+| `ExecutionError` | `crates/exec/src/error.rs:137`; variants `ResumeUnsupported` :226, `EffectsUnknown` :232, `SubmissionUnknown` :238, `NotSubmitted` :241, `InvalidHandle` :245 | Typed failures, classified in the same file. |
+| `JobKind::Execution` payload | `jobs.rs:452–467`, optional journal properties on the job node | Not a separate typed payload. Keys are in `crates/session/src/components/jobs.rs:59–81`: `backend`, `reattach_schema`, `reattach_handle`, `submission_started`, `request`, `output_mode`, `destination`, `deadline`, `approval`, `execution_result`, `execution_failure`, and `execution_state`. |
+| `ExecutionSubmission` | `jobs.rs:251` | `owner: Str`, `identity: Str`, `request`. The owner is a free string today (D4). |
+| `AuthorizedExecution`, `ExecutionApprovalError` | `jobs.rs:170, :223` | Only `from_session` mints the proof. |
+| `ExecutionStartError`, `ExecutionReattachError`, `ExecutionResume` | `jobs.rs:262, :289, :398` | Typed refusals (section 4). |
+| `ExecutionSettlement`, `JobSettlement`, `JobRecord` | `jobs.rs:137, :150, :421` | Board and journal records. |
+| Journal writers | `crates/session/src/components/jobs.rs:165` `insert_execution`; :204 `mark_execution_submitting` | `omp-session` depends on `omp-exec` (`crates/session/Cargo.toml`). |
+| `JobOwner` | `crates/tool/src/lib.rs:2090` (`NamedProcess`, `AgentLoop`) | `JobMetadata` (:2164) has no construction outside a contract test (`crates/tool/tests/contracts.rs:2372`). Execution jobs are not in that roster. |
+
+Dependency check, from the manifests: `omp-agent` depends on `omp-exec` (`crates/agent/Cargo.toml`). `omp-exec` depends on `omp-adw`, `omp-core`, `omp-journal`, `omp-proto` and `omp-sandbox`, and not on `omp-agent` or `omp-session` (`crates/exec/Cargo.toml`). `omp-tool` depends on neither (`crates/tool/Cargo.toml`). The homes above therefore create no cycle, and `omp_tool::JobOwner` cannot name an exec type (D4).
+
+### 3. Lifecycle, as built
+
+1. Approve. `RemoteBuildTool::run` asks the network route once per host (`ask`, `remote_build.rs:354`), then mints the proof for this call id (`authorize`, :401). Only a user or external approval counts (`approves`).
+2. Submit. `start_execution` refuses a duplicate id and a spent ticket, journals `requested`, then journals the marker. No backend is contacted before the marker commits (jobs.rs:1024–1073). If only the marker fails to commit, `requested` stays indexed and the next `poll` settles it `NotSubmitted`; `start` never ran.
+3. Start. `start_execution_run` calls `backend.start` exactly once (jobs.rs:1822). A failure or a cancel before a handle settles `SubmissionUnknown`. Nothing is retried and no handle is invented.
+4. Accept. `supervise_execution` (jobs.rs:1923) forwards `ExecutionEvent::Accepted` to the board over a bounded channel. `poll` journals `Accepted` with the handle (jobs.rs:1140).
+5. Settle. `Settled(Ok)` gives `Settled`. `Settled(Err(EffectsUnknown { handle }))` gives `EffectsUnknown`. A typed error with an accepted handle gives `Settled`; without a handle it gives `SubmissionUnknown`. An event stream that ends after acceptance gives `EffectsUnknown` (`supervise_execution`, jobs.rs:1923–2064). Cancellation calls `ExecutionRun::cancel` (jobs.rs:2016); the surrounding branch is UNVERIFIED.
+6. Journal. Every transition is a session patch: `commit_settlement` (jobs.rs:2375) and `resume_txn` (:2104). The board index is disposable; `rebuild` (jobs.rs:1095) rebuilds it from the DOM.
+7. Reattach. `reattach_execution` (jobs.rs:1669) checks the journal and the backend (section 4), calls `backend.reattach` with the remaining deadline, journals `jobs.resume`, then supervises with the stored handle. If the resume patch fails, the run is detached, not cancelled (doc of `reattach_execution`).
+8. Restart. `rebuild` marks a live execution job orphaned (`restart_orphan`, jobs.rs:2174). The orphan step of `poll` (jobs.rs:1212) settles it from the journal (`orphaned_execution`, :2194). The job's status becomes `failed`; its execution state becomes `EffectsUnknown` when a handle was stored. `resumable` still accepts such a job, because only `completed` and `cancelled` are refused (jobs.rs:2068–2092).
+
+Crash windows:
+
+| # | Crash point | Journal after restart | Backend contacted again | Test |
+|---|---|---|---|---|
+| 1 | Before `requested` commits | No node | No | None by name. Proposed in section 5, step 2. |
+| 2 | After `requested`, before the marker | `NotSubmitted` | No | `execution_t5_restart_distinguishes_submitting_from_never_submitted` (`tests/jobs.rs:1396`; name only). |
+| 3 | After the marker, before `start` returns | `SubmissionUnknown`, no handle | No | `execution_t5_crash_after_the_marker_is_submission_unknown_without_retry` (`tests/jobs.rs:1929`; body read). It reopens, asserts `reattach_handle` is `None`, and asserts `test_calls` (`tests/jobs.rs:1761`), which fails on any start before its marker. |
+| 4 | After the backend accepts, before `poll` journals `Accepted` | `SubmissionUnknown`, no handle | No | None. Proposed in section 5, step 2. This is the residual (D3). |
+| 5 | After `Accepted` commits, before settlement | `EffectsUnknown` with the handle; resumable | No | `execution_t4_restart_after_acceptance_settles_effects_unknown_once` (`tests/jobs.rs:1341`; reopen read, assertions by name); `execution_produced_restart_after_acceptance_never_starts_again` (`tests/jobs.rs:2262`; body read: two reopen cycles, `test_calls` asserted). |
+| 6 | After settlement commits | Terminal | No | `execution_t7_produced_results_and_failures_survive_reopen` (`tests/jobs.rs:2201`; name only). |
+
+Window 4 in detail. Acceptance reaches the board over a `flume` channel of capacity one (jobs.rs:1024–1088). The journal learns of it only on the next `poll`. A kill in between loses the operation name. `ExecuteRequest` has no client-chosen operation name and no idempotency key (`crates/exec-reapi/proto/build/bazel/remote/execution/v2/remote_execution.proto:1584–1663`: fields 1, 3 and 6–12). The Execution service has `Execute` (:118) and `WaitExecution` (:136), and both need an operation name; no other RPC sits between them and the ActionCache service that starts at `GetActionResult` (:170). The ActionCache can return a finished result by action digest, but only when the action cache is in use, and that is a result read, not a run handle. So the job settles `SubmissionUnknown`. No second start happens. The accepted work may still run, and this record cannot reattach it. [INFERENCE] No request-identity lookup exists in the vendored service.
+
+The 2026-10-31 rule says the journal MUST record `EffectsUnknown` when the watcher loses the terminal effect after acceptance. Window 4 is before the journal knows of acceptance, so that rule does not reach it. D3 records this, and this amendment does not reword the rule.
+
+### 4. Typed refusals
+
+Every refusal below happens before backend contact and before any journal write.
+
+- Approval, in `RemoteBuildTool::run`: `Fault::NotApproved` when no decided approval exists for the call (`authorize`, `remote_build.rs:401`). `ExecutionApprovalError` (`jobs.rs:223`) has `UnknownTicket`, `NotApproved` and `NotCovered`.
+- Submit, in `start_execution` (`jobs.rs:1024`): `ExecutionStartError::Duplicate`, `ApprovalSpent` (`jobs.rs:262`; test `execution_t1_only_an_approved_ticket_starts_one_run`, `tests/jobs.rs:1781`), `NoJobs` and `Session`.
+- Reattach, in `reattach_execution` (`jobs.rs:1669`) and `resumable` (`jobs.rs:2068`), typed by `ExecutionReattachError` (`jobs.rs:289`):
+  - `NotExecution`, `Watched` (the job is still live), `Finished` (settled, or accepted and `completed` or `cancelled`), `NotAccepted`, and `InvalidHandle` (from `resumable`).
+  - `Changed` (the node id changed, or a task is live) and `BackendMismatch { expected }` (the handle names a different backend).
+  - `Unsupported { backend }` for `ResumeSupport::Unsupported`, which `LocalBackend` and `SshBackend` report; `SnapshotOnly { backend }` for `ResumeSupport::Snapshot`, which no core backend reports.
+  - `Backend(ExecutionError)`: the backend's own `reattach` failed.
+
+Tests. `execution_t11_refusals_make_no_backend_call_and_no_write` (`tests/jobs.rs:2500`) has a table covering `Unsupported`, `SnapshotOnly` and a renamed backend (`BackendMismatch`), each checked against its typed variant (:2517–2532). Its body after :2531 was not read, so the no-call and no-write assertions are UNVERIFIED. `execution_attach_without_submission_marker_is_refused` (:2293) covers the marker rule. `Watched` is asserted at :2469.
+
+Submit-time refusal for non-resumable backends is not implemented. The agent producer composes only `ReapiBackend` (`remote_build.rs:126`), so today it cannot submit to a backend that cannot resume. See D5.
+
+### 5. Implementation sequence for Gaps 1–4
+
+Most of Gaps 1–4 is in the tree. What remains is verification, two missing tests, one owner decision, and the live check that the 2026-10-31 gate requires.
+
+- Step 0 (this PR, docs only). This amendment, plus in-place corrections to `STATUS.md:52` and :71 and `TASKS.md:242–243`. No code. Check: the citation and name checker, and a diff that touches only `docs/`.
+- Step 1 (verification, no code change). Run the `execution_` tests in `tests/jobs.rs` and `only_remote_eligible_cargo_just_recipes_run` (`crates/driver/tests/remote_build.rs:970`) on a remote runner, not locally, as the repository's build rule requires (rule text UNVERIFIED in this pass). Record the test-name list before and after, and require each name to appear. Pass: every listed test passes. This step settles D1 for Gaps 1, 3 and 4.
+- Step 2 (Gap 3, two tests, no production change). Add `execution_no_node_no_start_on_restart`: crash before `requested` commits, reopen, and assert no job and no start (window 1). Add `execution_t13_crash_between_acceptance_and_commit_is_submission_unknown_without_start`: accept, drop the board before `poll`, reopen, and assert `SubmissionUnknown`, `reattach_handle` `None`, and one start (window 4). Pass: both pass, and neither name exists today (checked: no matches).
+- Step 3 (Gap 2, live check, owner-gated). With `sv_exec_agent_runs` on and one REAPI endpoint, run a `remote_build` call. Kill the process after the `Accepted` commit (window 5), run `omp jobs attach` for that job, and check one settlement, one backend start, and a recorded invocation id. No test does this today: the CLI path (`crates/app/src/jobs_cmd.rs:89–105`) is tested only for an unknown id (:259). This step needs D6.
+- Step 4 (Gap 1, only if D2 is yes). ADW durable runs, with the changes in section 1. Not required for Gaps 1–4.
+- Step 5 (Gap 4, typed results). Covered by `execution_t9_spilled_typed_result_resolves_after_reopen` (`tests/jobs.rs:1584`, output bound 128 bytes, body read) and `execution_t7_produced_results_and_failures_survive_reopen` (`tests/jobs.rs:2201`). The spill is `bounded_output` (jobs.rs:2319). No new test is needed unless D3 changes.
+- Step 6 (documentation). Update the ADR 0040 Status section and STATUS.md in the same change as a Step 1 or Step 3 pass, as `docs/adr/README.md` requires. Do not change the record's status label until the owner accepts the gate.
+
+### 6. Open questions, with recommended answers
+
+- D1. Acceptance. Does the owner accept Gaps 1, 3 and 4 after Step 1 passes? Recommended: yes, for those three. Accept Gap 2 only after Step 3, because no test resumes a live `ReapiBackend` through `omp jobs attach`.
+- D2. ADW durability. Should ADW remote phases become durable runs? Recommended: not for this gate. Record them as non-durable in the Status section, keep the discard at `remote.rs:163`, and reopen the question when the owner asks. The change list is in section 1.
+- D3. Window 4. Accept `SubmissionUnknown` as a known residual, or tighten it? Recommended: accept it. The protocol gives no client key for finding the operation again (section 3). Tightening can only shrink the window, by committing acceptance before forwarding any later event; it cannot close the window. The 2026-10-31 rule describes a journal that already knows of acceptance and does not cover window 4.
+- D4. Owner type for execution jobs. Should the owner be a typed enum on the agent side, or a new `omp_tool::JobOwner::RemoteExecution` variant (ADR 0047, stage 2)? Recommended: a typed agent-side enum on the execution job. `ExecutionSubmission.owner` is a free string today (jobs.rs:251). Execution jobs never enter the `omp_tool` roster (`JobMetadata`, `crates/tool/src/lib.rs:2164`), and `omp_tool` cannot name exec types (section 2). Do not add the variant in Gaps 1–4. If it is added later, the exhaustive match at `crates/driver/src/headless/kernel.rs:1640–1643` must change with it.
+- D5. Submit-time refusal. Is a refusal needed for backends that cannot resume? Recommended: not now. The agent producer composes only `ReapiBackend` (`remote_build.rs:126`). When a second backend is composed for agent runs, refuse in `start_execution` with a new `ExecutionStartError::NotResumable` when `capabilities().resume` is `Unsupported`.
+- D6. Live-check prerequisites. Which answers unblock Step 3? Recommended: ADR 0040 open questions 2 (is uploading the omp2 source to BuildBuddy Cloud acceptable) and 3 (where the image is hosted, and who rebuilds it). Both are still open in the question list. Run Step 3 once, on one runner, and record the invocation id in `docs/audits/remote-verification-trial.md`.
+- D7. ADR 0047 condition C2. The acceptance amendment with conditions is not in this tree. ADR 0047 reads `Status: proposed; requires owner review` at base (line 3), and the `docs/adr0047-amend-accept` worktree is clean with no commits beyond base. The C2 wording is UNVERIFIED here. Recommended: the owner confirms it. Until then, the prerequisite in section 7 rests on the owner's statement, not on a file.
+- D8. ADR 0047 caller sentence. ADR 0047, Decision 1, says it "does not specify the producer caller". Recommended: the owner amends 0047 in its own change to point to section 1. This PR does not edit 0047.
+- D9. Two `JobKind` enums. `omp_tool::JobKind` (`crates/tool/src/lib.rs:2121`: `Shell`, `Task`, `Eval`) and `omp_agent::jobs::JobKind` (jobs.rs:50: `Tool`, `Subagent`, `Process`, `Execution`) both exist, and ADR 0010 requires one job primitive. Recommended: no change in this gate. The job board is the primitive, and the tool enum describes tool-layer metadata. UNVERIFIED: the call graph of `omp_tool::JobKind` was not traced. Trace it before ADR 0010's status is revised.
+
+### 7. ADR 0047 and condition C2
+
+Per the owner's brief, ADR 0047 condition C2 makes this producer a prerequisite for `JobOwner::RemoteExecution` work. The C2 text is UNVERIFIED in this tree (D7). The producer exists in code (section 0) but is not accepted (D1). So `RemoteExecution` owner work may start only after the owner accepts Gaps 1–4 (D1) and decides the owner type (D4). This PR starts none of that work.
+
+
 ## References
 
 - ADRs 0001, 0003, 0006, 0007, 0009, 0010, 0011, 0028, 0033, 0035, 0039.
