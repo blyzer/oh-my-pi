@@ -1,6 +1,6 @@
 # 0050. Extension-declared URL schemes
 
-Status: proposed; requires owner review
+Status: accepted by the owner on 2026-11-11, with conditions (see Decision record 2026-11-11)
 Date: 2026-11-10
 Area: tools
 
@@ -33,18 +33,13 @@ Citations in the table are paths on this docs tip, `omp2` at `580d3fb9fb`. The s
 
 ## Decision
 
-### D1. One canonical spelling; aliases are an owner choice
+### D1. One canonical spelling; no aliases in v1
 
 A declared scheme has one canonical spelling. The spelling matches the host-URI grammar already enforced by `set_host_uri_schemes`: `^[a-z][a-z0-9+.-]*$`, normalized to lowercase, at most `MAX_HOST_URI_SCHEME_BYTES`.
 
 The only built-in alias pair is `http` / `https` (`Scheme::Http`). A declared spelling that collides with any built-in wire name in `url-vocab.json`, including `https`, is refused.
 
-**Owner choice, recorded before S2.** Either:
-
-- a declaration carries one spelling, or
-- a declaration may list extra spellings that parse to that same scheme, on the pattern of `https` → `Http`.
-
-The proposed default is one spelling. An alias is a second prompt surface and a second key in the frozen alias map (`omp/urls.py` `_SCHEME_ALIASES`). Extra spellings, if the owner allows them, still cannot reuse a built-in wire name, and they count toward the 32-scheme generation cap.
+**Owner decision, 2026-11-11.** A declaration carries one spelling; v1 has no aliases. A declared spelling that collides with any built-in wire name in `url-vocab.json` is refused. The built-in wire names are `file`, `http`, `https`, `artifact`, `history`, `agent`, `local`, `memory`, `mcp`, `skill`, `rule`, `omp`, `issue`, `pr`, `ssh`, `security`, `vault`, `job`, `attachment` and `conflict` (`crates/tools/url-vocab.json`, the source of truth). An alias would be a second prompt surface and a second key in the frozen alias map (`omp/urls.py` `_SCHEME_ALIASES`); a later record may add aliases.
 
 ### D2. The built-in vocabulary does not grow
 
@@ -76,7 +71,9 @@ For a scheme this extension declared, core splits the shared line-selector gramm
 
 The byte ceiling is the central read bound ([ADR 0009](0009-bound-output-once.md)). An extension does not truncate the model-facing body itself.
 
-Fetch and credential judgment uses the declaration. A declared scheme with no fetch and no credentials is a local read. Anything the declaration omits stays `Effects::unknown()`, which is the exec approval tier. The existing `read_unknown_fetch` hook (`resolver.rs:764-768`) is where that judgment is reported for the fallback.
+Fetch and credential judgment uses the declaration. A declared scheme with no fetch and no credentials is a local read. Anything the declaration omits stays `Effects::unknown()`, which is the exec approval tier.
+
+**Current behavior, verified 2026-11-11, differs from the paragraph above.** A read of a raw foreign scheme reaches `read_unknown_fetch` (`crates/tools/src/read.rs:971`, `crates/tools/src/read/resolver.rs:767`), which returns the installed fallback's `read_fetch`. The envd fallback is `UrlResolver::Host`, and `crates/envd/src/tool_url.rs:453` answers `Some(FetchEffects { credentials: false })` for every host URI: an approval-tier `Fetch` (anonymous network egress, above Read and below Write; `ApprovalTier::from_effects`, `crates/contract/src/posture.rs:365-405`), whatever the extension declared. It is neither `Effects::unknown()` nor a declaration-based judgment. **Condition:** replacing that blanket answer with the declaration-based judgment above is a prerequisite of S3, with a regression test that a declared scheme whose declaration omits fetch and credentials is judged `Effects::unknown()` and that an undeclared foreign scheme never receives a declared scheme's judgment. `read_fetch` returns `Option<FetchEffects>` and cannot express `Effects::unknown()`, which is produced at `crates/agent/src/dispatch.rs:2196`, so S3 must carry the declaration's judgment through a path that can express it; the stale doc comment at `crates/envd/src/tool_url.rs:440-443` ("the environment fetches nothing for it") is corrected in the same slice.
 
 ### D6. Lifetime is the extension generation
 
@@ -86,20 +83,15 @@ A declared scheme is live only while the extension generation that registered it
 
 Two extensions claiming one spelling: the first claim stands, and the later claim is refused. The refusal names both extensions. A quarantined scheme does not fall through to another extension.
 
-### D7. Native MCP resource URIs are an owner choice
+### D7. Native MCP resource URIs stay with the MCP manager
 
-Mounted MCP resources stay readable as `mcp://`, via `omp.mcp.mount`, as ADR 0027 says. That path is unchanged under either owner choice.
+Mounted MCP resources stay readable as `mcp://`, via `omp.mcp.mount`, as ADR 0027 says. That path is unchanged.
 
-**Owner choice, recorded before S2.** The prior product behavior served some MCP resource URIs that used the server's own scheme. Either:
-
-- those native URIs stay an MCP-manager concern, and an extension that wants them readable tells the model to use `mcp://…`, or
-- an extension may declare the server's native scheme, and a `read` of that URI is served through the unknown-scheme fallback by the extension that mounted the server.
-
-The proposed default is the first. A native scheme is a second grammar beside `mcp://`, and a declared native spelling can occupy a name the built-in vocabulary might later need. The second choice, if the owner takes it, still refuses spellings that collide with built-ins, and the handler is the extension's declared read, not a new resolver.
+**Owner decision, 2026-11-11.** Native MCP resource URIs stay an MCP-manager concern. An extension that wants them readable tells the model to use `mcp://…`. An extension does not declare a server's native scheme in v1: a native scheme would be a second grammar beside `mcp://`, and a declared native spelling could occupy a name the built-in vocabulary may later need.
 
 ### Completion
 
-This record is complete when the owner has accepted it, D1 and D7 are recorded, and S1–S5 have landed. Until acceptance, the status stays proposed and no production change starts.
+This record is complete when S1–S5 have landed. It was accepted by the owner on 2026-11-11 with the conditions in the Decision record; D1 and D7 are recorded.
 
 ### Non-goals
 
@@ -114,17 +106,17 @@ This record is complete when the owner has accepted it, D1 and D7 are recorded, 
 
 ADR 0049 Phase **2S**: after Phase 2 (locality, the table-driven roster) and before Phase 3 (capability features). Phase 2S does not satisfy a Phase 2 or Phase 3 exit criterion, and it does not wait on Phase 4's forge-neutral `pr://` / `issue://` work.
 
-One PR per slice. Every slice is blocked until the owner accepts this record.
+One PR per slice. Each slice lands under the owner acceptance of 2026-11-11 and its conditions.
 
 | Slice | PR | Exit |
 |---|---|---|
-| S1 | Manifest field `schemes` and additive `omp.schemes`. Refuse a built-in wire name, an unclaimed name, and a grammar miss | A fixture manifest round-trips; `https` and `pr` are refused; `omp.urls.schemes` is unchanged |
+| S1 | Manifest field `schemes` and additive `omp.schemes`. The manifest parser (`crates/ext`, which has no dependency on the vocabulary) refuses an unclaimed name and a grammar miss; a built-in wire name is refused where the vocabulary is available, in `crates/py`, which packs `crates/tools/url-vocab.json` (`crates/py/build.rs:133`) | A fixture manifest round-trips; `https` and `pr` are refused; `omp.urls.schemes` is unchanged |
 | S2 | Fold live claims into one `set_host_uri_schemes` generation served by `HostUriResolver` | `read` of a declared scheme returns the handler body; a second extension's claim on the same spelling is refused; built-in `pr://` still resolves |
 | S3 | Core line-selector split for declared schemes only, plus effect judgment on the declaration | `widget://id:2-3` returns those lines from core; `custom://pending:raw` for an undeclared scheme still keeps `pending:raw`; `mcp://` stays opaque |
 | S4 | Rebind on `ExtensionReloadHandle::reload`; drop on `quarantine_extensions` | After `/reload-plugins` the scheme still reads; after quarantine it does not, and a built-in route still reads |
 | S5 | Model-facing listing of declared schemes, without a roster or schema change, plus the joined conformance test | The conformance test covers install, read, selector, reload, quarantine, and a stable built-in route |
 
-S2 starts only after D1 and D7 are recorded. S3 depends on S2. S4 depends on S2. S5 depends on S3 and S4.
+D1 and D7 are recorded (2026-11-11). S1 may start. S2 starts after S1 lands. S3 depends on S2 and on the D5 prerequisite above. S4 depends on S2. S5 depends on S3 and S4.
 
 ### Acceptance tests
 
@@ -134,7 +126,7 @@ S2 starts only after D1 and D7 are recorded. S3 depends on S2. S4 depends on S2.
 - Reload re-registers the scheme. Quarantine removes it and leaves static routes in place.
 - Two extensions cannot own one spelling. One extension's registration cannot erase another's.
 - The latched tool roster and the `Scheme` enum are unchanged by installing the fixture extension.
-- With the proposed D7 default, a server-native MCP URI is not implicitly a declared scheme. `mcp://` still reads the mounted resource.
+- With D7, a server-native MCP URI is not a declared scheme. `mcp://` still reads the mounted resource.
 
 ## Alternatives considered
 
@@ -161,20 +153,31 @@ S2 starts only after D1 and D7 are recorded. S3 depends on S2. S4 depends on S2.
 - A manifest field and one additive Python symbol, `omp.schemes`.
 - A generation-scoped union published through `set_host_uri_schemes`.
 - A line-selector split that applies to declared schemes and leaves undeclared `Unknown` URIs and `mcp://` opaque.
-- Two owner choices (D1 aliases, D7 native MCP URIs) recorded before S2.
+- Two owner decisions (D1 aliases, D7 native MCP URIs) recorded 2026-11-11, before S2.
+
+## Decision record 2026-11-11
+
+The owner accepted this record on 2026-11-11, on the recommendation of a three-lens council (requirements, risk, simplicity), with these conditions:
+
+1. **D1:** one canonical spelling, no aliases in v1; built-in wire names are refused.
+2. **D7:** extensions use `mcp://`; no declared native MCP URI schemes.
+3. **D5 correction:** the record said an unreported foreign scheme stays `Effects::unknown()`. The code answers `FetchEffects { credentials: false }` for every host URI (`crates/envd/src/tool_url.rs:453`). Replacing that with the declaration-based judgment is a prerequisite of S3, with the regression test named in D5.
+4. **S1 placement:** the built-in-name refusal belongs in `crates/py`, which packs the vocabulary; `crates/ext` has no dependency on it.
+
+The five-slice plan is unchanged. One council reviewer argued that S2 and S4 could merge and that S3 and the S5 listing could be deferred; that is recorded as an option for the owner, not adopted. S2 to S5 stay gated as the sequencing above says.
 
 **Unchanged:** the `Scheme` enum, `url-vocab.json`, the latched wire roster, journal schema, and `mcp://` via `omp.mcp.mount`.
 
 ## Implementation gate
 
-- Status is proposed. This record authorizes no production change before the owner accepts it.
-- The owner records D1 and D7 before S2.
+- Status is accepted by the owner (2026-11-11) with the conditions in the Decision record. Production change is authorized slice by slice under that record.
+- D1 and D7 are recorded; S2 waits for S1.
 - S1–S5 each land as one PR under ADR 0049 Phase 2S, after Phase 2 and before Phase 3.
 - Phase 2S does not start Phase 3 and does not close Phase 4.
 
 ## Status in omp
 
-**Not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` and at `bf39a439a0`. An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented. Implementation waits on owner acceptance.
+**Accepted, not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` (the `bf39a439a0` stack tip in the Context table is not on `omp2`). An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented; S1 is the first PR.
 
 ## References
 
