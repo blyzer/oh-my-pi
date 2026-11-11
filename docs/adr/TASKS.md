@@ -35,7 +35,7 @@ Status meanings:
 - 2026-10-28: Owner accepted ADR 0048 with B4 full frame preflight validation, behavior-family golden fixtures including compaction/tool.update/patch, `toolhost` retained in Buf breaking scope, and the lenient B1 decode variant. B9 Variant 1 is the selected implementation direction.
 
 - 2026-11-09: Owner accepted ADR 0049 (tiered integration architecture) and ADR 0046, with the rulings recorded in ADR 0046. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors. The owner ruled that `envd/src/codex_app_server` stays as a recorded exception with two exits (ADR 0043). ADRs 0027, 0036, 0043, 0045 and 0047 were amended; ADR 0040 and ADR 0047 keep their own acceptance gates.
-- 2026-11-11: Owner amended and accepted ADR 0047 with conditions. C1: credential containment (G3) is decided in its own record before any remote backend is composed by default. C2: ADR 0040 Gap 1 (`JobKind::Execution` producer) is a prerequisite of `JobOwner::RemoteExecution` stage-2 work. C3: acceptance creates no remote default; G8 stays open. C4: the 2026-11-05 vendor removal and the 2026-11-09 `ExecHost` move are separate changes that acceptance does not verify. Acceptance gate renamed A0 (it was G1, which ADR 0040 uses for the relief measurement).
+- 2026-11-11: Owner amended and accepted ADR 0047 with conditions. C1: credential containment (G3) is decided in its own record before any remote backend is composed by default. C2: ADR 0040 Gap 1 (`JobKind::Execution` producer) is a prerequisite of `JobOwner::RemoteExecution` stage-2 work. As built (checked 2026-11-11 on `omp2` `5b0cd838c9`): the producer exists in code (`JobBoard::start_execution`, called by the `remote_build` tool; `sv_exec_agent_runs` defaults to false) and is off by default and unaccepted. C3: acceptance creates no remote default; G8 stays open. C4: the 2026-11-05 vendor removal and the 2026-11-09 `ExecHost` move are separate changes that acceptance does not verify. Acceptance gate renamed A0 (it was G1, which ADR 0040 uses for the relief measurement).
 
 ## Decision matrix for remaining ADR work
 
@@ -82,11 +82,12 @@ error. No council verdict is recorded.
 - **ADR 0040 production gate: DECIDED 2026-11-04.** Build a product execution-job producer and a
   real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
   and result persistence require that producer. ADR 0047 is the agent-build companion (accepted
-  with conditions 2026-11-11; C2 makes this producer a prerequisite of its stage-2 work);
+  with conditions 2026-11-11; C2 makes acceptance of this producer a prerequisite of its stage-2 work;
+  the producer and `reattach_execution` now exist in code, off by default and unaccepted);
   ADR 0040 "Gap to acceptance" describes the work.
-- **ADR 0047 follow-up: enforce the gates in code (OPEN, 2026-11-11).** Remote REAPI wiring already
+- **ADR 0047 follow-up: enforce the gates in code (PROPOSED, not an owner condition; 2026-11-11).** Remote REAPI wiring already
   exists in the driver (`crates/driver/src/adw/production.rs:247`, `crates/driver/src/exec_composer.rs:641-653`).
-  It is opt-in (`SV_EXEC_POLICY` defaults to `LocalOnly`), but no code checks A0, G3 or G8. Make
+  It is opt-in (`SV_EXEC_POLICY` defaults to `LocalOnly`; `omp adw run --exec-policy` also selects remote per process), but no code checks A0, G3 or G8. Make
   the driver refuse to compose a remote backend until the credential-containment record (C1) is
   accepted, and add a test for the refusal.
 - **DONE** ADR 0040 quiet-host measurement harness (PR #490). The interleaved harness records host-pressure guards and accounts for the serving envd by role, including bounds for shared envd. Its dry run was synthetic; no real recipe measurement or relief verdict was produced. PR #494 fixed the profile/cache race, and PR #495 fixed runner cache eviction. A valid quiet-host run and the owner-set thresholds remain open.
@@ -182,7 +183,7 @@ ADR status: **accepted 2026-11-09**; implementation gated by Phase 0.
 - **DONE** Phase 4 (D6 class A, forge, gitwatch): `chat/src/gitwatch.rs` no longer spawns `gh`. The chat host asks `Services::branch_change_request`. App builds `ProjectEnvironment::checkout_forge`, the same forge `Delegated` router as `forge@1`, and `CheckoutForge::view_branch` reads the open change request through `view_change_request`. The chip still shows the number and URL. Autocomplete insertion strings stay `pr://` and `issue://`; the module name `github_refs` stays. Extensions home decided 2026-11-10 (`extensions/`); GitLab T2 is OPEN / next.
 - **DONE** Phase 4 (D6 class A, forge-cache): `cache/src/github_cache.rs` renamed+moved to `cache/src/forge_cache.rs`. Types, SQLite filename/table (`forge-cache.sqlite3` / `forge_cache`), convars (`sv_forge_cache_*`), and every caller cut over with no shims. TTL/etag/rebuildable semantics unchanged; old sqlite files are discarded. Autocomplete module name `github_refs` stays. Extensions home decided 2026-11-10 (`extensions/`); GitLab T2 is OPEN / next.
 - **DONE** Phase 4 (D6 class A, execution steps 1–3): REAPI profiles are operator data (`sv_exec_remote_credential_header`, `sv_exec_remote_arch_spelling`, `sv_exec_remote_fixed_properties`, `sv_exec_remote_refuse_action_cache`); `Profile::buildbuddy` and every `"buildbuddy"` branch in `adw/remote.rs` are gone. Deleted `buildbuddy-cancel`, `buildbuddy_cancel.rs`, `proto-buildbuddy/`, and the orphan `crates/exec-buildbuddy` workspace member. Root `Cargo.toml` no longer names BuildBuddy. Cancel now uses standard `Operations.CancelOperation` / action timeout until `DelegatedBackend` adds a cancel fallback (research steps 4–5). Evidence: `just test-pkg omp-exec-reapi`, focused `omp-driver` tests, `cargo check -p omp-app --tests --locked`.
-- **BLOCKED** Phase 4 (D6 class A, execution remainder): `DelegatedBackend`, execution-job producer, reattach, and a later Delegated cancel fallback (research steps 4–5); `repo_pins` rewrite (step 6). A BuildBuddy Run API / cancel extension still needs that Delegated surface; the extensions **home** (`extensions/`) is settled.
+- **BLOCKED** Phase 4 (D6 class A, execution remainder): `DelegatedBackend` and a later Delegated cancel fallback (research steps 4–5); `repo_pins` rewrite (step 6). A BuildBuddy Run API / cancel extension still needs that Delegated surface; the extensions **home** (`extensions/`) is settled.
 - **DONE** Phase 4 codex exit check (ADR 0043 ruling 2026-11-09) on tip `3dba669808`: neither Exit 1 nor Exit 2 holds; `envd/src/codex_app_server/*` kept as the recorded exception. Exit 1: no Codex ACP launch profile — `crates/driver/src/delegated_acp.rs` registers only dsh / Devin / Grok (`DSH_ID`/`DEVIN_ID`/`GROK_ID`, `enabled_executors`); Codex stays on the native app-server path (`sv_delegated_codex_program` in `delegated_host.rs`). ADR 0043 gaps still hold: system sections go through `thread/inject_items` (`session.rs` ~753–769; `TurnStartParams` in `wire.rs` has no system-prompt field); approval `write` and network `scoped` remain unmappable (`policy.rs` `wire_policy` returns `None` → `ExecutorError::PolicyUnmappable` at `session.rs` ~285–288). Research still records no Codex ACP server mode (`docs/research/native-cli-feasibility.md`). Exit 2: no delegated-executor **extension** contract in-tree — only the in-core `omp-agent` delegated + ACP client T1 surface; `DelegatedBackend` remains research/BLOCKED (`docs/research/exec-out-of-core.md`; TASKS execution remainder); a vendor-executor extension host remains Phase 5 work under `extensions/`. Module not deleted; no fake Codex ACP profile added.
 - **OPEN** owner choice: the `local` (candle) default.
 - **DONE** owner choice (2026-11-10): first-party T2 extensions home = in-repo `extensions/` (same-repo layout as early omp2 / can1357 upstream; not a Cargo member). Owners = repo maintainers / this tree. Wave-1 starts with the **GitLab forge adapter (D2.8)**; the list may grow. See `extensions/WAVE1.md`.
@@ -242,12 +243,14 @@ Deltas verified 2026-10-25 against `omp2` after PR #419:
 - **RESOLVED** ADR 0045 W8 evidence (0045-CONTAIN test deliverable): PR #419.
 - **Progressed** FOLLOW-0035 error-format migration: ratchet 1042 → 639
   formatted sites after PRs #414–#417.
-- **STILL OPEN** `reattach_execution` backend call
-  (`crates/agent/src/jobs.rs:1246-1257` TODO). The pieces it waited on exist: the
+- **BUILT, UNACCEPTED** `reattach_execution` backend call
+  (formerly a TODO at `crates/agent/src/jobs.rs:1246-1257`, no longer present). The pieces it waited on exist: the
   versioned `ReattachHandle` (`crates/exec/src/handle.rs`, `01f8151003`) and the
   `WaitExecution` reattach in `crates/exec-reapi/src/execute.rs:ReapiBackend::reattach`.
-  It now waits on a `JobKind::Execution` producer, because without one no handle is
-  stored (ADR 0040 "Gap to acceptance", items 1 and 2). ADR 0039 Part B has no
+  The producer now exists (`JobBoard::start_execution`, called by the `remote_build` tool,
+  off by default) and `reattach_execution` is implemented (`crates/agent/src/jobs.rs:1669`, reached from
+  `crates/app/src/jobs_cmd.rs:105`); what is open is acceptance and a live kill-and-resume run
+  (ADR 0040 "Gap to acceptance", items 1 and 2). ADR 0039 Part B has no
   reattach text and ADR 0039 R2 does not unblock it.
 - **STILL OPEN** kernel dispatch `channel_for(None, ..)`
   (`crates/agent/src/dispatch.rs:1549`; owner decision).

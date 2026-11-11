@@ -2,7 +2,7 @@
 
 Status: accepted by the owner 2026-11-11, with conditions C1–C4 (see [Decision record 2026-11-11](#decision-record-2026-11-11)).
 Authorised: ratification of the `omp-exec` types and `place()`; the `CargoJust` adapter; the local, REAPI and SSH backends; `omp.exec.*` telemetry; the `ExecHost` trait move into `omp-exec`; gate G4 (local parity) and closure of audit finding F11 for `just test-pkg omp-envd`.
-Still blocked: remote-by-default placement; a remote credential model; warm-state work; closing ADR 0040 Gaps 1 and 4.
+Still blocked: remote-by-default placement; a remote credential model; warm-state work; closing ADR 0040 Gaps 1 and 4 (the producer and its gate tests exist in code but are off by default and unaccepted; see the as-built note under C2).
 Date: 2026-10-11
 Area: runtime
 
@@ -35,7 +35,7 @@ Full analysis: [docs/research/provider-neutral-build-execution.md](../research/p
    - **Companion to [ADR 0040](0040-remote-build-and-test-execution.md):** this ADR covers
      agent-facing builds and job-board hosting, including a remote execution job owner in stage 2.
      ADR 0040 requires a product execution-job producer and real reattach before acceptance. This
-     record does not specify the producer caller. ADR 0040 Gap 1 (the `JobKind::Execution` producer) is a named prerequisite of the stage-2 `JobOwner::RemoteExecution` work (condition C2).
+     record does not specify the producer caller. The owner's condition C2 names ADR 0040 Gap 1 (the `JobKind::Execution` producer) as a prerequisite of the stage-2 `JobOwner::RemoteExecution` work. The producer already exists in code but is off by default and unaccepted (see the as-built note under C2).
 2. **`BuildExecutionPort` is deferred.** It is rejected in its proposed form. Bazel is a Local-placed adapter that never wraps its actions. GitHub Actions is a CI capability, not a working-tree executor. Superseded in part by the 2026-11-05 amendment: BuildBuddy is not two in-core backends. Generic REAPI stays in core, with vendor differences supplied as operator profile data. The Run API backend and invocation cancel move outside core as an extension behind one in-core adapter (`DelegatedBackend`, not built). The in-core `omp-exec-buildbuddy` crate is no longer in the workspace (see Status in omp).
 3. **envd does not become a build orchestrator.** It keeps its process, filesystem, blob and sandbox authorities, and later gains only a git-semantics `CaptureInputs`. Placement and adapters live outside envd. Vendor clients live outside envd and, since the 2026-11-05 amendment, outside omp's crates altogether.
 4. **First slice: Local backend plus `CargoJust`** for one ADW code phase (`just test-pkg omp-envd`), returning a `BuildReport` from cargo JSON and nextest JUnit. This closes F11 for ADW. Remote backends were gated on G2 (remote invocation) and G3 (credential containment). G2 is proven (2026-10-19, PR #339), and the REAPI and SSH backends exist and are opt-in. G3 is therefore the remaining gate before any remote backend is composed by default (condition C1), and G8 still gates any remote default. This ordering applies to agent builds generally. It does not amend ADR 0040's ordering for OMP²'s own builds; the owner must reconcile the two.
@@ -93,7 +93,7 @@ An external crate can implement the trait. `crates/agent/src/jobs.rs:JobBoard::a
   - Treating an AC hit or a snapshot as a verdict.
   - Envd-owned placement.
   - Remote-by-default before G8.
-- **Cost accepted:** no new crate (`omp-exec` already exists), plus a `JobOwner::RemoteExecution` variant in stage 2. That stage-2 work requires ADR 0040 Gap 1 first (C2).
+- **Cost accepted:** no new crate (`omp-exec` already exists), plus a `JobOwner::RemoteExecution` variant in stage 2. That stage-2 work requires ADR 0040 Gap 1 to be accepted first (C2). The producer is already in code, off by default.
 - **Not decided here:**
   - The first remote backend's credential model (G3).
   - The scratch-ref policy.
@@ -159,16 +159,17 @@ The owner decided to amend this record and then accept it with conditions. The a
 
 - **C1.** Credential containment (G3) is decided in its own record before any remote backend is composed by default.
 - **C2.** ADR 0040 Gap 1 (the `JobKind::Execution` producer) is a named prerequisite of the `JobOwner::RemoteExecution` stage-2 work.
+  - As built, checked against `omp2` at `5b0cd838c9` on 2026-11-11: the producer exists in code. `JobBoard::start_execution` (`crates/agent/src/jobs.rs:1024`) is called by the `remote_build` agent tool (`crates/driver/src/remote_build.rs:254`), which the kernel composes only when the tool is enabled (`crates/driver/src/headless/kernel.rs:3168-3169`). `sv_exec_agent_runs` (`remote_build.rs:44-47,58-60`) defaults to false. `reattach_execution` (`jobs.rs:1669`, reached from `crates/app/src/jobs_cmd.rs:105`) and `orphaned_execution` (`jobs.rs:2194`, settles to EffectsUnknown) are implemented. The producer, reattach and gate tests are therefore off by default and unaccepted, not unwritten: `crates/agent/tests/jobs.rs` has execution tests over mock backends whose results were not observed here, and no live kill-and-resume run exists.
 - **C3.** Acceptance creates no remote default. G8 (measured relief) stays open.
 - **C4.** The 2026-11-05 vendor removal and the 2026-11-09 `ExecHost` move are separate changes that must be verified on their own. Acceptance does not verify them.
 
 **Authorised:** ratification of the `omp-exec` types and `place()`; the `CargoJust` adapter; the local, REAPI and SSH backends; `omp.exec.*` telemetry; the `ExecHost` trait move; G4 local parity and F11 closure for `just test-pkg omp-envd`.
 
-**Still blocked:** remote-by-default placement; a remote credential model; warm-state work; closing ADR 0040 Gaps 1 (producer) and 4 (gate tests).
+**Still blocked:** remote-by-default placement; a remote credential model; warm-state work; closing ADR 0040 Gaps 1 (producer) and 4 (gate tests). Both are built but unaccepted, per the as-built note under C2; this acceptance does not close them.
 
-**Risk finding.** Remote REAPI wiring already exists in the driver, ahead of G3 (undecided) and G8 (unmeasured). It is opt-in: `SV_EXEC_POLICY` (`crates/driver/src/adw/remote.rs:70`) defaults to `AdwExecPolicy::LocalOnly`. When an operator sets `RemotePreferred` or `RemoteOnly`, `crates/driver/src/adw/production.rs:247` sends eligible phases to `run_remote`, which resolves a credential (`crates/driver/src/adw/remote.rs:131`) and connects a `ReapiBackend` (`crates/driver/src/exec_composer.rs:641-653`, `:773`). The cleanse path maps the same policy (`crates/driver/src/cleanse/production.rs:229-232`). Nothing in code checks A0, G3 or G8 before that composition. The default value is the only barrier.
+**Risk finding.** Remote REAPI wiring already exists in the driver, ahead of G3 (undecided) and G8 (unmeasured). It is opt-in: `SV_EXEC_POLICY` (`crates/driver/src/adw/remote.rs:70`) defaults to `AdwExecPolicy::LocalOnly`. When an operator sets `RemotePreferred` or `RemoteOnly`, `crates/driver/src/adw/production.rs:247` sends eligible phases to `run_remote`, which resolves a credential (`crates/driver/src/adw/remote.rs:131`) and connects a `ReapiBackend` (`crates/driver/src/exec_composer.rs:641-653`, `:773`). The cleanse path maps the same policy (`crates/driver/src/cleanse/production.rs:229-232`). Nothing in code checks A0, G3 or G8 before that composition. The `SV_EXEC_POLICY` default is therefore not the only route: `omp adw run --exec-policy` (`crates/app/src/cli.rs:1081-1083` to `crates/app/src/adw_cmd.rs:71` to `crates/driver/src/adw/production.rs:151-160`) selects remote placement for one process without changing the setting. The default and the operator's choice are the only barriers.
 
-**Follow-up.** Enforce the gates in code: refuse to compose a remote backend unless the credential-containment record (C1) is accepted and the operator opt-in is explicit, and add a test for the refusal. Until then the gates are a documentation rule only.
+**Follow-up (PROPOSED, not an owner condition): enforce the gates in code.** Refuse to compose a remote backend unless the credential-containment record (C1) is accepted and the operator opt-in is explicit, and add a test for the refusal. Until then the gates are a documentation rule only.
 
 ## References
 
