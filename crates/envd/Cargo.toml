@@ -45,7 +45,7 @@ omp-session.workspace = true
 omp-dom.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["open", "schemars"] }
 omp-desktop = { workspace = true, optional = true }
 omp-ci = { workspace = true, optional = true }
 omp-ci-delegated = { workspace = true, optional = true }
@@ -63,7 +63,7 @@ omp-http.workspace = true
 omp-memory.workspace = true
 omp-minimizer.workspace = true
 omp-oauth.workspace = true
-omp-proto.workspace = true
+omp-proto = { workspace = true, features = ["tonic"] }
 omp-py.workspace = true
 omp-secrets.workspace = true
 omp-sandbox.workspace = true

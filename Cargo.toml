@@ -58,7 +58,7 @@ enigo = { version = "=0.6.1", default-features = false }
 etagere = "0.3"
 fancy-regex = "0.17"
 fastembed = { version = "5.17.4", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
-flate2 = { version = "1.1", default-features = false, features = ["rust_backend", "zlib-rs"] }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 flume = "0.11"
 foldhash = "0.2"
 foreign-types = "=0.5.0"
@@ -130,7 +130,7 @@ omp-contract = { path = "crates/contract", version = "2.0.0" }
 omp-ar = { path = "crates/ar", version = "2.0.0" }
 omp-ast = { path = "crates/ast", version = "2.0.0" }
 omp-audio = { path = "crates/audio", version = "2.0.0" }
-omp-core = { path = "crates/core", version = "2.0.0", features = ["schemars"] }
+omp-core = { path = "crates/core", version = "2.0.0" }
 omp-dom = { path = "crates/dom", version = "2.0.0" }
 omp-journal = { path = "crates/journal", version = "2.0.0" }
 omp-kb = { path = "crates/kb", version = "2.0.0" }
@@ -157,7 +157,7 @@ omp-memory = { path = "crates/memory", version = "2.0.0", default-features = fal
 omp-minimizer = { path = "crates/minimizer", version = "2.0.0" }
 omp-oauth = { path = "crates/oauth", version = "2.0.0" }
 omp-macros = { path = "crates/macros", version = "2.0.0" }
-omp-proto = { path = "crates/proto", version = "2.0.0", features = ["tonic"] }
+omp-proto = { path = "crates/proto", version = "2.0.0" }
 omp-py = { path = "crates/py", version = "2.0.0" }
 omp-py-link = { path = "crates/py-link", version = "2.0.0" }
 omp-rpc = { path = "crates/rpc", version = "2.0.0" }
