@@ -1266,8 +1266,9 @@ are substantial; items 3 and 4 depend on the producer.
    `insert_execution` to its session, and hands the run to `JobBoard::attach_execution_run`. Part L
    files agent-initiated remote runs as jobs (ADR 0010) under "Later", and no caller is specified.
    Companion [ADR 0047](0047-agent-build-execution-model.md) covers agent builds over `omp-exec`,
-   reuses the job board and anticipates a remote execution job owner in stage 2. It is proposed,
-   not an implemented producer design, and does not specify this caller.
+   reuses the job board and anticipates a remote execution job owner in stage 2. The owner accepted
+   it with conditions on 2026-11-11, but it is not an implemented producer design and does not
+   specify this caller; its condition C2 makes this producer a prerequisite of that stage-2 work.
    The ADW path cannot be that caller as it stands, because it owns no session journal and no job
    board. Part A.1 already routes ADW results to "a CLI report for ADW today". The producer also
    needs the backend composition in `run_remote` moved where a kernel can build a `ReapiBackend`
@@ -1713,7 +1714,7 @@ None touches a backend.
    real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
    and result persistence need a product-created journaled job, not library-only tests of unused
    paths. [ADR 0047](0047-agent-build-execution-model.md) is the companion for agent builds; its
-   proposed job-board integration does not yet specify the producer caller.
+   job-board integration (accepted with conditions 2026-11-11) does not yet specify the producer caller.
 9. **Code location and shipping: dimension 1 DECIDED 2026-11-05.** BuildBuddy does not stay in
    `omp2`. Core keeps only the generic, extensible ground, and vendor integration moves outside as
    an extension. Dimension 2, what ships in the binary, is scoped but not built. See
