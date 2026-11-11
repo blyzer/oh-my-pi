@@ -35,6 +35,7 @@ Status meanings:
 - 2026-10-28: Owner accepted ADR 0048 with B4 full frame preflight validation, behavior-family golden fixtures including compaction/tool.update/patch, `toolhost` retained in Buf breaking scope, and the lenient B1 decode variant. B9 Variant 1 is the selected implementation direction.
 
 - 2026-11-09: Owner accepted ADR 0049 (tiered integration architecture) and ADR 0046, with the rulings recorded in ADR 0046. The owner also ruled that the 2026-11-05 vendor rule (ADR 0040 amendment) applies to forge and CI vendors. The owner ruled that `envd/src/codex_app_server` stays as a recorded exception with two exits (ADR 0043). ADRs 0027, 0036, 0043, 0045 and 0047 were amended; ADR 0040 and ADR 0047 keep their own acceptance gates.
+- 2026-11-11: Owner amended and accepted ADR 0047 with conditions. C1: credential containment (G3) is decided in its own record before any remote backend is composed by default. C2: ADR 0040 Gap 1 (`JobKind::Execution` producer) is a prerequisite of `JobOwner::RemoteExecution` stage-2 work. C3: acceptance creates no remote default; G8 stays open. C4: the 2026-11-05 vendor removal and the 2026-11-09 `ExecHost` move are separate changes that acceptance does not verify. Acceptance gate renamed A0 (it was G1, which ADR 0040 uses for the relief measurement).
 
 ## Decision matrix for remaining ADR work
 
@@ -80,8 +81,14 @@ error. No council verdict is recorded.
   producer and reattach acceptance gate.
 - **ADR 0040 production gate: DECIDED 2026-11-04.** Build a product execution-job producer and a
   real reattach before acceptance; do not narrow the gate to ADW. Journal replay, crash handling
-  and result persistence require that producer. ADR 0047 is the proposed agent-build companion;
+  and result persistence require that producer. ADR 0047 is the agent-build companion (accepted
+  with conditions 2026-11-11; C2 makes this producer a prerequisite of its stage-2 work);
   ADR 0040 "Gap to acceptance" describes the work.
+- **ADR 0047 follow-up: enforce the gates in code (OPEN, 2026-11-11).** Remote REAPI wiring already
+  exists in the driver (`crates/driver/src/adw/production.rs:247`, `crates/driver/src/exec_composer.rs:641-653`).
+  It is opt-in (`SV_EXEC_POLICY` defaults to `LocalOnly`), but no code checks A0, G3 or G8. Make
+  the driver refuse to compose a remote backend until the credential-containment record (C1) is
+  accepted, and add a test for the refusal.
 - **DONE** ADR 0040 quiet-host measurement harness (PR #490). The interleaved harness records host-pressure guards and accounts for the serving envd by role, including bounds for shared envd. Its dry run was synthetic; no real recipe measurement or relief verdict was produced. PR #494 fixed the profile/cache race, and PR #495 fixed runner cache eviction. A valid quiet-host run and the owner-set thresholds remain open.
 
 ## Output pipeline: normalizer and minimizer
