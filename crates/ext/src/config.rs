@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize, de};
 use strum::{Display, EnumString};
 
 use super::{ExtensionCode, ExtensionError, Layer};
-use crate::workspace_trust::inventory::{EXTENSIONS_DIR, PROJECT_DIR};
+use crate::{
+	scheme::SchemeDeclarations,
+	workspace_trust::inventory::{EXTENSIONS_DIR, PROJECT_DIR},
+};
 
 /// The ordered configuration scopes used for extension precedence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
@@ -1379,6 +1382,10 @@ pub struct DeploymentManifest {
 	/// Complete executable and content declaration inventory.
 	#[serde(default, rename = "declarations")]
 	pub declarations: Vec<StaticDeclaration>,
+	/// URL schemes the extension claims (ADR 0050 D4), stored inert until S2
+	/// binds them. Omitted from serialization when the manifest claims none.
+	#[serde(default, skip_serializing_if = "SchemeDeclarations::is_empty")]
+	pub schemes:      SchemeDeclarations,
 }
 
 /// Canonical selected manifest projection persisted by lock v2.
