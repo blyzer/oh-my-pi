@@ -2,7 +2,7 @@
 
 Shared vocabulary for the agent kernel and the project environment.
 
-Approvals, hook gates, the typed hook-event catalog, the object-safe
+Approvals, hook gates, the hook-event descriptor table, the object-safe
 Director surface, session routing views, environment events, approval
 posture, and the eval parent-bridge traits live here. `omp-agent`
 implements the kernel over them.
@@ -31,8 +31,10 @@ parent bridge (`ParentSessionHost`, `BridgeHost`) are the same kind of
 shared vocabulary. Decision logic that needs the live sandbox probe or the
 Python worker stays in `omp-envd` and speaks these types.
 
-The hook-event catalog (`HOOK_EVENTS`) is one `HookEventDescriptor` per
-`HookEventId`: the frozen wire identity, the payload schema revision, and the
-typed payload's name. `tests/hook_catalog.rs` holds it to the protobuf enum,
-the Python `omp.events` and `omp.hooks` catalogs, and the Claude plugin hook
-seams in `omp-ext`.
+The hook-event descriptor table (`HOOK_EVENTS`) is one `HookEventDescriptor`
+per `HookEventId`: the frozen wire identity, the payload schema revision, and
+the payload's name in the Python `omp.events` catalog. That name is checked
+against `omp.events` only and is not resolved to a Rust or protobuf type, so
+the table does not claim ADR 0046 owner ruling 3. `tests/hook_catalog.rs`
+holds the table to the protobuf enum, the Python `omp.events` and `omp.hooks`
+catalogs, and the Claude plugin hook seams in `omp-ext`.

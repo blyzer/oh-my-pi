@@ -2,10 +2,14 @@
 //! describes (ADR 0046 item 3, ADR 0049 Phase 5b): the frozen `HookEventId`
 //! enum in `toolhost.proto`, the Python `omp.events` spec table and
 //! `omp.hooks` declaration list, and the Claude plugin `HookSeam` mapping in
-//! `omp-ext`. The protobuf and Python sources are read as text, so no crate
-//! gains a dependency edge.
+//! `omp-ext`. The protobuf and Python sources are read as text at run time,
+//! so no crate gains a dependency edge.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	fs,
+	path::Path,
+};
 
 use omp_contract::{
 	AgentSettledEvent, GateEvent, HOOK_EVENTS, HookEvent, HookEventDescriptor, ProviderErrorEvent,
@@ -14,9 +18,33 @@ use omp_ext::claude_hooks::{ClaudeHookEvent, NotificationType};
 use omp_proto::toolhost::v1::HookEventId;
 use strum::VariantArray;
 
-const TOOLHOST_PROTO: &str = include_str!("../../proto/proto/omp/toolhost/v1/toolhost.proto");
-const EVENTS_PY: &str = include_str!("../../py/python/omp/events.py");
-const HOOKS_PY: &str = include_str!("../../py/python/omp/hooks.py");
+/// Wire ids `toolhost.proto` keeps as permanent `reserved` tombstones.
+const TOMBSTONES: [i32; 1] = [59];
+
+/// A sibling crate's source file, read relative to this crate's manifest
+/// directory at run time.
+fn sibling_source(relative: &str) -> String {
+	let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+		.join("..")
+		.join(relative);
+	fs::read_to_string(&path)
+		.unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+/// The `.proto` source the generated `HookEventId` is built from.
+fn toolhost_proto() -> String {
+	sibling_source("proto/proto/omp/toolhost/v1/toolhost.proto")
+}
+
+/// The Python `omp.events` module source.
+fn events_py() -> String {
+	sibling_source("py/python/omp/events.py")
+}
+
+/// The Python `omp.hooks` module source.
+fn hooks_py() -> String {
+	sibling_source("py/python/omp/hooks.py")
+}
 
 /// The stable event name of `id`: its protobuf name without `HOOK_EVENT_`,
 /// lowercased.
@@ -35,10 +63,10 @@ fn descriptors_named(name: &str) -> usize {
 		.count()
 }
 
-/// Every `NAME = number;` value of `enum HookEventId` and its `reserved`
-/// numbers, read from the `.proto` source the generated enum is built from.
-fn proto_hook_event_ids() -> (Vec<(&'static str, i32)>, Vec<i32>) {
-	let (_, rest) = TOOLHOST_PROTO
+/// Every `NAME = number;` value of `enum HookEventId` in `proto`, and its
+/// `reserved` numbers.
+fn proto_hook_event_ids(proto: &str) -> (Vec<(&str, i32)>, Vec<i32>) {
+	let (_, rest) = proto
 		.split_once("enum HookEventId {")
 		.expect("toolhost.proto declares enum HookEventId");
 	let (body, _) = rest.split_once('}').expect("enum HookEventId is closed");
@@ -78,9 +106,9 @@ fn unquote(literal: &str) -> &str {
 		.unwrap_or_else(|| panic!("{literal:?} is not a string literal"))
 }
 
-/// The items of the module-level Python tuple `name = (...)`: string
-/// literals as `Some`, `None` as `None`.
-fn python_tuple(source: &'static str, name: &str) -> Vec<Option<&'static str>> {
+/// The items of the module-level Python tuple `name = (...)` in `source`:
+/// string literals as `Some`, `None` as `None`.
+fn python_tuple<'a>(source: &'a str, name: &str) -> Vec<Option<&'a str>> {
 	let (_, rest) = source
 		.split_once(&format!("\n{name} = (\n"))
 		.unwrap_or_else(|| panic!("{name} is not a module-level tuple"));
@@ -95,13 +123,9 @@ fn python_tuple(source: &'static str, name: &str) -> Vec<Option<&'static str>> {
 		.collect()
 }
 
-/// The one-line `"key": value,` rows of the Python dict literal between
-/// `opening` and `closing`, comment lines skipped and keys unquoted.
-fn python_dict(
-	source: &'static str,
-	opening: &str,
-	closing: &str,
-) -> Vec<(&'static str, &'static str)> {
+/// The one-line `"key": value,` rows of the Python dict literal in `source`
+/// between `opening` and `closing`, comment lines skipped and keys unquoted.
+fn python_dict<'a>(source: &'a str, opening: &str, closing: &str) -> Vec<(&'a str, &'a str)> {
 	let (_, rest) = source
 		.split_once(opening)
 		.unwrap_or_else(|| panic!("{opening:?} not found"));
@@ -123,8 +147,8 @@ fn python_dict(
 
 /// The payload revision `omp.events._make_spec` assigns `event`: its `rev=`
 /// argument is `<n>` or `<n> if name == "<event>" else <default>`.
-fn python_revision(event: &str) -> u32 {
-	let expression = EVENTS_PY
+fn python_revision(events: &str, event: &str) -> u32 {
+	let expression = events
 		.lines()
 		.find_map(|line| line.trim().strip_prefix("rev="))
 		.and_then(|expression| expression.strip_suffix(','))
@@ -155,7 +179,8 @@ fn catalog_revision<E: HookEvent>() -> Option<u32> {
 
 #[test]
 fn every_hook_event_id_has_one_descriptor_and_keeps_its_wire_id() {
-	let (values, reserved) = proto_hook_event_ids();
+	let proto = toolhost_proto();
+	let (values, reserved) = proto_hook_event_ids(&proto);
 	let mut described = 0;
 	for (name, number) in values {
 		let id = HookEventId::from_str_name(name)
@@ -172,13 +197,16 @@ fn every_hook_event_id_has_one_descriptor_and_keeps_its_wire_id() {
 		}
 	}
 	assert_eq!(described, HOOK_EVENTS.len(), "a descriptor has no declared HookEventId");
+	for number in TOMBSTONES {
+		assert!(reserved.contains(&number), "toolhost.proto no longer reserves wire id {number}");
+	}
 	for number in reserved {
 		assert!(HookEventId::try_from(number).is_err(), "reserved {number} is a live variant");
 	}
 }
 
 #[test]
-fn descriptors_ascend_by_wire_id_and_name_a_typed_payload() {
+fn descriptors_ascend_by_wire_id_and_name_a_payload() {
 	for pair in HOOK_EVENTS.windows(2) {
 		assert!(
 			i32::from(pair[0].id) < i32::from(pair[1].id),
@@ -203,7 +231,8 @@ fn descriptors_ascend_by_wire_id_and_name_a_typed_payload() {
 
 #[test]
 fn omp_events_catalog_matches_every_descriptor() {
-	let payloads: BTreeMap<_, _> = python_dict(EVENTS_PY, "\n_EVENT_METADATA = {\n", "\n}")
+	let events = events_py();
+	let payloads: BTreeMap<_, _> = python_dict(&events, "\n_EVENT_METADATA = {\n", "\n}")
 		.into_iter()
 		.map(|(name, row)| {
 			let payload = row
@@ -216,7 +245,7 @@ fn omp_events_catalog_matches_every_descriptor() {
 		.collect();
 	assert_eq!(payloads.len(), HOOK_EVENTS.len(), "_EVENT_METADATA rows");
 	let mut matched = 0;
-	for (index, name) in python_tuple(EVENTS_PY, "_EVENT_NAMES_BY_ID")
+	for (index, name) in python_tuple(&events, "_EVENT_NAMES_BY_ID")
 		.into_iter()
 		.enumerate()
 	{
@@ -227,12 +256,14 @@ fn omp_events_catalog_matches_every_descriptor() {
 		match (name, row) {
 			(Some(name), Some(row)) => {
 				assert_eq!(event_name(row.id), name, "omp.events wire id {wire}");
-				assert_eq!(payloads.get(name), Some(&row.payload), "{name} payload type");
-				assert_eq!(python_revision(name), row.revision, "{name} schema revision");
+				assert_eq!(payloads.get(name), Some(&row.payload), "{name} payload name");
+				assert_eq!(python_revision(&events, name), row.revision, "{name} schema revision");
 				matched += 1;
 			},
-			// A tombstone on both sides: no Python name, no protobuf variant.
-			(None, None) => {},
+			// A tombstone on both sides: no Python name and no protobuf variant.
+			(None, None) => {
+				assert!(TOMBSTONES.contains(&wire), "omp.events leaves wire id {wire} unnamed");
+			},
 			(name, row) => panic!("wire id {wire}: omp.events has {name:?}, the catalog {row:?}"),
 		}
 	}
@@ -241,14 +272,15 @@ fn omp_events_catalog_matches_every_descriptor() {
 
 #[test]
 fn omp_hooks_routes_every_descriptor_and_rejects_only_events_without_one() {
+	let hooks = hooks_py();
 	let rejected: BTreeMap<_, _> =
-		python_dict(HOOKS_PY, "\n_REJECTED_EVENTS = types.MappingProxyType(\n    {\n", "\n    }\n)")
+		python_dict(&hooks, "\n_REJECTED_EVENTS = types.MappingProxyType(\n    {\n", "\n    }\n)")
 			.into_iter()
 			.map(|(name, reason)| (name, unquote(reason)))
 			.collect();
 	let mut routed = BTreeSet::new();
 	let mut unemitted = BTreeSet::new();
-	for name in python_tuple(HOOKS_PY, "_EVENT_NAMES") {
+	for name in python_tuple(&hooks, "_EVENT_NAMES") {
 		let name = name.expect("omp.hooks._EVENT_NAMES holds only names");
 		match (descriptors_named(name), rejected.get(name)) {
 			(1, None) => assert!(routed.insert(name), "omp.hooks declares {name} twice"),
@@ -290,10 +322,15 @@ fn every_claude_hook_seam_runs_on_one_described_event() {
 fn contract_hook_events_match_their_catalog_revision() {
 	assert_eq!(catalog_revision::<GateEvent>(), Some(GateEvent::REV));
 	assert_eq!(catalog_revision::<ProviderErrorEvent>(), Some(ProviderErrorEvent::REV));
-	// A recorded divergence this slice leaves unchanged: `omp.events` and
-	// `docs/py/05-hooks.md` declare `agent_settled` revision 2, which Python
-	// hook declarations carry to envd, while the in-process producer still
-	// stamps revision 1 on its dispatch.
+}
+
+/// `omp.events` and `docs/py/05-hooks.md` declare `agent_settled` revision 2,
+/// which Python hook declarations carry to envd, while the in-process producer
+/// stamps `AgentSettledEvent::REV`, revision 1, on its `HookGate` dispatch.
+/// No wire value changes here: which side moves is an owner decision
+/// (`docs/adr/TASKS.md`), and this test fails once either side does.
+#[test]
+fn agent_settled_revision_divergence_is_pinned() {
 	assert_eq!(catalog_revision::<AgentSettledEvent>(), Some(2));
 	assert_eq!(AgentSettledEvent::REV, 1);
 }

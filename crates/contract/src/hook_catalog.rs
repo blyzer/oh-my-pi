@@ -1,11 +1,14 @@
-//! The typed hook-event catalog (ADR 0046 item 3): one
+//! The hook-event descriptor table of ADR 0046 item 3: one
 //! [`HookEventDescriptor`] per [`HookEventId`].
 //!
 //! A descriptor's identity is the frozen `toolhost/v1` wire id. The stable
 //! event name is that variant's protobuf name without its `HOOK_EVENT_`
-//! prefix, lowercased: `HOOK_EVENT_TOOL_CALL` is `tool_call`. Payloads stay
-//! typed prost/serde structs; a descriptor names the payload type and never
-//! carries an untyped payload.
+//! prefix, lowercased: `HOOK_EVENT_TOOL_CALL` is `tool_call`.
+//!
+//! `payload` is the payload's name in the Python `omp.events` catalog and is
+//! checked against that catalog only. It is not resolved to a Rust or
+//! protobuf type, so this table does not claim ADR 0046 owner ruling 3
+//! (payloads stay typed prost/serde structs).
 //!
 //! `tests/hook_catalog.rs` holds the table to the protobuf enum, the Python
 //! `omp.events` and `omp.hooks` catalogs, and the Claude plugin hook seams.
@@ -19,8 +22,8 @@ pub struct HookEventDescriptor {
 	pub id:       HookEventId,
 	/// Schema revision of the event's payload.
 	pub revision: u32,
-	/// Name of the event's typed payload, as the `omp.events` catalog
-	/// declares it.
+	/// The payload's name in the Python `omp.events` catalog; it need not
+	/// name a Rust or protobuf type.
 	pub payload:  &'static str,
 }
 
