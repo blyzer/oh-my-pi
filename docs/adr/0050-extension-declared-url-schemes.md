@@ -177,8 +177,7 @@ The five-slice plan is unchanged. One council reviewer argued that S2 and S4 cou
 
 ## Status in omp
 
-[Bash view: /private/tmp/omp-w-adr0050/docs/adr/0050-extension-declared-url-schemes.md (lines 180-180 of 185 total)]
-UGxH│**Accepted, not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` (the `bf39a439a0` stack tip in the Context table is not on `omp2`). An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented; S1 is the first PR.
+**Accepted, not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` (the `bf39a439a0` stack tip in the Context table is not on `omp2`). An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented; S1 is the first PR.
 
 ## References
 

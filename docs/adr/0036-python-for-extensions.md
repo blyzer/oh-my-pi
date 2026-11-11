@@ -87,8 +87,7 @@ Under [ADR 0049](0049-tiered-integration-architecture.md):
 - **First-party extensions** live in a repository outside `omp2`. An `omp2` CI job runs them at a pinned revision against the frozen `omp.*` API.
 - **Manifests declare effects:** capabilities, fetch hosts and credentials. Anything undeclared stays `Effects::unknown()`.
 - **Additive API surface:** the frozen Python surface gains the `forge/*` and `ci/*` device schemas. No ABI break.
-[Bash view: /private/tmp/omp-w-adr0050/docs/adr/0036-python-for-extensions.md (lines 90-90 of 143 total)]
-OLsv│- **URL schemes.** The manifest gains a `schemes` field, and the frozen Python surface gains an additive `omp.schemes` registration API ([ADR 0050](0050-extension-declared-url-schemes.md)). No ABI break. Declared schemes are served through the existing unknown-scheme fallback. ADR 0050 was accepted by the owner on 2026-11-11 with conditions.
+- **URL schemes.** The manifest gains a `schemes` field, and the frozen Python surface gains an additive `omp.schemes` registration API ([ADR 0050](0050-extension-declared-url-schemes.md)). No ABI break. Declared schemes are served through the existing unknown-scheme fallback. ADR 0050 was accepted by the owner on 2026-11-11 with conditions.
 - Decision items 1 and 2 are unchanged. Python stays the only extension language.
 
 ## Status in omp
