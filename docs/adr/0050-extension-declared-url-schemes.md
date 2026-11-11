@@ -73,7 +73,7 @@ The byte ceiling is the central read bound ([ADR 0009](0009-bound-output-once.md
 
 Fetch and credential judgment uses the declaration. A declared scheme with no fetch and no credentials is a local read. Anything the declaration omits stays `Effects::unknown()`, which is the exec approval tier.
 
-**Current behavior, verified 2026-11-11, differs from the paragraph above.** A read of a raw foreign scheme reaches `read_unknown_fetch` (`crates/tools/src/read.rs:971`, `crates/tools/src/read/resolver.rs:767`), which returns the installed fallback's `read_fetch`. The envd fallback is `UrlResolver::Host`, and `crates/envd/src/tool_url.rs:453` answers `Some(FetchEffects { credentials: false })` for every host URI: a read-tier network fetch without credentials, whatever the extension declared. It is neither `Effects::unknown()` nor a declaration-based judgment. **Condition:** replacing that blanket answer with the declaration-based judgment above is a prerequisite of S3, with a regression test that a declared scheme whose declaration omits fetch and credentials is judged `Effects::unknown()` and that an undeclared foreign scheme never receives a declared scheme's judgment.
+**Current behavior, verified 2026-11-11, differs from the paragraph above.** A read of a raw foreign scheme reaches `read_unknown_fetch` (`crates/tools/src/read.rs:971`, `crates/tools/src/read/resolver.rs:767`), which returns the installed fallback's `read_fetch`. The envd fallback is `UrlResolver::Host`, and `crates/envd/src/tool_url.rs:453` answers `Some(FetchEffects { credentials: false })` for every host URI: an approval-tier `Fetch` (anonymous network egress, above Read and below Write; `ApprovalTier::from_effects`, `crates/contract/src/posture.rs:365-405`), whatever the extension declared. It is neither `Effects::unknown()` nor a declaration-based judgment. **Condition:** replacing that blanket answer with the declaration-based judgment above is a prerequisite of S3, with a regression test that a declared scheme whose declaration omits fetch and credentials is judged `Effects::unknown()` and that an undeclared foreign scheme never receives a declared scheme's judgment. `read_fetch` returns `Option<FetchEffects>` and cannot express `Effects::unknown()`, which is produced at `crates/agent/src/dispatch.rs:2196`, so S3 must carry the declaration's judgment through a path that can express it; the stale doc comment at `crates/envd/src/tool_url.rs:440-443` ("the environment fetches nothing for it") is corrected in the same slice.
 
 ### D6. Lifetime is the extension generation
 
@@ -177,7 +177,8 @@ The five-slice plan is unchanged. One council reviewer argued that S2 and S4 cou
 
 ## Status in omp
 
-**Accepted, not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` and at `bf39a439a0`. An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented; S1 is the first PR.
+[Bash view: /private/tmp/omp-w-adr0050/docs/adr/0050-extension-declared-url-schemes.md (lines 180-180 of 185 total)]
+UGxH│**Accepted, not started.** The unknown-scheme fallback and the RPC-host `HostUri` path exist, as the Context table records, on `omp2` at `580d3fb9fb` (the `bf39a439a0` stack tip in the Context table is not on `omp2`). An installed extension has no `schemes` manifest field and no `omp.schemes` API. No slice of this record is implemented; S1 is the first PR.
 
 ## References
 
