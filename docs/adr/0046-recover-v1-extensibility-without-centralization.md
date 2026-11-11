@@ -32,7 +32,7 @@ See also the companion proposed ADR 0045 (envd responsibilities).
 
 ## Decision
 
-The decision is proposed. Recover the following v1 *properties* in idiomatic Rust, at build or construction time only, without reopening any Locked Deviation:
+The decision is accepted (2026-11-09, see Owner rulings). Recover the following v1 *properties* in idiomatic Rust, at build or construction time only, without reopening any Locked Deviation:
 
 1. **Table-driven built-in roster.**
    - Extend the existing `omp-tools` identity table into a static construction table: identity, constructor, and required host bridges.
@@ -105,4 +105,4 @@ The owner accepted this record together with ADR 0049.
 
 ## Implementation gate
 
-Owner acceptance is recorded (2026-11-09). Each numbered decision item becomes a separate, reviewable task. A task may begin once the baseline measurements above are recorded (ADR 0049 Phase 0), in the order ADR 0049 sets: item 2 in Phase 1, item 1 in Phase 2, item 4 in Phase 5. Item 6 is realized by ADR 0049's tiers.
+Owner acceptance is recorded (2026-11-09). Each numbered decision item becomes a separate, reviewable task. A task may begin once the baseline measurements above are recorded (ADR 0049 Phase 0), in the order ADR 0049 sets: item 2 in Phase 1, item 1 in Phase 2, item 4 in Phase 5, items 3 and 5 in Phase 5b. Item 6 is realized by ADR 0049's tiers.
