@@ -1,10 +1,18 @@
 //! Sinks the environment and session routing use instead of the kernel mailbox.
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use omp_core::Str;
 
 use crate::EnvEvent;
+
+/// Future returned by [`SessionMailbox::send_env`] /
+/// [`SessionMailbox::send_peer`].
+///
+/// Boxed once at this dyn routing boundary so callers can wait for capacity
+/// without naming a concrete kernel channel.
+pub type MailboxSendFut<'a, T> =
+	Pin<Box<dyn Future<Output = Result<(), MailboxReject<T>>> + Send + 'a>>;
 
 /// A mailbox refused one message.
 #[derive(Debug)]
@@ -46,6 +54,21 @@ impl SessionMailbox for flume::Sender<EnvEvent> {
 		Err(MailboxReject::Disconnected(body))
 	}
 
+	fn send_env<'a>(&'a self, event: EnvEvent) -> MailboxSendFut<'a, EnvEvent> {
+		let sender = self.clone();
+		Box::pin(async move {
+			sender
+				.send_async(event)
+				.await
+				.map_err(|error| MailboxReject::Disconnected(error.into_inner()))
+		})
+	}
+
+	fn send_peer<'a>(&'a self, body: Str) -> MailboxSendFut<'a, Str> {
+		let _ = self;
+		Box::pin(async move { Err(MailboxReject::Disconnected(body)) })
+	}
+
 	fn same_mailbox(&self, other: &dyn SessionMailbox) -> bool {
 		other
 			.mailbox_any()
@@ -84,6 +107,12 @@ pub trait SessionMailbox: Send + Sync {
 
 	/// Delivers one ordinary peer message.
 	fn try_send_peer(&self, body: Str) -> Result<(), MailboxReject<Str>>;
+
+	/// Delivers one environment observation, waiting for mailbox capacity.
+	fn send_env<'a>(&'a self, event: EnvEvent) -> MailboxSendFut<'a, EnvEvent>;
+
+	/// Delivers one ordinary peer message, waiting for mailbox capacity.
+	fn send_peer<'a>(&'a self, body: Str) -> MailboxSendFut<'a, Str>;
 
 	/// Whether `other` sends onto the same channel as `self`.
 	fn same_mailbox(&self, other: &dyn SessionMailbox) -> bool;

@@ -64,6 +64,32 @@ impl SessionMailbox for UpMailbox {
 			})
 	}
 
+	fn send_env<'a>(&'a self, event: EnvEvent) -> omp_contract::MailboxSendFut<'a, EnvEvent> {
+		let sender = self.0.clone();
+		Box::pin(async move {
+			sender
+				.send_async(Up::Env(event))
+				.await
+				.map_err(|error| match error.into_inner() {
+					Up::Env(event) => MailboxReject::Disconnected(event),
+					_ => unreachable!("the mailbox only forwards environment events"),
+				})
+		})
+	}
+
+	fn send_peer<'a>(&'a self, body: Str) -> omp_contract::MailboxSendFut<'a, Str> {
+		let sender = self.0.clone();
+		Box::pin(async move {
+			sender
+				.send_async(Up::Peer(body))
+				.await
+				.map_err(|error| match error.into_inner() {
+					Up::Peer(body) => MailboxReject::Disconnected(body),
+					_ => unreachable!("the mailbox only forwards peer text"),
+				})
+		})
+	}
+
 	fn same_mailbox(&self, other: &dyn SessionMailbox) -> bool {
 		other
 			.mailbox_any()

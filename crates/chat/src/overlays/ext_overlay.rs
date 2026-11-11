@@ -5,14 +5,11 @@
 //! panel never writes terminal escapes: the host composites its frame like
 //! every other [`Panel`].
 
-use std::{
-	collections::BTreeMap,
-	sync::{Arc, Mutex},
-	time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use omp_core::Str;
 use omp_tui::{Frame, Key, Size, Ui, UiContext, UiEvent};
+use parking_lot::Mutex;
 
 use super::{Panel, PanelAnchor, PanelEvent};
 
@@ -52,7 +49,6 @@ impl OverlayState {
 		self
 			.inner
 			.lock()
-			.expect("overlay state")
 			.values
 			.iter()
 			.map(|(k, v)| (k.clone(), v.clone()))
@@ -62,19 +58,19 @@ impl OverlayState {
 	/// Watched events drained so far.
 	#[must_use]
 	pub fn events(&self) -> Vec<serde_json::Value> {
-		self.inner.lock().expect("overlay state").events.clone()
+		self.inner.lock().events.clone()
 	}
 
 	/// Whether the overlay has been closed.
 	#[must_use]
 	pub fn closed(&self) -> bool {
-		self.inner.lock().expect("overlay state").closed
+		self.inner.lock().closed
 	}
 
 	/// Settlement outcome once closed.
 	#[must_use]
 	pub fn outcome(&self) -> Option<OverlayOutcome> {
-		self.inner.lock().expect("overlay state").outcome.clone()
+		self.inner.lock().outcome.clone()
 	}
 
 	/// Marks the overlay closed from the host (idempotent close request).
@@ -83,7 +79,7 @@ impl OverlayState {
 	}
 
 	fn close(&self, cancelled: bool, reason: Option<Str>) {
-		let mut inner = self.inner.lock().expect("overlay state");
+		let mut inner = self.inner.lock();
 		if inner.closed {
 			return;
 		}
@@ -92,11 +88,11 @@ impl OverlayState {
 	}
 
 	fn record_event(&self, event: serde_json::Value) {
-		self.inner.lock().expect("overlay state").events.push(event);
+		self.inner.lock().events.push(event);
 	}
 
 	fn capture_values(&self, values: serde_json::Value) {
-		let mut inner = self.inner.lock().expect("overlay state");
+		let mut inner = self.inner.lock();
 		inner.values = match values {
 			serde_json::Value::Object(map) => map.into_iter().collect(),
 			_ => BTreeMap::new(),

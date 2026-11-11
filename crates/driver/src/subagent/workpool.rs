@@ -351,24 +351,34 @@ impl WorkpoolProducer {
 				mode: None,
 				timestamp_ms,
 			};
-			if cancel.is_cancelled() {
-				return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
+			tokio::select! {
+				biased;
+				() = cancel.cancelled() => {
+					return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
+				},
+				result = owner.up.send_env(EnvEvent::IrcTraffic {
+					payload: Arc::new(incoming),
+				}) => {
+					result.map_err(|_| WorkpoolProducerError::OwnerDisconnected {
+						owner: owner.id.clone(),
+					})?;
+				},
 			}
-			owner
-				.up
-				.try_send_env(EnvEvent::IrcTraffic { payload: Arc::new(incoming) })
-				.map_err(|_| WorkpoolProducerError::OwnerDisconnected { owner: owner.id.clone() })?;
 			let mut state = self.state.lock();
 			state.last_timestamp_ms = timestamp_ms;
 			state.result_observations.insert(reply_to.id.clone());
 		}
-		if cancel.is_cancelled() {
-			return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
+		tokio::select! {
+			biased;
+			() = cancel.cancelled() => {
+				return Err(WorkpoolProducerError::DeliveryCancelled { pool: self.pool.clone() });
+			},
+			result = owner.up.send_peer(body.clone()) => {
+				result.map_err(|_| WorkpoolProducerError::OwnerDisconnected {
+					owner: owner.id.clone(),
+				})?;
+			},
 		}
-		owner
-			.up
-			.try_send_peer(body.clone())
-			.map_err(|_| WorkpoolProducerError::OwnerDisconnected { owner: owner.id.clone() })?;
 		self.state.lock().results.insert(reply_to.id.clone());
 		if let Some(main) = self.authority.relay_target(&target, &owner) {
 			let relay = IrcTraffic {
