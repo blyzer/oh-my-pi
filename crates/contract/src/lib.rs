@@ -15,6 +15,7 @@ pub mod eval_bridge;
 pub mod extensions;
 pub mod hooks;
 pub mod mailbox;
+pub mod managed_skills;
 pub mod posture;
 pub mod prompt_memory;
 pub mod session;

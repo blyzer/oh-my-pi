@@ -249,7 +249,7 @@ impl ActiveSkills {
 			{
 				let existing = &self.skills[index];
 				let plugin_wins = skill.provider.as_str() == "agent-plugins"
-					&& ["agents", "codex", "opencode", omp_envd::managed_skills_domain::PROVIDER_ID]
+					&& ["agents", "codex", "opencode", omp_contract::managed_skills::PROVIDER_ID]
 						.contains(&existing.provider.as_str());
 				if plugin_wins {
 					self.skills[index] = skill;
@@ -353,7 +353,7 @@ impl ActiveSkills {
 }
 
 /// The isolated managed-skills root beneath the configuration root
-/// ([`omp_envd::managed_skills_domain`]); dead last in discovery.
+/// ([`omp_contract::managed_skills`]); dead last in discovery.
 #[must_use]
 pub fn managed_skills_root(config_root: &Path) -> PathBuf {
 	config_root.join("agent/managed-skills")
@@ -483,7 +483,7 @@ pub fn sources(
 		push("custom", dir.clone(), SkillLevel::User);
 	}
 	push(
-		omp_envd::managed_skills_domain::PROVIDER_ID,
+		omp_contract::managed_skills::PROVIDER_ID,
 		managed_skills_root(config_root),
 		SkillLevel::User,
 	);
@@ -576,7 +576,7 @@ pub fn discover(sources: &[SkillSource], policy: &SkillPolicy) -> ActiveSkills {
 	let mut by_name = BTreeMap::<Str, usize>::new();
 	let mut realpaths = BTreeSet::<PathBuf>::new();
 	for source in sources {
-		let managed = source.provider.as_str() == omp_envd::managed_skills_domain::PROVIDER_ID;
+		let managed = source.provider.as_str() == omp_contract::managed_skills::PROVIDER_ID;
 		if managed && !managed_root_safe(&source.root) {
 			continue;
 		}
@@ -822,7 +822,7 @@ fn load_skill(
 		});
 		return None;
 	}
-	if managed && !omp_envd::managed_skills_domain::is_valid_name(name) {
+	if managed && !omp_contract::managed_skills::is_valid_name(name) {
 		warnings.push(SkillWarning {
 			path:    canonical,
 			message: Str::new_static("managed skill name is not exact kebab-case"),
@@ -835,7 +835,7 @@ fn load_skill(
 		.map(str::trim)
 		.unwrap_or_default();
 	let description = if managed {
-		omp_envd::managed_skills_domain::sanitize_description(description)
+		omp_contract::managed_skills::sanitize_description(description)
 	} else {
 		Str::new(description)
 	};
@@ -897,7 +897,7 @@ fn managed_file_safe(path: &Path) -> bool {
 	};
 	!file.file_type().is_symlink()
 		&& file.is_file()
-		&& file.len() <= omp_envd::managed_skills_domain::MAX_SKILL_BYTES as u64
+		&& file.len() <= omp_contract::managed_skills::MAX_SKILL_BYTES as u64
 		&& !directory.file_type().is_symlink()
 		&& directory.is_dir()
 }

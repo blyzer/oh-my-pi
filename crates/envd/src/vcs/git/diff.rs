@@ -3,6 +3,7 @@
 use std::{path::Path, str, str::FromStr as _};
 
 use bytes::Bytes;
+use omp_vcs::StatusSummary;
 use strum::{EnumString, IntoStaticStr};
 use tokio_util::sync::CancellationToken;
 
@@ -49,17 +50,6 @@ pub struct StatusEntry {
 	pub path:       GitPath,
 	/// Original path for a rename or copy.
 	pub orig_path:  Option<GitPath>,
-}
-
-/// Porcelain status counts.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct StatusCounts {
-	/// Paths changed in the index.
-	pub staged:    u32,
-	/// Paths changed in the worktree.
-	pub unstaged:  u32,
-	/// Untracked paths.
-	pub untracked: u32,
 }
 
 /// A parsed numstat count; binary files have no line count.
@@ -257,14 +247,9 @@ impl GitDiff {
 		&self,
 		cwd: &Path,
 		cancel: &CancellationToken,
-	) -> Result<StatusCounts, CommandError> {
+	) -> Result<StatusSummary, CommandError> {
 		let repo = Self::repo(cwd, cancel).await?;
-		let value = super::blocking(Some(cancel), move || repo.status_summary()).await?;
-		Ok(StatusCounts {
-			staged:    value.staged,
-			unstaged:  value.unstaged,
-			untracked: value.untracked,
-		})
+		Ok(super::blocking(Some(cancel), move || repo.status_summary()).await?)
 	}
 
 	/// Reads NUL-framed porcelain-v1 status.
@@ -375,13 +360,13 @@ pub fn parse_status_entries(bytes: &[u8]) -> Vec<StatusEntry> {
 }
 
 /// Parses porcelain v1 (line or NUL framed) and v2 records into counts.
-pub fn parse_status(bytes: &[u8]) -> StatusCounts {
+pub fn parse_status(bytes: &[u8]) -> StatusSummary {
 	let nul_framed = bytes.contains(&0);
 	let records: Vec<_> = bytes
 		.split(|byte| *byte == 0 || !nul_framed && *byte == b'\n')
 		.filter(|record| !record.is_empty())
 		.collect();
-	let mut counts = StatusCounts::default();
+	let mut counts = StatusSummary::default();
 	let mut index = 0;
 	while index < records.len() {
 		let record = records[index];

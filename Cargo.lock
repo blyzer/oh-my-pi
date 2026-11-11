@@ -8490,9 +8490,6 @@ dependencies = [
  "flume",
  "futures",
  "globset",
- "grep-matcher",
- "grep-pcre2",
- "grep-regex",
  "http",
  "http-body-util",
  "hyper",
@@ -8524,6 +8521,7 @@ dependencies = [
  "omp-ext",
  "omp-forge",
  "omp-forge-delegated",
+ "omp-grep",
  "omp-http",
  "omp-journal",
  "omp-memory",
@@ -8695,6 +8693,22 @@ dependencies = [
  "omp-forge",
  "parking_lot",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "omp-grep"
+version = "2.0.0"
+dependencies = [
+ "bytecount",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-regex",
+ "omp-core",
+ "omp-walker",
+ "regex",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

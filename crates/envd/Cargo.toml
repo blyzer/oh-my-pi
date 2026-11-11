@@ -55,10 +55,8 @@ omp-forge = { workspace = true, optional = true }
 omp-forge-delegated = { workspace = true, optional = true }
 omp-ext.workspace = true
 bytecount.workspace = true
-grep-matcher.workspace = true
-grep-pcre2.workspace = true
-grep-regex.workspace = true
 omp-edit.workspace = true
+omp-grep.workspace = true
 omp-ai.workspace = true
 omp-journal.workspace = true
 omp-http.workspace = true
