@@ -16,6 +16,11 @@ code; apply them once in the GitHub UI.
 A manual package run can still occupy the self-hosted Mac and delay required
 pull request checks.
 
+With the repository variable `CI_LINUX_MODE` set to `remote`, the Linux jobs of
+a trusted run use the self-hosted Mac and BuildBuddy instead of hosted runners,
+under the same check names; fork pull requests stay on hosted runners. See
+[Operating CI without hosted minutes](research/ci-macos-runner-fallback.md#operating-ci-without-hosted-minutes).
+
 The label workflow runs on `pull_request_target`, so it can label pull
 requests from forks. It checks out nothing and runs no code from the pull
 request. Its size job runs after the path job, because `actions/labeler`
