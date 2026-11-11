@@ -46,7 +46,7 @@ omp-agent.workspace = true
 omp-contract.workspace = true
 omp-ar.workspace = true
 omp-collab.workspace = true
-omp-core.workspace = true
+omp-core = { workspace = true, features = ["schemars"] }
 omp-scribe.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
@@ -64,7 +64,7 @@ omp-ssh.workspace = true
 omp-http.workspace = true
 omp-serve.workspace = true
 omp-memory.workspace = true
-omp-proto.workspace = true
+omp-proto = { workspace = true, features = ["tonic"] }
 omp-rpc.workspace = true
 omp-secrets.workspace = true
 omp-cache.workspace = true
