@@ -208,28 +208,37 @@ impl From<Status> for PhaseStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhaseSnapshot {
 	/// The phase.
-	pub name:      PhaseName,
+	pub name:       PhaseName,
 	/// Where it stands.
-	pub status:    PhaseStatus,
+	pub status:     PhaseStatus,
 	/// Completed attempts.
-	pub attempts:  u32,
+	pub attempts:   u32,
 	/// Total acceptances ever (the next published version is one more).
-	pub accepted:  u32,
+	pub accepted:   u32,
 	/// The version currently standing, if any.
-	pub published: Option<u32>,
+	pub published:  Option<u32>,
+	/// The correction the next attempt will receive, if a rejection left one.
+	pub correction: Option<Str>,
 }
 
 /// The observable state of a [`Run`] (ADR 0051 R4).
 ///
-/// Two runs with equal snapshots are in the same state for every decision the
-/// engine makes, so a replayed run is correct when its snapshot equals the
-/// original's.
+/// It covers every field the engine's decisions read, except the producer
+/// versions an in-flight attempt consumed, which replay rebuilds from the
+/// dispatch order. Equal snapshots taken at the same event boundary mean the
+/// engine will make the same next decision. It is a comparison point, not a
+/// proof that two journals describe the same workflow: the workflow digest
+/// recorded in the run journal is that check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunSnapshot {
 	/// Every phase, in workflow order.
-	pub phases: Vec<PhaseSnapshot>,
+	pub phases:       Vec<PhaseSnapshot>,
 	/// Whether the run halted.
-	pub halted: bool,
+	pub halted:       bool,
+	/// The per-phase attempt budget.
+	pub max_attempts: u32,
+	/// The run-wide posture the host reported, if any.
+	pub posture:      Option<Posture>,
 }
 
 impl Run {
@@ -456,21 +465,43 @@ impl Run {
 	#[must_use]
 	pub fn snapshot(&self) -> RunSnapshot {
 		RunSnapshot {
-			phases: self
+			phases:       self
 				.workflow
 				.phases()
 				.iter()
 				.zip(&self.states)
 				.map(|(phase, state)| PhaseSnapshot {
-					name:      phase.name.clone(),
-					status:    state.status.into(),
-					attempts:  state.attempts,
-					accepted:  state.accepted,
-					published: state.published,
+					name:       phase.name.clone(),
+					status:     state.status.into(),
+					attempts:   state.attempts,
+					accepted:   state.accepted,
+					published:  state.published,
+					correction: state.correction.clone(),
 				})
 				.collect(),
-			halted: self.halted,
+			halted:       self.halted,
+			max_attempts: self.max_attempts,
+			posture:      self.posture,
 		}
+	}
+
+	/// Returns an in-flight attempt to pending without spending the attempt.
+	///
+	/// Recovery uses this when an attempt was dispatched and never settled and
+	/// its outcome is known not to have produced an effect (ADR 0051 D5): the
+	/// next [`Run::next_step`] dispatches the same attempt ordinal again, with
+	/// the same correction. The consumed input versions are dropped and chosen
+	/// afresh at that dispatch.
+	///
+	/// # Errors
+	///
+	/// [`RunError::UnknownPhase`] or [`RunError::NotRunning`].
+	pub fn interrupt(&mut self, phase: &PhaseName<str>) -> Result<(), RunError> {
+		let index = self.running_index(phase)?;
+		let state = &mut self.states[index];
+		state.status = Status::Pending;
+		state.consumed.clear();
+		Ok(())
 	}
 
 	/// The version currently standing for a phase, if it has one.

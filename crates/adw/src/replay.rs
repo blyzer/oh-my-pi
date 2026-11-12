@@ -247,4 +247,70 @@ mod tests {
 			replay(&mut run, &[dispatch("build", 1), dispatch("build", 1)]).expect_err("overlap");
 		assert!(matches!(error, ReplayError::OverlappingDispatch { index: 1, .. }), "{error:?}");
 	}
+
+	#[test]
+	fn an_in_flight_phase_can_be_interrupted_and_dispatched_again_with_the_same_attempt() {
+		let mut run = Run::new(workflow());
+		let outcome = replay(&mut run, &[dispatch("build", 1)]).expect("replay");
+		let (phase, attempt) = outcome.in_flight.expect("in flight");
+		run.interrupt(PhaseName::from_ref(phase.as_str()))
+			.expect("interrupt");
+		assert_eq!(run.snapshot().phases[0].status, PhaseStatus::Pending);
+		let Step::Run { phase: again, attempt: again_attempt, .. } = run.next_step() else {
+			panic!("the interrupted phase must dispatch again")
+		};
+		assert_eq!(again.name.as_str(), "build");
+		assert_eq!(again_attempt, attempt);
+		assert!(run.interrupt(PhaseName::from_ref("review")).is_err());
+	}
+
+	#[test]
+	fn the_snapshot_carries_the_correction_a_rejection_left() {
+		let events = [
+			dispatch("build", 1),
+			accept("build"),
+			dispatch("review", 1),
+			reject("review", "missing tests"),
+		];
+		let mut run = Run::new(workflow());
+		replay(&mut run, &events).expect("replay");
+		let mut other = Run::new(workflow());
+		let mut different = events.clone();
+		different[3] = reject("review", "wrong error message");
+		replay(&mut other, &different).expect("replay");
+		assert_ne!(run.snapshot(), other.snapshot(), "feedback must be part of the snapshot");
+	}
+
+	#[test]
+	fn a_retry_route_replays_to_the_same_snapshot() {
+		let retry = || {
+			Workflow::new(WorkflowName::new("once"), vec![
+				Phase::new(PhaseName::new("build"), PhaseKind::Agent).on_reject(OnReject::Retry),
+			])
+			.expect("workflow")
+		};
+		let mut original = Run::new(retry());
+		let mut events = Vec::new();
+		for accepted in [false, true] {
+			let Step::Run { phase, attempt, .. } = original.next_step() else {
+				panic!("run")
+			};
+			events.push(dispatch(phase.name.as_str(), attempt));
+			if accepted {
+				original
+					.accept(PhaseName::from_ref("build"))
+					.expect("accept");
+				events.push(accept("build"));
+			} else {
+				original
+					.reject(PhaseName::from_ref("build"), "flaky")
+					.expect("reject");
+				events.push(reject("build", "flaky"));
+			}
+		}
+		let mut replayed = Run::new(retry());
+		replay(&mut replayed, &events).expect("replay");
+		assert_eq!(replayed.snapshot(), original.snapshot());
+		assert_eq!(replayed.snapshot().phases[0].attempts, 2);
+	}
 }
