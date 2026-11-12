@@ -18,8 +18,14 @@ pub mod remote;
 use std::{error::Error as StdError, future::Future, path::Path};
 
 pub use definition::{DefinitionError, PhaseSpec, WorkflowDefinition};
-use omp_adw::{OnReject, Outcome, Phase, Posture, Run, RunError, SelectedInput, Step};
+use omp_adw::{
+	OnReject, Outcome, Phase, PhaseName, Posture, Run, RunError, SelectedInput, Step,
+	replay::{ReplayError, ReplayEvent, replay},
+};
 use omp_core::Str;
+use omp_journal::runlog::{
+	PhaseDispatch, PhaseSettle, RunDone, RunHalt, RunLog, RunLogError, RunRecord, SettleStatus,
+};
 use tokio_util::sync::CancellationToken;
 
 /// What a dispatched phase reported.
@@ -151,6 +157,12 @@ pub enum Error<E: StdError + 'static> {
 	/// Posture resolution failed before a phase could be recorded.
 	#[error("workflow runtime posture resolution failed")]
 	Posture(#[source] E),
+	/// Journal write failed.
+	#[error("workflow run log write failed")]
+	Journal(#[from] RunLogError),
+	/// Replay of recorded journal events failed.
+	#[error("workflow run log replay failed")]
+	Replay(#[from] ReplayError),
 }
 
 /// Drives one workflow to acceptance, halt, block, failure, or cancellation.
@@ -166,6 +178,22 @@ pub async fn run<H: AdwHost>(
 	host: &H,
 	cancel: &CancellationToken,
 ) -> Result<RunExit<H::Error>, Error<H::Error>> {
+	run_with_log(definition, max_attempts, host, cancel, None).await
+}
+
+/// Drives one workflow, recording events to an optional run log.
+///
+/// # Errors
+///
+/// Returns [`Error`] when posture resolution fails, the domain refuses a
+/// transition, or an append to `log` fails.
+pub async fn run_with_log<H: AdwHost>(
+	definition: &WorkflowDefinition,
+	max_attempts: u32,
+	host: &H,
+	cancel: &CancellationToken,
+	mut log: Option<&mut RunLog>,
+) -> Result<RunExit<H::Error>, Error<H::Error>> {
 	let posture = host.posture().map_err(Error::Posture)?;
 	let mut run = Run::new(definition.workflow().clone())
 		.with_max_attempts(max_attempts)
@@ -178,6 +206,9 @@ pub async fn run<H: AdwHost>(
 
 	loop {
 		if cancel.is_cancelled() {
+			if let Some(log) = log.as_mut() {
+				log.append(&RunRecord::Halt(RunHalt { reason: Str::new_static("cancelled") }))?;
+			}
 			return Ok(cancelled(records));
 		}
 		let mut posture_error = None;
@@ -200,6 +231,14 @@ pub async fn run<H: AdwHost>(
 					// Unreachable by construction: the loader rejects a phase
 					// without execution detail. Treated as a halt rather than a
 					// panic so a future loader change degrades visibly.
+					if let Some(log) = log.as_mut() {
+						log.append(&RunRecord::Halt(RunHalt {
+							reason: Str::from(format!(
+								"phase `{}` carries no execution detail",
+								phase.name.as_str()
+							)),
+						}))?;
+					}
 					return Ok(halted(
 						records,
 						Some(Str::from(format!(
@@ -208,13 +247,47 @@ pub async fn run<H: AdwHost>(
 						))),
 					));
 				};
+				if let Some(log) = log.as_mut() {
+					let executor = match spec {
+						PhaseSpec::Prompt { executor: Some(id), .. } => id.clone(),
+						_ => Str::new_static("native"),
+					};
+					let posture_str = Str::from(format!("{:?}", posture));
+					let input_versions = inputs
+						.iter()
+						.map(|inp| omp_journal::runlog::InputVersion {
+							phase:   inp.phase.as_str().into(),
+							version: inp.version,
+						})
+						.collect();
+					log.append(&RunRecord::Dispatch(PhaseDispatch {
+						phase: phase.name.as_str().into(),
+						attempt,
+						inputs: input_versions,
+						executor,
+						posture: posture_str,
+						effects: Vec::new(),
+					}))?;
+				}
 				let result = match host
 					.dispatch(&phase, spec, attempt, correction.as_ref(), &inputs, cancel)
 					.await
 				{
 					Ok(result) => result,
-					Err(_) if cancel.is_cancelled() => return Ok(cancelled(records)),
+					Err(_) if cancel.is_cancelled() => {
+						if let Some(log) = log.as_mut() {
+							log.append(&RunRecord::Halt(RunHalt {
+								reason: Str::new_static("cancelled"),
+							}))?;
+						}
+						return Ok(cancelled(records));
+					},
 					Err(source) => {
+						if let Some(log) = log.as_mut() {
+							log.append(&RunRecord::Halt(RunHalt {
+								reason: Str::from(format!("phase failed: {source}")),
+							}))?;
+						}
 						records.push(PhaseRecord {
 							phase: Str::new(phase.name.as_str()),
 							attempt,
@@ -229,14 +302,29 @@ pub async fn run<H: AdwHost>(
 				// feeding it back as a rejection would schedule (and report) a
 				// retry the run will never dispatch.
 				if cancel.is_cancelled() {
+					if let Some(log) = log.as_mut() {
+						log.append(&RunRecord::Halt(RunHalt { reason: Str::new_static("cancelled") }))?;
+					}
 					return Ok(cancelled(records));
 				}
 				let feedback = result.feedback.clone();
 				let outcome = if result.accepted {
 					run.accept(&phase.name)?
 				} else {
-					run.reject(&phase.name, result.feedback)?
+					run.reject(&phase.name, result.feedback.clone())?
 				};
+				if let Some(log) = log.as_mut() {
+					log.append(&RunRecord::Settle(PhaseSettle {
+						phase: phase.name.as_str().into(),
+						attempt,
+						status: if result.accepted {
+							SettleStatus::Accepted
+						} else {
+							SettleStatus::Rejected
+						},
+						feedback: result.feedback.clone(),
+					}))?;
+				}
 				if matches!(outcome, Outcome::Halted { .. }) {
 					halt_reason = Some(match phase.on_reject {
 						OnReject::Halt => Str::from(format!(
@@ -267,8 +355,18 @@ pub async fn run<H: AdwHost>(
 			},
 			// Dispatch is serial, so nothing is ever in flight here; a wait
 			// with an empty ready set means the graph cannot progress.
-			Step::Wait => return Ok(halted(records, Some(Str::new_static("no phase can proceed")))),
+			Step::Wait => {
+				if let Some(log) = log.as_mut() {
+					log.append(&RunRecord::Halt(RunHalt {
+						reason: Str::new_static("no phase can proceed"),
+					}))?;
+				}
+				return Ok(halted(records, Some(Str::new_static("no phase can proceed"))));
+			},
 			Step::Blocked { error } => {
+				if let Some(log) = log.as_mut() {
+					log.append(&RunRecord::Halt(RunHalt { reason: Str::from(error.to_string()) }))?;
+				}
 				return Ok(RunExit {
 					code: 1,
 					status: RunStatus::Blocked,
@@ -277,11 +375,80 @@ pub async fn run<H: AdwHost>(
 				});
 			},
 			Step::Done { accepted: true } => {
+				if let Some(log) = log.as_mut() {
+					log.append(&RunRecord::Done(RunDone { status: Str::new_static("accepted") }))?;
+				}
 				return Ok(RunExit { code: 0, status: RunStatus::Accepted, records, reason: None });
 			},
-			Step::Done { accepted: false } => return Ok(halted(records, halt_reason)),
+			Step::Done { accepted: false } => {
+				if let Some(log) = log.as_mut() {
+					log.append(&RunRecord::Halt(RunHalt {
+						reason: halt_reason
+							.clone()
+							.unwrap_or_else(|| Str::new_static("workflow halted")),
+					}))?;
+				}
+				return Ok(halted(records, halt_reason));
+			},
 		}
 	}
+}
+
+/// Converts recorded [`RunRecord`]s into [`ReplayEvent`]s for the engine
+/// replay.
+#[must_use]
+pub fn records_to_replay_events(records: &[RunRecord]) -> Vec<ReplayEvent> {
+	let mut events = Vec::new();
+	for record in records {
+		match record {
+			RunRecord::Dispatch(d) => {
+				events.push(ReplayEvent::Dispatch {
+					phase:   PhaseName::new(d.phase.clone()),
+					attempt: d.attempt,
+					posture: None,
+				});
+			},
+			RunRecord::Settle(s) => {
+				events.push(ReplayEvent::Settle {
+					phase:    PhaseName::new(s.phase.clone()),
+					accepted: s.status == SettleStatus::Accepted,
+					feedback: s.feedback.clone(),
+				});
+			},
+			RunRecord::Start(_)
+			| RunRecord::Uncertain(_)
+			| RunRecord::Halt(_)
+			| RunRecord::Done(_) => {},
+		}
+	}
+	events
+}
+
+/// Resumes a workflow execution from an existing journal log.
+///
+/// # Errors
+///
+/// Returns [`Error`] when replay fails or the resumed run cannot proceed.
+pub async fn resume_from_log<H: AdwHost>(
+	definition: &WorkflowDefinition,
+	max_attempts: u32,
+	host: &H,
+	cancel: &CancellationToken,
+	mut log: RunLog,
+	records: &[RunRecord],
+) -> Result<RunExit<H::Error>, Error<H::Error>> {
+	let posture = host.posture().map_err(Error::Posture)?;
+	let mut run = Run::new(definition.workflow().clone())
+		.with_max_attempts(max_attempts)
+		.with_posture(posture);
+
+	let events = records_to_replay_events(records);
+	let replayed = replay(&mut run, &events)?;
+	if let Some((phase, _)) = replayed.in_flight {
+		run.interrupt(&phase)?;
+	}
+
+	run_with_log(definition, max_attempts, host, cancel, Some(&mut log)).await
 }
 
 fn failed<E: StdError + 'static>(
@@ -528,5 +695,77 @@ mod tests {
 
 		assert!(matches!(exit.status, RunStatus::Cancelled));
 		assert!(exit.records.is_empty());
+		assert!(exit.records.is_empty());
+	}
+
+	#[tokio::test]
+	async fn run_records_dispatch_and_settle_in_run_log() {
+		let project = tempfile::tempdir().expect("project");
+		let directory = project.path().join(WORKFLOWS_DIR);
+		fs::create_dir_all(&directory).expect("workflow directory");
+		fs::write(
+			directory.join("flow.toml"),
+			"name = \"flow\"\n\n[[phase]]\nname = \"test\"\nkind = \"agent\"\nprompt = \"test it\"\n",
+		)
+		.expect("workflow file");
+		let definition = definition::load(project.path(), "flow").expect("definition");
+		struct MockHost {
+			root: PathBuf,
+		}
+		impl AdwHost for MockHost {
+			type Error = Infallible;
+
+			fn project_root(&self) -> &Path {
+				&self.root
+			}
+
+			fn posture(&self) -> Result<Posture, Infallible> {
+				Ok(Posture {
+					write:    WriteScope::Unconfined,
+					network:  NetworkScope::Unrestricted,
+					approval: ApprovalScope::Write,
+				})
+			}
+
+			fn dispatch<'a>(
+				&'a self,
+				_phase: &'a Phase,
+				_spec: &'a PhaseSpec,
+				_attempt: u32,
+				_correction: Option<&'a Str>,
+				_inputs: &'a [SelectedInput],
+				_cancel: &'a CancellationToken,
+			) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
+				ready(Ok(PhaseResult { accepted: true, feedback: Str::default() }))
+			}
+		}
+		let host = MockHost { root: project.path().to_path_buf() };
+		let log_path = project.path().join("test.oms");
+		let start = omp_journal::runlog::RunStart {
+			run:                 Str::new_static("01JADWTEST0000000000000000"),
+			workflow:            Str::new_static("flow"),
+			workflow_digest:     Str::from(definition.digest()),
+			input_digest:        Str::new_static(
+				"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			),
+			max_attempts:        2,
+			model:               Str::new_static("test"),
+			model_explicit:      false,
+			exec_policy:         Str::new_static("strict"),
+			exec_fallback_local: false,
+			workspace_trusted:   true,
+			workspace_root:      Str::from(project.path().to_string_lossy().as_ref()),
+			workspace_head:      None,
+			created:             Str::new_static("2026-11-12T10:00:00Z"),
+		};
+		let mut log = RunLog::create(&log_path, start).expect("create log");
+		let exit = run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log))
+			.await
+			.expect("run");
+		assert!(matches!(exit.status, RunStatus::Accepted));
+		let records = RunLog::read(&log_path).expect("read log");
+		assert!(records.len() >= 3); // Start, Dispatch, Settle (and Done)
+		let events = records_to_replay_events(&records);
+		assert_eq!(events.len(), 2); // 1 Dispatch, 1 Settle
 	}
 }

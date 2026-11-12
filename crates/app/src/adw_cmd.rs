@@ -23,6 +23,9 @@ pub async fn run(command: AdwCommand) -> miette::Result<()> {
 		AdwCommand::Run { workflow, project, model, max_attempts, exec_policy } => {
 			execute(&workflow, &project, model, max_attempts, exec_policy).await
 		},
+		AdwCommand::Resume { journal, project, exec_policy } => {
+			resume(&journal, &project, exec_policy).await
+		},
 	}
 }
 
@@ -117,6 +120,60 @@ async fn execute(
 		Ok(())
 	} else {
 		Err(miette::miette!("workflow exited with status {}", exit.code))
+	}
+}
+
+async fn resume(
+	journal_path: &Path,
+	project: &Path,
+	exec_policy: Option<AdwExecPolicy>,
+) -> miette::Result<()> {
+	let (records, start) = match omp_journal::runlog::RunLog::read(journal_path) {
+		Ok(records) => {
+			let start = match records.first() {
+				Some(omp_journal::runlog::RunRecord::Start(start)) => start.clone(),
+				_ => return Err(miette::miette!("run log carries no start record")),
+			};
+			(records, start)
+		},
+		Err(error) => return Err(miette::miette!("could not read run log: {error}")),
+	};
+
+	let definition = definition::load(project, &start.workflow).into_diagnostic()?;
+	if definition.digest() != start.workflow_digest.as_str() {
+		return Err(miette::miette!(
+			"workflow definition `{}` changed since the run started (digest mismatch)",
+			start.workflow
+		));
+	}
+
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	let host = open_host(project, data_dir, start.model.clone(), start.model_explicit)?;
+	let host = match exec_policy {
+		Some(policy) => host.with_exec_policy(policy),
+		None => host,
+	};
+
+	let (log, _) = omp_journal::runlog::RunLog::open(journal_path, &start.workflow_digest)
+		.map_err(|error| miette::miette!("could not reopen run log: {error}"))?;
+
+	let cancel = CancellationToken::new();
+	let exit = omp_driver::adw::resume_from_log(
+		&definition,
+		start.max_attempts,
+		&host,
+		&cancel,
+		log,
+		&records,
+	)
+	.await
+	.into_diagnostic()?;
+
+	println!("Resumed workflow `{}` from `{}`.", start.workflow, journal_path.display());
+	if exit.code == 0 {
+		Ok(())
+	} else {
+		Err(miette::miette!("resumed workflow exited with status {}", exit.code))
 	}
 }
 

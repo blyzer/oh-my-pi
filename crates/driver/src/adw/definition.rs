@@ -14,7 +14,7 @@ use std::{
 use omp_adw::{
 	OnReject, Phase, PhaseKind, PhaseName, Requirement, Workflow, WorkflowError, WorkflowName,
 };
-use omp_core::{FastHashMap, Str};
+use omp_core::{FastHashMap, Hash32, Str};
 use omp_ext::workspace_trust::inventory::{WORKFLOW_EXTENSION, WORKFLOWS_DIR};
 use serde::Deserialize;
 
@@ -49,6 +49,7 @@ pub enum PhaseSpec {
 pub struct WorkflowDefinition {
 	workflow: Workflow,
 	specs:    FastHashMap<PhaseName, PhaseSpec>,
+	digest:   Str,
 }
 
 impl WorkflowDefinition {
@@ -65,6 +66,12 @@ impl WorkflowDefinition {
 	/// handle a missing spec.
 	pub fn spec(&self, phase: &PhaseName<str>) -> Option<&PhaseSpec> {
 		self.specs.get(phase)
+	}
+
+	/// SHA-256 digest of the workflow definition content.
+	#[inline]
+	pub fn digest(&self) -> &str {
+		&self.digest
 	}
 }
 
@@ -158,7 +165,8 @@ pub fn load(project_root: &Path, name: &str) -> Result<WorkflowDefinition, Defin
 		.map_err(|source| DefinitionError::Read { path: path.clone(), source })?;
 	let file: FileWorkflow =
 		toml::from_str(&text).map_err(|source| DefinitionError::Parse { path, source })?;
-	lower(file, name)
+	let digest = Str::from(Hash32::sum(&text).to_hex().as_str());
+	lower(file, name, digest)
 }
 
 /// Every workflow name declared by the project, sorted.
@@ -185,7 +193,11 @@ pub fn available(project_root: &Path) -> Vec<Str> {
 	names
 }
 
-fn lower(file: FileWorkflow, fallback_name: &str) -> Result<WorkflowDefinition, DefinitionError> {
+fn lower(
+	file: FileWorkflow,
+	fallback_name: &str,
+	digest: Str,
+) -> Result<WorkflowDefinition, DefinitionError> {
 	let mut phases = Vec::with_capacity(file.phase.len());
 	let mut specs = FastHashMap::default();
 	for declared in file.phase {
@@ -240,7 +252,11 @@ fn lower(file: FileWorkflow, fallback_name: &str) -> Result<WorkflowDefinition, 
 		.name
 		.filter(|name| !name.is_empty())
 		.unwrap_or_else(|| Str::new(fallback_name));
-	Ok(WorkflowDefinition { workflow: Workflow::new(WorkflowName::new(name), phases)?, specs })
+	Ok(WorkflowDefinition {
+		workflow: Workflow::new(WorkflowName::new(name), phases)?,
+		specs,
+		digest,
+	})
 }
 
 fn escapes_project(cwd: &str) -> bool {
@@ -473,5 +489,15 @@ depends_on = ["a"]
 			load(project.path(), "cycle"),
 			Err(DefinitionError::Graph(WorkflowError::Cycle { .. }))
 		));
+	}
+
+	#[test]
+	fn computes_content_digest_on_load() {
+		let project = tempfile::tempdir().expect("project");
+		let content = "[[phase]]\nname = \"x\"\nkind = \"agent\"\nprompt = \"do it\"\n";
+		write(project.path(), "flow", content);
+		let def = load(project.path(), "flow").expect("load");
+		let expected = Hash32::sum(content).to_hex().to_string();
+		assert_eq!(def.digest(), expected);
 	}
 }
