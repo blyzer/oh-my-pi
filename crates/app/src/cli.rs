@@ -1081,7 +1081,6 @@ pub enum AdwCommand {
 		/// Placement for this process only, overriding `sv_exec_policy`.
 		#[arg(long, value_name = "POLICY")]
 		exec_policy:  Option<AdwExecPolicy>,
-		exec_policy:  Option<AdwExecPolicy>,
 	},
 	/// Resume an interrupted workflow execution from a run log.
 	Resume {
