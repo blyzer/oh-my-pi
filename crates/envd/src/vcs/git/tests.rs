@@ -1,13 +1,13 @@
 use std::{fs, time::Duration};
 
 use bytes::Bytes;
-use omp_vcs::testing::run as fixture_git;
+use omp_vcs::{StatusSummary, testing::run as fixture_git};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use super::{
 	commands::GitCommands,
-	diff::{self, ChangeKind, GitDiff, LineCount, StatusCounts},
+	diff::{self, ChangeKind, GitDiff, LineCount},
 	mutation::{
 		CommitOptions, DiffLineSelection, GitMutation, GitMutationConsumer, HunkSelection,
 		HunkSelector, LineRange, MutationOutcome, SelectionError,
@@ -31,7 +31,7 @@ fn repository_fixture() -> tempfile::TempDir {
 
 #[test]
 fn vcs_parsers_preserve_porcelain_renames_binary_and_terminal_newlines() {
-	assert_eq!(diff::parse_status(b"M  staged\n M unstaged\n?? untracked\n"), StatusCounts {
+	assert_eq!(diff::parse_status(b"M  staged\n M unstaged\n?? untracked\n"), StatusSummary {
 		staged:    1,
 		unstaged:  1,
 		untracked: 1,
@@ -40,7 +40,7 @@ fn vcs_parsers_preserve_porcelain_renames_binary_and_terminal_newlines() {
 		diff::parse_status(
 			b"1 M. N... 100644 100644 100644 a a tracked\0? odd\nname\02 R. N... 100644 100644 100644 a a R100 new\0old\0"
 		),
-		StatusCounts { staged: 2, unstaged: 0, untracked: 1 }
+		StatusSummary { staged: 2, unstaged: 0, untracked: 1 }
 	);
 	let entries = diff::parse_status_entries(
 		b"M  staged\0 R worktree-name\0worktree-old\0R  staged-name\0staged-old\0C  copied\0copy-source\0?? odd\nname\0UU conflict\0",
@@ -110,7 +110,7 @@ async fn vcs_snapshots_cover_normal_linked_bare_detached_unborn_packed_and_refta
 	assert_eq!(normal.availability, RepositoryAvailability::Available);
 	assert_eq!(normal.branch.as_deref(), Some("main"));
 	assert!(normal.head.is_some());
-	assert_eq!(normal.status_counts, StatusCounts::default());
+	assert_eq!(normal.status_counts, StatusSummary::default());
 
 	fixture_git(fixture.path(), &["checkout", "--detach", "HEAD"]);
 	let repository = repo::discover(fixture.path()).await.unwrap().unwrap();
@@ -155,7 +155,7 @@ async fn vcs_snapshots_cover_normal_linked_bare_detached_unborn_packed_and_refta
 	assert_eq!(bare_snapshot.availability, RepositoryAvailability::Available);
 	assert_eq!(bare_snapshot.worktree_root.as_deref(), Some(canonical_bare.as_path()));
 	assert_eq!(bare_snapshot.primary_root.as_deref(), Some(canonical_bare.as_path()));
-	assert_eq!(bare_snapshot.status_counts, StatusCounts::default());
+	assert_eq!(bare_snapshot.status_counts, StatusSummary::default());
 
 	// Reftable needs git 2.45 or later to create the fixture, and the product
 	// reads reftable refs through that same CLI; an older host has nothing to

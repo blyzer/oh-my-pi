@@ -294,18 +294,6 @@ pub enum StashPopOutcome {
 	},
 }
 
-/// Tree-wide reset policy.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ResetMode {
-	/// Preserve index and worktree.
-	Soft,
-	/// Reset the index and preserve the worktree.
-	#[default]
-	Mixed,
-	/// Reset both index and worktree.
-	Hard,
-}
-
 /// Untracked-path cleanup policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CleanMode {
@@ -835,15 +823,10 @@ impl GitMutation {
 	/// Resets `HEAD`, the index, or the worktree according to the selected mode.
 	pub async fn reset(
 		&self,
-		mode: ResetMode,
+		mode: omp_vcs::ResetMode,
 		target: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let mode = match mode {
-			ResetMode::Soft => omp_vcs::ResetMode::Soft,
-			ResetMode::Mixed => omp_vcs::ResetMode::Mixed,
-			ResetMode::Hard => omp_vcs::ResetMode::Hard,
-		};
 		let target = target.map(str::to_owned);
 		self
 			.locked(cancel, move |r| r.reset(mode, target.as_deref()))
