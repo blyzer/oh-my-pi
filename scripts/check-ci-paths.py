@@ -8,6 +8,9 @@ pending). Instead the `changes` job matches the pull request's files against
 counts as passing. This script verifies the pieces that must agree:
 
 * ci.yml's `push.paths` list equals .github/ci-paths.txt;
+* every path in .github/ci-rust-paths.txt (the paths that run the heavy Rust jobs on
+  a pull request) is also in .github/ci-paths.txt, and exactly the jobs in RUST_JOBS
+  gate on the `rust` output of the `changes` job, never on `ci` alone;
 * ci.yml's `pull_request` trigger carries no `paths` or `paths-ignore` filter;
 * every required status check in .github/rulesets/omp2-protected.json is the
   `name:` of a job in ci.yml, because a required check is matched by name;
@@ -29,6 +32,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github/workflows/ci.yml"
 PATHS = ROOT / ".github/ci-paths.txt"
+RUST_PATHS = ROOT / ".github/ci-rust-paths.txt"
+RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux"}
 RULESET = ROOT / ".github/rulesets/omp2-protected.json"
 WORKFLOWS = ROOT / ".github/workflows"
 TRUST_ACTION = ROOT / ".github/actions/buildbuddy-remote/action.yml"
@@ -198,6 +203,32 @@ def main() -> int:
             print(f"in ci.yml push.paths but not .github/ci-paths.txt: {item}")
         for item in sorted(set(listed) - set(push)):
             print(f"in .github/ci-paths.txt but not ci.yml push.paths: {item}")
+
+    rust_listed = [
+        line.strip()
+        for line in RUST_PATHS.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not rust_listed:
+        print("could not read .github/ci-rust-paths.txt", file=sys.stderr)
+        return 1
+    for item in sorted(set(rust_listed) - set(listed)):
+        ok = False
+        print(f"in .github/ci-rust-paths.txt but not .github/ci-paths.txt: {item}")
+
+    jobs = block(ci, "jobs", 0)
+    job_ids = [m.group(1) for line in jobs if (m := re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line))]
+    for name in sorted(RUST_JOBS - set(job_ids)):
+        ok = False
+        print(f"RUST_JOBS names a job that is not in ci.yml: {name}")
+    for name in job_ids:
+        gated = "needs.changes.outputs.rust" in "\n".join(block(jobs, name, 2))
+        if name in RUST_JOBS and not gated:
+            ok = False
+            print(f"job {name} runs heavy Rust work but does not gate on needs.changes.outputs.rust")
+        if name not in RUST_JOBS and gated:
+            ok = False
+            print(f"job {name} gates on the rust output but is not in RUST_JOBS")
 
     pull_request = block(on, "pull_request", 2)
     for key in ("paths", "paths-ignore"):

@@ -9,6 +9,7 @@ on:
       - ".config/**"
       - ".github/actions/**"
       - ".github/ci-paths.txt"
+      - ".github/ci-rust-paths.txt"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -74,9 +75,10 @@ jobs:
       pull-requests: read
     outputs:
       ci: ${{ steps.paths.outputs.ci }}
+      rust: ${{ steps.paths.outputs.rust }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Match the changed files against .github/ci-paths.txt
+      - name: Match the changed files against the CI path lists
         id: paths
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,27 +86,37 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # ci   = .github/ci-paths.txt: needs the light CI-infrastructure jobs.
+          # rust = .github/ci-rust-paths.txt: can change compiled or tested Rust
+          #        behaviour; only then do the heavy jobs run on a pull request.
           if [ -z "$PULL_REQUEST" ]; then
             echo "Not a pull request; CI is needed"
             echo "ci=true" >> "$GITHUB_OUTPUT"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(gh api --paginate "repos/$REPO/pulls/$PULL_REQUEST/files" \
             --jq '.[] | .filename, (.previous_filename // empty)')
-          while IFS= read -r file; do
-            while IFS= read -r pattern; do
-              case "$pattern" in ''|'#'*) continue ;; esac
-              # A `**` glob is a plain prefix match here; case patterns let `*` cross `/`.
-              # shellcheck disable=SC2254
-              case "$file" in ${pattern//\*\*/\*})
-                echo "$file matches $pattern; CI is needed"
-                echo "ci=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              ;; esac
-            done < .github/ci-paths.txt
-          done <<< "$files"
-          echo "No CI-relevant path changed; the CI jobs are skipped"
-          echo "ci=false" >> "$GITHUB_OUTPUT"
+          matches() {
+            local list="$1" file pattern
+            while IFS= read -r file; do
+              while IFS= read -r pattern; do
+                case "$pattern" in ''|'#'*) continue ;; esac
+                # A ** glob is a plain prefix match here; case patterns let * cross /.
+                # shellcheck disable=SC2254
+                case "$file" in ${pattern//\*\*/\*})
+                  echo "$file matches $pattern in $list"
+                  return 0
+                ;; esac
+              done < "$list"
+            done <<< "$files"
+            return 1
+          }
+          if matches .github/ci-paths.txt; then ci=true; else ci=false; fi
+          if matches .github/ci-rust-paths.txt; then rust=true; else rust=false; fi
+          echo "ci=$ci" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "ci=$ci rust=$rust"
 
   format:
     name: Rust format
@@ -400,7 +412,7 @@ jobs:
     # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
     # format still reports, and fails, its own required check.
     needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # This is the job that keeps a persistent target dir (incremental Rust +
     # embedded CPython) on the self-hosted Mac registered on THIS repository
     # (`vars.MACOS_RUNNER`, e.g. ["self-hosted","macOS","ARM64"]). Every other
@@ -576,7 +588,7 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
     needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # Clippy needs macOS coverage, not the dedicated test runner.
     runs-on: macos-15
     timeout-minutes: 45
@@ -623,7 +635,8 @@ jobs:
   # target gate.
   lint_linux:
     name: Lint workspace (Linux)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     # Clippy plus `just check-minimal-caps` (default `omp-app` and the
     # all-`cap-*`-off profile, different feature unification).
@@ -732,7 +745,8 @@ jobs:
   # cache entry; this job is its only writer.
   p9_p10_linux:
     name: Acceptance proofs P9, P10 and tool sources (Linux)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -833,7 +847,8 @@ jobs:
 
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -918,7 +933,7 @@ jobs:
   remote_linux:
     name: Remote Linux verification (BuildBuddy)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 90
     permissions:

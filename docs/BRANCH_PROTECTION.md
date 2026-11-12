@@ -223,3 +223,13 @@ wherever it was installed).
 **CODEOWNERS.** With one maintainer, every review routes to the same person.
 Add `.github/CODEOWNERS` when a second maintainer owns part of the tree, and
 then turn on *Require review from Code Owners* in the ruleset.
+
+
+## Which jobs a pull request starts
+
+The `changes` job in `ci.yml` sets two outputs from the pull request's files:
+
+- `ci` (paths in `.github/ci-paths.txt`): the light CI-infrastructure jobs run (format and the gate check, protobuf, lintx, runtime spec, extensions conformance, licenses).
+- `rust` (paths in `.github/ci-rust-paths.txt`: crates, Cargo files, toolchain and lint config, fixtures, extensions, `docs/py`): the heavy jobs also run (workspace tests and acceptance proofs, macOS and Linux lint, P7, P9 and P10 proofs, remote Linux verification).
+
+A change that only touches `.github/**`, `justfile` or `scripts/**` therefore runs the light jobs and skips the heavy ones. Skipped jobs count as passing for required checks, as they did before. The trade-off: such a change is not exercised by the heavy jobs on its pull request, but any event without a pull request number (a push to `omp2`, a merge queue `merge_group` run, a manual dispatch) sets both outputs to true and runs the full suite, so a bad change is caught before it settles on `omp2`. `scripts/check-ci-paths.py` fails when a heavy job is gated on `ci` alone, when a light job is gated on `rust`, or when a path is in the rust list but not in the ci list. To restore the old behaviour, change the three `rust` conditions back to `ci`, or list `.github/**`, `justfile` and `scripts/**` in `.github/ci-rust-paths.txt` and `.github/ci-paths.txt`.
