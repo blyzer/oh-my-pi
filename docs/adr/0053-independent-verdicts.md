@@ -46,6 +46,10 @@ Area: runtime
 - **O2.** Is a model on the same provider but a different model "independent"? Recommendation: independent means a different model; a different provider is better and is recorded, not required.
 - **O3.** EGM as a dependency: install the plugin as an expert for design questions (owner-authorized), but ship the review loop as OMP's own recipe so core never depends on it.
 
+## Related upstream request: decision models as judges (can1357/oh-my-pi issue 18621)
+
+Owner-supplied 2026-11-12; the issue was read, the linked Artificial Analysis Decision Index page and the open provider PRs were not. The issue asks OMP1 for native adapters for "decision" models that return calibrated probabilities (Artificial Analysis Decision Index v2, November 2026) instead of free chat text, and says a chat fallback strips those probabilities. A maintainer triaged it as an enhancement, noted some models are already native on upstream main (OpenAI Decisions API and Cloudflare decision models, per the upstream changelog), and said each provider needs its own pull request, so the bundled issue was closed as wontfix. Relevance here: the judge role (D3) and `Verdict` (D4) should not assume a chat model. A judge route may be a decision model whose answer is a calibrated choice, boolean or score, so `Verdict` should be able to carry a probability and a confidence next to the decision. The session tooling already exposes calibrated answers (`judge` with choice, bool and score types), which is a precedent for the shape. This is a design input for D4 and for the ADR 0052 router, not a commitment; each vendor adapter is its own extension and its own pull request, as the maintainer asked.
+
 ## Evidence from using EGM on the owner questions
 
 On 2026-11-12 four owner decisions (the `agent_settled` hook revision, the `omp-exec-ssh` closure measure, ACP Q18, ADR 0040 gap follow-ups) were put to three fresh-context reviewers running EGM persona files: zoom-out, comprehension and design critic. The author had recommended Q1 option A, Q2 A plus C, Q3 accept with conditions and Q4 accept Gaps 1, 3 and 4. What the reviews changed:
