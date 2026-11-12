@@ -362,8 +362,8 @@ pub async fn run_delegated_turn<R: PermissionResolver>(
 		Some(ExecutorKind::Codex(executor)) => {
 			run_turn_on(executor, request, input, limits, &mut resolver, cancel, events, session).await
 		},
-		Some(ExecutorKind::Acp(executor)) => {
-			run_turn_on(executor, request, input, limits, &mut resolver, cancel, events, session).await
+		Some(ExecutorKind::Acp(_)) => {
+			Err(DelegatedHostError::PolicyNotEnforced { id: executor_id.clone() })
 		},
 		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
 	}
@@ -453,15 +453,32 @@ pub async fn run_delegated_prompt<R: PermissionResolver>(
 	cancel: &CancellationToken,
 	session: &mut Session,
 ) -> Result<DelegatedAnswer, DelegatedHostError> {
-	match registry.get(executor_id) {
-		Some(ExecutorKind::Codex(executor)) => {
-			prompt_on(executor, workdir, text, resolver, cancel, session).await
-		},
-		Some(ExecutorKind::Acp(_)) => {
-			Err(DelegatedHostError::PolicyNotEnforced { id: executor_id.clone() })
-		},
-		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
-	}
+	let (request, input, limits) = delegated_prompt_parts(workdir, text);
+	let (tx, rx) = flume::unbounded();
+	let outcome = run_delegated_turn(
+		registry,
+		executor_id,
+		&request,
+		&input,
+		limits,
+		resolver,
+		cancel,
+		&tx,
+		session,
+	)
+	.await;
+	finish_prompt(outcome, tx, rx)
+}
+
+fn finish_prompt(
+	outcome: Result<TurnReport, DelegatedHostError>,
+	tx: Sender<DelegatedEvent>,
+	rx: flume::Receiver<DelegatedEvent>,
+) -> Result<DelegatedAnswer, DelegatedHostError> {
+	drop(tx);
+	let events: Vec<DelegatedEvent> = rx.drain().collect();
+	let report = outcome?;
+	Ok(DelegatedAnswer { text: final_text(&events), report })
 }
 
 async fn prompt_on<E: DelegatedExecutor, R: PermissionResolver>(
@@ -476,10 +493,7 @@ async fn prompt_on<E: DelegatedExecutor, R: PermissionResolver>(
 	let (tx, rx) = flume::unbounded();
 	let outcome =
 		run_turn_on(executor, &request, &input, limits, &mut resolver, cancel, &tx, session).await;
-	drop(tx);
-	let events: Vec<DelegatedEvent> = rx.drain().collect();
-	let report = outcome?;
-	Ok(DelegatedAnswer { text: final_text(&events), report })
+	finish_prompt(outcome, tx, rx)
 }
 
 /// Generic over the concrete executor type; called from [`run_delegated_turn`]
