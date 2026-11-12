@@ -17,7 +17,10 @@ use std::{
 	time::Duration,
 };
 
-use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
+use omp_adw::{
+	ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, Requirement, SelectedInput, WriteScope,
+};
+use omp_agent::delegated::{DenyAll, ExecutorId, TurnEnd};
 use omp_contract::posture::{ApprovalMode, effective_approval_mode};
 use omp_core::{Str, StrMut, sf};
 use omp_env::EnvClient;
@@ -33,6 +36,7 @@ use omp_exec::{
 };
 use omp_exec_local::{Config as LocalConfig, LocalBackend};
 use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
+use omp_session::{ComponentRegistry, Session, SessionError};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +47,7 @@ use super::{
 use crate::{
 	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
+	delegated_host::{DelegatedHostError, ExecutorRegistry, run_delegated_prompt},
 	exec_composer::{REMOTE_POSTURE, RemoteError},
 	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
 	workspace_trust::WorkspaceTrustSource,
@@ -94,6 +99,19 @@ pub enum ProductionError {
 	/// A remote phase was interrupted and its best-effort cancel was requested.
 	#[error("remote workflow code phase was cancelled")]
 	Cancelled,
+	/// A delegated executor could not run the phase's turn.
+	#[error("delegated executor failed the workflow phase")]
+	Delegated(#[from] DelegatedHostError),
+	/// The journal of a delegated phase's turn could not be created.
+	#[error("delegated phase journal could not be created")]
+	DelegatedJournal(#[source] SessionError),
+	/// A delegated turn ended without completing, so its answer is not a result.
+	#[error("delegated executor did not complete the phase's turn")]
+	DelegatedIncomplete,
+	/// A phase that declares a posture requirement was routed to a delegated
+	/// executor.
+	#[error("a phase with a posture requirement cannot run on a delegated executor")]
+	DelegatedRequirement,
 }
 
 impl From<RemoteError> for ProductionError {
@@ -222,6 +240,61 @@ impl ProductionAdwHost {
 			)
 			.await?;
 		Ok(outcome.assistant_text)
+	}
+
+	/// Runs one model phase's turn on a delegated executor (ADR 0052 D6) and
+	/// returns the agent's final text.
+	///
+	/// The turn is journaled under `<data dir>/adw/delegated` and kept.
+	/// Permission prompts are denied: an ADW run has no approver (`DenyAll`),
+	/// and the policy is the strictest one (see `run_delegated_prompt`). A turn
+	/// that did not complete is an error, never a result.
+	async fn run_delegated(
+		&self,
+		executor: &str,
+		prompt: &Str,
+		phase: &Phase,
+		attempt: u32,
+		cancel: &CancellationToken,
+	) -> Result<Str, ProductionError> {
+		if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
+			return Err(ProductionError::UntrustedWorkspace);
+		}
+		let registry = ExecutorRegistry::from_ctx(&self.ctx);
+		let journals = self.data_dir.join("adw").join("delegated");
+		fs::create_dir_all(&journals)?;
+		let stem: String = phase
+			.name
+			.as_str()
+			.chars()
+			.map(|c| {
+				if c.is_ascii_alphanumeric() || c == '-' {
+					c
+				} else {
+					'_'
+				}
+			})
+			.collect();
+		let stamp = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_millis());
+		let path = journals.join(format!("{stem}-{attempt}-{stamp}.oms"));
+		let mut session = Session::create(&path, ComponentRegistry::standard())
+			.map_err(ProductionError::DelegatedJournal)?;
+		let answer = run_delegated_prompt(
+			&registry,
+			&ExecutorId::new(executor),
+			&self.root,
+			prompt,
+			DenyAll,
+			cancel,
+			&mut session,
+		)
+		.await?;
+		if answer.report.end != TurnEnd::Completed {
+			return Err(ProductionError::DelegatedIncomplete);
+		}
+		Ok(answer.text)
 	}
 
 	/// Chooses the selector and its explicitness for every model phase.
@@ -500,9 +573,20 @@ impl AdwHost for ProductionAdwHost {
 					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
 			},
-			PhaseSpec::Prompt { text } => {
+			PhaseSpec::Prompt { text, executor } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
-				let answer = self.run_child(prompt, phase.kind, cancel).await?;
+				let answer = match executor {
+					Some(id) => {
+						if phase.requires != Requirement::default() {
+							return Err(ProductionError::DelegatedRequirement);
+						}
+						let answer = self
+							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
+							.await?;
+						return Ok(judge_delegated(phase.kind, answer));
+					},
+					None => self.run_child(prompt, phase.kind, cancel).await?,
+				};
 				Ok(judge(phase.kind, answer))
 			},
 		}
@@ -569,6 +653,18 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 	} else {
 		PhaseResult { accepted: false, feedback: answer }
 	}
+}
+
+fn judge_delegated(kind: PhaseKind, answer: Str) -> PhaseResult {
+	if kind != PhaseKind::Review && answer.trim().is_empty() {
+		return PhaseResult {
+			accepted: false,
+			feedback: Str::new_static(
+				"The delegated executor returned no text, so the phase has no result.",
+			),
+		};
+	}
+	judge(kind, answer)
 }
 
 #[cfg(test)]
@@ -938,6 +1034,61 @@ requires = { network = "disabled" }
 		assert!(!explicit);
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
 		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
+	fn a_delegated_answer_with_no_text_is_not_a_result() {
+		let empty = judge_delegated(PhaseKind::Agent, Str::empty());
+		assert!(!empty.accepted);
+		assert!(!empty.feedback.is_empty());
+		assert!(!judge_delegated(PhaseKind::Agent, sf!("  \n")).accepted);
+		assert!(judge_delegated(PhaseKind::Agent, sf!("done")).accepted);
+		assert!(judge_delegated(PhaseKind::Review, sf!("ACCEPT")).accepted);
+		assert!(!judge_delegated(PhaseKind::Review, Str::empty()).accepted);
+	}
+
+	#[tokio::test]
+	async fn a_delegated_phase_that_declares_a_requirement_is_refused_before_any_launch() {
+		use omp_adw::{Requirement, WriteScope};
+
+		let project = tempfile::tempdir().expect("project");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("@smol"),
+			false,
+			Arc::new(omp_con::Ctx::new()),
+			TRUSTED,
+		)
+		.expect("workflow host");
+		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent)
+			.requiring(Requirement { write: Some(WriteScope::ReadOnly), ..Requirement::default() });
+		let spec = PhaseSpec::Prompt { text: sf!("do it"), executor: Some(sf!("codex")) };
+		let result = host
+			.dispatch(&phase, &spec, 1, None, &[], &CancellationToken::new())
+			.await;
+		assert!(matches!(result, Err(ProductionError::DelegatedRequirement)), "{result:?}");
+		assert!(!project.path().join("data").join("adw").exists(), "a refused phase left a journal");
+	}
+
+	#[tokio::test]
+	async fn a_delegated_phase_is_withheld_in_an_untrusted_workspace() {
+		let project = tempfile::tempdir().expect("project");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("@smol"),
+			false,
+			Arc::new(omp_con::Ctx::new()),
+			TrustDecision::Denied,
+		)
+		.expect("workflow host");
+		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent);
+		let result = host
+			.run_delegated("codex", &sf!("do it"), &phase, 1, &CancellationToken::new())
+			.await;
+		assert!(matches!(result, Err(ProductionError::UntrustedWorkspace)), "{result:?}");
+		assert!(!project.path().join("data").join("adw").exists(), "a withheld phase left a journal");
 	}
 
 	#[test]
