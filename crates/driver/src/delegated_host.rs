@@ -186,6 +186,13 @@ pub enum DelegatedHostError {
 	/// Writing to the session journal failed.
 	#[error("session journal error")]
 	Session(#[source] SessionError),
+	/// The executor declares the requested policy but OMP cannot verify that it
+	/// enforces it.
+	#[error("executor `{id}` does not enforce the requested policy itself")]
+	PolicyNotEnforced {
+		/// The executor that was refused.
+		id: ExecutorId,
+	},
 }
 
 impl From<ExecutorError> for DelegatedHostError {
@@ -394,7 +401,7 @@ fn delegated_prompt_parts(workdir: &Path, text: &Str) -> (SessionRequest, TurnIn
 		workdir:      workdir.to_path_buf(),
 		policy:       DelegatedPolicy::STRICTEST,
 		resume:       None,
-		unknown_auth: UnknownAuth::Refuse,
+		unknown_auth: UnknownAuth::Proceed,
 	};
 	let input = TurnInput {
 		prompt: DelegatedPrompt::from_sections(
@@ -450,8 +457,8 @@ pub async fn run_delegated_prompt<R: PermissionResolver>(
 		Some(ExecutorKind::Codex(executor)) => {
 			prompt_on(executor, workdir, text, resolver, cancel, session).await
 		},
-		Some(ExecutorKind::Acp(executor)) => {
-			prompt_on(executor, workdir, text, resolver, cancel, session).await
+		Some(ExecutorKind::Acp(_)) => {
+			Err(DelegatedHostError::PolicyNotEnforced { id: executor_id.clone() })
 		},
 		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
 	}
@@ -957,6 +964,34 @@ mod tests {
 		let tally = answer.report.permissions;
 		assert_eq!(tally.allowed, 0);
 		assert!(tally.denied + tally.refused_by_policy >= 1, "{tally:?}");
+	}
+
+	#[tokio::test]
+	async fn an_acp_executor_is_refused_because_its_policy_is_declared_not_enforced() {
+		let ctx = Ctx::new();
+		ctx.exec("sv_delegated_devin_program /bin/true", Source::Console)
+			.unwrap();
+		let registry = ExecutorRegistry::from_ctx(&ctx);
+		let acp = registry
+			.executors()
+			.iter()
+			.find(|kind| matches!(kind, ExecutorKind::Acp(_)))
+			.expect("an enabled ACP executor")
+			.id()
+			.clone();
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let result = run_delegated_prompt(
+			&registry,
+			&acp,
+			&workdir(),
+			&Str::new_static("x"),
+			DenyAll,
+			&CancellationToken::new(),
+			&mut session,
+		)
+		.await;
+		assert!(matches!(result, Err(DelegatedHostError::PolicyNotEnforced { .. })), "{result:?}");
 	}
 
 	#[tokio::test]
