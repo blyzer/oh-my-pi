@@ -22,13 +22,13 @@ use std::{
 
 pub use chain::{abandoned, live_chain};
 pub use entry::{Entry, EntryDraft, EntryId};
-pub use kind::{Kind, KindError, KindName};
+pub use kind::{Kind, KindError, KindName, Vocabulary};
 use omp_core::{FastHashSet, Str, Ulid};
 use thiserror::Error;
 
 use crate::{
 	kind::JOURNAL,
-	sse::{Block, FRAME_HARD_CAP, SseError, parse_frame, read_block},
+	sse::{Block, FRAME_HARD_CAP, SseError, parse_frame_with, read_block},
 	ulid::{MonotonicUlid, UlidGenerationError},
 };
 
@@ -59,6 +59,7 @@ pub struct Journal {
 	ids:                  FastHashSet<EntryId>,
 	entry_count:          usize,
 	recovered_tail_bytes: u64,
+	vocabulary:           Vocabulary,
 }
 
 impl Journal {
@@ -71,6 +72,18 @@ impl Journal {
 	/// Returns [`JournalError::Io`] if the parent cannot be created or the file
 	/// already exists.
 	pub fn create(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+		Self::create_with(path, Vocabulary::builtin())
+	}
+
+	/// Creates a new empty journal that also accepts the kinds in `vocabulary`.
+	///
+	/// # Errors
+	///
+	/// As [`Self::create`].
+	pub fn create_with(
+		path: impl AsRef<Path>,
+		vocabulary: Vocabulary,
+	) -> Result<Self, JournalError> {
 		let path = path.as_ref().to_path_buf();
 		if let Some(parent) = path
 			.parent()
@@ -94,6 +107,7 @@ impl Journal {
 			ids: FastHashSet::default(),
 			entry_count: 0,
 			recovered_tail_bytes: 0,
+			vocabulary,
 		})
 	}
 
@@ -107,6 +121,18 @@ impl Journal {
 	/// Returns a typed error for I/O, malformed complete frames, invalid journal
 	/// structure, or invalid branch links.
 	pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Entry>), JournalError> {
+		Self::open_with(path, Vocabulary::builtin())
+	}
+
+	/// Opens a journal that also accepts the kinds in `vocabulary`.
+	///
+	/// # Errors
+	///
+	/// As [`Self::open`].
+	pub fn open_with(
+		path: impl AsRef<Path>,
+		vocabulary: Vocabulary,
+	) -> Result<(Self, Vec<Entry>), JournalError> {
 		let path = path.as_ref().to_path_buf();
 		// Lock the stable sidecar before opening the journal. Locking the
 		// journal inode itself is insufficient: GC replaces that inode, and
@@ -115,7 +141,8 @@ impl Journal {
 		let namespace = JournalNamespaceLock::acquire_shared(&path)?;
 		let lock = WriterLock::acquire(&path)?;
 		let file = OpenOptions::new().append(true).read(true).open(&path)?;
-		let decoded = decode_committed(BufReader::with_capacity(READ_BUFFER, File::open(&path)?))?;
+		let decoded =
+			decode_committed(BufReader::with_capacity(READ_BUFFER, File::open(&path)?), &vocabulary)?;
 		let Decoded { entries, clean_len, torn_len } = decoded;
 		if torn_len != 0 {
 			file.set_len(clean_len)?;
@@ -138,6 +165,7 @@ impl Journal {
 				ids,
 				entry_count: entries.len(),
 				recovered_tail_bytes: torn_len,
+				vocabulary,
 			},
 			entries,
 		))
@@ -155,8 +183,22 @@ impl Journal {
 	/// Returns a typed error for I/O, malformed complete frames, invalid
 	/// journal structure, or invalid branch links.
 	pub fn scan(path: impl AsRef<Path>) -> Result<Vec<Entry>, JournalError> {
+		Self::scan_with(path, &Vocabulary::builtin())
+	}
+
+	/// [`Self::scan`] for a journal whose vocabulary is wider than the closed
+	/// set.
+	///
+	/// # Errors
+	///
+	/// As [`Self::scan`].
+	pub fn scan_with(
+		path: impl AsRef<Path>,
+		vocabulary: &Vocabulary,
+	) -> Result<Vec<Entry>, JournalError> {
 		let file = File::open(path)?;
-		decode_committed(BufReader::with_capacity(READ_BUFFER, file)).map(|decoded| decoded.entries)
+		decode_committed(BufReader::with_capacity(READ_BUFFER, file), vocabulary)
+			.map(|decoded| decoded.entries)
 	}
 
 	/// Reads the committed entries within the first `limit` bytes of a
@@ -174,7 +216,8 @@ impl Journal {
 	/// journal structure, or invalid branch links within the prefix.
 	pub fn scan_prefix(path: impl AsRef<Path>, limit: u64) -> Result<Vec<Entry>, JournalError> {
 		let file = io::Read::take(File::open(path)?, limit);
-		decode_committed(BufReader::with_capacity(READ_BUFFER, file)).map(|decoded| decoded.entries)
+		decode_committed(BufReader::with_capacity(READ_BUFFER, file), &Vocabulary::builtin())
+			.map(|decoded| decoded.entries)
 	}
 
 	/// Appends and durably commits one entry.
@@ -185,7 +228,7 @@ impl Journal {
 	/// its payload is not single-line JSON or exceeds one mebibyte, identity
 	/// generation is exhausted, or the durable write fails.
 	pub fn append(&mut self, draft: EntryDraft) -> Result<Entry, JournalError> {
-		validate_draft(&draft, self.entry_count, &self.ids)?;
+		validate_draft(&draft, self.entry_count, &self.ids, &self.vocabulary)?;
 		let id = EntryId::from(self.generator.generate()?);
 		let entry = Entry {
 			id,
@@ -196,7 +239,7 @@ impl Journal {
 			data: draft.data,
 		};
 		let mut encoded = Vec::with_capacity(entry.data.len() + 160);
-		sse::encode(&entry, &mut encoded).map_err(map_sse_write_error)?;
+		sse::encode_with(&entry, &mut encoded, &self.vocabulary).map_err(map_sse_write_error)?;
 		self.file.write_all(&encoded)?;
 		self.file.sync_data()?;
 		self.ids.insert(id);
@@ -355,7 +398,10 @@ struct Decoded {
 /// vocabulary is reported as [`JournalError::NewerRevision`] rather than a
 /// generic frame failure, so a journal written by a newer omp is diagnosed
 /// instead of looking corrupt.
-fn decode_committed<R: BufRead>(mut reader: R) -> Result<Decoded, JournalError> {
+fn decode_committed<R: BufRead>(
+	mut reader: R,
+	vocabulary: &Vocabulary,
+) -> Result<Decoded, JournalError> {
 	let mut entries = Vec::new();
 	let mut block = Vec::new();
 	let mut clean_len = 0_u64;
@@ -375,14 +421,14 @@ fn decode_committed<R: BufRead>(mut reader: R) -> Result<Decoded, JournalError> 
 				if block == b"\n" || block == b"\r\n" {
 					continue;
 				}
-				entries.push(parse_frame(&block).map_err(|source| match source {
+				entries.push(parse_frame_with(&block, vocabulary).map_err(|source| match source {
 					SseError::UnknownKind { kind } => JournalError::NewerRevision { kind },
 					source => JournalError::Frame { source },
 				})?);
 			},
 		}
 	}
-	validate_history(&entries)?;
+	validate_history(&entries, vocabulary)?;
 	validate_genesis_version(&entries)?;
 	Ok(Decoded { entries, clean_len, torn_len })
 }
@@ -491,10 +537,10 @@ impl WriterLock {
 	}
 }
 
-fn validate_history(entries: &[Entry]) -> Result<(), JournalError> {
+fn validate_history(entries: &[Entry], vocabulary: &Vocabulary) -> Result<(), JournalError> {
 	let mut ids = FastHashSet::default();
 	for (index, entry) in entries.iter().enumerate() {
-		validate_entry(entry, index, &ids)?;
+		validate_entry(entry, index, &ids, vocabulary)?;
 		if !ids.insert(entry.id) {
 			return Err(JournalError::DuplicateId { id: entry.id });
 		}
@@ -506,16 +552,36 @@ fn validate_draft(
 	draft: &EntryDraft,
 	index: usize,
 	ids: &FastHashSet<EntryId>,
+	vocabulary: &Vocabulary,
 ) -> Result<(), JournalError> {
-	validate_fields(&draft.kind, draft.by, draft.prior, &draft.label, &draft.data, index, ids)
+	validate_fields(
+		&draft.kind,
+		draft.by,
+		draft.prior,
+		&draft.label,
+		&draft.data,
+		index,
+		ids,
+		vocabulary,
+	)
 }
 
 fn validate_entry(
 	entry: &Entry,
 	index: usize,
 	ids: &FastHashSet<EntryId>,
+	vocabulary: &Vocabulary,
 ) -> Result<(), JournalError> {
-	validate_fields(&entry.kind, entry.by, entry.prior, &entry.label, &entry.data, index, ids)
+	validate_fields(
+		&entry.kind,
+		entry.by,
+		entry.prior,
+		&entry.label,
+		&entry.data,
+		index,
+		ids,
+		vocabulary,
+	)
 }
 
 fn validate_fields(
@@ -526,8 +592,9 @@ fn validate_fields(
 	data: &Str,
 	index: usize,
 	ids: &FastHashSet<EntryId>,
+	vocabulary: &Vocabulary,
 ) -> Result<(), JournalError> {
-	if !kind.is_known() {
+	if !vocabulary.accepts(kind) {
 		return Err(JournalError::UnknownKind { kind: kind.clone() });
 	}
 	let genesis = kind.name.as_str() == JOURNAL && kind.rev == 1;

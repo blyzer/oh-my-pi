@@ -133,6 +133,47 @@ impl Kind {
 	}
 }
 
+/// The event kinds one journal file accepts: the closed revision-1 set plus
+/// any kinds a caller registers (ADR 0051 S1).
+///
+/// A registered kind must not already belong to the closed set, so a session
+/// journal's vocabulary is never redefined: registration only widens what a
+/// dedicated journal, such as an ADW run journal, accepts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Vocabulary {
+	extra: Vec<Kind>,
+}
+
+impl Vocabulary {
+	/// The closed revision-1 vocabulary and nothing else.
+	#[must_use]
+	pub fn builtin() -> Self {
+		Self::default()
+	}
+
+	/// Adds `kind` to the vocabulary.
+	///
+	/// # Errors
+	///
+	/// [`KindError::AlreadyKnown`] when `kind` is already a member of the closed
+	/// set.
+	pub fn with(mut self, kind: Kind) -> Result<Self, KindError> {
+		if kind.is_known() {
+			return Err(KindError::AlreadyKnown);
+		}
+		if !self.extra.contains(&kind) {
+			self.extra.push(kind);
+		}
+		Ok(self)
+	}
+
+	/// Returns whether a journal with this vocabulary accepts `kind`.
+	#[must_use]
+	pub fn accepts(&self, kind: &Kind) -> bool {
+		kind.is_known() || self.extra.contains(kind)
+	}
+}
+
 impl fmt::Display for Kind {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(formatter, "{}@{}", self.name, self.rev)
@@ -160,6 +201,9 @@ pub enum KindError {
 	/// The name violates the dotted segment grammar.
 	#[error("kind name is invalid")]
 	InvalidName,
+	/// The kind is already a member of the closed revision-1 vocabulary.
+	#[error("kind is already part of the closed vocabulary")]
+	AlreadyKnown,
 	/// The revision is not an unsigned 32-bit integer.
 	#[error("kind revision is invalid")]
 	InvalidRevision {

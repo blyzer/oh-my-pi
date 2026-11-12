@@ -13,7 +13,7 @@ use memchr::memchr;
 use omp_core::{Str, UlidParseError};
 use thiserror::Error;
 
-use crate::{Entry, Kind, KindError};
+use crate::{Entry, Kind, KindError, kind::Vocabulary};
 
 /// Maximum inline JSON payload size: one mebibyte.
 pub const DATA_HARD_CAP: usize = 1 << 20;
@@ -131,9 +131,22 @@ pub enum SseError {
 /// single frame, the payload is invalid JSON, it exceeds the hard cap, or the
 /// whole frame would exceed [`FRAME_HARD_CAP`].
 pub fn encode(entry: &Entry, output: &mut Vec<u8>) -> Result<(), SseError> {
+	encode_with(entry, output, &Vocabulary::builtin())
+}
+
+/// [`encode`] for a journal whose vocabulary is wider than the closed set.
+///
+/// # Errors
+///
+/// As [`encode`], with the kind checked against `vocabulary`.
+pub fn encode_with(
+	entry: &Entry,
+	output: &mut Vec<u8>,
+	vocabulary: &Vocabulary,
+) -> Result<(), SseError> {
 	validate_label(entry.label.as_deref())?;
 	validate_data(entry.data.as_str())?;
-	if !entry.kind.is_known() {
+	if !vocabulary.accepts(&entry.kind) {
 		return Err(SseError::UnknownKind { kind: entry.kind.clone() });
 	}
 	let start = output.len();
@@ -298,6 +311,10 @@ pub(crate) fn read_block<R: BufRead>(reader: &mut R, block: &mut Vec<u8>) -> io:
 }
 
 pub(crate) fn parse_frame(raw: &[u8]) -> Result<Entry, SseError> {
+	parse_frame_with(raw, &Vocabulary::builtin())
+}
+
+pub(crate) fn parse_frame_with(raw: &[u8], vocabulary: &Vocabulary) -> Result<Entry, SseError> {
 	let text = std::str::from_utf8(raw).map_err(|source| SseError::InvalidUtf8 { source })?;
 	let mut id = None;
 	let mut kind = None;
@@ -364,7 +381,7 @@ pub(crate) fn parse_frame(raw: &[u8]) -> Result<Entry, SseError> {
 	serde_json::from_str::<serde::de::IgnoredAny>(&data)
 		.map_err(|source| SseError::InvalidData { source })?;
 	let kind = kind.ok_or(SseError::MissingEvent)?;
-	if !kind.is_known() {
+	if !vocabulary.accepts(&kind) {
 		return Err(SseError::UnknownKind { kind });
 	}
 	Ok(Entry { id: id.ok_or(SseError::MissingId)?, kind, by, prior, label, data: Str::new(data) })
