@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github/workflows/ci.yml"
 PATHS = ROOT / ".github/ci-paths.txt"
 RUST_PATHS = ROOT / ".github/ci-rust-paths.txt"
-RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux"}
+RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux", "affected"}
 RULESET = ROOT / ".github/rulesets/omp2-protected.json"
 WORKFLOWS = ROOT / ".github/workflows"
 TRUST_ACTION = ROOT / ".github/actions/buildbuddy-remote/action.yml"
@@ -238,6 +238,12 @@ def main() -> int:
             ok = False
             print(f"ci.yml pull_request must not filter on `{key}`: required checks would stay pending")
 
+    affected_gate = "\n".join(line for line in block(jobs, "affected", 2) if line.startswith("    if:"))
+    for needle in ("vars.CI_AFFECTED_ONLY == 'true'", "github.event_name == 'pull_request'"):
+        if needle not in affected_gate:
+            ok = False
+            print(f"the affected job must stay opt-in and pull-request only: its if lacks {needle}")
+
     if not any("checks_requested" in line for line in block(on, "merge_group", 2)):
         ok = False
         print("ci.yml must trigger on merge_group with types: [checks_requested]: a merge queue waits for every required check")
@@ -246,6 +252,14 @@ def main() -> int:
         if needle not in changes_job:
             ok = False
             print(f"the changes job must run everything when there is no pull request number: missing {needle}")
+
+    rust_job = "\n".join(block(jobs, "rust", 2))
+    start = rust_job.find("- name: Record the proved tree")
+    proved_if = rust_job[start:].split("\n")[1] if start != -1 else ""
+    for needle in ("needs.affected.outputs.scope != 'subset'", "needs.affected.outputs.scope != 'none'"):
+        if needle not in proved_if:
+            ok = False
+            print(f"the proved-tree notice must not be recorded for a narrowed run: its if lacks {needle}")
 
     names = set(job_names(ci))
     required = [
