@@ -13,7 +13,7 @@
 //!
 //! 1. `WorkspaceTrust::Untrusted` always returns `DelegatedPolicy::STRICTEST`,
 //!    regardless of the requested sandbox, network, or approval mode.  This
-//!    mirrors `omp_envd::admission::effective_approval_mode`, which clamps an
+//!    mirrors `omp_contract::posture::effective_approval_mode`, which clamps an
 //!    explicit `Yolo` to `Write` for untrusted workspaces, but is stricter
 //!    still: a delegated session operates with external code, so any untrusted
 //!    workspace refuses *all* latitude.
@@ -89,10 +89,8 @@
 //! ```
 
 use omp_agent::delegated::{ApprovalPosture, DelegatedPolicy, NetworkPosture, SandboxPosture};
-use omp_envd::{
-	admission::ApprovalMode,
-	exec_settings::{ExecSandboxMode, SandboxNetworkMode},
-};
+use omp_contract::posture::ApprovalMode;
+use omp_envd::exec_settings::{ExecSandboxMode, SandboxNetworkMode};
 use omp_ext::workspace_trust::WorkspaceTrust;
 
 /// Converts OMP driver-side policy settings to a [`DelegatedPolicy`].

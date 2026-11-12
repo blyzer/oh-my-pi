@@ -816,8 +816,7 @@ fn search_blocking(
 		let (display_path, glob) = match target {
 			GrepTarget::Filesystem { path, glob, is_file, .. } => {
 				if *is_file
-					&& fs::metadata(path)
-						.is_ok_and(|metadata| metadata.len() > crate::grep::MAX_FILE_BYTES)
+					&& fs::metadata(path).is_ok_and(|metadata| metadata.len() > omp_grep::MAX_FILE_BYTES)
 				{
 					oversized_files.push(workspace_relative(host.root(), path)?);
 				}
@@ -825,7 +824,7 @@ fn search_blocking(
 			},
 			GrepTarget::Memory(memory) => (memory.path.clone(), None),
 		};
-		let options = crate::grep::GrepOptions {
+		let options = omp_grep::GrepOptions {
 			pattern: request.pattern.clone(),
 			path: display_path,
 			glob,
@@ -838,20 +837,18 @@ fn search_blocking(
 			context_before: request.context_before,
 			context_after: request.context_after,
 			max_columns: Some(request.max_columns),
-			mode: crate::grep::GrepOutputMode::Content,
+			mode: omp_grep::GrepOutputMode::Content,
 			timeout_ms: Some(timeout_ms),
 		};
 		let native = match target {
 			GrepTarget::Filesystem { .. } => {
-				crate::grep::grep_with_cancellation(&options, blocking_cancel.as_ref())
+				omp_grep::grep_with_cancellation(&options, blocking_cancel.as_ref())
 					.map_err(map_native_grep_fault)?
 			},
-			GrepTarget::Memory(memory) => crate::grep::search_with_cancellation(
-				&memory.content,
-				&options,
-				blocking_cancel.as_ref(),
-			)
-			.map_err(map_native_grep_fault)?,
+			GrepTarget::Memory(memory) => {
+				omp_grep::search_with_cancellation(&memory.content, &options, blocking_cancel.as_ref())
+					.map_err(map_native_grep_fault)?
+			},
 		};
 		skipped_oversized = skipped_oversized.saturating_add(native.skipped_oversized);
 		limit_reached |= native.limit_reached;
@@ -1009,22 +1006,22 @@ fn prepare_grep_snapshot(source_key: Str, path: &Path) -> Option<SearchSnapshot>
 	Some(SearchSnapshot { source_key, revision, bytes })
 }
 
-fn map_native_grep_fault(error: crate::grep::GrepError) -> grep::Fault {
+fn map_native_grep_fault(error: omp_grep::GrepError) -> grep::Fault {
 	match error {
-		crate::grep::GrepError::InvalidRegex { regex, pcre2 } => {
+		omp_grep::GrepError::InvalidRegex { regex, pcre2 } => {
 			let message = format!("{regex}; PCRE2 fallback: {pcre2}");
 			grep::Fault::InvalidRegex { message: Str::from(strip_regex_error_prefix(&message)) }
 		},
-		crate::grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
-		crate::grep::GrepError::Cancelled => {
+		omp_grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
+		omp_grep::GrepError::Cancelled => {
 			grep::Fault::Cancelled { reason: Str::from(CANCELLED_REASON) }
 		},
-		crate::grep::GrepError::PathNotFound { path } => {
+		omp_grep::GrepError::PathNotFound { path } => {
 			grep::Fault::AllPathsMissing { paths: vec![path] }
 		},
-		crate::grep::GrepError::InvalidGlob { message }
-		| crate::grep::GrepError::Walk { message }
-		| crate::grep::GrepError::Search { message } => grep::Fault::Workspace { message },
+		omp_grep::GrepError::InvalidGlob { message }
+		| omp_grep::GrepError::Walk { message }
+		| omp_grep::GrepError::Search { message } => grep::Fault::Workspace { message },
 	}
 }
 fn strip_regex_error_prefix(message: &str) -> &str {
@@ -2091,10 +2088,10 @@ mod tests {
 		let GrepTarget::Filesystem { path, .. } = target else {
 			panic!("external file resolved to memory");
 		};
-		let result = crate::grep::grep(&crate::grep::GrepOptions {
+		let result = omp_grep::grep(&omp_grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: Str::from(path.to_string_lossy().into_owned()),
-			..crate::grep::GrepOptions::default()
+			..omp_grep::GrepOptions::default()
 		})
 		.expect("grep external file");
 
@@ -2263,10 +2260,10 @@ mod tests {
 		assert_eq!(targets.len(), 1);
 		assert_eq!(targets[0].path, "fixture.zip:docs/readme.txt");
 		assert_eq!(unreadable, vec![sf!("fixture.zip:docs/blob.bin (binary archive entry)")]);
-		let result = crate::grep::search(&targets[0].content, &crate::grep::GrepOptions {
+		let result = omp_grep::search(&targets[0].content, &omp_grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: targets[0].path.clone(),
-			..crate::grep::GrepOptions::default()
+			..omp_grep::GrepOptions::default()
 		})
 		.expect("search materialized member");
 		assert_eq!(result.matches.len(), 1);
@@ -2304,10 +2301,10 @@ mod tests {
 		let target = materialize_url_root(&CannedHttpClient, &root, 3)
 			.await
 			.expect("materialize URL");
-		let result = crate::grep::search(&target.content, &crate::grep::GrepOptions {
+		let result = omp_grep::search(&target.content, &omp_grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: target.path.clone(),
-			..crate::grep::GrepOptions::default()
+			..omp_grep::GrepOptions::default()
 		})
 		.expect("search URL");
 

@@ -140,6 +140,7 @@ crate's `Cargo.toml`.
 | `desktop` | `omp-desktop` | Desktop capture, input, accessibility |
 | `webview` | `omp-webview` | Embedded browser surfaces |
 | `walker` | `omp-walker` | Filesystem traversal and discovery |
+| `grep` | `omp-grep` | In-process content search (extracted from `omp-envd`, ADR 0045 ENVD-05) |
 | `ar` | `omp-ar` | Lazy multi-format archive read/write |
 | `vcs` | `omp-vcs` | gitoxide + jj behind one interface |
 | `macros` | `omp-macros` | `dom!` / `view!` / `cached` proc macros |

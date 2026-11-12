@@ -54,7 +54,6 @@ mod forge_adapter;
 pub use forge_adapter::CheckoutForge;
 pub mod forge_url;
 mod forge_worktree;
-pub mod grep;
 pub mod host_info;
 pub mod host_settings;
 mod http_egress;
@@ -66,7 +65,6 @@ pub mod line_reader;
 mod loopback_upstream;
 pub mod lsp_settings;
 mod managed_skills;
-pub mod managed_skills_domain;
 pub mod mcp;
 /// Image generation, speech synthesis, and ask playback. Compiled only with
 /// `cap-media`, which links `omp-audio`.

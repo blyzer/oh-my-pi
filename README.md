@@ -160,7 +160,7 @@ live in [`AGENTS.md`](AGENTS.md). Read it before touching anything.
 The workspace partitions into 5 strictly acyclic layers:
 1. **Core Substrate & Primitives**: `omp-core` (with zero-copy `Str`, `Ulid`, `slopjson`), `omp-vocab`, `omp-proto`, `omp-audio`, `omp-http`, `omp-vcs`, `omp-walker`, `omp-desktop`, `omp-snapcompact`, `omp-macros`, `omp-ar`, `omp-secrets`, `omp-oauth`, `omp-cache`, `omp-sandbox`, `omp-webview`.
 2. **Domain Modeling, State & Editing**: `omp-journal`, `omp-dom`, `omp-con`, `omp-catalog`, `omp-ast`, `omp-edit`, `omp-scribe`, `omp-collab`, `omp-memory`.
-3. **Execution Engines, Tooling & Interpreters**: `omp-ai`, `omp-shell`, `omp-shell-builtins`, `omp-tool`, `omp-tools`, `omp-py`, `omp-env`, `omp-ext`, `omp-tui`, `omp-gui`.
+3. **Execution Engines, Tooling & Interpreters**: `omp-ai`, `omp-grep`, `omp-shell`, `omp-shell-builtins`, `omp-tool`, `omp-tools`, `omp-py`, `omp-env`, `omp-ext`, `omp-tui`, `omp-gui`.
 4. **Session, Agent Kernel & Daemons**: `omp-session`, `omp-agent`, `omp-envd`, `omp-observability`, `omp-rpc`, `omp-serve`, `omp-sdk`.
 5. **Applications & Composition**: `omp-driver` (`compose_kernel`), `omp-chat`, `omp-app`, `omp-e2e`.
 

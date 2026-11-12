@@ -4525,7 +4525,8 @@ mod tests {
 	#[test]
 	fn settings_admission_asks_an_unnamed_kernel_fetch_as_the_tools_own() {
 		use omp_agent::{ToolAdmission, ToolAdmissionVerdict};
-		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_contract::posture::SandboxState;
+		use omp_envd::tool_settings::ToolSettings;
 
 		let args = serde_json::value::RawValue::from_string(String::from(r#"{"url":"x"}"#))
 			.expect("raw args");
@@ -4578,7 +4579,8 @@ mod tests {
 	#[test]
 	fn settings_admission_prompts_for_host_tools_under_a_sandboxed_default_yolo() {
 		use omp_agent::{ToolAdmission, ToolAdmissionVerdict};
-		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_contract::posture::SandboxState;
+		use omp_envd::tool_settings::ToolSettings;
 		use omp_tool::{Confinement, DocEffects, Effects, ExecEffects, InferenceEffects, Usd};
 
 		let args = serde_json::value::RawValue::from_string(String::from("{}")).expect("raw args");
@@ -4648,10 +4650,8 @@ mod tests {
 	#[test]
 	fn the_posture_report_posts_once_until_the_journal_lacks_it() {
 		use omp_agent::{EnvEvent, SessionObserver as _, ToolAdmission as _, Up};
-		use omp_envd::{
-			admission::{ApprovalPosture, SandboxState},
-			tool_settings::ToolSettings,
-		};
+		use omp_contract::posture::{ApprovalPosture, SandboxState};
+		use omp_envd::tool_settings::ToolSettings;
 		use omp_tool::{Confinement, Effects};
 
 		let scratch = tempfile::tempdir().expect("scratch");
@@ -4760,11 +4760,11 @@ mod tests {
 	/// settings; the probe counts only when the environment reported none.
 	#[tokio::test]
 	async fn the_session_posture_follows_the_sandbox_the_environment_reports() {
-		use omp_env::frame::SandboxState as Reported;
-		use omp_envd::{
-			admission::{ApprovalMode, ApprovalPosture, Provenance, SandboxState, SandboxUnavailable},
-			tool_settings::ToolSettings,
+		use omp_contract::posture::{
+			ApprovalMode, ApprovalPosture, Provenance, SandboxState, SandboxUnavailable,
 		};
+		use omp_env::frame::SandboxState as Reported;
+		use omp_envd::tool_settings::ToolSettings;
 
 		let probed = |sandbox| super::SettingsAdmission {
 			settings: ToolSettings::default(),

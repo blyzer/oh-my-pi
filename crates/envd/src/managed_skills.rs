@@ -13,7 +13,10 @@ use std::{
 };
 
 use bytes::BytesMut;
-use omp_contract::{GateError, HookEvent, HookGate, HookPatch};
+use omp_contract::{
+	GateError, HookEvent, HookGate, HookPatch,
+	managed_skills::{CandidateError, ManagedSkillCandidate, is_valid_name},
+};
 use omp_core::Str;
 use omp_proto::toolhost::v1::HookEventId;
 use omp_tools::manage_skill::{
@@ -21,8 +24,6 @@ use omp_tools::manage_skill::{
 };
 use parking_lot::Mutex;
 use serde::Serialize;
-
-use crate::managed_skills_domain::{CandidateError, ManagedSkillCandidate, is_valid_name};
 
 #[derive(Serialize)]
 struct ManagedResourceRef<'a> {
@@ -92,7 +93,7 @@ impl ManagedSkills {
 		let resource = || ManagedResourceRef {
 			uri:    uri.as_ref(),
 			kind:   "skill",
-			origin: crate::managed_skills_domain::PROVIDER_ID,
+			origin: omp_contract::managed_skills::PROVIDER_ID,
 		};
 		let (added, removed) = match action {
 			Action::Create => (vec![resource()].into_boxed_slice(), Vec::new().into_boxed_slice()),

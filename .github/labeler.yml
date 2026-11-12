@@ -57,6 +57,7 @@ area/tools:
           - 'crates/edit/**'
           - 'crates/ast/**'
           - 'crates/walker/**'
+          - 'crates/grep/**'
           - 'crates/vcs/**'
           - 'crates/ar/**'
           - 'crates/webview/**'
