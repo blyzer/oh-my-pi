@@ -21,7 +21,7 @@ pub use definition::{DefinitionError, PhaseSpec, WorkflowDefinition};
 use omp_adw::{
 	NetworkScope, OnReject, Outcome, Phase, PhaseName, Posture, Run, RunError, SelectedInput, Step,
 	WriteScope,
-	replay::{ReplayError, ReplayEvent, replay},
+	ReplayError, ReplayEvent, replay,
 };
 use omp_core::Str;
 use omp_journal::runlog::{
