@@ -556,7 +556,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$AFFECTED_SCOPE" in
-            subset) cargo nextest run --profile ci $AFFECTED_ARGS --locked ;;
+            subset)
+              read -r -a args <<< "$AFFECTED_ARGS"
+              cargo nextest run --profile ci "${args[@]}" --locked
+              ;;
             none) echo "No tested crate is affected; skipping the workspace tests" ;;
             *) cargo nextest run --profile ci --workspace --exclude omp-e2e --locked ;;
           esac
@@ -569,7 +572,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$AFFECTED_SCOPE" in
-            subset) cargo test --doc $AFFECTED_ARGS --locked ;;
+            subset)
+              read -r -a args <<< "$AFFECTED_ARGS"
+              cargo test --doc "${args[@]}" --locked
+              ;;
             none) echo "No tested crate is affected; skipping the doctests" ;;
             *) cargo test --doc --workspace --exclude omp-e2e --locked ;;
           esac

@@ -83,5 +83,62 @@ class CheckCiPaths(unittest.TestCase):
         self.assertIn("Unlisted/**", out)
 
 
+    def test_affected_job_without_the_opt_in_variable_fails(self):
+        self.mutate_ci("vars.CI_AFFECTED_ONLY == 'true' && ", "")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("CI_AFFECTED_ONLY", out)
+
+    def test_affected_job_on_every_event_fails(self):
+        self.mutate_ci("github.event_name == 'pull_request' && vars.CI_AFFECTED_ONLY", "vars.CI_AFFECTED_ONLY")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("pull-request only", out)
+
+
+def step_script(step_name):
+    lines = (ROOT / ".github/workflows/ci.yml").read_text().split("\n")
+    start = next(i for i, line in enumerate(lines) if line == f"      - name: {step_name}")
+    run = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
+    body = []
+    for line in lines[run + 1 :]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body)
+
+
+class AffectedScopeFallback(unittest.TestCase):
+    def run_step(self, step, scope, args=""):
+        script = "cargo() { echo \"cargo $*\"; }\n" + step_script(step)
+        done = subprocess.run(
+            ["bash", "-c", script],
+            env={"AFFECTED_SCOPE": scope, "AFFECTED_ARGS": args, "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def test_workspace_tests_run_everything_when_the_job_did_not_run(self):
+        for scope in ("", "all", "unexpected"):
+            out = self.run_step("Test workspace", scope, "-p omp-x")
+            self.assertEqual(out, "cargo nextest run --profile ci --workspace --exclude omp-e2e --locked", scope)
+
+    def test_workspace_tests_run_only_the_selected_crates_for_a_subset(self):
+        out = self.run_step("Test workspace", "subset", "-p omp-a -p omp-b")
+        self.assertEqual(out, "cargo nextest run --profile ci -p omp-a -p omp-b --locked")
+
+    def test_workspace_tests_skip_when_nothing_is_affected(self):
+        out = self.run_step("Test workspace", "none")
+        self.assertNotIn("cargo", out)
+        self.assertIn("skipping", out)
+
+    def test_doctests_follow_the_same_scope(self):
+        self.assertEqual(self.run_step("Test doctests", ""), "cargo test --doc --workspace --exclude omp-e2e --locked")
+        self.assertEqual(self.run_step("Test doctests", "subset", "-p omp-a"), "cargo test --doc -p omp-a --locked")
+        self.assertIn("skipping", self.run_step("Test doctests", "none"))
+
+
 if __name__ == "__main__":
     unittest.main()
