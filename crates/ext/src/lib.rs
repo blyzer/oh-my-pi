@@ -14,6 +14,7 @@ pub mod lock;
 pub mod marketplace;
 pub mod plugin_command;
 pub mod resolver;
+pub mod scheme;
 pub mod trust;
 pub mod upgrade;
 pub mod workspace_trust;

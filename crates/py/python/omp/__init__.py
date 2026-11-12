@@ -613,6 +613,7 @@ def require(*caps: Capability) -> None:
 # Importing these frozen modules only creates declarations and namespace values.
 from . import env as env
 from . import urls as urls
+from . import schemes as schemes
 from . import journal as journal
 from . import artifacts as artifacts
 from .artifacts import (
@@ -756,7 +757,6 @@ from .urls import (
     UrlError,
     parse,
     parse_selector,
-    schemes,
 )
 from ._registry import (
     DeclarationDrift,
@@ -1694,6 +1694,7 @@ __all__ += (
     "convars",
     "limits",
     "policy",
+    "schemes",
 )
 __all__ += (
     "ACTIVATION_TIMEOUT",

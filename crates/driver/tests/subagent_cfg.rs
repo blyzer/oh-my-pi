@@ -128,11 +128,9 @@ fn children_of_a_plan_mode_parent_inherit_a_read_only_ceiling() {
 /// explicit `off` unsandboxed.
 #[test]
 fn children_keep_an_explicit_scoped_network_under_sandbox_mode_off() {
+	use omp_contract::posture::SandboxState;
 	use omp_driver::subagent::spawn::configure_child;
-	use omp_envd::{
-		admission::SandboxState,
-		exec_settings::{NetworkConfinement, network_confinement},
-	};
+	use omp_envd::exec_settings::{NetworkConfinement, network_confinement};
 
 	let root = tempfile::tempdir().expect("scratch root");
 	let plain_user = root.path().join("plain");

@@ -5,7 +5,8 @@
 
 [error-str-payload]
 core = 1
-envd = 51
+envd = 48
 exec = 2
+grep = 3
 tool = 1
 tools = 27

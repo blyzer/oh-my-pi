@@ -21,7 +21,7 @@ omp-session.workspace = true
 omp-catalog.workspace = true
 omp-ai.workspace = true
 omp-journal.workspace = true
-omp-proto.workspace = true
+omp-proto = { workspace = true, features = ["tonic"] }
 omp-tool.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

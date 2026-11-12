@@ -249,7 +249,7 @@ impl ActiveSkills {
 			{
 				let existing = &self.skills[index];
 				let plugin_wins = skill.provider.as_str() == "agent-plugins"
-					&& ["agents", "codex", "opencode", omp_envd::managed_skills_domain::PROVIDER_ID]
+					&& ["agents", "codex", "opencode", omp_contract::managed_skills::PROVIDER_ID]
 						.contains(&existing.provider.as_str());
 				if plugin_wins {
 					self.skills[index] = skill;
@@ -353,7 +353,7 @@ impl ActiveSkills {
 }
 
 /// The isolated managed-skills root beneath the configuration root
-/// ([`omp_envd::managed_skills_domain`]); dead last in discovery.
+/// ([`omp_contract::managed_skills`]); dead last in discovery.
 #[must_use]
 pub fn managed_skills_root(config_root: &Path) -> PathBuf {
 	config_root.join("agent/managed-skills")
@@ -422,6 +422,218 @@ pub fn installed_plugin_skill_sources(plugins: &ClaudePlugins) -> Vec<SkillSourc
 	out
 }
 
+/// The policy flag that admits one [`SKILL_SOURCES`] rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SkillGate {
+	/// Always admitted.
+	Always,
+	/// `sv_skills_enable_pi_project`.
+	NativeProject,
+	/// `sv_skills_enable_pi_user`.
+	NativeUser,
+	/// `sv_skills_enable_claude_user`.
+	ClaudeUser,
+	/// `sv_skills_enable_claude_project`.
+	ClaudeProject,
+	/// `sv_skills_enable_agents_project`.
+	AgentsProject,
+	/// `sv_skills_enable_agents_user`.
+	AgentsUser,
+	/// `sv_skills_enable_codex_user`.
+	CodexUser,
+}
+
+impl SkillGate {
+	fn admits(self, policy: &SkillPolicy) -> bool {
+		match self {
+			Self::Always => true,
+			Self::NativeProject => policy.native_project,
+			Self::NativeUser => policy.native_user,
+			Self::ClaudeUser => policy.claude_user,
+			Self::ClaudeProject => policy.claude_project,
+			Self::AgentsProject => policy.agents_project,
+			Self::AgentsUser => policy.agents_user,
+			Self::CodexUser => policy.codex_user,
+		}
+	}
+}
+
+/// Where the directories of one [`SKILL_SOURCES`] rule come from. Every
+/// variant names a data directory of `<name>/SKILL.md` declarations: discovery
+/// reads files and never loads or runs foreign code (ADR 0036; ADR 0046
+/// item 5).
+#[derive(Clone, Copy, Debug)]
+enum SkillRoot {
+	/// Each relative path under every project walk-up root, closest root first.
+	Ancestors(&'static [&'static str]),
+	/// Each relative path under the home directory.
+	Home(&'static [&'static str]),
+	/// One relative path under the configuration root.
+	Config(&'static str),
+	/// One relative path under the project root.
+	ProjectRoot(&'static str),
+	/// The contained `skills` directory of every Agent Plugins package directly
+	/// under each project container of [`AGENT_PLUGIN_DIRS`], in that order.
+	ProjectPlugins,
+	/// The same under one relative path of the configuration root.
+	ConfigPlugins(&'static str),
+	/// `sv_skills_custom_directories`, in order.
+	Custom,
+	/// The isolated managed-skills root ([`managed_skills_root`]).
+	Managed,
+}
+
+/// One provider of [`SKILL_SOURCES`].
+#[derive(Clone, Copy, Debug)]
+struct SkillSourceRule {
+	/// Provider identity of every source the rule produces.
+	provider: &'static str,
+	/// Where its directories come from.
+	root:     SkillRoot,
+	/// Precedence level of every source the rule produces.
+	level:    SkillLevel,
+	/// The policy flag that admits the rule.
+	gate:     SkillGate,
+}
+
+/// Skill providers in precedence order: the table order is the vector order
+/// of [`sources`], and [`ordered_sources`] relies on the first `agents` rule
+/// and the final managed rule keeping their places. Claude and Codex
+/// enumerate their opted-in user source before the project source; native and
+/// `.agent[s]` retain project-first order.
+const SKILL_SOURCES: [SkillSourceRule; 14] = [
+	SkillSourceRule {
+		provider: "native",
+		root:     SkillRoot::Ancestors(&[".omp/skills"]),
+		level:    SkillLevel::Project,
+		gate:     SkillGate::NativeProject,
+	},
+	SkillSourceRule {
+		provider: "native",
+		root:     SkillRoot::Config("agent/skills"),
+		level:    SkillLevel::User,
+		gate:     SkillGate::NativeUser,
+	},
+	SkillSourceRule {
+		provider: "claude",
+		root:     SkillRoot::Home(&[".claude/skills"]),
+		level:    SkillLevel::User,
+		gate:     SkillGate::ClaudeUser,
+	},
+	SkillSourceRule {
+		provider: "claude",
+		root:     SkillRoot::Ancestors(&[".claude/skills"]),
+		level:    SkillLevel::Project,
+		gate:     SkillGate::ClaudeProject,
+	},
+	SkillSourceRule {
+		provider: "agent-plugins",
+		root:     SkillRoot::ProjectPlugins,
+		level:    SkillLevel::Project,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: "agent-plugins",
+		root:     SkillRoot::ConfigPlugins("extensions"),
+		level:    SkillLevel::User,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: "agent-plugins",
+		root:     SkillRoot::ConfigPlugins("agent/plugins"),
+		level:    SkillLevel::User,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: "agents",
+		root:     SkillRoot::Ancestors(&[".agent/skills", ".agents/skills"]),
+		level:    SkillLevel::Project,
+		gate:     SkillGate::AgentsProject,
+	},
+	SkillSourceRule {
+		provider: "agents",
+		root:     SkillRoot::Home(&[".agent/skills", ".agents/skills"]),
+		level:    SkillLevel::User,
+		gate:     SkillGate::AgentsUser,
+	},
+	SkillSourceRule {
+		provider: "codex",
+		root:     SkillRoot::Home(&[".codex/skills"]),
+		level:    SkillLevel::User,
+		gate:     SkillGate::CodexUser,
+	},
+	SkillSourceRule {
+		provider: "codex",
+		root:     SkillRoot::ProjectRoot(".codex/skills"),
+		level:    SkillLevel::Project,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: "opencode",
+		root:     SkillRoot::ProjectRoot(".opencode/skills"),
+		level:    SkillLevel::Project,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: "custom",
+		root:     SkillRoot::Custom,
+		level:    SkillLevel::User,
+		gate:     SkillGate::Always,
+	},
+	SkillSourceRule {
+		provider: omp_contract::managed_skills::PROVIDER_ID,
+		root:     SkillRoot::Managed,
+		level:    SkillLevel::User,
+		gate:     SkillGate::Always,
+	},
+];
+
+impl SkillSourceRule {
+	/// The directories the rule contributes, in precedence order.
+	fn roots(
+		&self,
+		project_root: &Path,
+		home: &Path,
+		config_root: &Path,
+		ancestors: &[PathBuf],
+		policy: &SkillPolicy,
+	) -> Vec<(PathBuf, SkillLevel)> {
+		let level = self.level;
+		match self.root {
+			SkillRoot::Ancestors(relatives) => ancestors
+				.iter()
+				.flat_map(|dir| {
+					relatives
+						.iter()
+						.map(move |relative| (dir.join(relative), level))
+				})
+				.collect(),
+			SkillRoot::Home(relatives) => relatives
+				.iter()
+				.map(|relative| (home.join(relative), level))
+				.collect(),
+			SkillRoot::Config(relative) => vec![(config_root.join(relative), level)],
+			SkillRoot::ProjectRoot(relative) => vec![(project_root.join(relative), level)],
+			SkillRoot::ProjectPlugins => {
+				let containers = AGENT_PLUGIN_DIRS
+					.iter()
+					.map(|relative| (project_root.join(relative), level))
+					.collect::<Vec<_>>();
+				agent_plugin_skill_roots(&containers)
+			},
+			SkillRoot::ConfigPlugins(relative) => {
+				agent_plugin_skill_roots(&[(config_root.join(relative), level)])
+			},
+			SkillRoot::Custom => policy
+				.custom_directories
+				.iter()
+				.map(|dir| (dir.clone(), level))
+				.collect(),
+			SkillRoot::Managed => vec![(managed_skills_root(config_root), level)],
+		}
+	}
+}
+
 /// Ordered skill sources for one project: precedence is the vector order.
 #[must_use]
 pub fn sources(
@@ -432,61 +644,21 @@ pub fn sources(
 ) -> Vec<SkillSource> {
 	let ancestors = ancestors(project_root, home);
 	let mut out = Vec::new();
-	let mut push = |provider: &'static str, root: PathBuf, level: SkillLevel| {
-		out.push(SkillSource { provider: Str::new_static(provider), root, level });
-	};
-	if policy.native_project {
-		for dir in &ancestors {
-			push("native", dir.join(".omp/skills"), SkillLevel::Project);
+	for rule in &SKILL_SOURCES {
+		if !rule.gate.admits(policy) {
+			continue;
 		}
+		out.extend(
+			rule
+				.roots(project_root, home, config_root, &ancestors, policy)
+				.into_iter()
+				.map(|(root, level)| SkillSource {
+					provider: Str::new_static(rule.provider),
+					root,
+					level,
+				}),
+		);
 	}
-	if policy.native_user {
-		push("native", config_root.join("agent/skills"), SkillLevel::User);
-	}
-	if policy.claude_user {
-		push("claude", home.join(".claude/skills"), SkillLevel::User);
-	}
-	if policy.claude_project {
-		for dir in &ancestors {
-			push("claude", dir.join(".claude/skills"), SkillLevel::Project);
-		}
-	}
-	let [extensions, agent, agents] =
-		AGENT_PLUGIN_DIRS.map(|dir| (project_root.join(dir), SkillLevel::Project));
-	for root in agent_plugin_skill_roots(&[
-		extensions,
-		agent,
-		agents,
-		(config_root.join("extensions"), SkillLevel::User),
-		(config_root.join("agent/plugins"), SkillLevel::User),
-	]) {
-		push("agent-plugins", root.0, root.1);
-	}
-	if policy.agents_project {
-		for dir in &ancestors {
-			push("agents", dir.join(".agent/skills"), SkillLevel::Project);
-			push("agents", dir.join(".agents/skills"), SkillLevel::Project);
-		}
-	}
-	if policy.agents_user {
-		push("agents", home.join(".agent/skills"), SkillLevel::User);
-		push("agents", home.join(".agents/skills"), SkillLevel::User);
-	}
-	// Claude and Codex enumerate their opted-in user source before the project
-	// source; native and `.agent[s]` retain project-first order.
-	if policy.codex_user {
-		push("codex", home.join(".codex/skills"), SkillLevel::User);
-	}
-	push("codex", project_root.join(".codex/skills"), SkillLevel::Project);
-	push("opencode", project_root.join(".opencode/skills"), SkillLevel::Project);
-	for dir in &policy.custom_directories {
-		push("custom", dir.clone(), SkillLevel::User);
-	}
-	push(
-		omp_envd::managed_skills_domain::PROVIDER_ID,
-		managed_skills_root(config_root),
-		SkillLevel::User,
-	);
 	out
 }
 
@@ -576,7 +748,7 @@ pub fn discover(sources: &[SkillSource], policy: &SkillPolicy) -> ActiveSkills {
 	let mut by_name = BTreeMap::<Str, usize>::new();
 	let mut realpaths = BTreeSet::<PathBuf>::new();
 	for source in sources {
-		let managed = source.provider.as_str() == omp_envd::managed_skills_domain::PROVIDER_ID;
+		let managed = source.provider.as_str() == omp_contract::managed_skills::PROVIDER_ID;
 		if managed && !managed_root_safe(&source.root) {
 			continue;
 		}
@@ -822,7 +994,7 @@ fn load_skill(
 		});
 		return None;
 	}
-	if managed && !omp_envd::managed_skills_domain::is_valid_name(name) {
+	if managed && !omp_contract::managed_skills::is_valid_name(name) {
 		warnings.push(SkillWarning {
 			path:    canonical,
 			message: Str::new_static("managed skill name is not exact kebab-case"),
@@ -835,7 +1007,7 @@ fn load_skill(
 		.map(str::trim)
 		.unwrap_or_default();
 	let description = if managed {
-		omp_envd::managed_skills_domain::sanitize_description(description)
+		omp_contract::managed_skills::sanitize_description(description)
 	} else {
 		Str::new(description)
 	};
@@ -897,7 +1069,7 @@ fn managed_file_safe(path: &Path) -> bool {
 	};
 	!file.file_type().is_symlink()
 		&& file.is_file()
-		&& file.len() <= omp_envd::managed_skills_domain::MAX_SKILL_BYTES as u64
+		&& file.len() <= omp_contract::managed_skills::MAX_SKILL_BYTES as u64
 		&& !directory.file_type().is_symlink()
 		&& directory.is_dir()
 }
@@ -1577,5 +1749,234 @@ mod tests {
 		assert!(names.contains(&"SKILL.md") && names.contains(&"refs/"), "{names:?}");
 		let completions = resolver.complete("rev", 5).await.unwrap();
 		assert_eq!(completions[0].value.as_str(), "skill://review");
+	}
+
+	/// One rung of the full ladder with every policy flag on: the bit of the
+	/// flag that admits it (`None` = always), provider, directory and level.
+	type Rung = (Option<u32>, &'static str, PathBuf, SkillLevel);
+
+	const NATIVE_PROJECT: Option<u32> = Some(0);
+	const NATIVE_USER: Option<u32> = Some(1);
+	const CLAUDE_USER: Option<u32> = Some(2);
+	const CLAUDE_PROJECT: Option<u32> = Some(3);
+	const AGENTS_PROJECT: Option<u32> = Some(4);
+	const AGENTS_USER: Option<u32> = Some(5);
+	const CODEX_USER: Option<u32> = Some(6);
+
+	struct Ladder {
+		home:    PathBuf,
+		project: PathBuf,
+		config:  PathBuf,
+		custom:  Vec<PathBuf>,
+		rungs:   Vec<Rung>,
+	}
+
+	/// The expected precedence, written out by hand from the pre-table
+	/// `sources()` so the table is checked against an independent oracle. The
+	/// project sits one level below its repository root, so every walk-up rung
+	/// appears twice, closest first.
+	fn ladder(root: &Path) -> Ladder {
+		let (home, config) = (root.join("home"), root.join("config"));
+		let repo = home.join("work/repo");
+		let project = repo.join("pkg");
+		fs::create_dir_all(repo.join(".git")).unwrap();
+		fs::create_dir_all(&project).unwrap();
+		let (project_level, user_level) = (SkillLevel::Project, SkillLevel::User);
+		// Package containers in discovery order with their packages in creation
+		// order; the sources of one container are expected sorted by name.
+		let containers: [(PathBuf, SkillLevel, &[&str]); 5] = [
+			(project.join(".omp/extensions"), project_level, &["ext"]),
+			(project.join(".agent/plugins"), project_level, &["zeta", "alpha"]),
+			(project.join(".agents/plugins"), project_level, &["mid", "beta"]),
+			(config.join("extensions"), user_level, &["cfgext"]),
+			(config.join("agent/plugins"), user_level, &["shared"]),
+		];
+		let mut plugin_rungs: Vec<Rung> = Vec::new();
+		for (container, level, names) in &containers {
+			for name in *names {
+				let plugin = container.join(name);
+				fs::create_dir_all(plugin.join("skills")).unwrap();
+				fs::write(
+					plugin.join("plugin.json"),
+					format!(
+						r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}"}}"#
+					),
+				)
+				.unwrap();
+			}
+			let mut sorted = names.to_vec();
+			sorted.sort_unstable();
+			plugin_rungs.extend(
+				sorted
+					.into_iter()
+					.map(|name| (None, "agent-plugins", container.join(name).join("skills"), *level)),
+			);
+		}
+		let custom = vec![root.join("custom-a"), root.join("custom-b")];
+		let mut rungs: Vec<Rung> = vec![
+			(NATIVE_PROJECT, "native", project.join(".omp/skills"), project_level),
+			(NATIVE_PROJECT, "native", repo.join(".omp/skills"), project_level),
+			(NATIVE_USER, "native", config.join("agent/skills"), user_level),
+			(CLAUDE_USER, "claude", home.join(".claude/skills"), user_level),
+			(CLAUDE_PROJECT, "claude", project.join(".claude/skills"), project_level),
+			(CLAUDE_PROJECT, "claude", repo.join(".claude/skills"), project_level),
+		];
+		rungs.extend(plugin_rungs);
+		for dir in [&project, &repo] {
+			rungs.push((AGENTS_PROJECT, "agents", dir.join(".agent/skills"), project_level));
+			rungs.push((AGENTS_PROJECT, "agents", dir.join(".agents/skills"), project_level));
+		}
+		rungs.extend([
+			(AGENTS_USER, "agents", home.join(".agent/skills"), user_level),
+			(AGENTS_USER, "agents", home.join(".agents/skills"), user_level),
+			(CODEX_USER, "codex", home.join(".codex/skills"), user_level),
+			(None, "codex", project.join(".codex/skills"), project_level),
+			(None, "opencode", project.join(".opencode/skills"), project_level),
+		]);
+		rungs.extend(
+			custom
+				.iter()
+				.map(|dir| (None, "custom", dir.clone(), user_level)),
+		);
+		rungs.push((
+			None,
+			omp_contract::managed_skills::PROVIDER_ID,
+			config.join("agent/managed-skills"),
+			user_level,
+		));
+		Ladder { home, project, config, custom, rungs }
+	}
+
+	fn policy_for(mask: u32, custom: &[PathBuf]) -> SkillPolicy {
+		let on = |bit: u32| (mask >> bit) & 1 == 1;
+		SkillPolicy {
+			native_project: on(0),
+			native_user: on(1),
+			claude_user: on(2),
+			claude_project: on(3),
+			agents_project: on(4),
+			agents_user: on(5),
+			codex_user: on(6),
+			custom_directories: custom.to_vec(),
+			..SkillPolicy::default()
+		}
+	}
+
+	#[test]
+	fn skill_source_precedence_is_pinned_for_every_policy_flag_combination() {
+		let tree = tempfile::tempdir().unwrap();
+		let ladder = ladder(&tree.path().canonicalize().unwrap());
+		// Seven independent flags gate `sources()`: 2^7 combinations.
+		// Seven independent flags gate `sources()`: 2^7 combinations, with and
+		// without custom directories.
+		for custom in [ladder.custom.clone(), Vec::new()] {
+			for mask in 0..128_u32 {
+				let policy = policy_for(mask, &custom);
+				let produced = sources(&ladder.project, &ladder.home, &ladder.config, &policy)
+					.into_iter()
+					.map(|source| (source.provider.as_str().to_owned(), source.root, source.level))
+					.collect::<Vec<_>>();
+				let expected = ladder
+					.rungs
+					.iter()
+					.filter(|(gate, provider, ..)| {
+						(*provider != "custom" || !custom.is_empty())
+							&& gate.is_none_or(|bit| (mask >> bit) & 1 == 1)
+					})
+					.map(|(_, provider, root, level)| ((*provider).to_owned(), root.clone(), *level))
+					.collect::<Vec<_>>();
+				assert_eq!(produced, expected, "policy mask {mask:#09b}, {} custom", custom.len());
+				// Marketplace plugin sources are spliced in by `ordered_sources`,
+				// never produced by the provider table.
+				assert!(
+					produced
+						.iter()
+						.all(|(provider, ..)| provider != CLAUDE_PLUGINS_PROVIDER)
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn skill_source_table_names_data_directories_only() {
+		let known = [
+			"native",
+			"claude",
+			"agent-plugins",
+			"agents",
+			"codex",
+			"opencode",
+			"custom",
+			omp_contract::managed_skills::PROVIDER_ID,
+		];
+		let contained = |relative: &str| {
+			let path = Path::new(relative);
+			path.is_relative()
+				&& !path
+					.components()
+					.any(|part| matches!(part, Component::ParentDir))
+		};
+		let skills_dir = |relative: &str| {
+			Path::new(relative)
+				.file_name()
+				.and_then(|name| name.to_str())
+				== Some("skills")
+		};
+		for rule in &SKILL_SOURCES {
+			assert!(known.contains(&rule.provider), "unknown provider {}", rule.provider);
+			match rule.root {
+				SkillRoot::Ancestors(relatives) | SkillRoot::Home(relatives) => {
+					for relative in relatives {
+						assert!(contained(relative), "{relative}");
+						assert!(skills_dir(relative), "{relative}");
+					}
+				},
+				SkillRoot::Config(relative) | SkillRoot::ProjectRoot(relative) => {
+					assert!(contained(relative), "{relative}");
+					assert!(skills_dir(relative), "{relative}");
+				},
+				// A package container yields only the contained `skills` directory
+				// of a manifest-checked Agent Plugins package.
+				SkillRoot::ProjectPlugins => {
+					assert_eq!(rule.provider, "agent-plugins");
+					for relative in AGENT_PLUGIN_DIRS {
+						assert!(contained(relative), "{relative}");
+					}
+				},
+				SkillRoot::ConfigPlugins(relative) => {
+					assert!(contained(relative), "{relative}");
+					assert_eq!(rule.provider, "agent-plugins");
+				},
+				SkillRoot::Custom => assert_eq!(rule.provider, "custom"),
+				SkillRoot::Managed => {
+					assert_eq!(rule.provider, omp_contract::managed_skills::PROVIDER_ID);
+				},
+			}
+		}
+		// ADR 0036 and ADR 0046 item 5: discovery reads data and never loads or
+		// runs foreign code, so the production half of this module holds no
+		// process-spawn or dynamic-load API. The test module is cut at its exact
+		// opening, and comment lines are skipped.
+		let (production, _) = include_str!("skills.rs")
+			.split_once("\n#[cfg(test)]\nmod tests {")
+			.expect("test module marker");
+		let code = production
+			.lines()
+			.filter(|line| !line.trim_start().starts_with("//"))
+			.collect::<Vec<_>>()
+			.join("\n");
+		let forbidden = [
+			"std::process",
+			"tokio::process",
+			"Command::new",
+			"CommandExt",
+			"libloading",
+			"dlopen",
+			"dlsym",
+			"libc::exec",
+		];
+		for needle in forbidden {
+			assert!(!code.contains(needle), "skills discovery must not use {needle}");
+		}
 	}
 }
