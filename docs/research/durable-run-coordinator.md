@@ -60,5 +60,5 @@ First move: S1 with the journal store, because it is the smallest change that ma
 
 - Read OMP1's metaharness and Vibemon adapter (`packages/metaharness/src/tb/vmon.ts`) before designing a harness-as-host adapter. Vibemon is a KVM/HVF microVM platform that speaks the E2B API, forks sandboxes copy-on-write from a template snapshot and can pause to disk and resume on another node [ext: stencil-hq/vibemon README]; that matches the isolated-workspace need of S4 and the leased-worker need of ADR 0039, but fit is unverified.
 - Decide whether `extensions/workflows` migrates onto the run store or stays a cache (it must not become a third engine).
-- The term OVNFS is unresolved (see the ADR 0007 amendment).
+- OVNFS is stencil-hq/ovnfs, copy-on-write agent checkouts with diff and three-way apply (README read, source not read); evaluate it as the isolated-workspace backend for S4 (see the ADR 0007 amendment).
 - Measure write amplification of a dispatch and settle append on a real workflow. ADR 0051 D3 and D4 fix per-dispatch and per-settle appends; a measurement that shows a problem would reopen that granularity.
