@@ -263,8 +263,10 @@ pub fn collect_blobs_with(
 			return Err(GcError::Cancelled);
 		}
 		let lock = WriterLock::acquire(path)?;
-		let Decoded { entries, clean_len, .. } =
-			decode_committed(io::BufReader::with_capacity(READ_BUFFER, File::open(path)?))?;
+		let Decoded { entries, clean_len, .. } = decode_committed(
+			io::BufReader::with_capacity(READ_BUFFER, File::open(path)?),
+			&crate::Vocabulary::builtin(),
+		)?;
 		entries_scanned = entries_scanned.saturating_add(entries.len());
 		if entries_scanned > options.max_entries {
 			return Err(GcError::Limit {

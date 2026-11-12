@@ -110,7 +110,7 @@ A second workflow engine; distributed scheduling (ADR 0039 Part B owns it); exac
 
 ## Status in omp
 
-**Status: Not started.** `omp-adw::Run` and `omp_driver::adw::run` exist and are in memory only. Unverified: whether `crates/driver/src/adw/remote.rs` keeps any state across processes (not read).
+**Status: Started.** Slice 1 of S1 is done: `omp_journal::Vocabulary` with `Journal::create_with`, `open_with` and `scan_with` (`crates/journal/src/kind.rs, lib.rs, sse.rs, tests/vocabulary.rs: a run journal accepts only its registered kinds; session journals and session readers are unchanged and refuse a run journal). Nothing writes a run journal yet. `omp-adw::Run` and `omp_driver::adw::run` exist and are in memory only. Unverified: whether `crates/driver/src/adw/remote.rs` keeps any state across processes (not read).
 
 ## References
 
