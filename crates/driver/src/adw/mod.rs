@@ -224,6 +224,15 @@ pub async fn resume_from_log<H: AdwHost>(
 	mut log: RunLog,
 	records: &[RunRecord],
 ) -> Result<RunExit<H::Error>, Error<H::Error>> {
+	// A journal that already ended in `Done` is final: report its outcome
+	// without dispatching, since the log refuses any further append.
+	if let Some(RunRecord::Done(done)) = records.last() {
+		return Ok(if done.accepted {
+			RunExit { code: 0, status: RunStatus::Accepted, records: Vec::new(), reason: None }
+		} else {
+			halted(Vec::new(), Some(Str::new_static("the recorded run already ended rejected")))
+		});
+	}
 	let posture = host.posture().map_err(Error::Posture)?;
 	let mut run = Run::new(definition.workflow().clone())
 		.with_max_attempts(max_attempts)
@@ -869,6 +878,25 @@ mod tests {
 			.await
 			.expect("resume");
 		assert_eq!(exit.status, RunStatus::Accepted);
+	}
+
+	#[tokio::test]
+	async fn resuming_a_finished_run_reports_it_without_dispatching() {
+		let (project, definition) = two_phase_project();
+		let path = project.path().join("run.oms");
+		let mut log = RunLog::create(&path, start(&definition)).expect("create");
+		let host = Scripted::new(project.path(), CONFINED);
+		run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log)).await.expect("run");
+		drop(log);
+		host.seen.lock().clear();
+
+		let (log, records) = RunLog::open(&path, definition.digest()).expect("open");
+		let exit = resume_from_log(&definition, 2, &host, &CancellationToken::new(), log, &records)
+			.await
+			.expect("resuming a finished run is not an error");
+		assert_eq!(exit.status, RunStatus::Accepted);
+		assert!(host.seen.lock().is_empty());
+		assert_eq!(RunLog::read(&path).expect("read").len(), records.len(), "nothing appended");
 	}
 
 	#[test]
