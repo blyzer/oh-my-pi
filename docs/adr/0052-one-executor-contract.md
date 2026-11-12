@@ -91,7 +91,7 @@ The reviewer found these undefined: the field lists of `WorkAssignment`, `WorkOu
 
 ## Status in omp
 
-**Status: Partially implemented.** The delegated contract, `Capabilities`, the ACP client and the Codex adapter exist (see ADR 0043 status). The router, the assignment layer, the native-as-executor path and the production wiring do not. Unverified: the OMP1 metaharness beyond `vmon.ts`; whether the `task` tool can name an executor today.
+**Status: Partially implemented.** P0 is partly done: an ADW prompt phase can name an `executor` and is routed through `run_delegated_prompt` (`crates/driver/src/delegated_host.rs`), the first production caller of `run_delegated_turn`; delegated phases run read-only with no approver (`DelegatedPolicy::STRICTEST`, `DenyAll`) until the requirement-to-policy mapping is specified, and no real Codex run has been proven. The delegated contract, `Capabilities`, the ACP client and the Codex adapter exist (see ADR 0043 status). The router, the assignment layer, the native-as-executor path and the production wiring do not. Unverified: the OMP1 metaharness beyond `vmon.ts`; whether the `task` tool can name an executor today.
 
 ## References
 

@@ -28,7 +28,10 @@ pub enum PhaseSpec {
 	/// A model turn driven by this prompt.
 	Prompt {
 		/// Instruction text installed as the child's turn input.
-		text: Str,
+		text:     Str,
+		/// A delegated executor that runs the turn instead of a native OMP kernel
+		/// (ADR 0052 D1, D6). `None` runs natively.
+		executor: Option<Str>,
 	},
 	/// A process whose exit status decides the outcome.
 	Command {
@@ -99,6 +102,12 @@ pub enum DefinitionError {
 	#[error("phase `{phase}` is a model phase but declares no prompt")]
 	MissingPrompt {
 		/// The phase missing its instruction.
+		phase: PhaseName,
+	},
+	/// A phase named an executor that is empty, or that cannot apply to it.
+	#[error("phase `{phase}` names an executor but is not a model phase, or names an empty one")]
+	BadExecutor {
+		/// The phase carrying the rejected executor.
 		phase: PhaseName,
 	},
 	/// A code phase declared no command.
@@ -176,9 +185,19 @@ fn lower(file: FileWorkflow, fallback_name: &str) -> Result<WorkflowDefinition, 
 				if declared.prompt.trim().is_empty() {
 					return Err(DefinitionError::MissingPrompt { phase: name });
 				}
-				PhaseSpec::Prompt { text: declared.prompt }
+				if declared
+					.executor
+					.as_deref()
+					.is_some_and(|id| id.trim().is_empty())
+				{
+					return Err(DefinitionError::BadExecutor { phase: name });
+				}
+				PhaseSpec::Prompt { text: declared.prompt, executor: declared.executor }
 			},
 			PhaseKind::Code => {
+				if declared.executor.is_some() {
+					return Err(DefinitionError::BadExecutor { phase: name });
+				}
 				let mut argv = declared.command.into_iter();
 				let Some(binary) = argv.next() else {
 					return Err(DefinitionError::MissingCommand { phase: name });
@@ -244,6 +263,8 @@ struct FilePhase {
 	#[serde(default)]
 	prompt:     Str,
 	#[serde(default)]
+	executor:   Option<Str>,
+	#[serde(default)]
 	command:    Vec<Str>,
 	#[serde(default)]
 	cwd:        Option<Str>,
@@ -262,6 +283,59 @@ mod tests {
 		let directory = root.join(WORKFLOWS_DIR);
 		std::fs::create_dir_all(&directory).expect("workflow directory");
 		std::fs::write(directory.join(format!("{name}.toml")), body).expect("workflow file");
+	}
+
+	#[test]
+	fn a_model_phase_may_name_a_delegated_executor() {
+		let project = tempfile::tempdir().expect("project");
+		write(
+			project.path(),
+			"ship",
+			r#"
+[[phase]]
+name = "build"
+kind = "agent"
+executor = "codex"
+prompt = "Implement it."
+"#,
+		);
+		let definition = load(project.path(), "ship").expect("definition");
+		assert_eq!(
+			definition.spec(PhaseName::from_ref("build")),
+			Some(&PhaseSpec::Prompt {
+				text:     Str::new_static("Implement it."),
+				executor: Some(Str::new_static("codex")),
+			})
+		);
+	}
+
+	#[test]
+	fn an_executor_on_a_code_phase_or_an_empty_executor_is_refused() {
+		let project = tempfile::tempdir().expect("project");
+		write(
+			project.path(),
+			"on-code",
+			r#"
+[[phase]]
+name = "test"
+kind = "code"
+executor = "codex"
+command = ["cargo", "test"]
+"#,
+		);
+		write(
+			project.path(),
+			"empty",
+			r#"
+[[phase]]
+name = "build"
+kind = "agent"
+executor = " "
+prompt = "Implement it."
+"#,
+		);
+		assert!(matches!(load(project.path(), "on-code"), Err(DefinitionError::BadExecutor { .. })));
+		assert!(matches!(load(project.path(), "empty"), Err(DefinitionError::BadExecutor { .. })));
 	}
 
 	#[test]
@@ -296,7 +370,7 @@ prompt = "Judge it."
 		assert_eq!(definition.workflow().phases().len(), 3);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("build")),
-			Some(&PhaseSpec::Prompt { text: Str::new_static("Implement it.") })
+			Some(&PhaseSpec::Prompt { text: Str::new_static("Implement it."), executor: None })
 		);
 		assert_eq!(
 			definition.spec(PhaseName::from_ref("test")),

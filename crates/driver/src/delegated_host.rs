@@ -46,16 +46,21 @@
 //! itself succeeded; a turn that failed, crashed or was cancelled reports its
 //! own error.
 
-use std::{ffi::OsString, time::Instant};
+use std::{
+	ffi::OsString,
+	path::Path,
+	time::{Duration, Instant},
+};
 
 use flume::Sender;
 use omp_agent::delegated::{
-	ActiveSession, Capabilities, DelegatedEvent, DelegatedExecutor, ExecutorError, ExecutorId,
-	LifecycleEvent, PermissionResolver, SessionRequest, TurnInput, TurnLimits, TurnReport,
+	ActiveSession, Capabilities, DelegatedEvent, DelegatedExecutor, DelegatedPolicy,
+	DelegatedPrompt, ExecutionMode, ExecutorError, ExecutorId, LifecycleEvent, PermissionResolver,
+	PromptRole, PromptSection, SessionRequest, TurnInput, TurnLimits, TurnReport, UnknownAuth,
 	start_session,
 };
 use omp_con::Ctx;
-use omp_core::Str;
+use omp_core::{Hash32, Str};
 use omp_dom::{Handle, KnownTag, PropId, Sid, Tag};
 use omp_envd::{acp_client::AcpExecutor, codex_app_server::CodexExecutor};
 use omp_journal::data::TurnReceipt;
@@ -355,6 +360,119 @@ pub async fn run_delegated_turn<R: PermissionResolver>(
 		},
 		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
 	}
+}
+
+/// What one delegated prompt produced.
+#[derive(Debug)]
+pub struct DelegatedAnswer {
+	/// The agent's final message: the last `AgentMessage` when one arrived,
+	/// else its streamed text deltas in order.
+	pub text:   Str,
+	/// How the turn ended, with usage and the permission tally.
+	pub report: TurnReport,
+}
+
+/// Longest a delegated prompt may work.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Longest silence tolerated between two events of a delegated prompt.
+const PROMPT_IDLE: Duration = Duration::from_secs(10 * 60);
+/// How long a cooperative interrupt may take before the process is killed.
+const PROMPT_INTERRUPT_GRACE: Duration = Duration::from_secs(10);
+
+/// The request, input and limits for one delegated prompt.
+///
+/// The policy is [`DelegatedPolicy::STRICTEST`] (read-only sandbox, no
+/// network). How an ADW phase requirement maps to a delegated policy is not
+/// specified yet (ADR 0052), so a delegated phase never gets more than the
+/// strictest posture an executor lists; an executor that cannot enforce it is
+/// refused by [`start_session`] rather than weakened.
+fn delegated_prompt_parts(workdir: &Path, text: &Str) -> (SessionRequest, TurnInput, TurnLimits) {
+	let empty = Hash32::sum([]);
+	let bands = [empty, empty, empty, Hash32::sum(text.as_bytes())];
+	let request = SessionRequest {
+		mode:         ExecutionMode::CliManaged,
+		workdir:      workdir.to_path_buf(),
+		policy:       DelegatedPolicy::STRICTEST,
+		resume:       None,
+		unknown_auth: UnknownAuth::Refuse,
+	};
+	let input = TurnInput {
+		prompt: DelegatedPrompt::from_sections(
+			vec![PromptSection { role: PromptRole::User, text: text.clone() }],
+			bands,
+		),
+	};
+	let limits = TurnLimits {
+		timeout:         PROMPT_TIMEOUT,
+		idle:            PROMPT_IDLE,
+		interrupt_grace: PROMPT_INTERRUPT_GRACE,
+	};
+	(request, input, limits)
+}
+
+/// The agent's final text from a turn's events.
+fn final_text(events: &[DelegatedEvent]) -> Str {
+	if let Some(text) = events.iter().rev().find_map(|event| match event {
+		DelegatedEvent::AgentMessage { text, .. } => Some(text.clone()),
+		_ => None,
+	}) {
+		return text;
+	}
+	let mut streamed = String::new();
+	for event in events {
+		if let DelegatedEvent::AgentTextDelta { text, .. } = event {
+			streamed.push_str(text.as_str());
+		}
+	}
+	Str::from(streamed)
+}
+
+/// Runs one prompt as a delegated turn and returns what the agent said.
+///
+/// The first production caller of [`run_delegated_turn`]: the turn is journaled
+/// into `session`, streamed events are collected, and the caller's `resolver`
+/// answers permission prompts (an unattended caller passes
+/// [`omp_agent::delegated::DenyAll`]). Cancelling `cancel` interrupts the CLI.
+///
+/// # Errors
+///
+/// As [`run_delegated_turn`].
+pub async fn run_delegated_prompt<R: PermissionResolver>(
+	registry: &ExecutorRegistry,
+	executor_id: &ExecutorId,
+	workdir: &Path,
+	text: &Str,
+	resolver: R,
+	cancel: &CancellationToken,
+	session: &mut Session,
+) -> Result<DelegatedAnswer, DelegatedHostError> {
+	match registry.get(executor_id) {
+		Some(ExecutorKind::Codex(executor)) => {
+			prompt_on(executor, workdir, text, resolver, cancel, session).await
+		},
+		Some(ExecutorKind::Acp(executor)) => {
+			prompt_on(executor, workdir, text, resolver, cancel, session).await
+		},
+		None => Err(DelegatedHostError::UnknownExecutor { id: executor_id.clone() }),
+	}
+}
+
+async fn prompt_on<E: DelegatedExecutor, R: PermissionResolver>(
+	executor: &E,
+	workdir: &Path,
+	text: &Str,
+	mut resolver: R,
+	cancel: &CancellationToken,
+	session: &mut Session,
+) -> Result<DelegatedAnswer, DelegatedHostError> {
+	let (request, input, limits) = delegated_prompt_parts(workdir, text);
+	let (tx, rx) = flume::unbounded();
+	let outcome =
+		run_turn_on(executor, &request, &input, limits, &mut resolver, cancel, &tx, session).await;
+	drop(tx);
+	let events: Vec<DelegatedEvent> = rx.drain().collect();
+	let report = outcome?;
+	Ok(DelegatedAnswer { text: final_text(&events), report })
 }
 
 /// Generic over the concrete executor type; called from [`run_delegated_turn`]
@@ -754,6 +872,125 @@ mod tests {
 			matches!(result, Err(DelegatedHostError::Executor(ExecutorError::Cancelled { .. }))),
 			"expected Cancelled, got {result:?}"
 		);
+	}
+
+	#[tokio::test]
+	async fn a_delegated_prompt_returns_the_final_message_and_keeps_the_journal() {
+		let executor = MockExecutor::new(mock_caps());
+		executor.push_turn(completed_turn(1));
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+
+		let answer = prompt_on(
+			&executor,
+			&workdir(),
+			&Str::new_static("do the thing"),
+			DenyAll,
+			&CancellationToken::new(),
+			&mut session,
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(answer.text.as_str(), "hello from delegate");
+		assert_eq!(answer.report.end, TurnEnd::Completed);
+		let journal = std::fs::metadata(dir.path().join("session.oms")).unwrap();
+		assert!(journal.len() > 0, "the turn left nothing in the journal");
+	}
+
+	#[test]
+	fn a_delegated_prompt_runs_under_the_strictest_policy() {
+		let (request, ..) = delegated_prompt_parts(&workdir(), &Str::new_static("x"));
+		assert_eq!(request.policy, DelegatedPolicy::STRICTEST);
+		assert_eq!(request.workdir, workdir());
+		assert!(request.resume.is_none());
+	}
+
+	#[tokio::test]
+	async fn a_delegated_prompt_that_asks_permission_is_denied_when_nobody_can_approve() {
+		use omp_agent::delegated::{CallId, PermissionKind, PermissionRequest, PromptId};
+
+		let features = FeatureSet::EMPTY
+			.with(Feature::WorkingDirectoryInheritance)
+			.with(Feature::StreamingText)
+			.with(Feature::UsageReporting)
+			.with(Feature::Permissions);
+		let caps = Capabilities::new(
+			ExecutorId::new_static("mock"),
+			VersionRange { min_inclusive: CliVersion::new(1, 0, 0), max_exclusive: None },
+			features,
+			vec![DelegatedPolicy::STRICTEST],
+		);
+		let executor = MockExecutor::new(caps);
+		let turn_id = TurnId::new(Str::new_static("turn-1"));
+		executor.push_turn(vec![
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnStarted {
+				turn: turn_id.clone(),
+			})),
+			Step::Event(DelegatedEvent::Permission(PermissionRequest {
+				prompt:        PromptId::new_static("prompt-1"),
+				turn:          turn_id.clone(),
+				call:          Some(CallId::new_static("call-1")),
+				kind:          PermissionKind::Exec,
+				subject:       Str::new_static("rm -rf build"),
+				session_grant: false,
+			})),
+			Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnCompleted {
+				turn:    turn_id,
+				outcome: TurnEnd::Completed,
+			})),
+		]);
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+
+		let answer = prompt_on(
+			&executor,
+			&workdir(),
+			&Str::new_static("do the thing"),
+			DenyAll,
+			&CancellationToken::new(),
+			&mut session,
+		)
+		.await
+		.unwrap();
+
+		let tally = answer.report.permissions;
+		assert_eq!(tally.allowed, 0);
+		assert!(tally.denied + tally.refused_by_policy >= 1, "{tally:?}");
+	}
+
+	#[tokio::test]
+	async fn an_unknown_executor_is_a_typed_error_not_a_native_fallback() {
+		let registry = ExecutorRegistry::from_ctx(&Ctx::new());
+		let dir = tempdir().unwrap();
+		let mut session = session_in(&dir);
+		let result = run_delegated_prompt(
+			&registry,
+			&ExecutorId::new_static("does-not-exist"),
+			&workdir(),
+			&Str::new_static("x"),
+			DenyAll,
+			&CancellationToken::new(),
+			&mut session,
+		)
+		.await;
+		assert!(matches!(result, Err(DelegatedHostError::UnknownExecutor { .. })), "{result:?}");
+	}
+
+	#[test]
+	fn the_final_text_is_the_last_message_else_the_streamed_deltas() {
+		let turn = TurnId::new(Str::new_static("t"));
+		let delta = |text: &'static str| DelegatedEvent::AgentTextDelta {
+			turn: turn.clone(),
+			text: Str::new_static(text),
+		};
+		let message = |text: &'static str| DelegatedEvent::AgentMessage {
+			turn: turn.clone(),
+			text: Str::new_static(text),
+		};
+		assert_eq!(final_text(&[delta("he"), delta("llo")]).as_str(), "hello");
+		assert_eq!(final_text(&[delta("he"), message("first"), message("last")]).as_str(), "last");
+		assert_eq!(final_text(&[]).as_str(), "");
 	}
 
 	#[tokio::test]
