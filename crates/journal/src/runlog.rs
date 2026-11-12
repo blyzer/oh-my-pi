@@ -3,7 +3,9 @@
 //! A run journal is a normal journal file whose vocabulary is widened with the
 //! [`vocabulary`] kinds. The first record is always [`RunStart`]; every later
 //! entry names the previous one in `by`, so the file is a linear chain, and a
-//! finished run (a [`RunDone`] or [`RunHalt`] record) accepts nothing more.
+//! finished run (a [`RunDone`] record) accepts nothing more. A [`RunHalt`]
+//! record only marks a stop: a halted run is resumable and accepts further
+//! records.
 
 use std::path::Path;
 
@@ -25,7 +27,7 @@ pub const PHASE_DISPATCH: &str = "adw.phase.dispatch";
 pub const PHASE_SETTLE: &str = "adw.phase.settle";
 /// `adw.phase.uncertain@1`: recovery found a dispatch with no settle.
 pub const PHASE_UNCERTAIN: &str = "adw.phase.uncertain";
-/// `adw.run.halt@1`: the run stopped without finishing.
+/// `adw.run.halt@1`: the run stopped without finishing and can be resumed.
 pub const RUN_HALT: &str = "adw.run.halt";
 /// `adw.run.done@1`: the run reached a terminal outcome.
 pub const RUN_DONE: &str = "adw.run.done";
@@ -150,7 +152,7 @@ pub struct PhaseUncertain {
 	pub reason:  Str,
 }
 
-/// Payload of `adw.run.halt@1`.
+/// Payload of `adw.run.halt@1`. A halt is not terminal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunHalt {
 	/// Why the run stopped.
@@ -190,8 +192,14 @@ impl RunRecord {
 	pub fn encode(&self) -> Result<(Kind, Str), RunLogError> {
 		let (name, json) = match self {
 			Self::Start(payload) => (RUN_START, serde_json::to_string(payload)?),
-			Self::Dispatch(payload) => (PHASE_DISPATCH, serde_json::to_string(payload)?),
-			Self::Settle(payload) => (PHASE_SETTLE, serde_json::to_string(payload)?),
+			Self::Dispatch(payload) => {
+				check_effects(&payload.effects)?;
+				(PHASE_DISPATCH, serde_json::to_string(payload)?)
+			},
+			Self::Settle(payload) => {
+				let bounded = PhaseSettle { feedback: capped(&payload.feedback), ..payload.clone() };
+				(PHASE_SETTLE, serde_json::to_string(&bounded)?)
+			},
 			Self::Uncertain(payload) => (PHASE_UNCERTAIN, serde_json::to_string(payload)?),
 			Self::Halt(payload) => (RUN_HALT, serde_json::to_string(payload)?),
 			Self::Done(payload) => (RUN_DONE, serde_json::to_string(payload)?),
@@ -209,7 +217,11 @@ impl RunRecord {
 		let data = entry.data.as_str();
 		Ok(match entry.kind.name.as_str() {
 			RUN_START => Self::Start(serde_json::from_str(data)?),
-			PHASE_DISPATCH => Self::Dispatch(serde_json::from_str(data)?),
+			PHASE_DISPATCH => {
+				let payload: PhaseDispatch = serde_json::from_str(data)?;
+				check_effects(&payload.effects)?;
+				Self::Dispatch(payload)
+			},
 			PHASE_SETTLE => Self::Settle(serde_json::from_str(data)?),
 			PHASE_UNCERTAIN => Self::Uncertain(serde_json::from_str(data)?),
 			RUN_HALT => Self::Halt(serde_json::from_str(data)?),
@@ -218,10 +230,10 @@ impl RunRecord {
 		})
 	}
 
-	/// Whether this record ends the run.
+	/// Whether this record ends the run for good. Only [`RunDone`] does.
 	#[must_use]
 	pub const fn is_terminal(&self) -> bool {
-		matches!(self, Self::Halt(_) | Self::Done(_))
+		matches!(self, Self::Done(_))
 	}
 }
 
@@ -258,6 +270,21 @@ pub enum RunLogError {
 	/// A record was appended after the run finished.
 	#[error("the run is finished and accepts no more records")]
 	Finished,
+	/// An entry does not name the previous entry in `by`.
+	#[error("entry {index} breaks the by chain")]
+	BrokenChain {
+		/// Position of the entry.
+		index: usize,
+	},
+	/// An effect key is not the 64-character hex digest the ADR requires.
+	#[error("effect key for {effect} is not a 64-character hex digest")]
+	BadEffectKey {
+		/// The effect whose key is invalid.
+		effect: Str,
+	},
+	/// An earlier append failed, so the in-memory chain may be stale.
+	#[error("an earlier append failed; reopen the run journal before writing again")]
+	Poisoned,
 }
 
 /// A run journal open for appending.
@@ -266,6 +293,7 @@ pub struct RunLog {
 	journal:  Journal,
 	last:     EntryId,
 	finished: bool,
+	poisoned: bool,
 }
 
 impl RunLog {
@@ -288,7 +316,7 @@ impl RunLog {
 			label: None,
 			data:  Str::new(genesis),
 		})?;
-		let mut log = Self { journal, last: genesis.id, finished: false };
+		let mut log = Self { journal, last: genesis.id, finished: false, poisoned: false };
 		log.append(&RunRecord::Start(start))?;
 		Ok(log)
 	}
@@ -306,14 +334,15 @@ impl RunLog {
 		expected_digest: &str,
 	) -> Result<(Self, Vec<RunRecord>), RunLogError> {
 		let (journal, entries) = Journal::open_with(path, vocabulary())?;
+		check_chain(&entries)?;
 		let records = decode_records(&entries)?;
 		check_start(&records, expected_digest)?;
 		let last = entries
 			.last()
 			.map(|entry| entry.id)
 			.ok_or(RunLogError::MissingStart)?;
-		let finished = records.last().is_some_and(RunRecord::is_terminal);
-		Ok((Self { journal, last, finished }, records))
+		let finished = records.iter().any(RunRecord::is_terminal);
+		Ok((Self { journal, last, finished, poisoned: false }, records))
 	}
 
 	/// Reads a run journal without locking it or truncating a torn tail.
@@ -323,7 +352,9 @@ impl RunLog {
 	/// [`RunLogError`] when the journal cannot be read or holds a non-run
 	/// record.
 	pub fn read(path: impl AsRef<Path>) -> Result<Vec<RunRecord>, RunLogError> {
-		decode_records(&Journal::scan_with(path, &vocabulary())?)
+		let entries = Journal::scan_with(path, &vocabulary())?;
+		check_chain(&entries)?;
+		decode_records(&entries)
 	}
 
 	/// Appends one record, chained to the previous entry.
@@ -332,21 +363,72 @@ impl RunLog {
 	///
 	/// [`RunLogError::Finished`] after a terminal record, or a journal failure.
 	pub fn append(&mut self, record: &RunRecord) -> Result<EntryId, RunLogError> {
+		if self.poisoned {
+			return Err(RunLogError::Poisoned);
+		}
 		if self.finished {
 			return Err(RunLogError::Finished);
 		}
 		let (kind, data) = record.encode()?;
-		let entry = self.journal.append(EntryDraft {
+		let entry = match self.journal.append(EntryDraft {
 			kind,
 			by: Some(self.last),
 			prior: None,
 			label: None,
 			data,
-		})?;
+		}) {
+			Ok(entry) => entry,
+			Err(error) => {
+				self.poisoned = true;
+				return Err(error.into());
+			},
+		};
 		self.last = entry.id;
 		self.finished = record.is_terminal();
 		Ok(entry.id)
 	}
+}
+
+fn check_chain(entries: &[Entry]) -> Result<(), RunLogError> {
+	for (index, entry) in entries.iter().enumerate() {
+		let expected = index.checked_sub(1).map(|previous| entries[previous].id);
+		if entry.by != expected {
+			return Err(RunLogError::BrokenChain { index });
+		}
+	}
+	Ok(())
+}
+
+fn valid_effect_key(key: &IdempotencyKey) -> bool {
+	key.validate().is_ok()
+		&& key.as_str().len() == 64
+		&& key.as_str().bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn check_effects(effects: &[EffectKey]) -> Result<(), RunLogError> {
+	match effects.iter().find(|effect| !valid_effect_key(&effect.key)) {
+		Some(effect) => Err(RunLogError::BadEffectKey { effect: effect.effect.clone() }),
+		None => Ok(()),
+	}
+}
+
+/// Longest rejection feedback a settle record keeps.
+///
+/// The journal caps a payload at 1 MiB and a settle that cannot be written
+/// would strand the phase, so a longer feedback is cut at a character boundary
+/// and marked.
+pub const FEEDBACK_CAP: usize = 256 * 1024;
+
+fn capped(feedback: &Str) -> Str {
+	let text = feedback.as_str();
+	if text.len() <= FEEDBACK_CAP {
+		return feedback.clone();
+	}
+	let mut end = FEEDBACK_CAP;
+	while !text.is_char_boundary(end) {
+		end -= 1;
+	}
+	Str::new(format!("{}[truncated {} bytes]", &text[..end], text.len() - end))
 }
 
 fn decode_records(entries: &[Entry]) -> Result<Vec<RunRecord>, RunLogError> {

@@ -115,12 +115,105 @@ fn a_finished_run_accepts_no_more_records() {
 }
 
 #[test]
-fn a_halt_also_ends_the_run() {
+fn a_halt_does_not_end_the_run_and_it_can_be_resumed() {
 	let directory = tempdir().expect("tempdir");
-	let mut log = RunLog::create(directory.path().join("run.oms"), start("d1")).expect("create");
+	let path = directory.path().join("run.oms");
+	let mut log = RunLog::create(&path, start("d1")).expect("create");
 	log.append(&RunRecord::Halt(RunHalt { reason: Str::new_static("cancelled") }))
 		.expect("halt");
-	assert!(matches!(log.append(&dispatch(1)), Err(RunLogError::Finished)));
+	log.append(&dispatch(1))
+		.expect("a halted run accepts more records");
+	drop(log);
+	let (mut reopened, records) = RunLog::open(&path, "d1").expect("open");
+	assert_eq!(records.len(), 3);
+	reopened
+		.append(&settle(1, SettleStatus::Accepted))
+		.expect("resumed");
+}
+
+#[test]
+fn an_entry_that_does_not_name_the_previous_one_breaks_the_chain() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("run.oms");
+	{
+		let mut journal = Journal::create_with(&path, vocabulary()).expect("create");
+		let genesis = journal
+			.append(omp_journal::EntryDraft {
+				kind:  omp_journal::Kind::new(omp_journal::kind::JOURNAL, 1).expect("kind"),
+				by:    None,
+				prior: None,
+				label: None,
+				data:  Str::new_static(r#"{"version":1,"cwd":"/tmp","created":"now"}"#),
+			})
+			.expect("genesis");
+		let draft = |record: &RunRecord, by| {
+			let (kind, data) = record.encode().expect("encode");
+			omp_journal::EntryDraft { kind, by: Some(by), prior: None, label: None, data }
+		};
+		journal
+			.append(draft(&RunRecord::Start(start("d1")), genesis.id))
+			.expect("start");
+		journal
+			.append(draft(&dispatch(1), genesis.id))
+			.expect("dispatch");
+	}
+	assert!(matches!(RunLog::read(&path), Err(RunLogError::BrokenChain { index: 2 })));
+	assert!(matches!(RunLog::open(&path, "d1"), Err(RunLogError::BrokenChain { index: 2 })));
+}
+
+#[test]
+fn an_effect_key_that_is_not_a_64_character_hex_digest_is_refused() {
+	let directory = tempdir().expect("tempdir");
+	let mut log = RunLog::create(directory.path().join("run.oms"), start("d1")).expect("create");
+	let short = RunRecord::Dispatch(PhaseDispatch {
+		phase:    Str::new_static("build"),
+		attempt:  1,
+		inputs:   vec![],
+		executor: Str::new_static("native"),
+		posture:  Str::new_static("p"),
+		effects:  vec![EffectKey {
+			effect: Str::new_static("pr.create"),
+			key:    IdempotencyKey::parse("short").expect("parses"),
+		}],
+	});
+	assert!(matches!(log.append(&short), Err(RunLogError::BadEffectKey { .. })));
+	let not_hex = RunRecord::Dispatch(PhaseDispatch {
+		effects: vec![EffectKey {
+			effect: Str::new_static("pr.create"),
+			key:    IdempotencyKey::parse(&"z".repeat(64)).expect("parses"),
+		}],
+		..PhaseDispatch {
+			phase:    Str::new_static("build"),
+			attempt:  1,
+			inputs:   vec![],
+			executor: Str::new_static("native"),
+			posture:  Str::new_static("p"),
+			effects:  vec![],
+		}
+	});
+	assert!(matches!(log.append(&not_hex), Err(RunLogError::BadEffectKey { .. })));
+}
+
+#[test]
+fn an_oversized_rejection_feedback_is_cut_so_the_settle_can_still_be_written() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("run.oms");
+	let mut log = RunLog::create(&path, start("d1")).expect("create");
+	let huge = Str::new("x".repeat(omp_journal::runlog::FEEDBACK_CAP * 2));
+	log.append(&RunRecord::Settle(PhaseSettle {
+		phase:    Str::new_static("build"),
+		attempt:  1,
+		status:   SettleStatus::Rejected,
+		feedback: huge,
+	}))
+	.expect("an oversized feedback must not strand the phase");
+	drop(log);
+	let records = RunLog::read(&path).expect("read");
+	let RunRecord::Settle(settled) = &records[1] else {
+		panic!("settle expected")
+	};
+	assert!(settled.feedback.as_str().ends_with(" bytes]"));
+	assert!(settled.feedback.len() < omp_journal::runlog::FEEDBACK_CAP + 64);
 }
 
 #[test]
