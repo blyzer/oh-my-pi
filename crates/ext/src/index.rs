@@ -151,6 +151,7 @@ impl IndexRelease {
 			features:     self.features.clone(),
 			binaries:     Vec::new(),
 			declarations: self.declarations.clone(),
+			schemes:      Default::default(),
 		}
 	}
 }
