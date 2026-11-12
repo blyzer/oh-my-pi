@@ -239,7 +239,7 @@ impl ProductionAdwHost {
 	/// explicit `--model` stays authoritative for every phase. The second value
 	/// is whether the child kernel must apply the selector instead of the
 	/// inherited `ai_model`.
-	fn model_phase_selector_for(&self, kind: PhaseKind) -> (&str, bool) {
+	pub fn model_phase_selector_for(&self, kind: PhaseKind) -> (&str, bool) {
 		if kind == PhaseKind::Review && !self.model_override {
 			return ("@judge", true);
 		}
@@ -375,12 +375,6 @@ impl ProductionAdwHost {
 	}
 }
 
-/// Options for one model phase's child kernel, which inherits the run's
-/// workspace trust decision.
-///
-/// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
-/// workflow is project input already, and a project must not also choose
-/// the code its phases' kernels load.
 /// Puts the `ai_model` a child run replaced back when the run ends, whatever
 /// the outcome, so a review phase's `@judge` never becomes the next producer's
 /// model. The driver runs one phase at a time, so the shared value is not
@@ -402,6 +396,12 @@ impl Drop for RestoreModel<'_> {
 	}
 }
 
+/// Options for one model phase's child kernel, which inherits the run's
+/// workspace trust decision.
+///
+/// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
+/// workflow is project input already, and a project must not also choose
+/// the code its phases' kernels load.
 fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -> KernelOptions {
 	KernelOptions {
 		ephemeral: true,

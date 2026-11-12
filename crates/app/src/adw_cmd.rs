@@ -21,14 +21,7 @@ pub async fn run(command: AdwCommand) -> miette::Result<()> {
 	match command {
 		AdwCommand::List { project } => list(&project),
 		AdwCommand::Run { workflow, project, model, max_attempts, exec_policy } => {
-			execute(
-				&workflow,
-				&project,
-				model.unwrap_or_else(|| Str::new_static("default")),
-				max_attempts,
-				exec_policy,
-			)
-			.await
+			execute(&workflow, &project, model, max_attempts, exec_policy).await
 		},
 	}
 }
@@ -60,13 +53,15 @@ fn list(project: &Path) -> miette::Result<()> {
 async fn execute(
 	workflow: &str,
 	project: &Path,
-	model: Str,
+	model: Option<Str>,
 	max_attempts: u32,
 	exec_policy: Option<AdwExecPolicy>,
 ) -> miette::Result<()> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let host = open_host(project, data_dir, model)?;
+	let explicit = model.is_some();
+	let model = model.unwrap_or_else(|| Str::new_static("default"));
+	let host = open_host(project, data_dir, model, explicit)?;
 	let host = match exec_policy {
 		Some(policy) => host.with_exec_policy(policy),
 		None => host,
@@ -134,9 +129,17 @@ pub fn open_host(
 	project: &Path,
 	data_dir: PathBuf,
 	model: Str,
+	model_override: bool,
 ) -> miette::Result<ProductionAdwHost> {
 	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
 	let workspace_trust = evaluate_workspace(&data_dir, project);
-	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, false, ctx, workspace_trust)
-		.into_diagnostic()
+	ProductionAdwHost::open(
+		project.to_path_buf(),
+		data_dir,
+		model,
+		model_override,
+		ctx,
+		workspace_trust,
+	)
+	.into_diagnostic()
 }
