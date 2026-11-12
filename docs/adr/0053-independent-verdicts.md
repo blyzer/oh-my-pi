@@ -6,7 +6,7 @@ Area: runtime
 
 ## Context
 
-- OMP1 has independent review (owner, 2026-11-12; not read for this record). OMP2 has two pieces and no joined path: the Advisor Director and ADW's `Review` phase kind.
+- OMP1 has independent review (owner, 2026-11-12). In upstream can1357/oh-my-pi it is a bundled `/review` command (`packages/coding-agent/src/extensibility/custom-commands/bundled/review/`: it resolves a PR, MR or local diff into a review target and builds the prompt) that runs the reviewer agent, whose structured result is the shape OMP2's `reviewer` agent already returns: `overall_correctness`, `explanation`, `confidence` and a list of findings with priority, confidence, file path and lines. OMP1's advisor is a separate module (`packages/coding-agent/src/advisor/`) of which OMP2's Director is the port. Only the file listing and the command entry point were read, not the review prompts. OMP2 has two pieces and no joined path: the Advisor Director and ADW's `Review` phase kind.
 - The Advisor Director (`crates/agent/src/directors/advisor.rs`) pairs the session with the `@advisor` role model, reads the primary transcript as incremental session updates and speaks only through the `advise` tool, at candidate yields and optionally mid-turn. Its notes are advice (`nit`, `concern`, `blocker`); it accepts or rejects nothing. It exists inside one session, not inside an ADW run.
 - ADW's `Review` phase is "a model turn that judges another phase's output" (`crates/adw/src/workflow.rs`, `PhaseKind`). Its verdict is the first word of the answer: `ACCEPT`, else a rejection carrying the text (`crates/driver/src/adw/production.rs`, `judge`).
 - That review is not independent. Every model phase, including review, uses one selector (`model_phase_selector`: explicit `--model`, then `ai_model`, then `@smol`), so the reviewer is the producer's model. There is no judge role in the catalog's role selectors, and the reviewer is not required to see less than the producer saw.
@@ -61,7 +61,7 @@ So the author's recommendation was revised in every one of the four. That is the
 
 ## Not yet specified (readiness review, 2026-11-12)
 
-Undefined: the field types, wire form and parse rule of `Verdict`; a `Run` state for `NeedsHuman`; the TOML schema for acceptance criteria, required gates, criterion ids and `accept_on_claim`; how a dependent phase declares it requires verified input (`Run` has no such concept); the mechanism that makes a judge read-only; the definition of "context digest"; the contract for collecting artifacts (diff, check output, CI run ids); a migration for existing workflows if the recommended default (O1) is adopted; and tests for D8 and for "the advisor never accepts". This record is a proposal, not implementation-ready.
+Undefined: the field types, wire form and parse rule of `Verdict` (a starting point is the `reviewer` agent's result: `overall_correctness`, `explanation`, `confidence`, findings with priority, confidence, file and line range, which OMP2 already produces and OMP1's `/review` command consumes); a `Run` state for `NeedsHuman`; the TOML schema for acceptance criteria, required gates, criterion ids and `accept_on_claim`; how a dependent phase declares it requires verified input (`Run` has no such concept); the mechanism that makes a judge read-only; the definition of "context digest"; the contract for collecting artifacts (diff, check output, CI run ids); a migration for existing workflows if the recommended default (O1) is adopted; and tests for D8 and for "the advisor never accepts". This record is a proposal, not implementation-ready.
 
 ## Acceptance tests
 
@@ -74,7 +74,7 @@ Undefined: the field types, wire form and parse rule of `Verdict`; a `Run` state
 
 ## Status in omp
 
-**Status: Not started** for the judge role, structured verdict, acceptance criteria and recipe. **Implemented:** the Advisor Director, and the `Review` phase's first-word verdict. Unverified: OMP1's independent review design (not read); how `ai_advisor_*` settings interact with a future `@judge`.
+**Status: Not started** for the judge role, structured verdict, acceptance criteria and recipe. **Implemented:** the Advisor Director, and the `Review` phase's first-word verdict. Unverified: OMP1's review prompts and how its `/review` aggregates several reviewers (not read); how `ai_advisor_*` settings interact with a future `@judge`.
 
 ## References
 
