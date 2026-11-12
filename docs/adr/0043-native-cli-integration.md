@@ -183,3 +183,21 @@ Consequences of this amendment:
 - The file `crates/app/src/acp_client.rs` is the editor-facing ACP agent of ADR 0037 and launches no vendor CLI (`ADR 0037`, `crates/app/src/acp_client.rs:1-10`). The 2026-11-09 amendment groups it with `envd/src/acp_client/*` and `driver/src/delegated_acp.rs` as generic ACP code; only those two concern vendor CLIs.
 - The `codex_app_server` exception and its two exits stand (lines 163-168 above). Whether its driver glue in `crates/driver/src/delegated_host.rs` is covered is an open question (design Q2).
 - Not implemented. The design is a proposal. Its open questions (design §7) go to the council, and this record's own acceptance is still open.
+
+## Amendment (2026-11-12): coverage of the requested vendors, A2A, and a gate on Q18
+
+Owner request, 2026-11-12: a generic ACP client and server with specific profiles only where a vendor needs them (Grok, Antigravity, DeepSeek, Codex, Claude, Cursor, Devin and others), the same for A2A, and extension points for all of it. Most of this is already decided in this record and in `docs/design/acp-extension-profiles.md` (PR #591). Nothing below re-decides it.
+
+| Vendor | Route and status |
+|---|---|
+| DeepSeek Harness, Devin, Grok | ACP launch profiles; design §4 moves them from Rust code to extension manifests (`acp-dsh`, `acp-devin`, `acp-grok`). Not yet migrated. |
+| Antigravity | ACP through Google's `agy_acp_server.par` (registry `antigravity-acp`); listed in this record's profile set (line 70), profile row not in the design's §4 manifests. |
+| Claude Code | ACP through the `claude-agent-acp` bridge (Node), or an Agent SDK shim (design §3.1). Profile row not in §4. |
+| Codex | Recorded exception: `envd/src/codex_app_server/*` stays, with the two exits above. |
+| Cursor | Not named in this record or the design. A Cursor ACP agent is reported by the owner's research; unverified here. A profile needs a recorded handshake first (rule at line 33). |
+| A2A, MCP-server-as-agent, Agent SDK | Shims that reach core as ACP over stdio in v1 (design §3.2); a native executor only when the §3.6 criteria are met. The profile `transport` field reserves `a2a-http`. |
+| ACP server (OMP as the agent) | An ACP controller surface exists in `crates/app` (proofs in `crates/app/tests/acp_spine.rs`). This record makes no new decision about it. |
+
+**Gate on design Q18 (extension data supplying the argument vector).** Three fresh-context reviewers (EGM personas; see ADR 0053's evidence section) advised deferring acceptance. The design's three conditions are not controls on their own: one depends on a human reading an approval screen, one (first-party only) cannot be enforced because core cannot tell a first-party extension from another, one is documentation. Before Q18 is accepted, core needs these checks, none of which exist today: an enforcement canary at first open (a forbidden write must be denied); an environment allowlist, not a name denylist; a digest covering every file the launch names and the `[evidence]` block; refusal of an interpreter as the program (a Node bridge with `-e` is arbitrary code); and sanitized text on the approval screen. The executor spawns the child with the user's privileges and no OMP sandbox around it (`crates/envd/src/acp_client/executor.rs`, reviewer-cited, not re-read), and a vendor sandbox may fail open (Grok, `crates/driver/src/delegated_acp.rs:21-32`). The decision stays with the owner.
+
+Where executors are chosen and wired into real work: ADR 0052. Where a delegated agent's work is judged: ADR 0053.

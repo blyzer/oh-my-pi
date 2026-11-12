@@ -72,6 +72,18 @@ changed nothing observable (`none` never disabled isolation). The rest of the de
 every writing child works in its own view and returns a patch or branch that the parent applies
 under its own policy.
 
+## Amendment (2026-11-12): parallel isolation, integration conflicts and the term OVNFS
+
+Owner direction, 2026-11-12 (roadmap P3): independent ADW phases run concurrently, each in its own isolated workspace, their produced artifacts are tracked, and integration conflicts are detected so changes are reviewed and integrated without silently overwriting one another.
+
+- The decision above already gives each writer a copy-on-write view and returns a content-addressed patch or branch. The addition: the parent integrates patches one at a time through the coordinator (ADR 0039 B12); two patches that touch the same path or the same hunk are an integration conflict that is reported, never resolved by last-writer-wins. A conflict creates a work item for a human or an executor under ADR 0052; it does not retry silently.
+- Each view records its base manifest digest, so a patch is applied only to a workspace generation it can be checked against.
+- Parallelism needs a concurrent ADW driver (`Step::Wait` currently ends the run, ADR 0051 Context); that is roadmap P3 and is not implemented.
+- **OVNFS** is §stencil-hq/ovnfs§ (Go, public; owner-supplied 2026-11-12; README read, source not read). Per its README it gives agents isolated, copy-on-write views of any folder, a git repository or not, opened without copying it. The agent works in the checkout, the owner reviews with §ovnfs diff§ and merges back with a three-way §ovnfs apply§. Checkouts can be snapshotted, forked and attached to another machine, where content arrives on first read (§ovnfs attach§, §send§, §push§). One daemon serves every checkout as folders of a single mount: NFSv3 on macOS, FUSE on Linux (needs §fusermount3§), SMB or WinFsp on Windows; no root. It is the same shape as this record's decision (a view per writer, a diff back, the parent applies), delivered as an external daemon.
+  - **How it fits OMP2 (proposal, unverified):** an isolation backend behind the existing view interface, selected by a setting, as this record's "future targets" already allow for overlayfs and snapshots; not a replacement for the built-in clone-based view. The coordinator drives §new§, §diff§, §apply§, §rm§ and §prune§ per phase (ADR 0051 workspace reference; the conflict rule above is the §apply§ three-way merge). It would be an extension, because it is a vendor tool in Go with a mount daemon (ADR 0049).
+  - **Open before design:** the Go and daemon dependency and its license (§LICENSE§ not read); NFS loopback and FUSE behavior under §omp-sandbox§; whether §ovnfs apply§ conflicts surface as data OMP can route; behavior of the §.git§ directory and gitignored paths (ADR 0007's open gap); Windows. None of these was tested.
+- Sandbox providers that fork copy-on-write from a snapshot and can pause to disk (the owner's reference: Vibemon, `stencil-hq/vibemon`, an E2B-API microVM platform, [ext] README) fit the view/sandbox role here as an execution-backend extension (ADR 0052 D8); fit is unverified.
+
 ## Status in omp
 
 **Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, with per-file reflink and a copy fallback as the only backend. Decided 2026-11-01: the gitignore allowlist is empty, so gitignored files are not copied. That is the rule, not an open gap. (Verified 2026-10-05 against `omp2` at `6bfa10e313`, after the convar cleanup.)
