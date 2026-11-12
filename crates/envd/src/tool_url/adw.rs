@@ -638,4 +638,60 @@ mod tests {
 				.contains("No ADW runs recorded.")
 		);
 	}
+
+	/// Reads one full `adw://` URI the way the read tool does: parse, then
+	/// dispatch through the registry table.
+	async fn registry_read(
+		table: &omp_tools::read::resolver::ResolverTable<super::super::UrlResolver>,
+		uri: &str,
+	) -> Result<String, Fault> {
+		let parsed = omp_tools::read::selector::parse_uri(uri)
+			.expect("uri parses")
+			.expect("uri has a scheme");
+		assert_eq!(parsed.scheme, omp_tools::read::resolver::Scheme::Adw);
+		table
+			.read(parsed.scheme, parsed.resource, &parsed.selector)
+			.await
+			.expect("adw:// has a registered reader")
+			.map(|bytes| String::from_utf8(bytes.to_vec()).unwrap())
+	}
+
+	#[tokio::test]
+	async fn adw_reads_through_the_url_registry() {
+		let temp = tempfile::tempdir().unwrap();
+		let run = "01EEEEEEEEEEEEEEEEEEEEEEEE";
+		write_run(temp.path(), run, "ship", "2026-02-01T00:00:00Z", &[
+			dispatch("build", 1),
+			settle("build", 1, SettleStatus::Rejected, "tests fail"),
+			dispatch("build", 2),
+			RunRecord::Halt(RunHalt { reason: Str::new("operator cancelled") }),
+		]);
+		let mut builder = omp_tools::read::resolver::ResolverTable::builder();
+		builder
+			.register(
+				super::super::adw_scheme_entry(),
+				super::super::UrlResolver::Adw(AdwResolver::new(temp.path().to_path_buf())),
+			)
+			.expect("adw resolver is unique");
+		let table = builder.build();
+
+		let listing = registry_read(&table, "adw://runs").await.unwrap();
+		assert!(listing.contains(&format!("adw://{run}")), "{listing}");
+		assert!(listing.contains("outcome: halted: operator cancelled"), "{listing}");
+		assert_eq!(listing, registry_read(&table, "adw://").await.unwrap());
+
+		let detail = registry_read(&table, &format!("adw://{run}"))
+			.await
+			.unwrap();
+		assert!(detail.contains("### build"), "{detail}");
+		assert!(
+			detail.contains("attempt 1: ") && detail.contains("rejected: tests fail"),
+			"{detail}"
+		);
+		assert!(detail.contains("attempt 2: ") && detail.contains("not settled"), "{detail}");
+		assert!(detail.contains("Halted: operator cancelled"), "{detail}");
+
+		let refused = registry_read(&table, "adw://../x").await.unwrap_err();
+		assert!(matches!(refused, Fault::Invalid { .. }), "{refused:?}");
+	}
 }

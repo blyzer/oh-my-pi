@@ -546,6 +546,13 @@ pub(super) fn local_scheme_entry() -> SchemeEntry {
 		.with_capabilities(true, true, true)
 }
 
+/// Policy for `adw://`: readable, listable, and completable recorded workflow
+/// runs; never minted or written by the model.
+pub(super) fn adw_scheme_entry() -> SchemeEntry {
+	SchemeEntry::new(Scheme::Adw, true, false, "recorded ADW workflow runs")
+		.with_capabilities(true, false, true)
+}
+
 /// Builds the production internal URL table and shared conflict registry.
 pub(super) fn production_url_resolvers(
 	conflicts: Arc<ConflictRegistry>,
@@ -723,11 +730,7 @@ pub(super) fn production_url_resolvers(
 		)
 		.expect("omp URL resolver is unique");
 	builder
-		.register(
-			SchemeEntry::new(Scheme::Adw, true, false, "recorded ADW workflow runs")
-				.with_capabilities(true, false, true),
-			UrlResolver::Adw(adw::AdwResolver::from_data_dir()),
-		)
+		.register(adw_scheme_entry(), UrlResolver::Adw(adw::AdwResolver::from_data_dir()))
 		.expect("adw URL resolver is unique");
 	Arc::new(builder.build())
 }
