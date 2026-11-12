@@ -245,6 +245,6 @@ Once the repository belongs to an organization:
 
 1. Repository settings, Rules, Rulesets, `omp2-protected`: enable "Require merge queue". Keep the merge method Merge commit, the group size at 1 to start, and "Only merge non-failing pull requests".
 2. Leave the required status checks as they are (every one is a job of `ci.yml`, listed in `.github/rulesets/omp2-protected.json`). A queue run reports each of them because every job is a `merge_group` job of the same workflow.
-3. Runners: a queued run is code a maintainer chose to enqueue, so the fork test on `runs-on` (which keys on `pull_request`) does not apply to it. Enqueue a pull request from another repository only after reading it, as you would before approving its workflow runs.
+3. Runners: the fork test on `runs-on` keys on `pull_request`, so it does not apply to a queued run. A queued pull request from another repository would run its own `ci.yml` and scripts on the self-hosted runners with the BuildBuddy key. Do not enqueue pull requests from other repositories; merge them another way, or read every changed file in `.github/`, `scripts/` and `justfile` first.
 
 Rollback: disable "Require merge queue" in the same ruleset; `ci.yml` still works without it, the `merge_group` trigger simply never fires.
