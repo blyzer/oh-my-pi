@@ -3,9 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use omp_core::Str;
+use omp_vcs::StatusSummary;
 use tokio_util::sync::CancellationToken;
-
-use self::git::diff::StatusCounts;
 
 pub mod git;
 
@@ -34,7 +33,7 @@ pub struct RepositorySnapshot {
 	/// Current branch name when `HEAD` is attached.
 	pub branch:        Option<Str>,
 	/// Current index, worktree, and untracked change counts.
-	pub status_counts: StatusCounts,
+	pub status_counts: StatusSummary,
 }
 
 /// Failure to capture a repository snapshot.
@@ -59,7 +58,7 @@ pub async fn snapshot(
 			primary_root:  None,
 			head:          None,
 			branch:        None,
-			status_counts: StatusCounts::default(),
+			status_counts: StatusSummary::default(),
 		});
 	};
 	let worktree_root = repository.root().to_owned();
@@ -70,7 +69,7 @@ pub async fn snapshot(
 			repository.head_id()?,
 			repository.label()?,
 			if bare {
-				omp_vcs::StatusSummary::default()
+				StatusSummary::default()
 			} else {
 				repository.status_summary()?
 			},
@@ -84,11 +83,7 @@ pub async fn snapshot(
 			primary_root:  Some(primary_root),
 			head:          head.map(Str::from),
 			branch:        branch.map(Str::from),
-			status_counts: StatusCounts {
-				staged:    status.staged,
-				unstaged:  status.unstaged,
-				untracked: status.untracked,
-			},
+			status_counts: status,
 		}),
 		Err(
 			omp_vcs::Error::Cli { exit_code: 127, .. }
@@ -100,7 +95,7 @@ pub async fn snapshot(
 			primary_root:  Some(primary_root),
 			head:          None,
 			branch:        None,
-			status_counts: StatusCounts::default(),
+			status_counts: StatusSummary::default(),
 		}),
 		Err(error) => Err(error.into()),
 	}

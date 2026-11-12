@@ -1,0 +1,24 @@
+[package]
+name = "omp-grep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Binding-free regex search over in-memory bytes and workspace files: ripgrep engine with PCRE2 fallback"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytecount.workspace = true
+grep-matcher.workspace = true
+grep-pcre2.workspace = true
+grep-regex.workspace = true
+omp-core.workspace = true
+omp-walker.workspace = true
+regex.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

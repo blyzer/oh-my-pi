@@ -15,6 +15,12 @@ sits below both and can be reasoned about as data in, data out.
   contributions.
 - `lock`: reproducible lockfiles and local installed/enabled records.
 - `resolver`: the `uv` resolution driver and R1-R12 policy checks.
+- `scheme`: the manifest `[[schemes]]` URL-scheme claims (ADR 0050 S1). Each
+  claim has one canonical spelling (ASCII-lowercased, then
+  `^[a-z][a-z0-9+.-]*$`, at most 64 bytes), unique after lowercasing, at most
+  32 per manifest; `SchemeDeclarations::claim` refuses an unclaimed name.
+  Built-in wire names are refused in `omp-py`, which packs the URL vocabulary.
+  Claims are stored inert until S2 binds them.
 - `trust`: signature verification, trust tiers, and the local grant file
   (`<data>/ext/grants.toml`), including operator approvals of plugin-launched
   commands and workspace trust rows. Every write is a locked read-modify-write

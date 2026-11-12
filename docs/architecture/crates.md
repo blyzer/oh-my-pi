@@ -63,8 +63,8 @@ a convar declaration plus command stream, with archived values represented by cf
 ## Supporting engines
 
 `omp-core` supplies allocation-aware primitives; `omp-proto` owns generated wire contracts;
-`omp-observability` owns diagnostics and telemetry. The document authority and in-process grep now live
-inside `omp-envd`. Resource and editing engines include `omp-ast`, `omp-walker`, `omp-ar`,
+`omp-observability` owns diagnostics and telemetry. The document authority lives inside `omp-envd`;
+in-process grep is the separate `omp-grep` crate. Resource and editing engines include `omp-ast`, `omp-walker`, `omp-ar`,
 and `omp-edit`, while tolerant JSON parsing is provided by `omp_core::slopjson`. These are libraries
 below the production spine and never assemble a competing agent/session stack.
 
