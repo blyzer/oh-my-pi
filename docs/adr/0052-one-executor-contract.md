@@ -37,6 +37,35 @@ Area: runtime
 
 **D10. Authority never escalates through delegation.** A child executor receives the parent's effective authority or less, and its budget is carved from the parent's (budgets are hierarchical across goals, workflows, subagents and external harnesses).
 
+## Implementation guide: a MicroVM execution backend (owner-supplied recommendation, 2026-11-12)
+
+This section records the owner's recommended direction as a guide for the harness-as-host and sandbox work in D8. The vendor facts (SmolVM, Microsandbox, Vibemon behavior) come from the owner and were not checked here, except where marked as read. It is a proposal; the open items must be settled before code.
+
+**Shape.** One generic MicroVM capability behind the execution contract, with vendors as adapters:
+
+```
+OMP2 Factory / ADW
+      v
+ExecutionBackend            (crates/exec/src/backend.rs)
+  +-- LocalBackend, SshBackend, ReapiBackend      (existing)
+  +-- MicroVmBackend                              (proposed)
+        +-- E2B/Vibemon adapter                   (implement first)
+        +-- SmolVM adapter, Microsandbox adapter  (later, to test the contract)
+```
+
+**What already exists.** `ExecutionBackend` has `start` and `reattach`; `ExecutionRun` has a streamed `next_event`, `cancel` and `detach` (dropping an undetached run cancels it); `BackendCapabilities` is where optional behavior is declared (read at `crates/exec/src/backend.rs:139-175`). So creation, execution, streaming, cancellation, reattachment and teardown already have a home. Gaps to specify: **status** (a query without an event stream), **artifact transfer** in and out of the guest (the `vmon.ts` `copyTo`, `copyDirectory`, `readFile` shape), and whether `ExecutionRequest` can express an arbitrary guest command, since `crates/exec` is shaped around cargo and just recipes (`cargo_just.rs`; not checked whether the request type is general).
+
+**Minimum production contract:** create, exec, stream, cancel, status, reattach, teardown, artifact transfer. **Optional capabilities, never assumed by every backend:** checkpoint, restore, fork, pause to disk and resume on another node. They are declared in `BackendCapabilities`; a caller that needs one asks for it, and a backend without it is refused for that assignment, not degraded (D2).
+
+**Three safeguards (normative for this backend):**
+1. **Workspace isolation.** A VM is not automatically safe to modify the main repository. The owner reports that SmolVM's coding-agent example mounts the host project read/write, so guest edits change host files at once (unchecked here). Every worker receives an isolated worktree or staged workspace (ADR 0007 and its OVNFS note); its changes reach the main tree only through the verification and integration gate (ADR 0039 B12, ADR 0053). A host mount that is writable to the real tree is refused.
+2. **Authority.** OMP2 owns job status, permissions, budgets and acceptance. A VM checkpoint preserves running processes; it never certifies that acceptance criteria passed (ADR 0053 D6).
+3. **Recovery.** The VM identity, checkpoint reference and execution id are written to the journal before the effect is dispatched (ADR 0051 D4, D5). After a restart the coordinator reattaches (`reattach` with a `ReattachHandle`) or reconciles the worker; it never launches the same work again blindly. A VM that cannot be reattached settles as `EffectsUnknown`, the outcome the contract already defines for a lost run.
+
+**Order of work (proposal):** (1) read the rest of the OMP1 metaharness and decide how `TrialVm`'s lifecycle maps to `start` and `reattach`; (2) a mock MicroVM backend in `omp-exec` tests to fix the contract gaps above; (3) the E2B/Vibemon adapter as an extension (Vibemon speaks the E2B API, per its README), proven on one workload; (4) a second adapter only if it exposes a gap; (5) isolation per safeguard 1 before any write access to a real tree.
+
+**Open:** where MicroVM-specific capability flags live; how the gateway for inference (as in `startGateway`) is expressed (ADR 0039 K2); host requirements (KVM or HVF) and CI coverage; cost and quota accounting for VM time (B8).
+
 ## Consequences
 
 - One workflow can run a phase on native OMP2, Codex or an ACP agent by changing assignment policy, not the workflow.
