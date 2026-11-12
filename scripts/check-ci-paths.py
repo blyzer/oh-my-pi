@@ -12,6 +12,8 @@ counts as passing. This script verifies the pieces that must agree:
   a pull request) is also in .github/ci-paths.txt, and exactly the jobs in RUST_JOBS
   gate on the `rust` output of the `changes` job, never on `ci` alone;
 * ci.yml's `pull_request` trigger carries no `paths` or `paths-ignore` filter;
+* ci.yml triggers on `merge_group` (`checks_requested`), and its `changes` job runs everything
+  when the event has no pull request number, so a merge queue gets every required check;
 * every required status check in .github/rulesets/omp2-protected.json is the
   `name:` of a job in ci.yml, because a required check is matched by name;
 * in every workflow a pull request can start, a job whose `runs-on` could name
@@ -235,6 +237,15 @@ def main() -> int:
         if block(pull_request, key, 4):
             ok = False
             print(f"ci.yml pull_request must not filter on `{key}`: required checks would stay pending")
+
+    if not any("checks_requested" in line for line in block(on, "merge_group", 2)):
+        ok = False
+        print("ci.yml must trigger on merge_group with types: [checks_requested]: a merge queue waits for every required check")
+    changes_job = "\n".join(block(jobs, "changes", 2))
+    for needle in ('[ -z "$PULL_REQUEST" ]', 'echo "ci=true"', 'echo "rust=true"'):
+        if needle not in changes_job:
+            ok = False
+            print(f"the changes job must run everything when there is no pull request number: missing {needle}")
 
     names = set(job_names(ci))
     required = [

@@ -34,6 +34,8 @@ on:
   # job is skipped, which a required check counts as passing.
   pull_request:
     branches: [main, omp2]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
@@ -86,6 +88,7 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # An event without a pull request number (push, merge_group, dispatch) runs everything.
           # ci   = .github/ci-paths.txt: needs the light CI-infrastructure jobs.
           # rust = .github/ci-rust-paths.txt: can change compiled or tested Rust
           #        behaviour; only then do the heavy jobs run on a pull request.
@@ -371,29 +374,25 @@ jobs:
           set -euo pipefail
           head=$(gh api "repos/$REPO/commits/$SHA/pulls" \
             --jq "[.[] | select(.merge_commit_sha == \"$SHA\")][0].head.sha // empty")
-          if [ -z "$head" ]; then
-            echo "No pull request was merged as $SHA; running the macOS job"
-            exit 0
-          fi
           pushed=$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha)
           encoded=$(jq -rn --arg name "$CHECK" '$name | @uri')
-          runs=$(gh api --paginate "repos/$REPO/commits/$head/check-runs?check_name=$encoded&filter=all" \
-            --jq '.check_runs[] | select(.app.slug == "github-actions" and .conclusion == "success") | .id')
-          if [ -z "$runs" ]; then
-            echo "Head $head has no successful '$CHECK' run; running the macOS job"
-            exit 0
-          fi
-          for run in $runs; do
-            proved=$(gh api "repos/$REPO/check-runs/$run/annotations" \
-              --jq '[.[] | select(.title == "proved-tree") | .message][0] // empty')
-            if [ "$proved" = "$pushed" ]; then
-              echo "Tree $pushed already passed '$CHECK' (check run $run on $head); skipping the macOS job"
-              echo "verified=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "Check run $run proved tree '${proved:-unrecorded}', not $pushed"
+          # A merge queue pushes the very commit its merge_group run tested, so $SHA
+          # itself can carry the proof; a plain merge carries it on the pull request head.
+          for commit in "$SHA" $head; do
+            runs=$(gh api --paginate "repos/$REPO/commits/$commit/check-runs?check_name=$encoded&filter=all" \
+              --jq '.check_runs[] | select(.app.slug == "github-actions" and .conclusion == "success") | .id')
+            for run in $runs; do
+              proved=$(gh api "repos/$REPO/check-runs/$run/annotations" \
+                --jq '[.[] | select(.title == "proved-tree") | .message][0] // empty')
+              if [ "$proved" = "$pushed" ]; then
+                echo "Tree $pushed already passed '$CHECK' (check run $run on $commit); skipping the macOS job"
+                echo "verified=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "Check run $run proved tree '${proved:-unrecorded}', not $pushed"
+            done
           done
-          echo "No successful '$CHECK' run on $head proved tree $pushed; running the macOS job"
+          echo "No successful '$CHECK' run proved tree $pushed on $SHA or its pull request head; running the macOS job"
 
   rust:
     name: Rust workspace and acceptance proofs
