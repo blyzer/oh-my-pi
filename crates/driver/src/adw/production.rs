@@ -200,9 +200,12 @@ impl ProductionAdwHost {
 	async fn run_child(
 		&self,
 		prompt: Str,
+		kind: PhaseKind,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
-		let (model, model_override) = self.model_phase_selector();
+		let (model, model_override) = self.model_phase_selector_for(kind);
+		let _restore =
+			(model_override && !self.model_override).then(|| RestoreModel::capture(&self.ctx));
 		let (mut kernel, mut session, _) = compose_kernel(
 			&self.data_dir,
 			&self.root,
@@ -227,6 +230,20 @@ impl ProductionAdwHost {
 	/// then the `@smol` fallback selector.
 	fn model_phase_selector(&self) -> (&str, bool) {
 		(self.model.as_str(), self.model_override)
+	}
+
+	/// Chooses the selector for one phase of `kind`.
+	///
+	/// A `Review` phase judges another phase's output, so it runs on the
+	/// `@judge` role rather than the producer's selector (ADR 0053 D2, D3). An
+	/// explicit `--model` stays authoritative for every phase. The second value
+	/// is whether the child kernel must apply the selector instead of the
+	/// inherited `ai_model`.
+	fn model_phase_selector_for(&self, kind: PhaseKind) -> (&str, bool) {
+		if kind == PhaseKind::Review && !self.model_override {
+			return ("@judge", true);
+		}
+		self.model_phase_selector()
 	}
 
 	async fn run_command(
@@ -364,6 +381,27 @@ impl ProductionAdwHost {
 /// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
 /// workflow is project input already, and a project must not also choose
 /// the code its phases' kernels load.
+/// Puts the `ai_model` a child run replaced back when the run ends, whatever
+/// the outcome, so a review phase's `@judge` never becomes the next producer's
+/// model. The driver runs one phase at a time, so the shared value is not
+/// contended.
+struct RestoreModel<'a> {
+	ctx:      &'a omp_con::Ctx,
+	previous: Str,
+}
+
+impl<'a> RestoreModel<'a> {
+	fn capture(ctx: &'a omp_con::Ctx) -> Self {
+		Self { ctx, previous: omp_agent::AI_MODEL.get(ctx) }
+	}
+}
+
+impl Drop for RestoreModel<'_> {
+	fn drop(&mut self) {
+		let _ = omp_agent::AI_MODEL.set(self.ctx, self.previous.clone());
+	}
+}
+
 fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -> KernelOptions {
 	KernelOptions {
 		ephemeral: true,
@@ -464,7 +502,7 @@ impl AdwHost for ProductionAdwHost {
 			},
 			PhaseSpec::Prompt { text } => {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
-				let answer = self.run_child(prompt, cancel).await?;
+				let answer = self.run_child(prompt, phase.kind, cancel).await?;
 				Ok(judge(phase.kind, answer))
 			},
 		}
@@ -900,6 +938,43 @@ requires = { network = "disabled" }
 		assert!(!explicit);
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
 		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[test]
+	fn review_phases_use_the_judge_role_unless_the_operator_chose_a_model() {
+		let project = tempfile::tempdir().expect("project");
+		let open = |model: Str, explicit: bool| {
+			ProductionAdwHost::open(
+				project.path().to_path_buf(),
+				project.path().join("data"),
+				model,
+				explicit,
+				Arc::new(omp_con::Ctx::new()),
+				TRUSTED,
+			)
+			.expect("workflow host")
+		};
+		let implicit = open(sf!("@smol"), false);
+		assert_eq!(implicit.model_phase_selector_for(PhaseKind::Review), ("@judge", true));
+		assert_eq!(implicit.model_phase_selector_for(PhaseKind::Agent), ("@smol", false));
+		let explicit = open(sf!("flag/model"), true);
+		assert_eq!(explicit.model_phase_selector_for(PhaseKind::Review), ("flag/model", true));
+		assert_eq!(explicit.model_phase_selector_for(PhaseKind::Agent), ("flag/model", true));
+	}
+
+	#[test]
+	fn a_review_run_restores_the_model_it_replaced() {
+		let ctx = omp_con::Ctx::new();
+		ctx.exec("ai_model configured/model", omp_con::Source::Config(sf!("test")))
+			.expect("configured model");
+		{
+			let _restore = RestoreModel::capture(&ctx);
+			omp_agent::AI_MODEL
+				.set(&ctx, sf!("@judge"))
+				.expect("judge model");
+			assert_eq!(omp_agent::AI_MODEL.get(&ctx).as_str(), "@judge");
+		}
+		assert_eq!(omp_agent::AI_MODEL.get(&ctx).as_str(), "configured/model");
 	}
 
 	#[test]

@@ -174,7 +174,7 @@ pub fn upsert_role_assignment(
 /// are the stable public contract used by selectors and persisted settings.
 pub const BUILTIN_ROLE_IDS: &[&str] = &[
 	"default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "memory", "task",
-	"advisor",
+	"advisor", "judge",
 ];
 
 /// Parsed, syntax-only model selector annotations.
@@ -462,7 +462,7 @@ fn select_inner(
 					select_inner(models, routes, aliases, roles, mru, &selector, visiting).ok()
 				}),
 				"smol" | "task" => find_smol(models, routes, mru),
-				"slow" | "plan" | "advisor" => find_slow(models, routes, mru),
+				"slow" | "plan" | "advisor" | "judge" => find_slow(models, routes, mru),
 				_ => pick_default(models, routes, mru),
 			};
 			visiting.remove(role);
@@ -1222,6 +1222,25 @@ mod tests {
 			assert_eq!(selected.model, target.model);
 			assert_eq!(selected.thinking.as_deref(), thinking);
 		}
+	}
+
+	#[test]
+	fn unset_judge_role_falls_back_to_the_slow_selection() {
+		let catalog = Catalog::embedded();
+		let roles = known_roles(&[]);
+		assert!(roles.iter().any(|role| role.id == "judge"));
+		let select = |selector: &str| {
+			select_model(
+				catalog.models(),
+				catalog.routes(),
+				catalog.aliases(),
+				&roles,
+				&BTreeMap::new(),
+				selector,
+			)
+			.expect(selector)
+		};
+		assert_eq!(select("@judge").model, select("@slow").model);
 	}
 
 	#[test]
