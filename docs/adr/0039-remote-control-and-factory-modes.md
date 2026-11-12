@@ -599,6 +599,36 @@ place, and its scope table gained the `answer_ui` row.
    `oneof`. One private typed decoder reads it, and its encoding is provisional. The alternatives
    are a proto `oneof`, a typed sub-message, or the provisional JSON.
 
+## Amendment (2026-11-12): workstreams, multi-repository work, the run coordinator and the Issue-to-PR lifecycle
+
+Owner direction, 2026-11-12. This amends Part B (Factory); it adds Part D and changes nothing in Parts A to C.
+
+**Part D. D1. A workstream sits above ADW runs.** Three objects with different lifetimes:
+
+| Object | Responsibility | Lifetime | Where it lives |
+|---|---|---|---|
+| Workstream | Coordinates an evolving objective, its work items and repositories | Days to months | The fleet ledger (B2), a new record type |
+| ADW run | Drives a defined dependency graph to a terminal outcome (ADR 0051) | Minutes to days | Its own run journal, referenced from the workstream |
+| Agent session | Performs assignments through one executor (ADR 0052) | Turns to hours | The session journal |
+
+An ADW run is never itself a workstream. A workstream owns several runs, some concurrent and some dependent on earlier results. A single host is a valid one-worker factory (unchanged from B1), so a workstream works with one local worker.
+
+**D2. Work items and digests.** A work item has `work_item_id`, a request or spec digest and an acceptance revision. Digests identify immutable input, not mutable state: the workflow definition digest (ADR 0051 D2), the executor capability snapshot digest (ADR 0052), the workspace-generation digest and artifact SHA-256s (B7), and the lease generation (B3). Together they answer which specification, source revision, agent, permission policy and test evidence produced a given pull request.
+
+**D3. Roles, kept apart.** The Foreman is an LLM agent role that proposes an approach, chooses a specialist and asks a human for decisions. ADW is the orchestrator: dependencies, sequencing, retries. The coordinator is deterministic Rust: authoritative state, leases, fencing, recovery and enforcement. The scheduler (the existing workpool and fleet placement, B5) chooses where and when. Workers are native OMP2 or delegated harnesses. The judge is gates plus an independent verdict (ADR 0053). Rule: the Foreman proposes and the coordinator enforces; no model output can change a lease, a permission or a recorded verdict. The Foreman has no authority over the journal, the scheduler or the environment.
+
+**D4. Multi-repository coordination.** A workstream references a set of repositories. Each repository has its own workspace generation, worktree and forge adapter (`omp-forge` through ADR 0049's contracts; no provider-specific code in core). Dependencies are edges between work items, not between repositories. Cross-repository atomic merge is not attempted. A change set spanning repositories is an ordered group in the ledger: every repository's gates and independent verdict must pass before the first merge, merges follow the declared order through the coordinator-only integration of B12, and a failure after the first merge produces a recorded compensation plan for a human or a policy to apply (for example, revert pull requests), never a silent partial state. Extension points: repository providers, dependency discovery and release-train rules.
+
+**D5. The Issue-to-PR lifecycle is a workflow recipe, not core.** Stages: intake, triage, plan (approval), implement (isolated workspace), verify (gates), review (independent verdict), integrate (push, pull request, merge), close. It is a first-party workflow extension over `omp-forge` and `omp-ci`, with ADW supplying phase semantics and the run journal supplying durability. Intake sources (GitHub, GitLab, another tracker) and any stage handler are extension points, so a project can replace or extend a stage without changing core. Every external mutation (push, pull request, merge, comment, close) carries an idempotency key and a reconciler (ADR 0051 D5). B10 and open question 10 (push and pull request creation as a gated phase kind; who holds forge credentials) apply: the gate, not the executor, holds the credential.
+
+**D6. Factory invariants (normative).** (1) Acceptance is evidence-based: a completion claim cannot override a failed required check (ADR 0053). (2) Exactly-once effects are not assumed: effects need idempotency keys or recovery reconciliation. (3) Permissions cannot escalate through delegation: a child inherits or narrows the parent's authority. (4) Every change has provenance: creating agent, harness, model, session, workflow phase, workspace and verification results. (5) Recovery is explicit: a crashed executor is recoverable or uncertain, never automatically successful. (6) Parallelism is isolated: each writer has its own filesystem view and integration is an authorized operation (ADR 0007). (7) Budgets are hierarchical across goals, workflows, subagents and external harnesses (B8).
+
+**D7. Durable coordinator.** The coordinator's durability is the run journal and the fleet ledger. The options and the staged plan are in `docs/research/durable-run-coordinator.md`; the recommendation is an event-sourced journal with deterministic replay into `omp-adw::Run`, not a second engine and not an external service.
+
+**Resolves or narrows open questions.** Question 8 (new crate `omp-fleet` or a module in `omp-adw`): workstream and work-item types go in the pure fleet crate if it is created, never in `omp-adw`, which stays about one run. Question 10 is answered for the Issue-to-PR recipe as above; other recipes follow the same rule.
+
+**Not decided here.** (No fleet crate exists yet, so workstream types have no home until one is created; B3's lease protocol is the fleet one, and the single-host lease is ADR 0051 D6.) The workstream record schema; the compensation policy language; how a workstream is created from a human request (the Foreman path versus a ticket). These need the owner.
+
 ## Status in omp
 
 **Status: Partially implemented.** R2 is complete: Submit, Approve, and AnswerUi are served by `crates/serve/src/session.rs:SessionControlRpc::{submit,approve,answer_ui}` and `crates/driver/src/session_wire.rs:SessionWire::{submit,approve,answer_ui}`. Local attach uses `crates/app/src/attach_cmd.rs:run`. New-session Open is served by `crates/serve/src/session.rs:SessionControlRpc::open` and `crates/driver/src/session_wire.rs:SessionWire::open_session`; resume and fork remain `UNIMPLEMENTED` in `SessionControlRpc::open`. Remaining phases are R3a, R3b, R4 and F1-F4; network and fleet status was not reassessed.

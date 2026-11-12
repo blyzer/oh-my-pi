@@ -204,6 +204,26 @@ ADR status: **accepted by the owner 2026-11-11 with conditions**. Placement is A
 - **BLOCKED** S4: `/reload-plugins` → `Mutation::ReloadExtensions` → `ExtensionReloadHandle::reload` rebinds the generation; `quarantine_extensions` drops that extension's schemes and keeps static routes.
 - **BLOCKED** S5: model-facing listing without a roster change, plus the conformance read, selector, reload, and quarantine test.
 
+## ADRs 0051 to 0053 and the factory and harness plan (2026-11-12)
+
+Owner prompt 2026-11-12, roadmap P0 to P5. New records: [0051](0051-durable-resumable-adw-runs.md) durable ADW, [0052](0052-one-executor-contract.md) one executor contract and harness adapters, [0053](0053-independent-verdicts.md) independent verdicts. Amended in place: [0039](0039-remote-control-and-factory-modes.md) (Part D: workstreams, multi-repository, Issue-to-PR, invariants), [0043](0043-native-cli-integration.md) (vendor coverage, A2A, a gate on Q18), [0007](0007-subagent-filesystem-isolation.md) (parallel isolation, conflicts, OVNFS). Research: `docs/research/durable-run-coordinator.md`. Already decided and not redone: ACP client with launch profiles and A2A as shims (0043 and `docs/design/acp-extension-profiles.md`).
+
+- **OPEN** P0 (ADR 0052 D6): wire `ExecutorRegistry` and `run_delegated_turn` (`crates/driver/src/delegated_host.rs`) into one production path; prove it with one real Codex task (stream, cancel, journal kept, denied permission stays denied). Today nothing outside that file uses either.
+- **OPEN** P1 (ADR 0051): `RunStore` trait, run journal, `Run` replay constructor, `omp adw resume`, effect keys and a first reconciler (PR creation). Blocked only on ADR 0051 O1 (extend the journal's kind set, or a separate run journal file).
+- **OPEN** P2 (ADR 0052): router, assignment layer, native OMP2 as an executor.
+- **OPEN** P3 (ADR 0007 amendment, ADR 0051): concurrent ADW driver, isolated workspaces, integration conflict detection. Not started.
+- **OPEN** P4 (ADR 0053, ADR 0039 Part D): `@judge` role, structured verdict, acceptance criteria, Issue-to-PR recipe, workstream ledger. Blocked on ADR 0053 O1.
+- **OPEN** P5: factory API over `omp-rpc` and `omp-sdk`; not designed beyond ADR 0039 Part A.
+- **OPEN** owner decision: what OVNFS means (ADR 0007 amendment). Term unresolved; nothing depends on it.
+- **OPEN** read OMP1's `packages/metaharness/src/tb/vmon.ts` and the metaharness interface before designing a harness-as-host or Vibemon execution-backend extension (ADR 0052 D8). OMP2 has no Vibemon adapter. Unread.
+- **OPEN** owner decisions, with the fresh-context review (EGM personas zoom-out, comprehension, design critic; ADR 0053 evidence section) of 2026-11-12. These supersede the author's earlier recommendations:
+  - `agent_settled` revision: do not take option A as wire-neutral. Python subscribers already put revision 2 on the wire and envd refuses a mismatched revision (`crates/envd/src/tools/hooks.rs:942-950`). The critic reports a Python `agent_settled` hook can never `Continue` today (fail open); only the first half was verified. Decide A or B after an end-to-end test where a Python hook returns `Continue`, and log the dropped Deny.
+  - `omp-exec-ssh` closure: reword the ADR 0049 exit to name both measures. Under the repository's `feature-unification = "workspace"` (`.cargo/config.toml`) the count is about 363 and the exit is open; the 273 figure is a distinct-name count and is not a basis for calling it met.
+  - ACP Q18: defer. Core needs an enforcement canary, an environment allowlist, a digest of every file the launch names plus `[evidence]`, refusal of an interpreter as the program, and sanitized approval text first (ADR 0043 amendment 2026-11-12).
+  - ADR 0040 Gaps 1, 3, 4: do not accept yet. The two Step 2 tests ADR 0040 D1 requires do not exist (`execution_no_node_no_start_on_restart`, `execution_t13_crash_between_acceptance...`). Defer the Gap 2 live check with a hard trigger: before stage-2 work, before enabling `sv_exec_agent_runs` on any other machine, or before any non-test recipe. Keep the default off.
+- **OPEN** ADRs 0051 to 0053 are proposals, not implementation-ready: an EGM implementation-readiness review (2026-11-12) found factual errors, now corrected, and decisions left open, now listed in each record's "Not yet specified" section. Settle those lists before code.
+- **OPEN** the question text for the four decisions above was judged not decidable from its own text for three of them (reviewer finding); rewrite with definitions before asking the owner again.
+
 ## ADR 0048 — schema and serialization boundaries
 
 ADR status: **accepted 2026-10-28; implementation gate open**.

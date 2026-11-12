@@ -72,6 +72,16 @@ changed nothing observable (`none` never disabled isolation). The rest of the de
 every writing child works in its own view and returns a patch or branch that the parent applies
 under its own policy.
 
+## Amendment (2026-11-12): parallel isolation, integration conflicts and the term OVNFS
+
+Owner direction, 2026-11-12 (roadmap P3): independent ADW phases run concurrently, each in its own isolated workspace, their produced artifacts are tracked, and integration conflicts are detected so changes are reviewed and integrated without silently overwriting one another.
+
+- The decision above already gives each writer a copy-on-write view and returns a content-addressed patch or branch. The addition: the parent integrates patches one at a time through the coordinator (ADR 0039 B12); two patches that touch the same path or the same hunk are an integration conflict that is reported, never resolved by last-writer-wins. A conflict creates a work item for a human or an executor under ADR 0052; it does not retry silently.
+- Each view records its base manifest digest, so a patch is applied only to a workspace generation it can be checked against.
+- Parallelism needs a concurrent ADW driver (`Step::Wait` currently ends the run, ADR 0051 Context); that is roadmap P3 and is not implemented.
+- **OVNFS: term unresolved.** The owner's text mentions "ovnfs" as something to implement in OMP2. A search of `crates`, `docs` and `extensions` finds no use of the word. It may mean an overlay or copy-on-write filesystem (this record names overlayfs among "future targets" for the isolation mechanism), but that is a guess and is not adopted. Nothing in this amendment depends on it. The owner needs to say what OVNFS is before it can be designed.
+- Sandbox providers that fork copy-on-write from a snapshot and can pause to disk (the owner's reference: Vibemon, `stencil-hq/vibemon`, an E2B-API microVM platform, [ext] README) fit the view/sandbox role here as an execution-backend extension (ADR 0052 D8); fit is unverified.
+
 ## Status in omp
 
 **Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, with per-file reflink and a copy fallback as the only backend. Decided 2026-11-01: the gitignore allowlist is empty, so gitignored files are not copied. That is the rule, not an open gap. (Verified 2026-10-05 against `omp2` at `6bfa10e313`, after the convar cleanup.)
