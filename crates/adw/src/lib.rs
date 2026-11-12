@@ -30,9 +30,14 @@
 //! ```
 
 mod profile;
+mod replay;
 mod run;
 mod workflow;
 
 pub use profile::{ApprovalScope, NetworkScope, Posture, PostureError, Requirement, WriteScope};
-pub use run::{DEFAULT_MAX_ATTEMPTS, Outcome, Run, RunError, SelectedInput, Step};
+pub use replay::{ReplayError, ReplayEvent, Replayed, replay};
+pub use run::{
+	DEFAULT_MAX_ATTEMPTS, Outcome, PhaseSnapshot, PhaseStatus, Run, RunError, RunSnapshot,
+	SelectedInput, Step,
+};
 pub use workflow::{OnReject, Phase, PhaseKind, PhaseName, Workflow, WorkflowError, WorkflowName};
