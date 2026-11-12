@@ -251,6 +251,9 @@ impl ProductionAdwHost {
 		attempt: u32,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
+		if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
+			return Err(ProductionError::UntrustedWorkspace);
+		}
 		let registry = ExecutorRegistry::from_ctx(&self.ctx);
 		let journals = self.data_dir.join("adw").join("delegated");
 		fs::create_dir_all(&journals)?;
@@ -1009,6 +1012,26 @@ requires = { network = "disabled" }
 		assert!(!explicit);
 		assert_eq!(omp_agent::AI_MODEL.get(&host.ctx).as_str(), "configured/model");
 		assert!(!child_kernel_options(&host.workspace_trust, explicit).model_override);
+	}
+
+	#[tokio::test]
+	async fn a_delegated_phase_is_withheld_in_an_untrusted_workspace() {
+		let project = tempfile::tempdir().expect("project");
+		let host = ProductionAdwHost::open(
+			project.path().to_path_buf(),
+			project.path().join("data"),
+			sf!("@smol"),
+			false,
+			Arc::new(omp_con::Ctx::new()),
+			TrustDecision::Denied,
+		)
+		.expect("workflow host");
+		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent);
+		let result = host
+			.run_delegated("codex", &sf!("do it"), &phase, 1, &CancellationToken::new())
+			.await;
+		assert!(matches!(result, Err(ProductionError::UntrustedWorkspace)), "{result:?}");
+		assert!(!project.path().join("data").join("adw").exists(), "a withheld phase left a journal");
 	}
 
 	#[test]
