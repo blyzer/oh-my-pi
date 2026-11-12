@@ -13,6 +13,7 @@ SPEC.loader.exec_module(affected_crates)
 
 CRATES = ["core", "mid", "tool", "app", "e2e", "reader", "data"]
 DEPENDS_ON = {"mid": ["core"], "tool": ["core"], "app": ["mid"], "e2e": ["app"]}
+BIN_ONLY = {"tool", "e2e"}
 
 
 def package_id(name):
@@ -21,7 +22,13 @@ def package_id(name):
 
 def fixture():
     packages = [
-        {"id": package_id(n), "name": f"omp-{n}", "manifest_path": f"/ws/crates/{n}/Cargo.toml"} for n in CRATES
+        {
+            "id": package_id(n),
+            "name": f"omp-{n}",
+            "manifest_path": f"/ws/crates/{n}/Cargo.toml",
+            "targets": [{"kind": ["bin" if n in BIN_ONLY else "lib"]}],
+        }
+        for n in CRATES
     ]
     nodes = [
         {"id": package_id(n), "deps": [{"pkg": package_id(d)} for d in DEPENDS_ON.get(n, [])]} for n in CRATES
@@ -92,8 +99,36 @@ class AffectedCrates(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(output.read_text(), "scope=subset\nargs=-p omp-tool\n")
+        self.assertEqual(output.read_text(), "scope=subset\nargs=-p omp-tool\ndoc_args=\n")
         self.assertIn("omp-tool", done.stdout)
+
+    def test_a_path_that_belongs_to_nothing_known_reports_every_crate(self):
+        self.assertEqual(self.affected(["vendor-data/blob.bin"])[0], "all")
+        self.assertEqual(self.affected(["crates/tool/src/lib.rs", "newdir/x.txt"])[0], "all")
+
+    def test_known_non_rust_paths_are_ignored_even_next_to_a_crate_change(self):
+        scope, names = self.affected(["docs/adr/x.md", "AGENTS.md", "scripts/a.py", "crates/tool/src/lib.rs"])
+        self.assertEqual((scope, names), ("subset", ["omp-tool"]))
+
+    def test_doctests_are_selected_only_for_crates_with_a_library_target(self):
+        scope, names = self.affected(["crates/core/src/lib.rs"])
+        self.assertEqual(
+            affected_crates.doc_packages(fixture(), names), ["omp-app", "omp-core", "omp-mid"]
+        )
+
+    def test_command_line_lists_library_crates_for_doctests(self):
+        metadata = self.root / "metadata.json"
+        files = self.root / "files.txt"
+        output = self.root / "github-output.txt"
+        metadata.write_text(json.dumps(fixture()))
+        files.write_text("crates/mid/src/lib.rs\n")
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/affected-crates.py"), "--metadata", str(metadata),
+             "--files", str(files), "--root", str(self.root), "--github-output", str(output)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(output.read_text(), "scope=subset\nargs=-p omp-app -p omp-e2e -p omp-mid\ndoc_args=-p omp-app -p omp-mid\n")
 
 
 if __name__ == "__main__":

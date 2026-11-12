@@ -20,6 +20,12 @@ ALL_PREFIXES = (
     "docs/py/",
 )
 ALL_CONFIG_FILES = {"rustfmt.toml", "clippy.toml", "deny.toml", "about.toml"}
+IGNORED_EXACT = {
+    "justfile", "AGENTS.md", "CLAUDE.md", "README.md", ".gitignore", ".gitattributes",
+    ".editorconfig", "THIRD-PARTY-NOTICES.txt", "CODEOWNERS",
+}
+IGNORED_PREFIXES = ("docs/", "scripts/", ".github/", ".claude/", ".idea/", ".vscode/", ".omp/", "LICENSE")
+DOC_TARGET_KINDS = {"lib", "rlib", "dylib", "proc-macro"}
 
 
 def run(cmd: list[str], cwd: Path) -> str:
@@ -89,9 +95,19 @@ def file_read_edges(root: Path, packages: dict[str, dict]) -> dict[str, set[str]
 def triggers_everything(path: str, package_dirs: list[str]) -> bool:
     if any(path == d or path.startswith(d + "/") for d in package_dirs):
         return False
-    if path in ALL_EXACT or path in ALL_CONFIG_FILES:
+    if path in ALL_EXACT or path in ALL_CONFIG_FILES or path.startswith(ALL_PREFIXES):
         return True
-    return path.startswith(ALL_PREFIXES)
+    return not (path in IGNORED_EXACT or path.startswith(IGNORED_PREFIXES))
+
+
+def doc_packages(metadata: dict, names: list[str]) -> list[str]:
+    wanted = set(names)
+    return sorted(
+        package["name"]
+        for package in metadata["packages"]
+        if package["name"] in wanted
+        and any(set(target["kind"]) & DOC_TARGET_KINDS for target in package.get("targets", []))
+    )
 
 
 def affected(metadata: dict, files: list[str], root: Path, exclude: set[str]) -> tuple[str, list[str]]:
@@ -144,13 +160,14 @@ def main() -> int:
         files = changed_files(root, options.base, options.head)
     scope, names = affected(metadata, files, root, set(options.exclude))
     args = " ".join(f"-p {name}" for name in names) if scope == "subset" else ""
+    doc_args = " ".join(f"-p {name}" for name in doc_packages(metadata, names)) if scope == "subset" else ""
 
     print(f"scope={scope} changed_files={len(files)} packages={len(names)}")
     for name in names:
         print(name)
     if options.github_output:
         with open(options.github_output, "a") as handle:
-            handle.write(f"scope={scope}\nargs={args}\n")
+            handle.write(f"scope={scope}\nargs={args}\ndoc_args={doc_args}\n")
     return 0
 
 

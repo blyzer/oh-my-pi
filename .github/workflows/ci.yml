@@ -130,6 +130,7 @@ jobs:
     outputs:
       scope: ${{ steps.scope.outputs.scope }}
       args: ${{ steps.scope.outputs.args }}
+      doc_args: ${{ steps.scope.outputs.doc_args }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -158,6 +159,8 @@ jobs:
         run: python3 scripts/check-ci-paths.py
       - name: Test the CI gate script
         run: python3 scripts/test_check_ci_paths.py
+      - name: Test the affected-crates script
+        run: python3 scripts/test_affected_crates.py
       - name: Check the editing discipline of repo text
         run: python3 scripts/check-editing-discipline.py
 
@@ -562,8 +565,12 @@ jobs:
           set -euo pipefail
           case "$AFFECTED_SCOPE" in
             subset)
-              read -r -a args <<< "$AFFECTED_ARGS"
-              cargo nextest run --profile ci "${args[@]}" --locked
+              if [ -z "$AFFECTED_ARGS" ]; then
+                cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+              else
+                read -r -a args <<< "$AFFECTED_ARGS"
+                cargo nextest run --profile ci "${args[@]}" --locked
+              fi
               ;;
             none) echo "No tested crate is affected; skipping the workspace tests" ;;
             *) cargo nextest run --profile ci --workspace --exclude omp-e2e --locked ;;
@@ -573,13 +580,17 @@ jobs:
       - name: Test doctests
         env:
           AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
-          AFFECTED_ARGS: ${{ needs.affected.outputs.args }}
+          AFFECTED_ARGS: ${{ needs.affected.outputs.doc_args }}
         run: |
           set -euo pipefail
           case "$AFFECTED_SCOPE" in
             subset)
-              read -r -a args <<< "$AFFECTED_ARGS"
-              cargo test --doc "${args[@]}" --locked
+              if [ -z "$AFFECTED_ARGS" ]; then
+                echo "No selected crate has a library target; skipping the doctests"
+              else
+                read -r -a args <<< "$AFFECTED_ARGS"
+                cargo test --doc "${args[@]}" --locked
+              fi
               ;;
             none) echo "No tested crate is affected; skipping the doctests" ;;
             *) cargo test --doc --workspace --exclude omp-e2e --locked ;;
@@ -621,6 +632,7 @@ jobs:
       # was actually proved, and `push_verified` compares a merge commit's tree
       # against it.
       - name: Record the proved tree
+        if: ${{ needs.affected.outputs.scope != 'subset' && needs.affected.outputs.scope != 'none' }}
         run: echo "::notice title=proved-tree::$(git rev-parse 'HEAD^{tree}')"
 
   # The only macOS clippy pass, on its own runner in parallel with `rust`, and

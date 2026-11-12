@@ -89,6 +89,14 @@ class CheckCiPaths(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("CI_AFFECTED_ONLY", out)
 
+    def test_proved_tree_recorded_for_a_narrowed_run_fails(self):
+        self.mutate_ci(
+            "        if: ${{ needs.affected.outputs.scope != 'subset' && needs.affected.outputs.scope != 'none' }}\n", ""
+        )
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("proved-tree", out)
+
     def test_affected_job_on_every_event_fails(self):
         self.mutate_ci("github.event_name == 'pull_request' && vars.CI_AFFECTED_ONLY", "vars.CI_AFFECTED_ONLY")
         code, out = self.run_check()
@@ -128,6 +136,15 @@ class AffectedScopeFallback(unittest.TestCase):
     def test_workspace_tests_run_only_the_selected_crates_for_a_subset(self):
         out = self.run_step("Test workspace", "subset", "-p omp-a -p omp-b")
         self.assertEqual(out, "cargo nextest run --profile ci -p omp-a -p omp-b --locked")
+
+    def test_workspace_tests_run_everything_when_a_subset_has_no_arguments(self):
+        out = self.run_step("Test workspace", "subset", "")
+        self.assertEqual(out, "cargo nextest run --profile ci --workspace --exclude omp-e2e --locked")
+
+    def test_doctests_skip_when_a_subset_has_no_library_crate(self):
+        out = self.run_step("Test doctests", "subset", "")
+        self.assertNotIn("cargo", out)
+        self.assertIn("skipping", out)
 
     def test_workspace_tests_skip_when_nothing_is_affected(self):
         out = self.run_step("Test workspace", "none")

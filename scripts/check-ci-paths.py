@@ -253,6 +253,14 @@ def main() -> int:
             ok = False
             print(f"the changes job must run everything when there is no pull request number: missing {needle}")
 
+    rust_job = "\n".join(block(jobs, "rust", 2))
+    start = rust_job.find("- name: Record the proved tree")
+    proved_if = rust_job[start:].split("\n")[1] if start != -1 else ""
+    for needle in ("needs.affected.outputs.scope != 'subset'", "needs.affected.outputs.scope != 'none'"):
+        if needle not in proved_if:
+            ok = False
+            print(f"the proved-tree notice must not be recorded for a narrowed run: its if lacks {needle}")
+
     names = set(job_names(ci))
     required = [
         rule["context"]
