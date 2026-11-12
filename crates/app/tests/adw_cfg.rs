@@ -2,13 +2,13 @@
 
 use std::{env, fs, path::Path};
 
-use omp_adw::{Posture, WriteScope};
+use omp_adw::{PhaseKind, Posture, WriteScope};
 use omp_app::adw_cmd::open_host;
 use omp_core::Str;
 use omp_driver::adw::AdwHost as _;
 
 fn reported_posture(project: &Path, data: &Path) -> Posture {
-	open_host(project, data.to_path_buf(), Str::new_static("unused-model"))
+	open_host(project, data.to_path_buf(), Str::new_static("unused-model"), false)
 		.expect("workflow host")
 		.posture()
 		.expect("posture")
@@ -34,4 +34,17 @@ fn user_config_cfg_decides_the_reported_posture() {
 	if shipped.write != WriteScope::Unconfined {
 		assert_ne!(shipped, configured, "config.cfg changed the reported posture");
 	}
+}
+
+#[test]
+fn an_explicit_model_flag_keeps_review_phases_on_that_model() {
+	let project = tempfile::tempdir().expect("project");
+	let data = project.path().join("data");
+	let flagged = open_host(project.path(), data.clone(), Str::new_static("flag/model"), true)
+		.expect("flagged host");
+	assert_eq!(flagged.model_phase_selector_for(PhaseKind::Review), ("flag/model", true));
+	let unflagged =
+		open_host(project.path(), data, Str::new_static("default"), false).expect("unflagged host");
+	assert_eq!(unflagged.model_phase_selector_for(PhaseKind::Review), ("@judge", true));
+	assert_eq!(unflagged.model_phase_selector_for(PhaseKind::Agent), ("default", false));
 }
