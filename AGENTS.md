@@ -106,7 +106,10 @@ gates. The measured performance baseline is recorded per omp2 push by
 never in a PR. `Rust workspace and acceptance proofs` is the only macOS job
 that uses the self-hosted Mac in `vars.MACOS_RUNNER` (persistent target dir
 for incremental Rust and embedded CPython). Every other job, including
-`Lint workspace (macOS)`, runs on a GitHub-hosted runner.
+`Lint workspace (macOS)`, runs on a GitHub-hosted runner, unless the repository
+variable `CI_LINUX_MODE` is `remote`: then a trusted run's light Linux jobs use the Mac
+too, two of them hand their Cargo work to BuildBuddy, while fork pull requests stay on
+hosted runners (`docs/research/ci-macos-runner-fallback.md`).
 Lint runs on BOTH
 platforms deliberately: clippy on one target never sees the other's
 `#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until

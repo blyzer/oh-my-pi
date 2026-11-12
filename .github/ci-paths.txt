@@ -5,6 +5,7 @@
 .config/**
 .github/actions/**
 .github/ci-paths.txt
+.github/ci-rust-paths.txt
 .github/workflows/ci.yml
 Cargo.lock
 Cargo.toml

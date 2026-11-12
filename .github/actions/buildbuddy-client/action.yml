@@ -1,13 +1,18 @@
 name: Install BuildBuddy client
-description: Restore or download and cache the pinned bb binary, then add it to PATH.
+description: >-
+  Restore or download and cache the pinned bb binary, then add it to PATH. Linux x86_64 (the
+  GitHub-hosted runners) and macOS arm64 (the self-hosted Mac, for vars.CI_LINUX_MODE=remote).
 
 inputs:
   version:
     description: BuildBuddy client version to install
     default: '5.0.492'
   sha256:
-    description: Expected SHA-256 of the downloaded binary
+    description: Expected SHA-256 of the downloaded linux-x86_64 binary
     default: 'e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9'
+  sha256-darwin-arm64:
+    description: Expected SHA-256 of the downloaded darwin-arm64 binary
+    default: '3cb6cf0c2f866c5db3d4efbb6a28f7a142c7a0b69b8bf876226aa3f6560718df'
 
 runs:
   using: composite
@@ -17,7 +22,8 @@ runs:
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ${{ runner.temp }}/bin/bb
-        key: bb-${{ inputs.version }}
+        # Linux x86_64 keeps the original key; any other platform gets its own entry.
+        key: bb-${{ inputs.version }}${{ (runner.os != 'Linux' || runner.arch != 'X64') && format('-{0}-{1}', runner.os, runner.arch) || '' }}
 
     - name: Download and verify bb binary
       if: steps.cache.outputs.cache-hit != 'true'
@@ -25,13 +31,24 @@ runs:
       env:
         BB_VERSION: ${{ inputs.version }}
         BB_SHA256: ${{ inputs.sha256 }}
+        BB_SHA256_DARWIN_ARM64: ${{ inputs.sha256-darwin-arm64 }}
       run: |
         set -euo pipefail
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) asset=linux-x86_64 sha=$BB_SHA256 ;;
+          macOS/ARM64) asset=darwin-arm64 sha=$BB_SHA256_DARWIN_ARM64 ;;
+          *) echo "::error::no pinned bb binary for $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+        esac
         mkdir -p "$RUNNER_TEMP/bin"
         curl --fail --location --silent --show-error \
-          "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-linux-x86_64" \
+          "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-${asset}" \
           --output "$RUNNER_TEMP/bin/bb"
-        printf '%s  %s\n' "$BB_SHA256" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
+        # macOS has a BSD sha256sum without --check/--status; shasum has both.
+        if [ "$RUNNER_OS" = macOS ]; then
+          printf '%s  %s\n' "$sha" "$RUNNER_TEMP/bin/bb" | shasum -a 256 --check --status
+        else
+          printf '%s  %s\n' "$sha" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
+        fi
         chmod 0755 "$RUNNER_TEMP/bin/bb"
 
     - name: Ensure bb is executable after cache restore

@@ -9,6 +9,7 @@ on:
       - ".config/**"
       - ".github/actions/**"
       - ".github/ci-paths.txt"
+      - ".github/ci-rust-paths.txt"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -47,22 +48,37 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # vars.CI_LINUX_MODE: unset (or anything but `remote`), every Linux job below
+  # runs on GitHub-hosted ubuntu-24.04, as before. `remote` moves a trusted
+  # run's light Linux jobs to the self-hosted Mac (vars.CI_LINUX_RUNNER, else
+  # vars.MACOS_RUNNER; with neither set they stay on ubuntu-24.04). Most run
+  # there as they are; lintx_ratchet and runtime_spec skip their github-hosted
+  # steps and run their `just ci-*` recipe on BuildBuddy instead
+  # (docs/research/ci-macos-runner-fallback.md). lint_linux, p9_p10_linux and
+  # p7_linux stay on ubuntu-24.04 in either mode until their `just ci-*`
+  # recipes are proven on BuildBuddy. Each runs-on that can name the Mac starts with
+  # the `rust` job's fork test, so a pull request from another repository runs
+  # on ubuntu-24.04 in either mode and never reaches the Mac or the BuildBuddy
+  # key; `just check-ci-paths` fails a runs-on that could name a self-hosted
+  # runner without that test in front.
+  #
   # Decides whether a pull request touches anything CI proves. Every required
   # check is a job of this workflow; when no CI path changed, they are all
   # skipped, and a skipped required check passes. The decision fails closed:
   # if this job errors, `ci` is empty and the jobs run.
   changes:
     name: Detect CI-relevant changes
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
     outputs:
       ci: ${{ steps.paths.outputs.ci }}
+      rust: ${{ steps.paths.outputs.rust }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Match the changed files against .github/ci-paths.txt
+      - name: Match the changed files against the CI path lists
         id: paths
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,33 +86,43 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # ci   = .github/ci-paths.txt: needs the light CI-infrastructure jobs.
+          # rust = .github/ci-rust-paths.txt: can change compiled or tested Rust
+          #        behaviour; only then do the heavy jobs run on a pull request.
           if [ -z "$PULL_REQUEST" ]; then
             echo "Not a pull request; CI is needed"
             echo "ci=true" >> "$GITHUB_OUTPUT"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(gh api --paginate "repos/$REPO/pulls/$PULL_REQUEST/files" \
             --jq '.[] | .filename, (.previous_filename // empty)')
-          while IFS= read -r file; do
-            while IFS= read -r pattern; do
-              case "$pattern" in ''|'#'*) continue ;; esac
-              # A `**` glob is a plain prefix match here; case patterns let `*` cross `/`.
-              # shellcheck disable=SC2254
-              case "$file" in ${pattern//\*\*/\*})
-                echo "$file matches $pattern; CI is needed"
-                echo "ci=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              ;; esac
-            done < .github/ci-paths.txt
-          done <<< "$files"
-          echo "No CI-relevant path changed; the CI jobs are skipped"
-          echo "ci=false" >> "$GITHUB_OUTPUT"
+          matches() {
+            local list="$1" file pattern
+            while IFS= read -r file; do
+              while IFS= read -r pattern; do
+                case "$pattern" in ''|'#'*) continue ;; esac
+                # A ** glob is a plain prefix match here; case patterns let * cross /.
+                # shellcheck disable=SC2254
+                case "$file" in ${pattern//\*\*/\*})
+                  echo "$file matches $pattern in $list"
+                  return 0
+                ;; esac
+              done < "$list"
+            done <<< "$files"
+            return 1
+          }
+          if matches .github/ci-paths.txt; then ci=true; else ci=false; fi
+          if matches .github/ci-rust-paths.txt; then rust=true; else rust=false; fi
+          echo "ci=$ci" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "ci=$ci rust=$rust"
 
   format:
     name: Rust format
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -116,7 +142,7 @@ jobs:
     name: Protobuf format and lint
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -124,13 +150,25 @@ jobs:
         env:
           BUF_VERSION: 1.73.0
           BUF_SHA256: 8f2986298ad08f0cc1bf999b9797b7c383adf32d7edf0f73d6f1e1a701baeac1
+          # buf-Darwin-arm64 of the same release: the self-hosted Mac (vars.CI_LINUX_MODE=remote).
+          BUF_SHA256_DARWIN_ARM64: 6e6df0fef4522e4e43dfe7c341873c3f2c29ceb45a9dfa5e0bad5580b8b2022f
         run: |
           set -euo pipefail
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) asset=buf-Linux-x86_64 sha=$BUF_SHA256 ;;
+            macOS/ARM64) asset=buf-Darwin-arm64 sha=$BUF_SHA256_DARWIN_ARM64 ;;
+            *) echo "::error::no pinned buf binary for $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/bin"
           curl --fail --location --silent --show-error \
-            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/${asset}" \
             --output "$RUNNER_TEMP/bin/buf"
-          printf '%s  %s\n' "$BUF_SHA256" "$RUNNER_TEMP/bin/buf" | sha256sum --check --status
+          # macOS has a BSD sha256sum without --check/--status; shasum has both.
+          if [ "$RUNNER_OS" = macOS ]; then
+            printf '%s  %s\n' "$sha" "$RUNNER_TEMP/bin/buf" | shasum -a 256 --check --status
+          else
+            printf '%s  %s\n' "$sha" "$RUNNER_TEMP/bin/buf" | sha256sum --check --status
+          fi
           chmod 0755 "$RUNNER_TEMP/bin/buf"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Check Protobuf formatting
@@ -166,13 +204,15 @@ jobs:
     name: Error-formatting ratchet (lintx)
     needs: [changes, format]
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Select pinned Rust toolchain
+        if: runner.environment == 'github-hosted'
         run: rustup show active-toolchain
       - name: Cache lintx build
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
@@ -181,22 +221,54 @@ jobs:
             tools/lintx/target
           key: lintx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/lintx/Cargo.lock', 'tools/lintx/Cargo.toml', 'rust-toolchain.toml') }}
       - name: Test lintx
+        if: runner.environment == 'github-hosted'
         run: cargo test --locked --manifest-path tools/lintx/Cargo.toml
       - name: Check the error-formatting ratchet
+        if: runner.environment == 'github-hosted'
         run: cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --ratchet tools/lintx/baselines/error-formatting.toml crates
+
+      # vars.CI_LINUX_MODE=remote, on the self-hosted Mac: the github-hosted steps above are
+      # skipped and `just ci-lintx-ratchet` runs the same commands on BuildBuddy.
+      - name: Decide whether this run may use the BuildBuddy key
+        id: trust
+        if: runner.environment != 'github-hosted'
+        uses: ./.github/actions/buildbuddy-remote
+        with:
+          has-key: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
+      - name: Test lintx and check the ratchet on BuildBuddy
+        if: steps.trust.outputs.remote == 'true'
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: scripts/remote-verify.sh ci-lintx-ratchet
 
   runtime_spec:
     name: Runtime symbol and dependency contracts
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Select pinned Rust toolchain
+        if: runner.environment == 'github-hosted'
         run: rustup show active-toolchain
       - name: Generate and validate runtime specification
+        if: runner.environment == 'github-hosted'
         run: cargo -Zscript scripts/check-spec.rs -- target/runtime-symbol-spec.json
+
+      # vars.CI_LINUX_MODE=remote, on the self-hosted Mac: the github-hosted steps above are
+      # skipped and `just ci-runtime-spec` runs the same commands on BuildBuddy.
+      - name: Decide whether this run may use the BuildBuddy key
+        id: trust
+        if: runner.environment != 'github-hosted'
+        uses: ./.github/actions/buildbuddy-remote
+        with:
+          has-key: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
+      - name: Generate and validate runtime specification on BuildBuddy
+        if: steps.trust.outputs.remote == 'true'
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+        run: scripts/remote-verify.sh ci-runtime-spec
 
   # ADR 0049 D5: wave-1 first-party extensions against frozen omp.* (stdlib + stubs).
   # Informational — not listed in .github/rulesets/omp2-protected.json required checks.
@@ -204,7 +276,7 @@ jobs:
     name: First-party extension conformance
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -215,7 +287,7 @@ jobs:
     name: License policy and release notices
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -225,6 +297,7 @@ jobs:
       # ten-second check. The versions are pinned, so the binaries are too.
       - name: Cache pinned compliance tools
         id: compliance-tools
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
@@ -233,11 +306,32 @@ jobs:
             ~/.cargo/bin/cargo-about
           key: compliance-tools-${{ runner.os }}-${{ runner.arch }}-just-1.58.0-cargo-deny-0.20.2-cargo-about-0.8.2
       - name: Install pinned compliance tools
-        if: steps.compliance-tools.outputs.cache-hit != 'true'
+        if: runner.environment == 'github-hosted' && steps.compliance-tools.outputs.cache-hit != 'true'
         run: |
           cargo install --locked --version 1.58.0 just
           cargo install --locked --version 0.20.2 cargo-deny
           cargo install --locked --version 0.8.2 cargo-about
+      # The self-hosted Mac (vars.CI_LINUX_MODE=remote) builds nothing into its
+      # user's ~/.cargo/bin: it fetches the pinned cargo-deny release into this
+      # job's temp dir, and brings its own just.
+      - name: Install pinned cargo-deny release
+        if: runner.environment != 'github-hosted'
+        env:
+          DENY_VERSION: 0.20.2
+          DENY_SHA256: fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
+          just --version
+          name="cargo-deny-${DENY_VERSION}-aarch64-apple-darwin"
+          curl --fail --location --silent --show-error \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${name}.tar.gz" \
+            --output "$RUNNER_TEMP/cargo-deny.tar.gz"
+          printf '%s  %s\n' "$DENY_SHA256" "$RUNNER_TEMP/cargo-deny.tar.gz" | shasum -a 256 --check --status
+          tar -xzf "$RUNNER_TEMP/cargo-deny.tar.gz" -C "$RUNNER_TEMP" "$name/cargo-deny"
+          mkdir -p "$RUNNER_TEMP/bin"
+          mv "$RUNNER_TEMP/$name/cargo-deny" "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Check license policy and release notices
         run: just license-check
 
@@ -257,7 +351,7 @@ jobs:
   push_verified:
     name: Pushed tree already verified
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -318,12 +412,13 @@ jobs:
     # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
     # format still reports, and fails, its own required check.
     needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # This is the job that keeps a persistent target dir (incremental Rust +
     # embedded CPython) on the self-hosted Mac registered on THIS repository
     # (`vars.MACOS_RUNNER`, e.g. ["self-hosted","macOS","ARM64"]). Every other
     # CI job stays on GitHub-hosted runners so that Mac is not occupied by
-    # work that does not reuse that cache. Unset MACOS_RUNNER → macos-15.
+    # work that does not reuse that cache, unless vars.CI_LINUX_MODE is
+    # `remote` (top of `jobs`). Unset MACOS_RUNNER → macos-15.
     # A pull request whose head is a different repository (not a branch of
     # this one) is ROUTED to hosted here. Read that as routing, not a trust
     # boundary: `pull_request` evaluates this workflow from the PR's own merge
@@ -493,7 +588,7 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
     needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # Clippy needs macOS coverage, not the dedicated test runner.
     runs-on: macos-15
     timeout-minutes: 45
@@ -540,7 +635,8 @@ jobs:
   # target gate.
   lint_linux:
     name: Lint workspace (Linux)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     # Clippy plus `just check-minimal-caps` (default `omp-app` and the
     # all-`cap-*`-off profile, different feature unification).
@@ -649,7 +745,8 @@ jobs:
   # cache entry; this job is its only writer.
   p9_p10_linux:
     name: Acceptance proofs P9, P10 and tool sources (Linux)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -750,7 +847,8 @@ jobs:
 
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
-    needs: format
+    needs: [format, changes]
+    if: ${{ needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -835,8 +933,8 @@ jobs:
   remote_linux:
     name: Remote Linux verification (BuildBuddy)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
-    runs-on: ubuntu-24.04
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -890,7 +988,7 @@ jobs:
   remote_seed:
     name: Seed BuildBuddy omp2 runner cache
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/omp2'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -906,6 +1004,17 @@ jobs:
           ref: omp2
       - name: Install pinned BuildBuddy client
         uses: ./.github/actions/buildbuddy-client
+      # On a self-hosted runner an empty key would let scripts/remote-verify.sh
+      # fall back to the runner user's own Keychain key: fail instead.
+      - name: Require the BuildBuddy key on a self-hosted runner
+        if: runner.environment != 'github-hosted'
+        env:
+          HAS_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != true ]; then
+            echo "::error title=BuildBuddy key missing::secrets.BUILDBUDDY_ORG_API_KEY is not set for this repository"
+            exit 1
+          fi
       - name: Seed omp2 runner snapshot
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
