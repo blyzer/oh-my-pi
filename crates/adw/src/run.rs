@@ -183,6 +183,55 @@ pub struct Run {
 	halted:       bool,
 }
 
+/// Where a phase stands, for comparing a replayed run with the original.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseStatus {
+	/// Not dispatched yet, or waiting to be retried.
+	Pending,
+	/// An attempt is in flight.
+	Running,
+	/// The phase passed.
+	Passed,
+}
+
+impl From<Status> for PhaseStatus {
+	fn from(status: Status) -> Self {
+		match status {
+			Status::Pending => Self::Pending,
+			Status::Running => Self::Running,
+			Status::Passed => Self::Passed,
+		}
+	}
+}
+
+/// One phase of a [`RunSnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseSnapshot {
+	/// The phase.
+	pub name:      PhaseName,
+	/// Where it stands.
+	pub status:    PhaseStatus,
+	/// Completed attempts.
+	pub attempts:  u32,
+	/// Total acceptances ever (the next published version is one more).
+	pub accepted:  u32,
+	/// The version currently standing, if any.
+	pub published: Option<u32>,
+}
+
+/// The observable state of a [`Run`] (ADR 0051 R4).
+///
+/// Two runs with equal snapshots are in the same state for every decision the
+/// engine makes, so a replayed run is correct when its snapshot equals the
+/// original's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunSnapshot {
+	/// Every phase, in workflow order.
+	pub phases: Vec<PhaseSnapshot>,
+	/// Whether the run halted.
+	pub halted: bool,
+}
+
 impl Run {
 	/// Starts a run of `workflow` with the default attempt budget.
 	pub fn new(workflow: Workflow) -> Self {
@@ -400,6 +449,28 @@ impl Run {
 	#[inline]
 	pub const fn is_halted(&self) -> bool {
 		self.halted
+	}
+
+	/// The observable state of the run, for comparing a replay with the
+	/// original.
+	#[must_use]
+	pub fn snapshot(&self) -> RunSnapshot {
+		RunSnapshot {
+			phases: self
+				.workflow
+				.phases()
+				.iter()
+				.zip(&self.states)
+				.map(|(phase, state)| PhaseSnapshot {
+					name:      phase.name.clone(),
+					status:    state.status.into(),
+					attempts:  state.attempts,
+					accepted:  state.accepted,
+					published: state.published,
+				})
+				.collect(),
+			halted: self.halted,
+		}
 	}
 
 	/// The version currently standing for a phase, if it has one.
