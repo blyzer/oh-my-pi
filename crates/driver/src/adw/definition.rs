@@ -110,6 +110,16 @@ pub enum DefinitionError {
 		/// The phase carrying the rejected executor.
 		phase: PhaseName,
 	},
+	/// A phase named a delegated executor and also declared a posture
+	/// requirement.
+	#[error(
+		"phase `{phase}` names an executor and declares a requirement, which a delegated executor \
+		 cannot meet"
+	)]
+	ExecutorWithRequirement {
+		/// The phase carrying both.
+		phase: PhaseName,
+	},
 	/// A code phase declared no command.
 	#[error("phase `{phase}` is a code phase but declares no command")]
 	MissingCommand {
@@ -191,6 +201,9 @@ fn lower(file: FileWorkflow, fallback_name: &str) -> Result<WorkflowDefinition, 
 					.is_some_and(|id| id.trim().is_empty())
 				{
 					return Err(DefinitionError::BadExecutor { phase: name });
+				}
+				if declared.executor.is_some() && declared.requires != Requirement::default() {
+					return Err(DefinitionError::ExecutorWithRequirement { phase: name });
 				}
 				PhaseSpec::Prompt { text: declared.prompt, executor: declared.executor }
 			},
@@ -307,6 +320,27 @@ prompt = "Implement it."
 				executor: Some(Str::new_static("codex")),
 			})
 		);
+	}
+
+	#[test]
+	fn an_executor_together_with_a_requirement_is_refused_at_load_time() {
+		let project = tempfile::tempdir().expect("project");
+		write(
+			project.path(),
+			"both",
+			r#"
+[[phase]]
+name = "build"
+kind = "agent"
+executor = "codex"
+requires = { write = "read-only" }
+prompt = "Implement it."
+"#,
+		);
+		assert!(matches!(
+			load(project.path(), "both"),
+			Err(DefinitionError::ExecutorWithRequirement { .. })
+		));
 	}
 
 	#[test]

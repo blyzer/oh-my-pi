@@ -58,7 +58,41 @@ Area: state
 - **O2.** Default store: journal file (recommended) or Mnemopi?
 - **O3.** Does `NeedsHuman` block only the phase or the whole run? Recommendation: only the dependent subgraph; independent phases continue once the driver is concurrent (roadmap P3).
 
-## Not yet specified (readiness review, 2026-11-12)
+## Specification decisions (2026-11-12, author, under the owner's delegation; reversible by the owner)
+
+These close the items the readiness review listed under "Not yet specified". They are decisions, not evidence; each can be revised before the code it governs lands.
+
+**S1. Decisions on the open questions.**
+- **O1 (journal kinds).** `omp-journal` gains a constructor that accepts a registered kind vocabulary (the run journal registers the `adw.*` kinds); session journals keep their closed set. Both options changed the journal, this one leaves session files untouched. This is the first code slice and it belongs to the journal crate.
+- **O2 (default store).** The journal file. Mnemopi is an optional later backend and its schema is not specified here.
+- **O3 (NeedsHuman scope).** Until the driver is concurrent (roadmap P3), a `NeedsHuman` phase halts the whole run in a resumable state. When phases run concurrently, it blocks only the dependent subgraph.
+
+**S2. Identity.**
+- **WorkflowDigest.** SHA-256 over a canonical byte encoding built field by field (not serde, so a serde change cannot move it): a version tag `adw-def/1`, then the workflow name, then every phase in declared order as length-prefixed UTF-8 strings: name, kind, each dependency, each input, `on_reject`, the three requirement fields, and the execution detail (prompt text and executor, or binary, arguments and cwd). Prompt text is included because changing it changes behavior. Defaults are written explicitly, never omitted.
+- **InputDigest.** Runs take no inputs in v1, so it is the SHA-256 of the empty string and the field is reserved.
+- **Resolved posture.** The three scopes (write, network, approval) as their kebab-case names plus the sandbox mode, exactly as `omp-adw::Posture` reports them.
+- **Workspace reference.** The canonical project root path and, when the root is a git work tree, the HEAD commit id; both strings, the second optional.
+- **Run id.** A ULID. **File.** `<data dir>/adw/runs/<run-id>.oms`.
+
+**S3. Journal framing.** The first entry is the `journal@1` genesis the journal already requires. Every later entry's `by` is the previous entry's id (a linear chain); `prior` is unset. `dispatch` and `settle` data are single-line JSON objects with sorted keys.
+
+**S4. Effects and reconcilers.**
+- A phase declares its external effects in TOML as `effects = ["pr.create", "git.push"]`. Names are dotted lowercase strings; the forge and CI extensions own the vocabulary.
+- At run start every declared effect must have a registered reconciler, otherwise the run refuses to start (fail closed).
+- Reconciler: `fn reconcile(&self, key: &IdempotencyKey, context: &EffectContext) -> impl Future<Output = Reconciliation> + Send`, with `Reconciliation` one of `Happened(EvidenceRef)`, `NotHappened`, `Unknown`. `Unknown` becomes `NeedsHuman`. Registration is by effect name in a `ReconcilerRegistry` owned by the host.
+- The idempotency key is the hex-truncated SHA-256 of (run id, phase, attempt, effect name), as in D5.
+
+**S5. Store trait and names.** A small crate `omp-runlog` (no ADW dependency) holds `RunStore` with `create`, `open` and `list`, and `RunWriter` with `append` and `try_lock`. The setting is `adw_run_store` with values `journal` (default), `memory` and `ext:<id>`. `omp adw runs` lists runs; `omp adw resume <run-id>` resumes one.
+
+**S6. `Run` states and replay.** `omp-adw::Run` gains, additively, the states `Failed`, `Uncertain` and `NeedsHuman` and a `redispatch` that repeats an attempt without spending the budget. Replay re-drives `next_step_with_posture` and then applies the recorded `accept` or `reject`. The replay constructor takes the recorded entries and returns a `Run` or a typed error naming the first entry that disagrees with what the engine would have done.
+
+**S7. Tests.** "Same terminal state" means equal `RunSnapshot` values: per phase its status, attempt number, published version, plus the run's halted flag and the ordered settle records. Boundary kills use named failpoints (`BeforeDispatchAppend`, `AfterDispatchAppend`, `BeforeSettleAppend`, `AfterSettleAppend`, `BeforeApply`) injected through a test-only hook in the driver loop; each is killed and resumed in turn.
+
+**First code slice (unblocked by this section).** The journal vocabulary constructor in `omp-journal` with tests that a session journal still rejects `adw.*` kinds and a run journal accepts only its registered ones. Second: `omp-runlog` with the journal store and the `RunSnapshot`. Third: `Run` replay and the new states in `omp-adw`. The driver integration, `omp adw resume` and the first reconciler follow.
+
+**Still open (needs a measurement or the owner).** Write amplification of per-dispatch and per-settle appends; the Mnemopi schema; how an extension store authenticates; a lease mechanism that works across hosts (B3 owns it).
+
+## Not yet specified (readiness review, 2026-11-12; resolved above except where S-items say open)
 
 A reviewer running the EGM implementation-readiness persona judged that an implementer could not start this record without making these decisions. They are left open on purpose and must be settled before code: the canonical serialization of the workflow digest (format, key order, defaults, whether prompt text is included); the input digest; the resolved-posture and workspace-reference fields; the field on `PhaseSpec` that declares external effects and its TOML schema; the reconciler trait (sync or async, return type, who registers it); the `RunStore` signatures, error type, crate name and setting name; the data directory and file naming; the Mnemopi schema; how `by`, `prior` and the genesis entry are used by a run journal; a failpoint mechanism for acceptance test 1 and a definition of "same terminal state"; and whether the concurrent driver (roadmap P3) is a prerequisite for O3.
 
