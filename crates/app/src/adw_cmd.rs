@@ -64,14 +64,18 @@ async fn execute(
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let explicit = model.is_some();
 	let model = model.unwrap_or_else(|| Str::new_static("default"));
-	let host = open_host(project, data_dir, model, explicit)?;
+	let host = open_host(project, data_dir.clone(), model.clone(), explicit)?;
 	let host = match exec_policy {
 		Some(policy) => host.with_exec_policy(policy),
 		None => host,
 	};
+	let (mut log, journal_path) =
+		create_run_log(&definition, project, &data_dir, max_attempts, &model, explicit, exec_policy)?;
+	println!("Recording run to `{}`.", journal_path.display());
 	let cancel = CancellationToken::new();
 	let exit = {
-		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);
+		let run =
+			omp_driver::adw::run_with_log(&definition, max_attempts, &host, &cancel, Some(&mut log));
 		tokio::pin!(run);
 		tokio::select! {
 			exit = &mut run => exit,
@@ -123,6 +127,51 @@ async fn execute(
 	}
 }
 
+/// Creates the run's journal at `<data dir>/adw/runs/<run-id>.oms` (ADR 0051
+/// S2) and commits its start record.
+fn create_run_log(
+	definition: &omp_driver::adw::definition::WorkflowDefinition,
+	project: &Path,
+	data_dir: &Path,
+	max_attempts: u32,
+	model: &Str,
+	model_explicit: bool,
+	exec_policy: Option<AdwExecPolicy>,
+) -> miette::Result<(omp_journal::runlog::RunLog, PathBuf)> {
+	let run = omp_core::ulid::Ulid::generate().to_string();
+	let path = data_dir.join("adw").join("runs").join(format!("{run}.oms"));
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent).into_diagnostic()?;
+	}
+	let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+	let head = omp_vcs::detect(&root)
+		.ok()
+		.flatten()
+		.and_then(|repo| repo.head_id().ok().flatten());
+	let trusted = matches!(
+		omp_driver::workspace_trust::evaluate_workspace(data_dir, project),
+		omp_ext::workspace_trust::TrustDecision::Trusted { .. }
+	);
+	let start = omp_journal::runlog::RunStart {
+		run: Str::from(run),
+		workflow: Str::from(definition.workflow().name().as_str()),
+		workflow_digest: Str::from(definition.digest()),
+		input_digest: Str::default(),
+		max_attempts,
+		model: model.clone(),
+		model_explicit,
+		exec_policy: Str::new_static(<&'static str>::from(exec_policy.unwrap_or_default())),
+		exec_fallback_local: false,
+		workspace_trusted: trusted,
+		workspace_root: Str::from(root.display().to_string()),
+		workspace_head: head.map(Str::from),
+		created: Str::from(jiff::Timestamp::now().to_string()),
+	};
+	let log = omp_journal::runlog::RunLog::create(&path, start)
+		.map_err(|error| miette::miette!("could not create run log: {error}"))?;
+	Ok((log, path))
+}
+
 async fn resume(
 	journal_path: &Path,
 	project: &Path,
@@ -154,7 +203,9 @@ async fn resume(
 		None => host,
 	};
 
-	let (log, _) = omp_journal::runlog::RunLog::open(journal_path, &start.workflow_digest)
+	// The records `open` returns were read under the log's lock; the earlier
+	// lock-free read only located the start record and its digest.
+	let (log, records) = omp_journal::runlog::RunLog::open(journal_path, &start.workflow_digest)
 		.map_err(|error| miette::miette!("could not reopen run log: {error}"))?;
 
 	let cancel = CancellationToken::new();

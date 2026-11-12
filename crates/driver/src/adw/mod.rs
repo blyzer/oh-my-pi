@@ -19,9 +19,8 @@ use std::{error::Error as StdError, future::Future, path::Path};
 
 pub use definition::{DefinitionError, PhaseSpec, WorkflowDefinition};
 use omp_adw::{
-	NetworkScope, OnReject, Outcome, Phase, PhaseName, Posture, Run, RunError, SelectedInput, Step,
-	WriteScope,
-	ReplayError, ReplayEvent, replay,
+	NetworkScope, OnReject, Outcome, Phase, PhaseName, Posture, ReplayError, ReplayEvent, Run,
+	RunError, SelectedInput, Step, WriteScope, replay,
 };
 use omp_core::Str;
 use omp_journal::runlog::{
@@ -886,7 +885,9 @@ mod tests {
 		let path = project.path().join("run.oms");
 		let mut log = RunLog::create(&path, start(&definition)).expect("create");
 		let host = Scripted::new(project.path(), CONFINED);
-		run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log)).await.expect("run");
+		run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log))
+			.await
+			.expect("run");
 		drop(log);
 		host.seen.lock().clear();
 
