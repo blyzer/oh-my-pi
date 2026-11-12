@@ -89,7 +89,8 @@ fn is_internal_resource(target: &str) -> bool {
 	};
 	matches!(
 		scheme.to_ascii_lowercase().as_str(),
-		"agent"
+		"adw"
+			| "agent"
 			| "artifact"
 			| "history"
 			| "issue"
@@ -243,6 +244,7 @@ fn at_prefix_is_shorthand(input: &str) -> bool {
 		|| input.starts_with("~\\")
 		|| is_windows_drive(input)
 		|| [
+			"adw://",
 			"agent://",
 			"artifact://",
 			"history://",

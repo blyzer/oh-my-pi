@@ -1,5 +1,6 @@
 //! App-owned internal URL resolver composition.
 
+pub(crate) mod adw;
 mod artifact;
 mod attachment;
 pub(crate) mod docs;
@@ -244,6 +245,8 @@ pub(super) enum UrlResolver {
 	Conflict(ConflictResolver),
 	/// Packaged harness documentation.
 	Docs(docs::DocsResolver),
+	/// Recorded ADW workflow runs.
+	Adw(adw::AdwResolver),
 }
 
 impl Resolve for UrlResolver {
@@ -269,6 +272,7 @@ impl Resolve for UrlResolver {
 			Self::Content(resolver) => resolver.read(resource, selector).await,
 			Self::Conflict(resolver) => resolver.read(resource, selector).await,
 			Self::Docs(resolver) => resolver.read(resource, selector).await,
+			Self::Adw(resolver) => resolver.read(resource, selector).await,
 		}
 	}
 
@@ -365,6 +369,7 @@ impl Resolve for UrlResolver {
 			}),
 			Self::Content(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			Self::Docs(resolver) => resolver.list(resource, max_entries, max_bytes).await,
+			Self::Adw(resolver) => resolver.list(resource, max_entries, max_bytes).await,
 			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Err(Fault::Invalid {
 				message: Str::new_static("GitHub list resources are read as Markdown."),
@@ -419,6 +424,7 @@ impl Resolve for UrlResolver {
 			Self::Mcp(resolver) => resolver.complete(query, max_results).await,
 			Self::Content(resolver) => resolver.complete(query, max_results).await,
 			Self::Docs(resolver) => resolver.complete(query, max_results).await,
+			Self::Adw(resolver) => resolver.complete(query, max_results).await,
 			#[cfg(feature = "cap-forge")]
 			Self::Issue(_) | Self::Pr(_) => Ok(Vec::new()),
 			Self::Conflict(_) => Ok(Vec::new()),
@@ -461,7 +467,8 @@ impl Resolve for UrlResolver {
 			| Self::Vault(_)
 			| Self::Content(_)
 			| Self::Conflict(_)
-			| Self::Docs(_) => None,
+			| Self::Docs(_)
+			| Self::Adw(_) => None,
 		}
 	}
 
@@ -492,6 +499,7 @@ impl Resolve for UrlResolver {
 			| Self::Mcp(_)
 			| Self::Content(_)
 			| Self::Docs(_)
+			| Self::Adw(_)
 			| Self::Conflict(_) => None,
 		}
 	}
@@ -525,7 +533,8 @@ impl UrlResolver {
 			| Self::Vault(_)
 			| Self::Content(_)
 			| Self::Conflict(_)
-			| Self::Docs(_) => None,
+			| Self::Docs(_)
+			| Self::Adw(_) => None,
 		}
 	}
 }
@@ -713,6 +722,13 @@ pub(super) fn production_url_resolvers(
 			UrlResolver::Docs(docs::DocsResolver::default()),
 		)
 		.expect("omp URL resolver is unique");
+	builder
+		.register(
+			SchemeEntry::new(Scheme::Adw, true, false, "recorded ADW workflow runs")
+				.with_capabilities(true, false, true),
+			UrlResolver::Adw(adw::AdwResolver::from_data_dir()),
+		)
+		.expect("adw URL resolver is unique");
 	Arc::new(builder.build())
 }
 fn project_json(bytes: Vec<u8>, query: Option<&str>, path: Option<&str>) -> Result<Vec<u8>, Fault> {
