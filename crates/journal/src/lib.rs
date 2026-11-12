@@ -11,6 +11,7 @@ mod entry;
 pub mod gc;
 pub mod idempotency;
 pub mod kind;
+pub mod runlog;
 pub mod sse;
 pub mod ulid;
 
