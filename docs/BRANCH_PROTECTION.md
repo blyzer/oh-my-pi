@@ -233,3 +233,18 @@ The `changes` job in `ci.yml` sets two outputs from the pull request's files:
 - `rust` (paths in `.github/ci-rust-paths.txt`: crates, Cargo files, toolchain and lint config, fixtures, extensions, `docs/py`): the heavy jobs also run (workspace tests and acceptance proofs, macOS and Linux lint, P7, P9 and P10 proofs, remote Linux verification).
 
 A change that only touches `.github/**`, `justfile` or `scripts/**` therefore runs the light jobs and skips the heavy ones. Skipped jobs count as passing for required checks, as they did before. The trade-off: such a change is not exercised by the heavy jobs on its pull request, but any event without a pull request number (a push to `omp2`, a merge queue `merge_group` run, a manual dispatch) sets both outputs to true and runs the full suite, so a bad change is caught before it settles on `omp2`. `scripts/check-ci-paths.py` fails when a heavy job is gated on `ci` alone, when a light job is gated on `rust`, or when a path is in the rust list but not in the ci list. To restore the old behaviour, change the three `rust` conditions back to `ci`, or list `.github/**`, `justfile` and `scripts/**` in `.github/ci-rust-paths.txt` and `.github/ci-paths.txt`.
+
+
+## Merge queue (not available on this repository today)
+
+CI is ready for a merge queue: `ci.yml` triggers on `merge_group` (`checks_requested`), the `changes` job runs everything for an event without a pull request number, and `push_verified` accepts a proof recorded on the pushed commit itself, which is the commit a queue tested. `scripts/check-ci-paths.py` fails if any of that is removed (`scripts/test_check_ci_paths.py` mutates each piece).
+
+GitHub offers the merge queue only to repositories owned by an organization. `blyzer/oh-my-pi` is owned by a personal account, so the queue cannot be enabled here and the repository ruleset has no queue rule. Nothing in this repository enables it.
+
+Once the repository belongs to an organization:
+
+1. Repository settings, Rules, Rulesets, `omp2-protected`: enable "Require merge queue". Keep the merge method Merge commit, the group size at 1 to start, and "Only merge non-failing pull requests".
+2. Leave the required status checks as they are (every one is a job of `ci.yml`, listed in `.github/rulesets/omp2-protected.json`). A queue run reports each of them because every job is a `merge_group` job of the same workflow.
+3. Runners: the fork test on `runs-on` keys on `pull_request`, so it does not apply to a queued run. A queued pull request from another repository would run its own `ci.yml` and scripts on the self-hosted runners with the BuildBuddy key. Do not enqueue pull requests from other repositories; merge them another way, or read every changed file in `.github/`, `scripts/` and `justfile` first.
+
+Rollback: disable "Require merge queue" in the same ruleset; `ci.yml` still works without it, the `merge_group` trigger simply never fires.
