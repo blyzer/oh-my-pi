@@ -118,6 +118,27 @@ jobs:
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "ci=$ci rust=$rust"
 
+  affected:
+    name: Affected crates (opt-in)
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && vars.CI_AFFECTED_ONLY == 'true' && needs.changes.outputs.rust != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      args: ${{ steps.scope.outputs.args }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - name: Select pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: List the crates the change can affect
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/affected-crates.py --base "$BASE" --exclude omp-e2e --github-output "$GITHUB_OUTPUT"
+
   format:
     name: Rust format
     needs: changes
@@ -411,7 +432,7 @@ jobs:
     # Nor is it gated on `Rust format`: waiting for `cargo fmt --check` held this
     # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
     # format still reports, and fails, its own required check.
-    needs: [changes, push_verified]
+    needs: [changes, push_verified, affected]
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # This is the job that keeps a persistent target dir (incremental Rust +
     # embedded CPython) on the self-hosted Mac registered on THIS repository
@@ -530,11 +551,29 @@ jobs:
           cargo nextest run --profile ci --workspace --no-run --locked
 
       - name: Test workspace
-        run: cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
+        env:
+          AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
+          AFFECTED_ARGS: ${{ needs.affected.outputs.args }}
+        run: |
+          set -euo pipefail
+          case "$AFFECTED_SCOPE" in
+            subset) cargo nextest run --profile ci $AFFECTED_ARGS --locked ;;
+            none) echo "No tested crate is affected; skipping the workspace tests" ;;
+            *) cargo nextest run --profile ci --workspace --exclude omp-e2e --locked ;;
+          esac
       # nextest cannot run doctests; omp has them in 25+ modules, so they need
       # their own libtest pass or the coverage silently disappears.
       - name: Test doctests
-        run: cargo test --doc --workspace --exclude omp-e2e --locked
+        env:
+          AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
+          AFFECTED_ARGS: ${{ needs.affected.outputs.args }}
+        run: |
+          set -euo pipefail
+          case "$AFFECTED_SCOPE" in
+            subset) cargo test --doc $AFFECTED_ARGS --locked ;;
+            none) echo "No tested crate is affected; skipping the doctests" ;;
+            *) cargo test --doc --workspace --exclude omp-e2e --locked ;;
+          esac
 
       - name: Gate frozen Python examples
         run: python3 scripts/check-python-examples.py

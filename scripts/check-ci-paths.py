@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github/workflows/ci.yml"
 PATHS = ROOT / ".github/ci-paths.txt"
 RUST_PATHS = ROOT / ".github/ci-rust-paths.txt"
-RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux"}
+RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux", "affected"}
 RULESET = ROOT / ".github/rulesets/omp2-protected.json"
 WORKFLOWS = ROOT / ".github/workflows"
 TRUST_ACTION = ROOT / ".github/actions/buildbuddy-remote/action.yml"
@@ -235,6 +235,12 @@ def main() -> int:
         if block(pull_request, key, 4):
             ok = False
             print(f"ci.yml pull_request must not filter on `{key}`: required checks would stay pending")
+
+    affected_gate = "\n".join(line for line in block(jobs, "affected", 2) if line.startswith("    if:"))
+    for needle in ("vars.CI_AFFECTED_ONLY == 'true'", "github.event_name == 'pull_request'"):
+        if needle not in affected_gate:
+            ok = False
+            print(f"the affected job must stay opt-in and pull-request only: its if lacks {needle}")
 
     names = set(job_names(ci))
     required = [
