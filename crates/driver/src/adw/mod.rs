@@ -135,6 +135,13 @@ pub trait AdwHost: Sync {
 		self.posture()
 	}
 
+	/// Refuses a phase before its dispatch is journaled. A refusal ran nothing,
+	/// so the run halts with no open dispatch that resume would treat as
+	/// possibly effectful.
+	fn admit(&self, _phase: &Phase, _spec: &PhaseSpec) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
 	/// Runs one phase and reports what it produced.
 	fn dispatch<'a>(
 		&'a self,
@@ -393,6 +400,9 @@ async fn drive<H: AdwHost>(
 					append(&mut log, || RunRecord::Halt(RunHalt { reason: reason.clone() }))?;
 					return Ok(halted(records, Some(reason)));
 				};
+				if let Err(source) = host.admit(&phase, spec) {
+					return host_failed(&mut log, records, &phase, attempt, source);
+				}
 				append(&mut log, || {
 					RunRecord::Dispatch(PhaseDispatch {
 						phase: Str::new(phase.name.as_str()),
@@ -424,24 +434,7 @@ async fn drive<H: AdwHost>(
 						})?;
 						return Ok(cancelled(records));
 					},
-					Err(source) => {
-						append(&mut log, || {
-							RunRecord::Halt(RunHalt {
-								reason: Str::from(format!(
-									"phase `{}` attempt {attempt} failed in its host",
-									phase.name.as_str()
-								)),
-							})
-						})?;
-						records.push(PhaseRecord {
-							phase: Str::new(phase.name.as_str()),
-							attempt,
-							status: PhaseStatus::Failed,
-							decision: Str::new_static("failed"),
-							feedback: Str::default(),
-						});
-						return Ok(failed(records, phase.name.as_str(), attempt, source));
-					},
+					Err(source) => return host_failed(&mut log, records, &phase, attempt, source),
 				};
 				// A phase stopped by cancellation did not fail on its merits:
 				// feeding it back as a rejection would schedule (and report) a
@@ -539,6 +532,32 @@ fn append(
 		log.append(&record())?;
 	}
 	Ok(())
+}
+
+/// Journals a phase its host could not run, and ends the run with it.
+fn host_failed<E: StdError + 'static>(
+	log: &mut Option<&mut RunLog>,
+	mut records: Vec<PhaseRecord>,
+	phase: &Phase,
+	attempt: u32,
+	source: E,
+) -> Result<RunExit<E>, Error<E>> {
+	append(log, || {
+		RunRecord::Halt(RunHalt {
+			reason: Str::from(format!(
+				"phase `{}` attempt {attempt} failed in its host",
+				phase.name.as_str()
+			)),
+		})
+	})?;
+	records.push(PhaseRecord {
+		phase: Str::new(phase.name.as_str()),
+		attempt,
+		status: PhaseStatus::Failed,
+		decision: Str::new_static("failed"),
+		feedback: Str::default(),
+	});
+	Ok(failed(records, phase.name.as_str(), attempt, source))
 }
 
 fn failed<E: StdError + 'static>(
@@ -786,6 +805,102 @@ mod tests {
 		assert!(matches!(exit.status, RunStatus::Cancelled));
 		assert!(exit.records.is_empty());
 		assert!(exit.records.is_empty());
+	}
+
+	struct RefusesBeforeDispatch {
+		root: PathBuf,
+	}
+
+	impl AdwHost for RefusesBeforeDispatch {
+		type Error = std::io::Error;
+
+		fn project_root(&self) -> &Path {
+			&self.root
+		}
+
+		fn posture(&self) -> Result<Posture, std::io::Error> {
+			Ok(CONFINED)
+		}
+
+		fn admit(&self, _phase: &Phase, _spec: &PhaseSpec) -> Result<(), std::io::Error> {
+			Err(std::io::Error::other("untrusted workspace"))
+		}
+
+		fn dispatch<'a>(
+			&'a self,
+			_phase: &'a Phase,
+			_spec: &'a PhaseSpec,
+			_attempt: u32,
+			_correction: Option<&'a Str>,
+			_inputs: &'a [SelectedInput],
+			_cancel: &'a CancellationToken,
+		) -> impl Future<Output = Result<PhaseResult, std::io::Error>> + Send + 'a {
+			ready(Err(std::io::Error::other("a refused phase was dispatched")))
+		}
+	}
+
+	#[tokio::test]
+	async fn a_phase_refused_before_dispatch_journals_no_dispatch() {
+		let (project, definition) = two_phase_project();
+		let path = project.path().join("run.oms");
+		let mut log = RunLog::create(&path, start(&definition)).expect("create");
+		let host = RefusesBeforeDispatch { root: project.path().to_path_buf() };
+		let exit = run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log))
+			.await
+			.expect("a refusal is a run outcome, not an error");
+		assert!(matches!(exit.status, RunStatus::Failed(_)), "{:?}", exit.status);
+		assert_eq!(record_kinds(&path), ["start", "halt"], "a refused phase journaled a dispatch");
+	}
+
+	/// Reads its own journal from inside the dispatch it authorizes.
+	struct ReadsJournalInDispatch {
+		root:    PathBuf,
+		journal: PathBuf,
+	}
+
+	impl AdwHost for ReadsJournalInDispatch {
+		type Error = Infallible;
+
+		fn project_root(&self) -> &Path {
+			&self.root
+		}
+
+		fn posture(&self) -> Result<Posture, Infallible> {
+			Ok(CONFINED)
+		}
+
+		fn dispatch<'a>(
+			&'a self,
+			phase: &'a Phase,
+			_spec: &'a PhaseSpec,
+			attempt: u32,
+			_correction: Option<&'a Str>,
+			_inputs: &'a [SelectedInput],
+			_cancel: &'a CancellationToken,
+		) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
+			let durable = RunLog::read(&self.journal)
+				.expect("read")
+				.iter()
+				.any(|record| {
+					matches!(record, RunRecord::Dispatch(dispatch)
+					if dispatch.phase.as_str() == phase.name.as_str() && dispatch.attempt == attempt)
+				});
+			assert!(durable, "the host ran before its dispatch was journaled");
+			ready(Ok(PhaseResult { accepted: true, feedback: Str::default() }))
+		}
+	}
+
+	#[tokio::test]
+	async fn a_dispatch_is_journaled_before_its_host_runs() {
+		let (project, definition) = two_phase_project();
+		let path = project.path().join("run.oms");
+		let mut log = RunLog::create(&path, start(&definition)).expect("create");
+		let host =
+			ReadsJournalInDispatch { root: project.path().to_path_buf(), journal: path.clone() };
+		let exit = run_with_log(&definition, 2, &host, &CancellationToken::new(), Some(&mut log))
+			.await
+			.expect("run");
+		assert_eq!(exit.status, RunStatus::Accepted);
 	}
 
 	#[tokio::test]

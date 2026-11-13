@@ -14,6 +14,7 @@ use super::{Panel, PanelAnchor, PanelEvent, services::Pending};
 /// Poll cadence while the request is pending.
 const POLL: Duration = Duration::from_millis(100);
 const PENDING_HINT: &str = "esc cancel";
+const CANCELLING_MESSAGE: &str = "Cancelling…";
 const SETTLED_HINT: &str = "Esc close";
 
 /// Where a settled result goes besides the panel row.
@@ -29,24 +30,26 @@ enum State {
 	Pending(Pending<Str>),
 	Done(Str),
 	Failed(Str),
-	Cancelled,
+	Cancelling(Pending<Str>),
 }
 
 /// Retained loader-then-result panel.
 pub struct PendingPanel {
-	id:        &'static str,
-	anchor:    PanelAnchor,
-	title:     Str,
-	message:   Str,
-	state:     State,
-	cancel:    Option<Sender<()>>,
-	settle:    Settle,
+	id:           &'static str,
+	anchor:       PanelAnchor,
+	title:        Str,
+	message:      Str,
+	state:        State,
+	cancel:       Option<Sender<()>>,
+	settle:       Settle,
 	/// Copy requested by the settle policy and not yet delivered.
-	copy_due:  bool,
-	next_wake: Option<Duration>,
-	ui:        Ui,
-	ctx:       UiContext,
-	width:     u16,
+	copy_due:     bool,
+	/// Outcome of a cancelled request, posted as a notice when it settles.
+	close_notice: Option<Str>,
+	next_wake:    Option<Duration>,
+	ui:           Ui,
+	ctx:          UiContext,
+	width:        u16,
 }
 
 impl PendingPanel {
@@ -71,6 +74,7 @@ impl PendingPanel {
 			cancel,
 			settle,
 			copy_due: false,
+			close_notice: None,
 			next_wake: Some(Duration::ZERO),
 			ui: Ui::from_root(dom! { <col/> }, 80, ctx.clone()),
 			ctx: ctx.clone(),
@@ -85,7 +89,7 @@ impl PendingPanel {
 	pub fn result(&self) -> Option<&str> {
 		match &self.state {
 			State::Done(line) | State::Failed(line) => Some(line),
-			State::Pending(_) | State::Cancelled => None,
+			State::Pending(_) | State::Cancelling(_) => None,
 		}
 	}
 
@@ -95,6 +99,10 @@ impl PendingPanel {
 		let tree = match &self.state {
 			State::Pending(_) => {
 				let loader = Loader::new(self.message.clone()).hint(PENDING_HINT);
+				dom! { <box border=round title={title}>{loader}</box> }
+			},
+			State::Cancelling(_) => {
+				let loader = Loader::new(CANCELLING_MESSAGE).hint(SETTLED_HINT);
 				dom! { <box border=round title={title}>{loader}</box> }
 			},
 			State::Done(line) => {
@@ -119,14 +127,6 @@ impl PendingPanel {
 					</box>
 				}
 			},
-			State::Cancelled => dom! {
-				<box border=round title={title} pad-x=1>
-					<col>
-						<text fg=muted>{"Cancelled"}</text>
-						<text fg=muted>{SETTLED_HINT}</text>
-					</col>
-				</box>
-			},
 		};
 		self.ui = Ui::from_root(tree, width, self.ctx.clone());
 	}
@@ -143,20 +143,23 @@ impl Panel for PendingPanel {
 
 	fn key(&mut self, key: Key) -> PanelEvent {
 		match key {
-			Key::Esc => {
-				if let State::Pending(_) = self.state {
+			Key::Esc => match std::mem::replace(&mut self.state, State::Done(Str::default())) {
+				State::Pending(pending) if self.cancel.is_some() => {
 					if let Some(cancel) = self.cancel.take() {
 						let _ = cancel.send(());
 					}
-					self.state = State::Cancelled;
-					self.next_wake = None;
+					self.state = State::Cancelling(pending);
 					self.rebuild(self.width);
+					PanelEvent::Consumed
+				},
+				state => {
+					self.state = state;
 					PanelEvent::Close
-				} else {
-					PanelEvent::Close
-				}
+				},
 			},
-			Key::Enter | Key::Char('q') if !matches!(self.state, State::Pending(_)) => {
+			Key::Enter | Key::Char('q')
+				if !matches!(self.state, State::Pending(_) | State::Cancelling(_)) =>
+			{
 				PanelEvent::Close
 			},
 			_ => PanelEvent::Consumed,
@@ -175,24 +178,32 @@ impl Panel for PendingPanel {
 	}
 
 	fn tick(&mut self, now: Duration) -> bool {
-		let State::Pending(pending) = &self.state else {
-			return false;
+		let (pending, cancelling) = match &self.state {
+			State::Pending(pending) => (pending, false),
+			State::Cancelling(pending) => (pending, true),
+			State::Done(_) | State::Failed(_) => return false,
 		};
-		match pending.try_recv() {
-			Ok(Ok(line)) => {
-				self.copy_due = self.settle == Settle::Copy;
-				self.state = State::Done(line);
-			},
-			Ok(Err(error)) => self.state = State::Failed(sf!("{error}")),
+		let settled = match pending.try_recv() {
+			Ok(Ok(line)) => State::Done(line),
+			Ok(Err(error)) => State::Failed(sf!("{error}")),
 			Err(flume::TryRecvError::Disconnected) => {
-				self.state = State::Failed(Str::new_static("the request was dropped before settling"));
+				State::Failed(Str::new_static("the request was dropped before settling"))
 			},
 			Err(flume::TryRecvError::Empty) => {
 				self.next_wake = Some(now + POLL);
 				return false;
 			},
-		}
+		};
 		self.next_wake = None;
+		if cancelling {
+			self.close_notice = match &settled {
+				State::Done(line) | State::Failed(line) => Some(line.clone()),
+				State::Pending(_) | State::Cancelling(_) => None,
+			};
+		} else {
+			self.copy_due = self.settle == Settle::Copy && matches!(settled, State::Done(_));
+		}
+		self.state = settled;
 		self.rebuild(self.width);
 		true
 	}
@@ -202,6 +213,9 @@ impl Panel for PendingPanel {
 	}
 
 	fn settled(&mut self) -> Option<PanelEvent> {
+		if let Some(line) = self.close_notice.take() {
+			return Some(PanelEvent::CloseNotice(line));
+		}
 		if self.copy_due {
 			self.copy_due = false;
 			if let State::Done(line) = &self.state {
@@ -266,7 +280,60 @@ mod tests {
 			Settle::Show,
 			&ctx,
 		);
-		assert_eq!(panel.key(Key::Esc), PanelEvent::Close);
+		assert_eq!(panel.key(Key::Esc), PanelEvent::Consumed, "the first Esc waits for the outcome");
 		assert!(cancel_rx.try_recv().is_ok(), "Esc sends the cancellation");
+		assert_eq!(panel.key(Key::Esc), PanelEvent::Close, "a second Esc leaves");
+	}
+
+	#[test]
+	fn a_cancelled_request_posts_its_settled_line_as_a_notice() {
+		let ctx = UiContext::default();
+		let (tx, rx) = flume::bounded(1);
+		let (cancel_tx, cancel_rx) = flume::bounded(1);
+		let mut panel = PendingPanel::new(
+			"adw-resume",
+			PanelAnchor::Center,
+			"Resume ADW run",
+			"Resuming 01M79Q6SBJVPWXS3EVKC2SG5EY.",
+			rx,
+			Some(cancel_tx),
+			Settle::Show,
+			&ctx,
+		);
+		assert_eq!(panel.key(Key::Esc), PanelEvent::Consumed, "the first Esc waits for the outcome");
+		assert!(cancel_rx.try_recv().is_ok(), "Esc sends the cancellation");
+		let text = omp_tui::frame_text(panel.frame(Size { width: 60, height: 12 }));
+		assert!(text.contains("Cancelling"), "cancelling not shown:\n{text}");
+		assert!(!panel.tick(Duration::ZERO), "nothing settled yet");
+		let outcome = Str::new_static(
+			"Resume of workflow ro cancelled before any phase ran; the run stays resumable.",
+		);
+		tx.send(Ok(outcome.clone())).unwrap();
+		assert!(panel.tick(POLL), "settling repaints");
+		assert_eq!(panel.settled(), Some(PanelEvent::CloseNotice(outcome)));
+		assert_eq!(panel.settled(), None, "the notice posts once");
+	}
+
+	#[test]
+	fn a_running_line_stays_inside_the_border() {
+		let ctx = UiContext::default();
+		let (_tx, rx) = flume::bounded::<Result<Str, super::super::services::ServiceError>>(1);
+		let (cancel_tx, _cancel_rx) = flume::bounded(1);
+		let mut panel = PendingPanel::new(
+			"adw-resume",
+			PanelAnchor::Center,
+			"Resume ADW run",
+			"Resuming 01M79Q6SBJVPWXS3EVKC2SG5EY. Esc cancels; the run stays resumable.",
+			rx,
+			Some(cancel_tx),
+			Settle::Show,
+			&ctx,
+		);
+		let text = omp_tui::frame_text(panel.frame(Size { width: 40, height: 12 }));
+		let row = text
+			.lines()
+			.find(|line| line.contains("Resuming"))
+			.expect("running line");
+		assert!(row.trim_end().ends_with('│'), "the running line overwrote the border:\n{text}");
 	}
 }

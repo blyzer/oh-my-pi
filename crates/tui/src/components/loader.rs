@@ -118,10 +118,12 @@ impl Component for Loader {
 		if let Some(y) = row(1) {
 			let column = pc.frame.put(rect.x, y, frames.at(now), accent);
 			let column = pc.frame.put(column, y, " ", muted);
-			pc.frame.put(column, y, &self.message, muted);
+			let room = rect.x.saturating_add(rect.width).saturating_sub(column);
+			pc.frame.put_clipped(column, y, room, &self.message, muted);
 		}
 		if let Some(y) = row(3) {
-			pc.frame.put(rect.x, y, &self.hint, muted);
+			pc.frame
+				.put_clipped(rect.x, y, rect.width, &self.hint, muted);
 		}
 		if let Some(y) = row(5) {
 			pc.frame.put(rect.x, y, &self.rule, border);

@@ -676,7 +676,7 @@ omp_con::cmd! {
 						"adw-resume",
 						PanelAnchor::Center,
 						"Resume ADW run",
-						sf!("Resuming {run_id}. Esc cancels; the run stays resumable."),
+						sf!("Resuming {run_id}."),
 						run.done,
 						Some(run.cancel),
 						Settle::Show,
