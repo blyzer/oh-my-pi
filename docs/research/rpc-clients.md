@@ -39,7 +39,7 @@ What upstream does **not** have: proto-generated clients. Its protocol is JSON, 
   - 19 files in 15 packages: `auth`, `blob`, `collab`, `control`, `document`, `env`, `gateway`, `identity`, `inference` (five files, one package), `policy`, `session`, `telemetry`, `thread`, `toolhost`, `ui`.
   - 6 gRPC services and 63 RPCs: `Auth` (21 RPCs, 20 unary and 1 server stream), `Blob` (4: 2 unary, 1 server stream, 1 client stream), `Gateway` (1 unary, `Hello`), `ForwardProxy` (1 server stream, `Forward`), `Inference` (30: 23 unary, 5 server stream, 2 bidirectional) and `SessionControl` (6: 5 unary, 1 server stream). Service declarations: `crates/proto/proto/omp/auth/v1/auth.proto:38`, `crates/proto/proto/omp/blob/v1/blob.proto:13`, `crates/proto/proto/omp/gateway/v1/gateway.proto:21`, `crates/proto/proto/omp/gateway/v1/gateway.proto:29`, `crates/proto/proto/omp/inference/v1/inference.proto:39`, `crates/proto/proto/omp/session/v1/session.proto:16`.
   - The other packages (`env`, `toolhost`, `control`, `ui`, `telemetry`, `document`, `collab` and so on) define messages only. `env` and `toolhost` ride a varint-framed stdio protocol, not gRPC (`crates/proto/README.md:10-17`). Their wire is not a client surface.
-- Services actually served: the daemon registers five of the six, `Gateway`, `ForwardProxy`, `Inference`, `Blob` and `Auth` (`crates/app/src/daemon.rs:403-408`). `SessionControl` has no server registration: not found (searched: `SessionServer` and `session_server` under `crates/`). A client for it would have nothing to call.
+- Services actually served: the daemon registers five of the six, `Gateway`, `ForwardProxy`, `Inference`, `Blob` and `Auth` (`crates/app/src/daemon.rs:403-408`). `SessionControl` is served separately, by the session host on a Unix socket under the data directory, wrapped in `SessionControlRpc` (`crates/driver/src/session_wire.rs:318`); `omp attach` is its client (`crates/app/src/attach_cmd.rs:33-39`). An earlier draft of this note said it was unserved; that was wrong, because the search used a wrong type name. Its authority model, scopes and socket lifetime were not traced (UNVERIFIED).
 - Hello advertises capabilities `auth`, `inference.native` and `gateway.forward` (`crates/app/src/daemon.rs:380-386`). `HelloRequest` carries the client name, its schema revision and capabilities; `HelloResponse` carries the server's revision, its minimum revision, capabilities and version (`crates/proto/proto/omp/gateway/v1/gateway.proto:43-63`). The wire-visible revision is `SCHEMA_REV`, 29 (`crates/proto/src/lib.rs:51`). A client has to perform this handshake itself.
 - Transports: an owner-only Unix-domain socket locally, or TCP with a bearer token file; plain TCP without a token is refused (`crates/app/src/daemon.rs:389-391`, `crates/app/src/daemon.rs:416-418`, `crates/app/src/daemon.rs:177`). TLS and optional mutual TLS are supported by the `omp-rpc` crate (`crates/rpc/src/tls.rs:9-18`). Server messages are capped at 64 MiB (`crates/proto/src/bounds.rs:11`, `crates/app/src/daemon.rs:63`), far above the default receive limits of grpc-go and grpcio, so a client must raise its limits. [INFERENCE: those defaults are from general knowledge, not read here.]
 - Build and checks: `build.rs` compiles every `.proto` with the pure-Rust `protox` compiler and `tonic-prost-build`; generated Rust goes to `OUT_DIR` and is never committed (`crates/proto/build.rs:1-6`, `crates/proto/README.md:18`). `buf.yaml` sets lint to BASIC and breaking to WIRE, and ignores `control`, `telemetry`, `ui` and `collab` (`crates/proto/buf.yaml`). CI runs `buf format`, `buf lint` and `buf breaking` against the PR base (`.github/workflows/ci.yml:203-229`). ADR 0048's text says CI does not run `buf breaking`; the workflow now does, so that sentence is out of date (`docs/adr/0048-schema-and-serialization-boundaries.md:29`).
@@ -47,8 +47,9 @@ What upstream does **not** have: proto-generated clients. Its protocol is JSON, 
 
 ### The `omp rpc` embedding protocol is not proto
 
-- `omp rpc` is "the framed embedding protocol", Content-Length frames in v1 and v2 (`crates/rpc/README.md:3`, `crates/rpc/README.md:8`). Its types are serde structs that "intentionally leave application-owned model, message, and event payloads as `serde_json::Value`" (`crates/rpc/src/protocol.rs:1-6`). There is no JSON Schema for it: `JsonSchema` appears zero times in `protocol.rs`. The Rust client is `omp-rpc`'s `client` module (`crates/rpc/README.md:7`).
-- The framing differs from upstream's newline-delimited JSON (`crates/rpc/README.md:8`, `upstream:packages/coding-agent/src/modes/rpc/rpc-frame.ts:5`). Upstream's SDKs therefore would not talk to omp2 unchanged. [INFERENCE: I did not diff the two protocols beyond framing.]
+- `omp rpc` is the stdio embedding protocol. Its types are serde structs that "intentionally leave application-owned model, message, and event payloads as `serde_json::Value`" (`crates/rpc/src/protocol.rs:1-6`). There is no JSON Schema for it: `JsonSchema` appears zero times in `protocol.rs`. The Rust client is the `client` module of `omp-rpc` (`crates/rpc/README.md:7`).
+- **The framing is the same as upstream's.** The stdio mode decodes newline-delimited JSON with protocol-v2 chunk reassembly (`JsonLineDecoder`, `RpcFrameDecoder`), with a 1 MiB cap per physical line and 64 MiB per reassembled payload (`crates/app/src/rpc_mode.rs:34`, `crates/rpc/src/framing.rs:1-2`, `crates/rpc/src/framing.rs:13-21`). The crate README and the CLI help say "Content-Length" (`crates/rpc/README.md:8`, `crates/app/src/cli.rs:1127`); `rpc_mode.rs` imports the JSON-line decoder, not the Content-Length one (`crates/rpc/src/framing.rs:159`). Those two texts look stale. An earlier draft of this note said the framing differed; that was wrong.
+- **Command overlap.** Upstream's schema lists 74 commands (`x-rpc.commands` in `upstream:packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json`). A scan of the match arms in `crates/app/src/rpc_mode.rs` finds 45 of those names handled by omp2, 29 upstream-only (for example `fork`, `goal`, `btw`, `live_start`, `dictation_start`, `navigate_tree`, `logout`) and 7 names only omp2 has (`approve`, `cancel`, `resume`, `shutdown` and three frame names). The scan is a string heuristic. Field shapes were not compared (UNVERIFIED). Upstream's SDKs may therefore work against omp2 for the shared commands.
 
 ### Locked decisions
 
@@ -68,13 +69,13 @@ What upstream does **not** have: proto-generated clients. Its protocol is JSON, 
 | Compatibility check in CI | schema conformance test | `buf breaking` (WIRE) | exists |
 | Generation tool | `bun run gen:rpc` | none for non-Rust; ADR 0048 rejects `buf generate` | needs a ruling |
 | Go packaging | module in the repo | package cycle thread/inference; no `go_package` | design needed |
-| Services to expose | the whole stdio surface | 5 served services; `SessionControl` unserved | choose scope |
+| Services to expose | the whole stdio surface | 6 services: 5 on the daemon, `SessionControl` on the session host | choose scope |
 
 ## 3. Class
 
-**Class d (propose).** Upstream's clients are generated from a different schema (JSON Schema) for a different wire (JSON lines), so there is nothing to port. omp2 has proto definitions and a served gRPC surface, which is a better generation source, but no generator, no Go code and a locked ADR against `buf generate`.
+**Class d (propose)** for proto-generated gRPC clients. omp2 has proto definitions and a served gRPC surface, which is a good generation source, but no generator, no Go code and a locked ADR against `buf generate`. For the stdio `omp rpc` protocol there is a second, cheaper path that may be **class c**: upstream's MIT SDKs speak newline-delimited JSON, and omp2 uses the same framing and shares 45 of 74 command names, so they may work with little change. That needs a compatibility probe first (option 7).
 
-Verdict: do not generate yet. First ship the schema as a versioned bundle (cheap, no new tool, no ADR conflict), then ask for the ADR 0048 amendment before any Go or Python generation.
+Verdict: do not generate gRPC clients yet. First ship the schema as a versioned bundle (cheap, no new tool, no ADR conflict), then ask for the ADR 0048 amendment before any Go or Python generation. In parallel, run the compatibility probe for upstream's SDKs against `omp rpc`; if it passes, adopting them is the cheapest way to give Go and Python users a typed client.
 
 ## 4. Options
 
@@ -82,14 +83,20 @@ Verdict: do not generate yet. First ship the schema as a versioned bundle (cheap
 2. **Publish the proto sources and a descriptor set as a release artifact** ("protos as the contract"). Cost: 1 to 2 days. Fit: good. It needs no new generator; the `protox` compiler the build already uses can emit a `FileDescriptorSet`. Consumers generate for any language with their own tools.
 3. **Generate Python and Go with `buf generate` or `protoc` plugins in a release job, publishing wheels and a Go module, never committing generated code.** Cost: 2 to 3 weeks for both. Fit: good for users, but it needs an ADR 0048 amendment and a Go toolchain in CI.
 4. **Check generated clients into the repository.** Rejected: generated code is never committed (`docs/adr/0048-schema-and-serialization-boundaries.md:12`).
-5. **Port upstream's JSON-schema approach to `omp rpc`.** Cost: very high. It first needs a schema for a protocol whose payloads are free-form `Value`. Fit: poor.
+5. **Port upstream's JSON-schema generator to `omp rpc`.** Cost: very high. It first needs a schema for a protocol whose payloads are free-form `Value`. Fit: poor. Superseded for the common case by option 7.
 6. **Generate clients for the stdio protocol from Rust types** with `schemars`. Cost: high, and the open payloads stay untyped. Fit: poor.
+7. **Reuse upstream's SDKs for `omp rpc`.** Take the Go, Python and Rust `omp-rpc` packages (MIT) and run them against omp2's stdio mode, fixing the differences. Cost: a probe of 1 to 2 days, then an unknown amount of adaptation for the 29 upstream-only and 7 omp2-only commands, whose wire shapes differ or are missing. Fit: good if the probe passes, because the framing is shared and the typed surface already exists. Risks: the generated `wire.go` and `_wire.py` encode upstream's schema, so omp2 changes need a regenerated or hand-patched wire file, and the generator is a Bun script (`upstream:package.json:161`), a runtime omp2 does not use.
 
-Choice: option 2 now, then option 3 for Python first and Go second, subject to the ADR amendment. [INFERENCE]
+Choice: option 2 now, then option 3 for Python first and Go second, subject to the ADR amendment; option 7's probe in parallel, and if it passes, option 7 for the stdio protocol. [INFERENCE]
 
 ## 5. Plan
 
 None of these slices changes an existing proto, service, convar or command. Each ships as a build or release artifact, off unless invoked.
+
+### Slice 0: compatibility probe (no repository change)
+
+- Run upstream's Python and Go `omp-rpc` test suites and a short scripted session against `omp rpc`, and record for each of the 74 upstream commands whether it passes, fails or is missing.
+- Acceptance: a table of all 74 commands with a result and the failing field where there is one, and a yes or no on adopting the SDKs for the shared commands. Also fix or flag the stale "Content-Length" text in `crates/rpc/README.md:8` and `crates/app/src/cli.rs:1127`.
 
 ### Slice 1: schema bundle
 
@@ -126,7 +133,7 @@ None of these slices changes an existing proto, service, convar or command. Each
 1. **ADR 0048.** Does the owner accept `buf generate` or `protoc` for non-Rust clients as a release step? The ADR's rejection was written about the Rust build. Without an answer, slices 3 and 4 do not start.
 2. **Go in the repository.** Is a Go toolchain in CI acceptable under "no new language runtimes", or must Go generation live in a separate repository?
 3. **The thread/inference cycle** (above). UNVERIFIED whether one Go package for both proto packages generates cleanly.
-4. **Scope.** Should a client cover only the five served services? `SessionControl` is defined but not served.
+4. **Scope.** Should a client cover the five daemon services only, or also `SessionControl`, which a different server (the session host) exposes on a different socket?
 5. **The stdio `omp rpc` protocol** stays hand-written and untyped in its payloads. A typed client for it needs a schema first. Is that wanted, or is gRPC the supported programmatic surface?
 6. **Compatibility promise.** `buf breaking` uses WIRE and ignores four packages. A published client implies a promise for the other eleven. The owner should say which services are stable.
 7. **Large messages.** Clients must raise receive limits to 64 MiB; a server-side lower cap for remote TCP may be wise. Not evaluated.
@@ -134,7 +141,7 @@ None of these slices changes an existing proto, service, convar or command. Each
 
 ## 7. Upstream origin and license
 
-Nothing from upstream's SDKs is proposed for reuse: they are generated from a JSON Schema for a JSON-lines protocol that omp2 does not speak. If the owner wants ideas from them, the useful ones are the binding rules (strict enums, an `Extra` map for open records, strict closed objects) and the split between a generated wire file and a hand-written client (`upstream:sdk/go/omp-rpc/README.md:22-29`). Upstream's `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`); the Python SDK carries its own MIT file (`upstream:sdk/python/omp-rpc/LICENSE:1-3`).
+Option 7 would reuse upstream's SDKs for the stdio protocol if the compatibility probe passes. Otherwise nothing from them is reused. Useful ideas either way, the useful ones are the binding rules (strict enums, an `Extra` map for open records, strict closed objects) and the split between a generated wire file and a hand-written client (`upstream:sdk/go/omp-rpc/README.md:22-29`). Upstream's `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`); the Python SDK carries its own MIT file (`upstream:sdk/python/omp-rpc/LICENSE:1-3`).
 
 Generator tools (buf, protoc-gen-go, grpc-go, grpcio-tools) are separate projects with their own licences. None was checked in this checkout (UNVERIFIED), and `deny.toml` covers only Rust crates, so a licence review would be a manual step.
 
