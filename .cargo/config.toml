@@ -87,6 +87,12 @@ codegen-backend = "llvm"
 # actions declared by downstream crates register without a central roster.
 [profile.dev.package.omp-con]
 codegen-backend = "llvm"
+# omp-contract declares the STANDARD_DIRECTORS linkme slice. Cranelift emits
+# its Mach-O bounds without the `\x01` no-prefix marker and its dupcheck
+# section without `no_dead_strip`, so ld64.lld cannot resolve
+# `section$start/end$__DATA$__linkme*` and the `omp` link fails.
+[profile.dev.package.omp-contract]
+codegen-backend = "llvm"
 # Telemetry hooks are fail-open across user callbacks and rely on
 # `catch_unwind`; cranelift does not emit the required landing pads.
 [profile.dev.package.omp-observability]
