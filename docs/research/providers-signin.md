@@ -1,6 +1,7 @@
 # Providers and sign-in: upstream parity on `omp2` (Gap 15, `providers-signin`)
 
 Status: research complete. No code changed.
+ADR: [`0059-provider-catalog-additions`](../adr/0059-provider-catalog-additions.md) (Proposed) records the decisions in this note.
 Date: 2026-11-13
 Upstream pin: `c308970263` (v18.20.0), `/Users/enverfrancisco/repositories/omp-work/upstream`. Every cited upstream line is re-checked at this pin. The provider list is the same at the pin and at `upstream/main` `84f5adc3bb` (94 ids).
 omp2 snapshot: worktree `omp-work/gaps` at `ed95a14a41`. Citations resolve at this commit.
@@ -11,7 +12,7 @@ Sources compared: `fixtures/llm-oracle/catalog/{providers.toml,oauth.toml,models
 1. **Part of the brief is already present.** DeepInfra, SiliconFlow (and `siliconflow-cn`), LiteLLM, GitLab Duo agent (`gitlab-duo-agent`) and Qwen portal are shared ids. They need no work.
 2. **Exactly 14 of upstream's 94 `KnownProvider` ids have no `[providers."<id>"]` entry in `omp2`.** Three of the 14 are not gaps (`apple`, `web`, `local`; section 1). **11 are genuinely missing.**
 3. **Only the judgment providers need a new operation.** `cloudflare-workers-ai`, `liquid`, `nace` and `typesafe` are System One *judgment* models, not chat. `omp2` has no judgment operation: `OperationKind` (`crates/catalog/src/capability.rs:95`) has no such variant. Five are plain catalog data. Snowflake is data plus a per-account base URL that `omp2` lacks as a generic mechanism. `factory-droid` is a routing layer over four wires `omp2` already has, not a new wire.
-4. **Sign-in gaps:** 10 flows across 9 provider ids are missing. Nine are in scope; the Cloudflare Workers AI flow is deferred with the judgment decision. None needs a new core protocol: each fits an existing `oauth.toml` kind or a `custom/*.rs` module (section 3).
+4. **Sign-in gaps:** 10 flows across 9 provider ids are missing. Eight are in scope and decided in ADR 0059 (D4). The Cloudflare Workers AI flow is deferred with the judgment decision (D5). The Devin CLI flow is not adopted (D6). None needs a new core protocol: each fits an existing `oauth.toml` kind or a `custom/*.rs` module (section 3).
 
 ## 1. Providers: exact diff
 
@@ -25,7 +26,7 @@ Method: upstream's generated `packages/catalog/src/compat/provider-ids.ts` (`Kno
 | `coralbricks` | yes | OpenAI-compatible, `https://inference.coralbricks.ai/v1`, `CORAL_API_KEY` or `CORALBRICKS_API_KEY` (`providers/coralbricks.kdl`) | **Data only** |
 | `helmcode` | yes | OpenAI-compatible, `https://api.helmcode.com/v1`, `HELMCODE_API_KEY` (`providers/helmcode.kdl`) | **Data only** |
 | `modular` | yes | OpenAI-compatible, `https://api.modular.com/v1`, `MODULAR_API_KEY`; catalog-only roster from models.dev; `thinking-format "openrouter"` (`providers/modular.kdl`) | **Data only.** `openrouter` is a documented thinking-format value (`crates/catalog/compat/README.md:169`) |
-| `otari` | yes | OpenAI-compatible gateway, `https://api.otari.ai/api/v1`, `OTARI_API_KEY`; self-hosted gateways set `OTARI_BASE_URL` (`providers/otari.kdl:1-4`); credential-scoped authoritative discovery; `supports-developer-role #false` | **Data only**, but the self-hosted override has no catalog-schema key (`crates/catalog/src` has no base-URL env key). See ADR 0059 O1 |
+| `otari` | yes | OpenAI-compatible gateway, `https://api.otari.ai/api/v1`, `OTARI_API_KEY`; credential-scoped authoritative discovery; `supports-developer-role #false` (`providers/otari.kdl`) | **Data only.** Shipped with its fixed URL. Self-hosted gateways use the existing `models.toml` `baseUrl` overlay, with no schema change (ADR 0059 D1) |
 | `snowflake` | yes | Cortex REST. Default model `claude-opus-5-5`, `SNOWFLAKE_PAT` (`providers/snowflake.kdl:13-14`). Per-model `api`: `anthropic-messages` at `<account>/api/v2/cortex` (`:18`) or `openai-completions` at `<account>/api/v2/cortex/v1` (`:79`). 15 seeded models | **Data plus a missing mechanism.** The roster supports per-model `api` and `baseUrl`, but the account host is per-user and `omp2` has no generic resolver (section 2) |
 | `factory-droid` | yes | `packages/catalog/src/wire/factory-droid.ts` routes each model to one of four wires (`:16-24`, `:75-84`), `api = "factory-droid-agent"`, 77 seeded models (`providers/factory-droid.kdl`); hosts `api.factory.ai` and `api.eu.factory.ai`; the runtime is `packages/ai/src/providers/factory-droid.ts` (814 lines) plus `factory-droid/gemini.ts` and `tool-names.ts` | **No new wire.** `omp2` has all four codecs (`openai-completions`, `openai-responses`, `anthropic-messages`, google-generate). Needs a provider hook (`crates/ai/src/codec/provider_hooks.rs`) for per-model wire choice, regional host, client headers and tool-name mapping, plus device-code sign-in. Largest item here |
 | `cloudflare-workers-ai` | yes | Judge models `@cf/cloudflare/clef` and `clef-flash`; `api = "workers-ai-systemone"`; `POST …/accounts/<account>/ai/run/@cf/cloudflare/<model>` (`providers/cloudflare-workers-ai.kdl`) | **New operation and codec** (judgment) |
@@ -34,7 +35,7 @@ Method: upstream's generated `packages/catalog/src/compat/provider-ids.ts` (`Kno
 | `typesafe` | yes | `api = "typesafe"`, `POST {baseUrl}/v1/systemone`; the same body serves OpenJEV, Kev, self-hosted Clef, OpenCode Zen and Command Code (`packages/ai/src/judgment/systemone.ts` header comment) | **New operation and codec** (judgment) |
 | `apple` | **no, alias** | On-device Apple Foundation Models. `omp2` has `apple-intelligence` (`base_url = "local://apple-intelligence"`, `auth none`) and `crates/ai/src/local/applefm*` | **Deliberate.** ADR 0042 (`docs/adr/0042-apple-pcc-integration.md:18`): "The existing `apple-intelligence` on-device identifier and behavior remain unchanged." Keep the id; at most add an import alias |
 | `web` | **no, structural** | Upstream's group id for standalone web-search engines. `omp2` models each engine as its own provider (`brave`, `exa`, `tavily`, …) | None here. Missing engines are covered by ADR 0055 |
-| `local` | **open** | On-device inference workers as catalog models (`api = "local-inference"`, `base-url local://inference`, 14 models: kokoro, parakeet, whisper-*, lfm2.5-*, qwen3-1.7b, gemma-3-1b, …; `providers/local.kdl`) | `omp2` has the runtime (`crates/ai/src/local/{tts,stt,embedding,tiny_catalog,speech_catalog,artifact}.rs`) but no `local` catalog provider. No ADR or catalog README rules on it, so the omission looks unmade rather than decided. Owner decision |
+| `local` | **no, settled** | On-device inference workers as catalog models (upstream `providers/local.kdl:7`, `api = "local-inference"`, 14 models). The on-device route is live under the `local` codec (`crates/ai/src/provider/builtin.rs:893`), and the catalog row that serves it is `apple-intelligence`. | Keep `apple-intelligence` as the id; upstream's `local` catalog row is not adopted (ADR 0059 D7) |
 
 Count check: data-only 5 + snowflake 1 + factory-droid 1 + judgment 4 = 11 genuinely missing; apple, web, local = 3; total 14. ✓
 
@@ -59,7 +60,7 @@ For the 80 shared ids, upstream seeds models in the provider `.kdl` that `omp2`'
 - **`cloudflare-ai-gateway`** has `{account}` and `{gateway}` placeholders in `fixtures/llm-oracle/catalog/providers.toml`, but no code resolves them. A search of `crates/ai/src/{provider,auth}` and `crates/catalog/src` finds none.
 - **The stored credential has no slot for an account value.** `CredentialMetadata` (`crates/ai/src/auth/store.rs:55-66`) holds `account_id`, `principal_id`, `kind`, a generation counter and timestamps. The secret payload is opaque to this metadata. So a Snowflake account URL or a Cloudflare account id cannot come from the stored credential without a new field.
 
-So Snowflake and both Cloudflare providers need either a generic mechanism (the account value from an env var first, then, if the owner wants it, a new stored field) or another per-provider resolver. This is more than catalog data.
+So Snowflake and both Cloudflare providers need a generic account-scoped base-URL mechanism, not a per-provider resolver. ADR 0059 D2 fixes its inputs to environment variables, validated as `production_azure_endpoint` validates its own (`crates/driver/src/registry.rs:1786`): `OMP_CLOUDFLARE_ACCOUNT_ID`, `OMP_CLOUDFLARE_AI_GATEWAY_NAME` and `OMP_SNOWFLAKE_ACCOUNT`. The stored credential is not used for the account value. This is more than catalog data.
 
 ## 3. Sign-in
 
@@ -79,24 +80,24 @@ Upstream non-API-key login flows (`packages/catalog/src/compat/rules/auth/*.kdl`
 | **Cloudflare AI Gateway** | provider present, no guided login | `registry/oauth/cloudflare-ai-gateway.ts:5`: collects the gateway credential and account and gateway ids |
 | **Alibaba Coding Plan** | provider present; only `alibaba_token_plan.rs` exists | `registry/oauth/alibaba-coding-plan.ts:5-8`: region choice (international or China base URL), key paste, optional proxy |
 | **Devin, Windsurf** | `devin` exists; this variant not found | `registry/oauth/devin-windsurf.ts:1-5`: Windsurf authorise page with PKCE and loopback, stored as a `devin` key |
-| **Devin, CLI** | not found | `registry/oauth/devin-cli.ts:1-4`: adopts the seat key the Devin CLI stores in `credentials.toml`. Never prompts, never touches the network |
+| **Devin, CLI** | not adopted | `registry/oauth/devin-cli.ts:1-4` adopts the seat key the Devin CLI keeps in `credentials.toml`. omp2 does not: ADR 0059 D6 gives five reasons. The existing delegated ACP login notice tells the user to run the Devin CLI login (`crates/driver/src/delegated_acp.rs:175-183`) |
 | coreweave | present as bearer; login helper absent | `registry/oauth/coreweave.ts`: requires `COREWEAVE_PROJECT=<team>/<project>` (OpenAI-Project header) before `/login` |
 | stencil | not a model provider | `auth/stencil.kdl`: credential for omp-hosted Stencil services, OIDC code flow. Out of scope for the catalog |
 
-Count: 10 missing flows across 9 provider ids (Devin has two flows). In scope: 9 flows across 8 provider ids. Deferred: the Cloudflare Workers AI flow.
+Count: 10 missing flows across 9 provider ids (Devin has two flows). In scope and decided: 8 flows across 8 provider ids (ADR 0059 D4). Deferred: the Cloudflare Workers AI flow (D5). Not adopted: the Devin CLI flow (D6).
 
 ### Recommendation (sign-in)
 
-Every in-scope flow fits an existing core mechanism: a `device-code`, `pkce` or `custom-exchange` row in `oauth.toml` for the pure OAuth ones (Kilo, Muse Code, Factory Droid), and a `custom/*.rs` module for the bespoke ones (Mistral Vibe, Snowflake, Cloudflare AI Gateway, Alibaba Coding Plan, Devin Windsurf and CLI). They stay in core under ADR 0049 class B (`ai/src/auth/**` OAuth flows are listed there). No new transport is needed. Order by value: Mistral Vibe (three calls, no per-user host), then Kilo and Muse Code (device code), then Snowflake with its provider data, then Factory Droid with its hook, since its login is useless without the provider.
+Every in-scope flow fits an existing core mechanism: a `device-code`, `pkce` or `custom-exchange` row in `oauth.toml` for the pure OAuth ones (Kilo, Muse Code, Factory Droid), and a `custom/*.rs` module for the bespoke ones (Mistral Vibe, Snowflake, Cloudflare AI Gateway, Alibaba Coding Plan, Devin Windsurf). They stay in core under ADR 0049 class B (`ai/src/auth/**` OAuth flows are listed there). No new transport is needed. Order by value: Mistral Vibe (three calls, no per-user host), then Kilo and Muse Code (device code), then Snowflake with its provider data, then Factory Droid with its hook, since its login is useless without the provider.
 
 ## 4. Suggested slices
 
 1. **Data PR.** Add `sambanova`, `coralbricks`, `helmcode`, `modular` and `otari` to `providers.toml`, regenerate with `just catalog-snapshot`, and refresh the roster with `just catalog-import-v1` (this also fills `scaleway`).
-2. **Account-scoped base URL.** A generic mechanism, or an Azure-style resolver (section 2). Then `snowflake` provider data (per-model `api`) and its sign-in module. The same mechanism unblocks `cloudflare-ai-gateway`.
+2. **Account-scoped base URL.** Environment-variable mechanism per ADR 0059 D2, then `snowflake` provider data (per-model `api`) and its sign-in module. The same mechanism serves `cloudflare-ai-gateway`, whose `{account}`/`{gateway}` placeholders may already be a live defect (the S2 test settles it).
 3. **Mistral Vibe, Kilo and Muse Code sign-ins.**
 4. **Factory Droid:** provider hook and device-code login. Needs its own recorded fixture set first.
 5. **Separate ADR:** the judgment operation, covering `typesafe`, `liquid`, `nace` and `cloudflare-workers-ai`, and the Cloudflare Workers AI sign-in with it.
-6. **Owner decision on `local` only.** `apple` is settled by ADR 0042.
+6. **Owner decisions.** `local` is settled by ADR 0059 D7 (keep `apple-intelligence`). `apple` is settled by ADR 0042.
 
 ## 5. Verification performed and limits
 
@@ -104,4 +105,10 @@ Every in-scope flow fits an existing core mechanism: a `device-code`, `pkce` or 
 - **Upstream wire facts** read from the `.kdl`, `auth/*.kdl`, `wire/factory-droid.ts`, `judgment/systemone.ts` and `registry/oauth/*.ts` files named above, all re-checked at the pin.
 - **`omp2` roster:** read by decompressing `models.json.zst` (70 providers; per-model `api` and `baseUrl` present).
 - **Stored credential fields:** `crates/ai/src/auth/store.rs:55-66`.
-- **Not done:** no catalog compiled or run; upstream endpoints are as written in upstream source, not probed live; whether `omp2` intentionally keeps `local` outside the catalog is unknown; `compat/providers/*.kdl` differences were compared by name only and are behaviour rules, not provider presence.
+- **Not done:** no catalog compiled or run; upstream endpoints are as written in upstream source, not probed live. Remaining open items are below.
+
+## Open items (ADR 0059)
+
+- **O1.** Who records the Factory Droid fixtures, and from which account? Recommendation: the owner records them; no fixture means no snapshot entry.
+- **O2.** Factory Droid's device login and org refresh use services that are not public. Recommendation: ship only after the fixtures prove the flow.
+- **O3.** Judgment `OperationKind`: a separate ADR. Check against ADR 0024 before any variant is added.
