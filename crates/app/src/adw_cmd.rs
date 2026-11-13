@@ -203,7 +203,7 @@ async fn resume(
 		.await
 		.into_diagnostic()?;
 	match outcome {
-		ResumeOutcome::Resumed { workflow, journal, exit } => {
+		ResumeOutcome::Resumed { workflow, journal, exit, .. } => {
 			println!("Resumed workflow `{workflow}` from `{}`.", journal.display());
 			exit_status(exit.code)
 		},
@@ -260,9 +260,41 @@ pub(crate) async fn resume_recorded(
 	.await
 }
 
+fn cancelled_line(
+	workflow: &Str,
+	journal: &Path,
+	at: &omp_driver::adw::resume::CancelledAt,
+) -> Str {
+	use omp_driver::adw::resume::CancelledAt;
+	let run = journal
+		.file_stem()
+		.and_then(|stem| stem.to_str())
+		.unwrap_or_default();
+	match at {
+		CancelledAt::BeforeAnyPhase => sf!(
+			"Resume of workflow `{workflow}` cancelled before any phase ran; the run stays resumable."
+		),
+		CancelledAt::BetweenPhases => {
+			sf!("Resume of workflow `{workflow}` cancelled between phases; the run stays resumable.")
+		},
+		CancelledAt::Interrupted { phase, attempt, may_have_effects: true } => sf!(
+			"Resume of workflow `{workflow}` cancelled: phase `{phase}` attempt {attempt} was \
+			 interrupted, its effects are unknown, and resuming will report it as uncertain \
+			 (adw://{run})."
+		),
+		CancelledAt::Interrupted { phase, attempt, may_have_effects: false } => sf!(
+			"Resume of workflow `{workflow}` cancelled: phase `{phase}` attempt {attempt} was \
+			 interrupted with no possible effects, so resuming re-runs it (adw://{run})."
+		),
+	}
+}
+
 pub(crate) fn outcome_line(outcome: &ResumeOutcome<ProductionError>) -> Str {
 	match outcome {
-		ResumeOutcome::Resumed { workflow, journal, exit } => {
+		ResumeOutcome::Resumed { workflow, journal, cancelled: Some(at), .. } => {
+			cancelled_line(workflow, journal, at)
+		},
+		ResumeOutcome::Resumed { workflow, journal, exit, .. } => {
 			sf!("Resumed workflow `{workflow}` from `{}`: {}.", journal.display(), exit_summary(exit))
 		},
 		ResumeOutcome::Finished { workflow, accepted, .. } => sf!(

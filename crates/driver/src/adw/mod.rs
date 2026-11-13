@@ -1218,4 +1218,135 @@ mod tests {
 		.expect("approval within the ceiling resumes");
 		assert!(matches!(allowed, resume::ResumeOutcome::Resumed { .. }), "{allowed:?}");
 	}
+
+	/// Cancels the run from inside its first dispatch and reports the phase
+	/// killed, under a posture with no possible effects so the attempt can be
+	/// dispatched again.
+	struct CancelOnFirstDispatch {
+		root: PathBuf,
+	}
+
+	impl AdwHost for CancelOnFirstDispatch {
+		type Error = Infallible;
+
+		fn project_root(&self) -> &Path {
+			&self.root
+		}
+
+		fn posture(&self) -> Result<Posture, Infallible> {
+			Ok(CONFINED)
+		}
+
+		fn dispatch<'a>(
+			&'a self,
+			_phase: &'a Phase,
+			_spec: &'a PhaseSpec,
+			_attempt: u32,
+			_correction: Option<&'a Str>,
+			_inputs: &'a [SelectedInput],
+			cancel: &'a CancellationToken,
+		) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
+			cancel.cancel();
+			ready(Ok(PhaseResult { accepted: false, feedback: Str::new_static("killed") }))
+		}
+	}
+
+	/// The journal's record kinds, in order.
+	fn record_kinds(path: &Path) -> Vec<&'static str> {
+		RunLog::read(path)
+			.expect("read")
+			.iter()
+			.map(|record| match record {
+				RunRecord::Start(_) => "start",
+				RunRecord::Dispatch(_) => "dispatch",
+				RunRecord::Settle(_) => "settle",
+				RunRecord::Uncertain(_) => "uncertain",
+				RunRecord::Halt(_) => "halt",
+				RunRecord::Done(_) => "done",
+			})
+			.collect()
+	}
+
+	#[tokio::test]
+	async fn adw_resume_cancelled_before_dispatch_dispatches_nothing_and_resumes_later() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		drop(RunLog::create(&journal, start(&definition)).expect("create"));
+
+		let cancelled = CancellationToken::new();
+		cancelled.cancel();
+		let host = Scripted::new(project.path(), CONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let outcome = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&cancelled,
+		)
+		.await
+		.expect("a cancelled resume is not an error");
+		let (exit, cancelled) = match outcome {
+			resume::ResumeOutcome::Resumed { exit, cancelled, .. } => (exit, cancelled),
+			other => panic!("the resume was not started: {other:?}"),
+		};
+		assert_eq!(exit.status, RunStatus::Cancelled);
+		assert_eq!(cancelled, Some(resume::CancelledAt::BeforeAnyPhase));
+		assert!(seen.lock().is_empty(), "a cancelled resume dispatches nothing");
+		assert_eq!(record_kinds(&journal), ["start", "halt"], "nothing but the halt is appended");
+
+		let host = Scripted::new(project.path(), CONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let outcome = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("the cancelled log resumes");
+		let exit = match outcome {
+			resume::ResumeOutcome::Resumed { exit, .. } => exit,
+			other => panic!("the resume was not started: {other:?}"),
+		};
+		assert_eq!(exit.status, RunStatus::Accepted);
+		assert_eq!(*seen.lock(), [(String::from("build"), 1), (String::from("review"), 1)]);
+	}
+
+	#[tokio::test]
+	async fn adw_resume_cancelled_mid_phase_dispatches_no_further_phase() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		drop(RunLog::create(&journal, start(&definition)).expect("create"));
+
+		let host = CancelOnFirstDispatch { root: project.path().to_path_buf() };
+		let outcome = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| Ok::<_, Infallible>(resume::OpenedHost { host, trust: WorkspaceTrust::Trusted }),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("a cancelled resume is not an error");
+		let (exit, cancelled) = match outcome {
+			resume::ResumeOutcome::Resumed { exit, cancelled, .. } => (exit, cancelled),
+			other => panic!("the resume was not started: {other:?}"),
+		};
+		assert_eq!(exit.status, RunStatus::Cancelled);
+		assert_eq!(
+			cancelled,
+			Some(resume::CancelledAt::Interrupted {
+				phase:            Str::new_static("build"),
+				attempt:          1,
+				may_have_effects: true,
+			})
+		);
+		assert_eq!(
+			record_kinds(&journal),
+			["start", "dispatch", "halt"],
+			"the cancelled build stays in flight; review is never dispatched"
+		);
+	}
 }

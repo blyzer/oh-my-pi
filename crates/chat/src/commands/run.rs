@@ -220,12 +220,6 @@ impl Presenter {
 					.send(HostCommand::Service(Mutation::DeleteSession { id }));
 				Routed::Repaint
 			},
-			CommandAction::AdwResume { run_id } => {
-				let _ = self
-					.commands
-					.send(HostCommand::Service(Mutation::AdwResume { run_id }));
-				Routed::Repaint
-			},
 			CommandAction::Rename { title } => {
 				let _ = self
 					.commands

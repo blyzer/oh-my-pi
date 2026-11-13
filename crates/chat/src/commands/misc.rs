@@ -17,7 +17,7 @@ use omp_con::{ConError, Value};
 use omp_core::{Str, StrMut, sf};
 use omp_tui::Icon;
 
-use super::{CommandAction, PaletteEntry, rest, run::director_active};
+use super::{PaletteEntry, rest, run::director_active};
 use crate::{
 	actions::{HostAction, post},
 	host::HostCommand,
@@ -667,7 +667,22 @@ omp_con::cmd! {
 				let run_id = rest(args, 1).ok_or_else(|| ConError::Usage {
 					usage: Str::new_static(ADW_RESUME_USAGE),
 				})?;
-				post(ctx, HostAction::Command(CommandAction::AdwResume { run_id }))
+				open(ctx, PanelOpener::new(move |cx| {
+					let run = cx
+						.services
+						.adw_resume(run_id.clone())
+						.map_err(|error| sf!("Resume failed to start: {error}"))?;
+					Ok(Box::new(PendingPanel::new(
+						"adw-resume",
+						PanelAnchor::Center,
+						"Resume ADW run",
+						sf!("Resuming {run_id}. Esc cancels; the run stays resumable."),
+						run.done,
+						Some(run.cancel),
+						Settle::Show,
+						cx.ui,
+					)))
+				}))
 			},
 			_ => Err(ConError::Usage { usage: Str::new_static(ADW_RESUME_USAGE) }),
 		}

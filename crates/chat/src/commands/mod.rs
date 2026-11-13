@@ -312,11 +312,6 @@ pub enum CommandAction {
 		/// Session id (journal stem).
 		id: Str,
 	},
-	/// `/adw resume <run-id>`: resumes a recorded ADW workflow run.
-	AdwResume {
-		/// Run id as typed.
-		run_id: Str,
-	},
 	/// `/rename <title>`: set the session title.
 	Rename {
 		/// Human-readable session title.

@@ -12,7 +12,9 @@ use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::runlog::{RunLog, RunLogError, RunRecord, RunStart};
 use tokio_util::sync::CancellationToken;
 
-use super::{AdwHost, DefinitionError, Error, RunExit, definition, resume_from_log};
+use super::{
+	AdwHost, DefinitionError, Error, RunExit, RunStatus, definition, had_no_effect, resume_from_log,
+};
 
 #[derive(Clone, Copy, Debug)]
 /// The journal of the run to resume.
@@ -57,11 +59,14 @@ pub enum ResumeOutcome<E: StdError + 'static> {
 	/// The run continued; `exit` is how it stopped this time.
 	Resumed {
 		/// The workflow the run executes.
-		workflow: Str,
+		workflow:  Str,
 		/// The journal the run continued from.
-		journal:  PathBuf,
+		journal:   PathBuf,
 		/// How the continued run stopped.
-		exit:     RunExit<E>,
+		exit:      RunExit<E>,
+		/// Set when the run was cancelled: where that resume stopped, read from
+		/// its journal.
+		cancelled: Option<CancelledAt>,
 	},
 	/// The journal already ended in `Done`; nothing was dispatched or appended.
 	Finished {
@@ -177,7 +182,71 @@ where
 	let (log, locked) = RunLog::open(&journal, &start.workflow_digest)
 		.map_err(|source| ResumeError::Journal { path: journal.clone(), source })?;
 	let exit = resume_from_log(&definition, start.max_attempts, &host, cancel, log, &locked).await?;
-	Ok(ResumeOutcome::Resumed { workflow: start.workflow.clone(), journal, exit })
+	let cancelled = if matches!(exit.status, RunStatus::Cancelled) {
+		let after = RunLog::read(&journal)
+			.map_err(|source| ResumeError::Journal { path: journal.clone(), source })?;
+		Some(classify_cancel(after.get(locked.len()..).unwrap_or_default()))
+	} else {
+		None
+	};
+	Ok(ResumeOutcome::Resumed { workflow: start.workflow.clone(), journal, exit, cancelled })
+}
+
+/// Where a cancelled resume stopped, read from what that resume journaled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CancelledAt {
+	/// No phase was dispatched by this resume.
+	BeforeAnyPhase,
+	/// Phases settled, and the cancel landed before the next dispatch.
+	BetweenPhases,
+	/// `phase` attempt `attempt` was dispatched and cut off before it settled.
+	/// When `may_have_effects` is set, resuming reports the attempt as uncertain
+	/// instead of re-running it.
+	Interrupted {
+		/// The interrupted phase.
+		phase:            Str,
+		/// The interrupted attempt.
+		attempt:          u32,
+		/// Whether the recorded posture allows effects.
+		may_have_effects: bool,
+	},
+}
+
+/// Classifies what one resume appended to the journal, excluding the records
+/// that were already there when it started.
+fn classify_cancel(appended: &[RunRecord]) -> CancelledAt {
+	let last_dispatch = appended
+		.iter()
+		.enumerate()
+		.rev()
+		.find_map(|(index, record)| match record {
+			RunRecord::Dispatch(dispatch) => Some((index, dispatch)),
+			_ => None,
+		});
+	let Some((index, dispatch)) = last_dispatch else {
+		let settled = appended
+			.iter()
+			.any(|record| matches!(record, RunRecord::Settle(_)));
+		return if settled {
+			CancelledAt::BetweenPhases
+		} else {
+			CancelledAt::BeforeAnyPhase
+		};
+	};
+	let settled = appended[index + 1..].iter().any(|record| match record {
+		RunRecord::Settle(settle) => {
+			settle.phase.as_str() == dispatch.phase.as_str() && settle.attempt == dispatch.attempt
+		},
+		_ => false,
+	});
+	if settled {
+		return CancelledAt::BetweenPhases;
+	}
+	CancelledAt::Interrupted {
+		phase:            dispatch.phase.clone(),
+		attempt:          dispatch.attempt,
+		may_have_effects: !had_no_effect(dispatch),
+	}
 }
 
 fn locate<E: StdError + 'static>(run: RunRef<'_>) -> Result<PathBuf, ResumeError<E>> {
