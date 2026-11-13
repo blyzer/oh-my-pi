@@ -18,7 +18,7 @@ Upstream's `desktop` module stops the agent from acting on an app the user is us
 
 Out of scope: the accessibility tree code, capture, and the macOS `key_reroute` and `release_guard` machinery (they serve background key delivery, not intervention).
 
-## Upstream behaviour
+## 1. Upstream
 
 ### Two separate mechanisms
 
@@ -63,7 +63,7 @@ Upstream has two different protections. They are easy to confuse.
 - The libei backend reads the keymap from the device and falls back to no layout (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:860`). `char_stroke` resolves a character through the layout, with a US-ASCII fast path only when the group is US (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:876`). Two real keymaps (`fr.xkb`, `us-fr.xkb`) are checked in as test data (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:1125`).
 - macOS reads the active input source per call (`upstream:docs/computer-use.md:159`). X11 has its own map in `linux/x11/keymap.rs` (651 lines; not read in depth for this document, so its group handling is UNVERIFIED).
 
-## omp2 today
+## 2. omp2 inventory
 
 omp2 has the same crate shape (`omp-desktop`: session facade, actor thread, per-OS backends) but none of the guard.
 
@@ -77,7 +77,7 @@ omp2 has the same crate shape (`omp-desktop`: session facade, actor thread, per-
 - X11 looks up a keycode by keysym in the first two columns of the server's keyboard mapping and errors when none matches (`crates/desktop/src/linux/x11/input.rs:494-510`). This respects the live layout but not other groups.
 - Dependencies: `reis`, `x11rb` (with `xinput` and `xtest`) and `xkeysym` are already present (`crates/desktop/Cargo.toml:25-33`, `Cargo.toml:214`, `Cargo.toml:326`, `Cargo.toml:328`). The `wayland/xkb.rs` parser upstream is hand-written and needs no new crate.
 
-## Gap table
+### Gap table
 
 | Capability | Upstream | omp2 | Gap |
 |---|---|---|---|
@@ -93,43 +93,76 @@ omp2 has the same crate shape (`omp-desktop`: session facade, actor thread, per-
 | X11 non-US typing | own keymap module | server mapping, 2 columns | partial |
 | Keymap test data | `fr.xkb`, `us-fr.xkb` | none | add with the parser |
 
-## Recommendation
+## 3. Class
 
-Two independent slices. They share no code.
+**Class c (port)**, in two independent parts.
 
-### Slice A: XKB typing on Wayland (do first)
+- Part A, group-aware XKB typing on Wayland: port. Upstream has a working Rust parser and tests; omp2 types through a fixed US table (`crates/desktop/src/linux/wayland/libei.rs:572`). This is a correctness bug on non-US layouts.
+- Part B, the macOS user-intervention guard: port, after a decision. It adds one error code and one event tag, and it needs the Input Monitoring permission.
+- Not ported now: the X11 takeover guard and the Escape monitors. omp2 has no takeover mode (`crates/desktop/src/backend.rs:12`), so they have nothing to attach to. That is an open question, not a slice.
 
-This is a correctness bug, not a feature. On a non-US layout omp2 types the wrong characters.
+Verdict: implement Part A; Part B after owner agreement; the rest research only.
 
-1. Port `xkb.rs` into `crates/desktop/src/linux/wayland/` with its two `.xkb` test files. It is about 676 lines of std-only parsing. Upstream's file is the source of truth for behaviour; the licence is the same project's, so no new third-party licence applies. [INFERENCE]
-2. Read the keymap from the libei keyboard device (upstream: `read_keymap`, `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:860`), keep it in the device struct, and replace `evdev_char` in `type_text` with a layout lookup that falls back to the US table only when the active group is US.
-3. Return `InvalidKey` or `InputFailed` with the character and the active group when no stroke exists.
-4. Tests: copy the upstream unit tests at `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:602-668` plus a French string test. They need no display. Estimate: 1 to 2 days. [INFERENCE]
+## 4. Options
 
-### Slice B: macOS intervention guard (do second, behind a design review)
+### Part A: typing on a non-US Wayland layout
 
-Prerequisites, in order: (1) add `ErrorCode::UserIntervened` and the matching `FaultCode` (a wire-visible change, so it needs the owner's agreement); (2) tag every event omp posts so the tap can ignore it; (3) port `intervention.rs` (550 lines) with its tests and `UserInputMonitor` (`control/macos.rs`, which reuses a tap-thread helper that omp2 may not have); (4) insert `check_press` before each press and AX action in `crates/desktop/src/macos/input.rs` and `crates/desktop/src/macos/ax.rs`; (5) update the computer tool prompt and docs so the agent knows to read again after `UserIntervened`.
+1. **Build on existing omp2 code.** Extend `evdev_char` with more tables. Cost: low for one layout, unbounded for the rest, and still wrong for any layout it does not list. Fit: poor.
+2. **Port upstream `xkb.rs`** (676 lines, std only) with its two keymap test files. Cost: 1 to 2 days. Fit: good. It reads the compositor's own compiled keymap, so every layout works, and no new dependency is needed. `reis`, `x11rb` and `xkeysym` are already in the crate (`crates/desktop/Cargo.toml:25-33`).
+3. **Link `libxkbcommon`.** Cost: a C dependency in a Rust-only workspace, plus build and packaging work on every platform. Fit: poor.
 
-Estimate: 4 to 7 days including permission handling. [INFERENCE] The tap needs the Input Monitoring permission; without it upstream silently sees nothing, which is a safe default but means the guard is off. The docs must say so.
+Choice: option 2. [INFERENCE]
 
-### Not recommended now
+### Part B: the macOS guard
 
-- Windows and Wayland guards: upstream has none.
-- X11 and the Escape monitors: they need a takeover mode and an input lease that omp2 does not have. Decide on takeover first; that is a larger product question than this gap.
+1. **Build on existing omp2 code.** Before each input call, compare the frontmost app's pid with the target's using the AX focus code omp2 already has. Cost: about a day. It catches an app switch but not typing inside the target app, which is the case upstream cares about. Fit: weak.
+2. **Port upstream `intervention.rs` and the tap.** Cost: 4 to 7 days. Fit: good. It needs a synthetic-event tag, a listen-only tap and `UserIntervened`.
+3. **Do nothing.** The agent already re-reads before acting, so the gap is a race, not a hole. Cost: zero.
 
-## Risks and open questions
+Choice: option 2, behind a default-off convar, once the owner accepts the new error code. Option 3 is acceptable if that code is refused. [INFERENCE]
 
-- **Privacy.** The tap sees every key and click system-wide. Upstream stores only pid and timestamp. Do the same; never log key codes. [INFERENCE]
-- **False positives.** A user's dictation tool or remote desktop posts input under another pid and counts as the user. That matches upstream's intent (`upstream:crates/pi-natives/src/desktop/control/macos.rs:413`), but it will make the agent wait for them.
-- **Wait cost.** `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`), so a cancellable wait must be added.
-- **Tap permission and lifecycle.** The tap must stop on session drop. omp2's actor thread owns platform objects (`crates/desktop/README.md`), which fits a tap thread owned by the actor.
-- **Contract.** Whether `UserIntervened` should exist on Linux at all is open; upstream scopes it to macOS and X11 takeover.
-- UNVERIFIED: the X11 map's group handling upstream (`linux/x11/keymap.rs`), and whether omp2's X11 path behaves correctly on a non-US layout; neither was run.
+## 5. Plan
 
-## Upstream origin and license
+### Slice A1: layout parser (no behaviour change)
+
+- Port `xkb.rs` and the two `.xkb` test files into `crates/desktop/src/linux/wayland/`.
+- Acceptance: unit tests ported from `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:602-668` pass with no display: French levels and AltGr, numeric group labels, only the active group resolves, NumLock and CapsLock rules.
+- Ships dead: nothing calls it yet.
+
+### Slice A2: use the layout in `type_text`
+
+- Read the keymap fd from the libei keyboard device (upstream does it in `read_keymap`, `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:860`), keep it on the device, and resolve each character through it. Keep the US table as the fast path only when the active group is US. When no stroke exists, return `InputFailed` naming the character and the group.
+- Acceptance: a French keymap fixture types `e-acute` and `@` with the keycodes and modifiers the keymap dictates; a character absent from every level fails with a typed error; US typing is unchanged (the existing libei tests still pass).
+- Gate: default-off convar `sv_desktop_xkb_layout` for one release, then default-on. Open question 1 asks whether a gate is wanted for a pure bug fix.
+
+### Slice B1: event tag and error code
+
+- Add `ErrorCode::UserIntervened` (`crates/desktop/src/error.rs:3`) and the matching `FaultCode` (`crates/tools/src/computer.rs:389`); tag every event omp posts (`crates/desktop/src/macos/input.rs:572`, `crates/desktop/src/macos/input.rs:656`).
+- Acceptance: a test posts an event and reads back the tag from the event source user data; the fault code round-trips through the tool layer's serde tests.
+- Gate: the code is unused until B2, so it ships with `cap-desktop-guard` off. Adding an enum variant is additive, but both enums are wire-visible, so the owner must agree first.
+
+### Slice B2: the guard
+
+- Port `intervention.rs` (state machine, `QUIET` of 5 s, `admit`, `check_press`) and the macOS `UserInputMonitor`; call `check_press` before each press and AX action in `crates/desktop/src/macos/input.rs` and `crates/desktop/src/macos/ax.rs`; give `OperationState` a cancellable wait (`crates/desktop/src/lib.rs:62`).
+- Acceptance: the upstream state-machine tests, ported with a simulated listener, pass headless; an integration test with the listener off shows input is never blocked when the tap cannot start.
+- Gate: feature `cap-desktop-guard` plus default-off convar `sv_desktop_intervention_guard`.
+
+### Slice B3: documentation and prompt
+
+- Tell the computer tool's prompt that `UserIntervened` means read again; document the Input Monitoring permission.
+- Acceptance: the tool prompt snapshot test changes only by the new paragraph.
+
+## 6. Open questions
+
+1. Does a pure bug fix (Part A) need a default-off gate under the additive-only rule? It changes what is typed on non-US layouts, from wrong to right.
+2. Does the owner accept a new `UserIntervened` variant in two wire-visible enums? Without it Part B cannot ship.
+3. Should omp2 grow a takeover mode at all? The X11 guard and the Escape stops depend on it. That is a product decision larger than this gap.
+4. Privacy. The tap sees every key and click system-wide. Upstream stores only a pid and a time. Do the same and never log key codes. [INFERENCE]
+5. False positives. A dictation tool or a remote desktop posts under another pid and counts as the user. That matches upstream's intent (`upstream:crates/pi-natives/src/desktop/control/macos.rs:413`) but will make the agent wait.
+6. Wait cost. `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`).
+7. UNVERIFIED: the X11 map's group handling upstream (`linux/x11/keymap.rs`), and whether omp2's X11 path behaves on a non-US layout. Neither was run.
+8. Conflicts with locked ADRs: none found. ADR 0006 (sandbox policy) is about sandboxing, not desktop input.
+
+## 7. Upstream origin and license
 
 A port would draw from `upstream:crates/pi-natives/src/desktop/control/intervention.rs`, `control/macos.rs`, `linux/wayland/xkb.rs`, `linux/wayland/libei.rs` and the two `testdata/*.xkb` files. The upstream `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`). A port keeps that notice. The `.xkb` testdata are dumps of the xkeyboard-config layouts, which carry their own (permissive, MIT-style) terms; check `crates/desktop/NOTICE`-style handling and `THIRD-PARTY-NOTICES.txt` before copying them. UNVERIFIED: the licence text of the `.xkb` files was not read.
-
-## Verdict
-
-Implement slice A (Wayland XKB typing) as a bug fix. Defer slice B until the owner agrees to the new error code and the event tag. Research only for X11, Windows and Escape-stop, because they depend on a takeover mode omp2 does not have.
