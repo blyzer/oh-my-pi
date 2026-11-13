@@ -10,7 +10,7 @@ repository's runner. Same-repo branches and pull requests use it directly.
 |---|---|---|
 | `rust` (workspace tests, P1–P8, P12) | `vars.MACOS_RUNNER`, else `macos-15` | Persistent target dir outside the checkout: incremental Rust compile and the embedded CPython link survive between runs |
 | `lint_macos` | GitHub-hosted `macos-15` | No reuse of that target dir; a warm clippy was no faster than a cold one |
-| Linux jobs (format, lint, P7, P9–P11, `tool_sources`, BuildBuddy) | GitHub-hosted `ubuntu-24.04`; the Mac plus BuildBuddy when `vars.CI_LINUX_MODE` is `remote` (below) | Do not need the Mac |
+| Linux jobs (format, lint, P7, P9–P11, `tool_sources`, BuildBuddy) | GitHub-hosted `ubuntu-24.04`; with `vars.CI_LINUX_MODE` = `remote`, all but `lint_linux`, `p7_linux` and `p9_p10_linux` use the Mac and BuildBuddy (below) | Do not need the Mac |
 
 That keeps the Mac for the one job that benefits from its disk cache, and
 runs everything else on GitHub so the Mac stays free.
@@ -31,15 +31,19 @@ our own branches.
 
 ## Operating CI without hosted minutes
 
-The repository variable `CI_LINUX_MODE` takes the Linux jobs of `ci.yml` off
+The repository variable `CI_LINUX_MODE` takes most Linux jobs of `ci.yml` off
 GitHub-hosted runners. Unset, or set to anything but `remote`, nothing
 changes: every Linux job runs on `ubuntu-24.04` as before. With `remote`, a
 trusted run (a push, a manual dispatch, or a pull request from a branch of
-this repository) sends each Linux job to the self-hosted Mac. The light jobs
-run there as they are. Each Cargo job skips its GitHub-hosted steps and runs
-the matching `just ci-*` recipe on a BuildBuddy remote Linux runner through
-`scripts/remote-verify.sh`, so the Mac only uploads the change and streams
-the log. Every job keeps its `name:`, so the required checks do not change.
+this repository) sends ten of the thirteen Linux jobs to the self-hosted Mac.
+Six run there natively. `lintx_ratchet` and `runtime_spec` skip their
+GitHub-hosted steps and run their `just ci-*` recipe on a BuildBuddy remote
+Linux runner through `scripts/remote-verify.sh`, so the Mac only uploads the
+change and streams the log; `remote_linux` and `remote_seed` start their
+BuildBuddy runs from the Mac instead of a hosted runner. `lint_linux`,
+`p9_p10_linux` and `p7_linux` stay on `ubuntu-24.04` in either mode until
+their recipes pass on BuildBuddy (Status, below). Every job keeps its `name:`,
+so the required checks do not change.
 
 Turn it on, and back off:
 
@@ -72,6 +76,19 @@ key fails rather than passing.
 `lint_macos` still runs on GitHub-hosted `macos-15` in either mode.
 `pr-labels.yml`, `codeql.yml`, `semantic-index-eval.yml` and the summary job
 of `p8-baseline.yml` are separate workflows and still use hosted Linux.
+
+### Status
+
+No GitHub Actions run has used `remote` yet. What was checked by hand:
+`just remote ci-lintx-ratchet` and `just remote ci-runtime-spec` passed on
+BuildBuddy, and the native steps of `changes`, `format`, `protobuf`,
+`extensions_conformance`, `licenses` and `push_verified` ran clean on the Mac
+with the runner's own `PATH`. With the variable unset, the push run on the
+merge commit of #596, which added the mode (run 43136579113), passed every job
+on its usual runner. `just remote ci-lint-linux` passed its clippy step, but no
+run of it has finished; `ci-p9-p10-linux` and `ci-p7-linux` have never run.
+Wire one of those three jobs to its recipe only after `just remote <recipe>`
+passes, and treat the first run with the variable set as the real test.
 
 ### Fork pull requests
 
