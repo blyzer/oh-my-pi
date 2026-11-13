@@ -1157,6 +1157,11 @@ pub enum Mutation {
 		/// Account selector (`provider:account` or `active`).
 		target: Str,
 	},
+	/// `/adw resume <run-id>`: resumes a recorded ADW workflow run.
+	AdwResume {
+		/// Run id as typed.
+		run_id: Str,
+	},
 }
 
 impl Mutation {
@@ -1189,6 +1194,7 @@ impl Mutation {
 			Self::RenameSession { .. } => "renamed",
 			Self::DeleteSession { .. } => "deleted",
 			Self::ResetUsage { .. } => "reset",
+			Self::AdwResume { .. } => "resumed",
 		}
 	}
 }
@@ -1255,6 +1261,11 @@ pub trait Services: Send + Sync {
 	/// network refresh; the actor only receives immutable selector rows.
 	fn reset_accounts(&self) -> ServiceResult<Pending<Vec<ResetAccountRow>>> {
 		Err(ServiceError::Unavailable { feed: "saved reset accounts" })
+	}
+
+	/// Recorded ADW run ids for `/adw resume` completion, newest first.
+	fn adw_runs(&self) -> ServiceResult<Vec<Str>> {
+		Err(ServiceError::Unavailable { feed: "adw runs" })
 	}
 
 	/// The kernel's registered tools.

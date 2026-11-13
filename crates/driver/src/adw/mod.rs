@@ -14,6 +14,7 @@
 pub mod definition;
 pub mod production;
 pub mod remote;
+pub mod resume;
 
 use std::{error::Error as StdError, future::Future, path::Path};
 
@@ -592,7 +593,7 @@ mod tests {
 	use std::{convert::Infallible, fs, future::ready, path::PathBuf};
 
 	use omp_adw::{ApprovalScope, NetworkScope, WriteScope};
-	use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
+	use omp_ext::workspace_trust::{WorkspaceTrust, inventory::WORKFLOWS_DIR};
 
 	use super::*;
 
@@ -923,12 +924,16 @@ mod tests {
 	struct Scripted {
 		root:    PathBuf,
 		posture: Posture,
-		seen:    parking_lot::Mutex<Vec<(String, u32)>>,
+		seen:    std::sync::Arc<parking_lot::Mutex<Vec<(String, u32)>>>,
 	}
 
 	impl Scripted {
 		fn new(root: &Path, posture: Posture) -> Self {
-			Self { root: root.to_path_buf(), posture, seen: parking_lot::Mutex::new(Vec::new()) }
+			Self {
+				root: root.to_path_buf(),
+				posture,
+				seen: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+			}
 		}
 	}
 
@@ -1011,5 +1016,202 @@ mod tests {
 			status:   SettleStatus::Accepted,
 			feedback: Str::default(),
 		})
+	}
+
+	fn opened(
+		host: Scripted,
+		trust: WorkspaceTrust,
+	) -> Result<resume::OpenedHost<Scripted>, Infallible> {
+		Ok(resume::OpenedHost { host, trust })
+	}
+
+	fn resume_request<'a>(
+		run: resume::RunRef<'a>,
+		project: &'a Path,
+		require_trusted: bool,
+	) -> resume::ResumeRequest<'a> {
+		resume::ResumeRequest { run, project, require_trusted, approval_ceiling: None }
+	}
+
+	#[tokio::test]
+	async fn adw_resume_refuses_an_invalid_or_unknown_run_id_before_any_host_opens() {
+		let (project, _definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let cancel = CancellationToken::new();
+		let reached = std::cell::Cell::new(false);
+
+		let invalid = resume::resume(
+			resume_request(
+				resume::RunRef::Id { runs_dir: &runs, id: "../escape" },
+				project.path(),
+				false,
+			),
+			|_| {
+				reached.set(true);
+				opened(Scripted::new(project.path(), CONFINED), WorkspaceTrust::Trusted)
+			},
+			&cancel,
+		)
+		.await;
+		assert!(matches!(invalid, Err(resume::ResumeError::InvalidRunId(_))), "{invalid:?}");
+
+		let unknown = resume::resume(
+			resume_request(
+				resume::RunRef::Id { runs_dir: &runs, id: "01JMISSING0000000000000000" },
+				project.path(),
+				false,
+			),
+			|_| {
+				reached.set(true);
+				opened(Scripted::new(project.path(), CONFINED), WorkspaceTrust::Trusted)
+			},
+			&cancel,
+		)
+		.await;
+		assert!(matches!(unknown, Err(resume::ResumeError::UnknownRun { .. })), "{unknown:?}");
+		assert!(!reached.get(), "a refused run id opens no host");
+	}
+
+	#[tokio::test]
+	async fn adw_resume_reports_a_finished_run_without_dispatching() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		let mut log = RunLog::create(&journal, start(&definition)).expect("create");
+		run_with_log(
+			&definition,
+			2,
+			&Scripted::new(project.path(), CONFINED),
+			&CancellationToken::new(),
+			Some(&mut log),
+		)
+		.await
+		.expect("run");
+		drop(log);
+		let recorded = RunLog::read(&journal).expect("read").len();
+
+		let host = Scripted::new(project.path(), CONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let outcome = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("a finished run is not an error");
+		assert!(
+			matches!(outcome, resume::ResumeOutcome::Finished { accepted: true, .. }),
+			"{outcome:?}"
+		);
+		assert!(seen.lock().is_empty(), "a finished run dispatches nothing");
+		assert_eq!(RunLog::read(&journal).expect("read").len(), recorded, "nothing is appended");
+	}
+
+	#[tokio::test]
+	async fn adw_resume_refuses_an_untrusted_workspace_before_any_phase_dispatches() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		drop(RunLog::create(&journal, start(&definition)).expect("create"));
+		let recorded = RunLog::read(&journal).expect("read").len();
+
+		let host = Scripted::new(project.path(), CONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let refused = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| opened(host, WorkspaceTrust::Untrusted),
+			&CancellationToken::new(),
+		)
+		.await;
+		assert!(matches!(refused, Err(resume::ResumeError::UntrustedWorkspace)), "{refused:?}");
+		assert!(seen.lock().is_empty(), "no phase dispatches in an untrusted workspace");
+		assert_eq!(RunLog::read(&journal).expect("read").len(), recorded, "nothing is appended");
+	}
+
+	#[tokio::test]
+	async fn adw_resume_continues_a_halted_run_through_the_shared_path() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		let mut log = RunLog::create(&journal, start(&definition)).expect("create");
+		log.append(&dispatch("build", CONFINED)).expect("dispatch");
+		log.append(&settle("build")).expect("settle");
+		log.append(&RunRecord::Halt(RunHalt { reason: Str::new_static("stopped by the operator") }))
+			.expect("halt");
+		drop(log);
+
+		let host = Scripted::new(project.path(), CONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let outcome = resume::resume(
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true),
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("the halted run resumes");
+		let exit = match outcome {
+			resume::ResumeOutcome::Resumed { exit, .. } => exit,
+			other => panic!("the halted run was not resumed: {other:?}"),
+		};
+		assert_eq!(exit.status, RunStatus::Accepted);
+		assert_eq!(*seen.lock(), [(String::from("review"), 1)]);
+		let events = records_to_replay_events(&RunLog::read(&journal).expect("read"));
+		let mut replayed = Run::new(definition.workflow().clone()).with_max_attempts(2);
+		replay(&mut replayed, &events).expect("the resumed journal replays cleanly");
+	}
+
+	#[tokio::test]
+	async fn adw_resume_refuses_host_approval_above_the_request_ceiling() {
+		let (project, definition) = two_phase_project();
+		let runs = project.path().join("runs");
+		fs::create_dir_all(&runs).expect("runs directory");
+		let id = "01JADWTEST0000000000000000";
+		let journal = runs.join(format!("{id}.oms"));
+		drop(RunLog::create(&journal, start(&definition)).expect("create"));
+		let recorded = RunLog::read(&journal).expect("read").len();
+
+		let host = Scripted::new(project.path(), UNCONFINED);
+		let seen = std::sync::Arc::clone(&host.seen);
+		let mut request =
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true);
+		request.approval_ceiling = Some(ApprovalScope::AlwaysAsk);
+		let refused = resume::resume(
+			request,
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&CancellationToken::new(),
+		)
+		.await;
+		assert!(
+			matches!(
+				refused,
+				Err(resume::ResumeError::ApprovalExceedsCeiling {
+					host:    ApprovalScope::Write,
+					ceiling: ApprovalScope::AlwaysAsk,
+				})
+			),
+			"{refused:?}"
+		);
+		assert!(seen.lock().is_empty(), "the refused host dispatches nothing");
+		assert_eq!(RunLog::read(&journal).expect("read").len(), recorded, "nothing is appended");
+
+		let host = Scripted::new(project.path(), CONFINED);
+		let mut request =
+			resume_request(resume::RunRef::Id { runs_dir: &runs, id }, project.path(), true);
+		request.approval_ceiling = Some(ApprovalScope::Write);
+		let allowed = resume::resume(
+			request,
+			|_| opened(host, WorkspaceTrust::Trusted),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("approval within the ceiling resumes");
+		assert!(matches!(allowed, resume::ResumeOutcome::Resumed { .. }), "{allowed:?}");
 	}
 }

@@ -17,7 +17,7 @@ use omp_con::{ConError, Value};
 use omp_core::{Str, StrMut, sf};
 use omp_tui::Icon;
 
-use super::{PaletteEntry, rest, run::director_active};
+use super::{CommandAction, PaletteEntry, rest, run::director_active};
 use crate::{
 	actions::{HostAction, post},
 	host::HostCommand,
@@ -37,6 +37,7 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "cleanse", icon: Icon::Broom },
 	PaletteEntry { name: "security", icon: Icon::Shield },
 	PaletteEntry { name: "memory", icon: Icon::Memory },
+	PaletteEntry { name: "adw", icon: Icon::Bolt },
 	PaletteEntry { name: "ssh", icon: Icon::Ssh },
 	PaletteEntry { name: "browser", icon: Icon::Browser },
 	PaletteEntry { name: "computer", icon: Icon::Desktop },
@@ -654,6 +655,23 @@ omp_con::cmd! {
 
 	/// Starts or stops the duplex live-voice session.
 	live() = |ctx, _args| post(ctx, HostAction::LiveToggle);
+}
+
+const ADW_RESUME_USAGE: &str = "Usage: /adw resume <run-id>";
+
+omp_con::cmd! {
+	/// Resumes a recorded ADW workflow run: `/adw resume <run-id>`.
+	adw(?subcommand: Str, ?run_id: Str) = |ctx, args| {
+		match args.opt::<Str>(0)?.as_deref() {
+			Some("resume") => {
+				let run_id = rest(args, 1).ok_or_else(|| ConError::Usage {
+					usage: Str::new_static(ADW_RESUME_USAGE),
+				})?;
+				post(ctx, HostAction::Command(CommandAction::AdwResume { run_id }))
+			},
+			_ => Err(ConError::Usage { usage: Str::new_static(ADW_RESUME_USAGE) }),
+		}
+	};
 }
 
 #[cfg(test)]

@@ -62,6 +62,21 @@ pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	}
 }
 
+pub(super) fn adw_approval_ceiling(state: &ServiceState) -> omp_adw::ApprovalScope {
+	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
+		.with_workspace_trust(state.workspace_trust)
+		.with_approval_mode_override(state.approval_override);
+	let mode = omp_contract::posture::effective_approval_mode(
+		settings.configured_approval(),
+		probe_sandbox(&state.con, &state.project),
+	);
+	match mode {
+		omp_contract::posture::ApprovalMode::AlwaysAsk => omp_adw::ApprovalScope::AlwaysAsk,
+		omp_contract::posture::ApprovalMode::Write => omp_adw::ApprovalScope::Write,
+		omp_contract::posture::ApprovalMode::Yolo => omp_adw::ApprovalScope::Yolo,
+	}
+}
+
 /// `/export [path]`: a standalone HTML projection of the live journal.
 pub fn export(
 	state: &ServiceState,

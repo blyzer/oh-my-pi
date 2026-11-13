@@ -263,6 +263,12 @@ impl Services for AppServices {
 		usage::reset_accounts(&self.state)
 	}
 
+	fn adw_runs(&self) -> ServiceResult<Vec<Str>> {
+		crate::adw_cmd::recorded_run_ids()
+			.map(|ids| ids.into_iter().map(Str::from).collect::<Vec<Str>>())
+			.map_err(ServiceError::failed)
+	}
+
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
 		tools::roster(&self.state)
 	}
@@ -559,11 +565,46 @@ impl Mutations for AppServices {
 				session_ops::delete(&self.state, &id).map(|()| Str::new_static("Session deleted")),
 			)),
 			Mutation::ResetUsage { target } => Ok(ready(usage::reset(&self.state, &target))),
+			Mutation::AdwResume { run_id } => Ok(self.adw_resume(run_id)),
 		}
 	}
 }
 
+async fn resume_adw_run(state: &ServiceState, run_id: &str) -> ServiceResult<Str> {
+	let data_dir = omp_core::dirs::data_dir(None).map_err(ServiceError::failed)?;
+	let runs_dir = omp_envd::tool_url::runs_dir(&data_dir);
+	let request = omp_driver::adw::resume::ResumeRequest {
+		run:              omp_driver::adw::resume::RunRef::Id {
+			runs_dir: &runs_dir,
+			id:       run_id,
+		},
+		project:          &state.project,
+		require_trusted:  true,
+		approval_ceiling: Some(misc::adw_approval_ceiling(state)),
+	};
+	let outcome = crate::adw_cmd::resume_recorded(
+		request,
+		&data_dir,
+		Arc::clone(&state.con),
+		None,
+		&tokio_util::sync::CancellationToken::new(),
+	)
+	.await
+	.map_err(ServiceError::failed)?;
+	Ok(crate::adw_cmd::outcome_line(&outcome))
+}
+
 impl AppServices {
+	fn adw_resume(&self, run_id: Str) -> Pending<Str> {
+		let (tx, rx) = flume::bounded(1);
+		let state = Arc::clone(&self.state);
+		self.state.runtime.spawn(async move {
+			let result = resume_adw_run(&state, run_id.as_str()).await;
+			let _ = tx.send(result);
+		});
+		rx
+	}
+
 	fn logout(&self, account: AccountRow) -> ServiceResult<Pending<Str>> {
 		let label = account.label.clone();
 		let pending = accounts::logout(&self.state, &account)?;

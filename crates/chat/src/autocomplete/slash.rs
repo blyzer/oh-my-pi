@@ -143,24 +143,61 @@ pub fn roster(con: &Arc<Ctx>) -> Vec<Command> {
 		.collect()
 }
 
+const ADW_SUBCOMMANDS: &[(&str, &str)] = &[("resume", "Resumes a recorded ADW workflow run")];
+const ADW_COMPLETION_LIMIT: usize = 50;
+
+fn adw_arguments(services: &dyn Services, partial: &str) -> Box<[CommandArgument]> {
+	let Some((raw_subcommand, run_prefix)) = partial.split_once(' ') else {
+		let prefix = partial.to_ascii_lowercase();
+		return ADW_SUBCOMMANDS
+			.iter()
+			.filter(|&&(name, _)| name.starts_with(prefix.as_str()))
+			.map(|&(name, description)| CommandArgument {
+				value:       Str::new_static(name),
+				description: Str::new_static(description),
+				usage:       None,
+			})
+			.collect();
+	};
+	if !raw_subcommand.eq_ignore_ascii_case("resume") || run_prefix.contains(char::is_whitespace) {
+		return Box::default();
+	}
+	let Ok(ids) = services.adw_runs() else {
+		return Box::default();
+	};
+	ids.into_iter()
+		.filter(|id| id.starts_with(run_prefix))
+		.take(ADW_COMPLETION_LIMIT)
+		.map(|id| CommandArgument {
+			value:       sf!("{raw_subcommand} {id}"),
+			description: Str::new_static("recorded ADW run"),
+			usage:       None,
+		})
+		.collect()
+}
+
 /// Attaches live service-backed argument sources after the console registry
 /// has been projected. Extension and template command names are already
 /// present through `Ctx::dynamic_cmds`; MCP additionally completes its
-/// subcommands and the current MCP server roster.
+/// subcommands and the current MCP server roster, and `/adw` completes its
+/// subcommands and recorded run ids.
 #[must_use]
 pub fn with_service_completions(
 	mut roster: Vec<Command>,
 	services: Arc<dyn Services>,
 ) -> Vec<Command> {
 	for command in &mut roster {
-		if command.name() != "mcp" {
-			continue;
-		}
 		let services = Arc::clone(&services);
-		*command = command
-			.clone()
-			.with_dynamic_args(move |partial| mcp_arguments(services.as_ref(), partial));
-		break;
+		let updated = match command.name() {
+			"mcp" => command
+				.clone()
+				.with_dynamic_args(move |partial| mcp_arguments(services.as_ref(), partial)),
+			"adw" => command
+				.clone()
+				.with_dynamic_args(move |partial| adw_arguments(services.as_ref(), partial)),
+			_ => continue,
+		};
+		*command = updated;
 	}
 	roster
 }
@@ -375,5 +412,24 @@ mod tests {
 		let servers = slash.suggest("/mcp test al", 12).expect("MCP server names");
 		assert_eq!(servers.items.len(), 1, "non-MCP extension rows stay hidden");
 		assert_eq!(servers.items[0].value(), "test Alpha ");
+	}
+
+	struct AdwRuns;
+
+	impl Services for AdwRuns {
+		fn adw_runs(&self) -> crate::overlays::services::ServiceResult<Vec<Str>> {
+			Ok(vec![Str::new_static("01ADW2"), Str::new_static("01ADW1"), Str::new_static("01OTHER")])
+		}
+	}
+
+	#[test]
+	fn adw_completes_resume_then_recorded_run_ids() {
+		let con = Arc::new(CtxBuilder::default().build());
+		let roster = with_service_completions(roster(&con), Arc::new(AdwRuns));
+		let mut slash = SlashCommands::new(roster);
+		assert_eq!(labels(&slash.suggest("/adw re", 7).expect("subcommands")), ["resume"]);
+		let runs = slash.suggest("/adw resume 01ADW", 17).expect("run ids");
+		assert_eq!(runs.items.len(), 2);
+		assert_eq!(runs.items[0].value(), "resume 01ADW2 ");
 	}
 }

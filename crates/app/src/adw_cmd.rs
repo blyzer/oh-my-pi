@@ -6,12 +6,19 @@ use std::{
 };
 
 use miette::IntoDiagnostic as _;
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_driver::{
-	adw::{RunStatus, definition, production::ProductionAdwHost, remote::AdwExecPolicy},
+	adw::{
+		RunExit, RunStatus, definition,
+		production::{ProductionAdwHost, ProductionError},
+		remote::AdwExecPolicy,
+		resume::{
+			OpenedHost, ResumeError, ResumeOutcome, ResumeRequest, RunRef, resume as shared_resume,
+		},
+	},
 	workspace_trust::evaluate_workspace,
 };
-use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
+use omp_ext::workspace_trust::{WorkspaceTrust, inventory::WORKFLOWS_DIR};
 use tokio_util::sync::CancellationToken;
 
 use crate::{cli::AdwCommand, process_ctx_with};
@@ -185,52 +192,103 @@ async fn resume(
 	data_dir: PathBuf,
 	exec_policy: Option<AdwExecPolicy>,
 ) -> miette::Result<()> {
-	let start = match omp_journal::runlog::RunLog::read(journal_path) {
-		Ok(records) => match records.into_iter().next() {
-			Some(omp_journal::runlog::RunRecord::Start(start)) => start,
-			_ => return Err(miette::miette!("run log carries no start record")),
+	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
+	let request = ResumeRequest {
+		run: RunRef::Journal(journal_path),
+		project,
+		require_trusted: false,
+		approval_ceiling: None,
+	};
+	let outcome = resume_recorded(request, &data_dir, ctx, exec_policy, &CancellationToken::new())
+		.await
+		.into_diagnostic()?;
+	match outcome {
+		ResumeOutcome::Resumed { workflow, journal, exit } => {
+			println!("Resumed workflow `{workflow}` from `{}`.", journal.display());
+			exit_status(exit.code)
 		},
-		Err(error) => return Err(miette::miette!("could not read run log: {error}")),
-	};
-
-	let definition = definition::load(project, &start.workflow).into_diagnostic()?;
-	if definition.digest() != start.workflow_digest.as_str() {
-		return Err(miette::miette!(
-			"workflow definition `{}` changed since the run started (digest mismatch)",
-			start.workflow
-		));
+		ResumeOutcome::Finished { workflow, journal, accepted } => {
+			println!(
+				"Workflow `{workflow}` already finished in `{}`; nothing to resume.",
+				journal.display()
+			);
+			exit_status(if accepted { 0 } else { 1 })
+		},
 	}
+}
 
-	let host = open_host(project, data_dir, start.model.clone(), start.model_explicit)?;
-	// The run continues under the policy it recorded; the flag overrides it.
-	let host = match exec_policy.or_else(|| recorded_exec_policy(&start)) {
-		Some(policy) => host.with_exec_policy(policy),
-		None => host,
-	};
-
-	// The records `open` returns were read under the log's lock; the earlier
-	// lock-free read only located the start record and its digest.
-	let (log, records) = omp_journal::runlog::RunLog::open(journal_path, &start.workflow_digest)
-		.map_err(|error| miette::miette!("could not reopen run log: {error}"))?;
-
-	let cancel = CancellationToken::new();
-	let exit = omp_driver::adw::resume_from_log(
-		&definition,
-		start.max_attempts,
-		&host,
-		&cancel,
-		log,
-		&records,
-	)
-	.await
-	.into_diagnostic()?;
-
-	println!("Resumed workflow `{}` from `{}`.", start.workflow, journal_path.display());
-	if exit.code == 0 {
+fn exit_status(code: u8) -> miette::Result<()> {
+	if code == 0 {
 		Ok(())
 	} else {
-		Err(miette::miette!("resumed workflow exited with status {}", exit.code))
+		Err(miette::miette!("resumed workflow exited with status {code}"))
 	}
+}
+
+pub(crate) async fn resume_recorded(
+	request: ResumeRequest<'_>,
+	data_dir: &Path,
+	ctx: Arc<omp_con::Ctx>,
+	exec_policy: Option<AdwExecPolicy>,
+	cancel: &CancellationToken,
+) -> Result<ResumeOutcome<ProductionError>, ResumeError<ProductionError>> {
+	let project = request.project;
+	shared_resume(
+		request,
+		|start: &omp_journal::runlog::RunStart| {
+			let host = ProductionAdwHost::open(
+				project.to_path_buf(),
+				data_dir.to_path_buf(),
+				start.model.clone(),
+				start.model_explicit,
+				Arc::clone(&ctx),
+				evaluate_workspace(data_dir, project),
+			)?;
+			let host = match exec_policy.or_else(|| recorded_exec_policy(start)) {
+				Some(policy) => host.with_exec_policy(policy),
+				None => host,
+			};
+			let trust = if host.workspace_trusted() {
+				WorkspaceTrust::Trusted
+			} else {
+				WorkspaceTrust::Untrusted
+			};
+			Ok(OpenedHost { host, trust })
+		},
+		cancel,
+	)
+	.await
+}
+
+pub(crate) fn outcome_line(outcome: &ResumeOutcome<ProductionError>) -> Str {
+	match outcome {
+		ResumeOutcome::Resumed { workflow, journal, exit } => {
+			sf!("Resumed workflow `{workflow}` from `{}`: {}.", journal.display(), exit_summary(exit))
+		},
+		ResumeOutcome::Finished { workflow, accepted, .. } => sf!(
+			"Workflow `{workflow}` already finished ({}); nothing to resume.",
+			if *accepted { "accepted" } else { "rejected" }
+		),
+	}
+}
+
+fn exit_summary(exit: &RunExit<ProductionError>) -> String {
+	let state = match exit.status {
+		RunStatus::Accepted => "accepted every phase",
+		RunStatus::Halted => "halted",
+		RunStatus::Blocked => "blocked",
+		RunStatus::Failed(_) => "failed",
+		RunStatus::Cancelled => "cancelled",
+	};
+	match exit.reason.as_deref() {
+		Some(reason) => format!("{state} ({reason})"),
+		None => state.to_owned(),
+	}
+}
+
+pub(crate) fn recorded_run_ids() -> std::io::Result<Vec<String>> {
+	let data_dir = omp_core::dirs::data_dir(None).map_err(std::io::Error::other)?;
+	omp_envd::tool_url::recorded_run_ids(&omp_envd::tool_url::runs_dir(&data_dir))
 }
 
 /// Opens the workflow host under the operator's configuration: user
