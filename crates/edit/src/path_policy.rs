@@ -16,7 +16,8 @@ const VAULT_DISABLED_MESSAGE: &str = "vault:// is disabled. Enable it by setting
                                       true` (Settings → Tools → Obsidian Vault).";
 const VAULT_ROOT_MISSING_MESSAGE: &str = "vault:// path resolution requires a cached vault root; \
                                           read vault:// first or use the write tool";
-const INTERNAL_PREFIXES: [&str; 9] = [
+const INTERNAL_PREFIXES: [&str; 10] = [
+	"adw://",
 	"agent://",
 	"artifact://",
 	"skill://",

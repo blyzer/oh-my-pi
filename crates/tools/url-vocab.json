@@ -21,6 +21,7 @@
     { "member": "JOB", "wire": ["job"], "selectors": true },
     { "member": "ATTACHMENT", "wire": ["attachment"], "selectors": true },
     { "member": "CONFLICT", "wire": ["conflict"], "selectors": true },
+    { "member": "ADW", "wire": ["adw"], "selectors": true },
     { "member": "UNKNOWN", "wire": [], "selectors": false }
   ]
 }

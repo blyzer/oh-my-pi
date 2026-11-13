@@ -171,10 +171,24 @@ impl ProductionAdwHost {
 		self
 	}
 
-	fn exec_policy(&self) -> AdwExecPolicy {
+	/// The execution policy phases run under: the override, else
+	/// `sv_exec_policy`.
+	pub fn exec_policy(&self) -> AdwExecPolicy {
 		self
 			.exec_policy_override
 			.unwrap_or_else(|| SV_EXEC_POLICY.get(&self.ctx))
+	}
+
+	/// Whether a remote-preferred phase falls back to local
+	/// (`sv_exec_fallback_local`).
+	pub fn exec_fallback_local(&self) -> bool {
+		SV_EXEC_FALLBACK_LOCAL.get(&self.ctx)
+	}
+
+	/// Whether the workspace trust decision this host gates code phases on
+	/// trusts the workspace.
+	pub fn workspace_trusted(&self) -> bool {
+		self.workspace_trust.trust() == WorkspaceTrust::Trusted
 	}
 
 	/// Opens the project Environment composition once and returns its owner.

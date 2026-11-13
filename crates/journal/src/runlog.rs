@@ -153,7 +153,7 @@ pub struct PhaseUncertain {
 /// Payload of `adw.run.halt@1`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunHalt {
-	/// Why the run stopped.
+	/// Why the run stopped. A halted run can be resumed (ADR 0051 R6).
 	pub reason: Str,
 }
 
@@ -175,7 +175,7 @@ pub enum RunRecord {
 	Settle(PhaseSettle),
 	/// Recovery could not decide an attempt.
 	Uncertain(PhaseUncertain),
-	/// The run stopped without finishing.
+	/// The run stopped without finishing; resume may continue it.
 	Halt(RunHalt),
 	/// The run reached a terminal outcome.
 	Done(RunDone),
@@ -218,10 +218,13 @@ impl RunRecord {
 		})
 	}
 
-	/// Whether this record ends the run.
+	/// Whether this record ends the run for good.
+	///
+	/// Only [`RunRecord::Done`] does: a halt (cancellation, a failed host,
+	/// a blocked phase) leaves the run resumable (ADR 0051 R6).
 	#[must_use]
 	pub const fn is_terminal(&self) -> bool {
-		matches!(self, Self::Halt(_) | Self::Done(_))
+		matches!(self, Self::Done(_))
 	}
 }
 

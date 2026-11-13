@@ -1082,6 +1082,18 @@ pub enum AdwCommand {
 		#[arg(long, value_name = "POLICY")]
 		exec_policy:  Option<AdwExecPolicy>,
 	},
+	/// Resume an interrupted workflow execution from a run log.
+	Resume {
+		/// Path to the run log journal file (`.oms`).
+		#[arg(value_name = "JOURNAL")]
+		journal:     PathBuf,
+		/// Project root whose workflow declarations are read.
+		#[arg(long, value_name = "PATH", default_value = ".")]
+		project:     PathBuf,
+		/// Placement for this process only, overriding `sv_exec_policy`.
+		#[arg(long, value_name = "POLICY")]
+		exec_policy: Option<AdwExecPolicy>,
+	},
 }
 
 /// Production application commands.

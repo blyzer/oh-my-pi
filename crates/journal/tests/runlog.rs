@@ -115,12 +115,18 @@ fn a_finished_run_accepts_no_more_records() {
 }
 
 #[test]
-fn a_halt_also_ends_the_run() {
+fn a_halted_run_can_be_resumed() {
 	let directory = tempdir().expect("tempdir");
-	let mut log = RunLog::create(directory.path().join("run.oms"), start("d1")).expect("create");
+	let path = directory.path().join("run.oms");
+	let mut log = RunLog::create(&path, start("d1")).expect("create");
 	log.append(&RunRecord::Halt(RunHalt { reason: Str::new_static("cancelled") }))
 		.expect("halt");
-	assert!(matches!(log.append(&dispatch(1)), Err(RunLogError::Finished)));
+	drop(log);
+	let (mut reopened, records) = RunLog::open(&path, "d1").expect("open");
+	assert!(matches!(records.last(), Some(RunRecord::Halt(_))));
+	reopened
+		.append(&dispatch(1))
+		.expect("a halted run accepts the resumed dispatch");
 }
 
 #[test]

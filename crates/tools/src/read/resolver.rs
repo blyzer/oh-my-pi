@@ -218,6 +218,8 @@ pub enum Scheme {
 	Attachment,
 	/// A session-registered merge conflict region.
 	Conflict,
+	/// Recorded ADW workflow runs (`adw://`).
+	Adw,
 	/// A syntactically valid scheme outside the built-in vocabulary.
 	Unknown,
 }
