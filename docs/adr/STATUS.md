@@ -63,6 +63,7 @@ investigations are historical evidence and do not override that ledger.
 | [0051](0051-durable-resumable-adw-runs.md) | ADW runs are durable, resumable and extensible over omp-journal | Proposed 2026-11-12; not started | `Run` is in memory only; nothing is journaled and there is no resume | Open: O1 journal kinds versus a separate run journal, O2 default store, O3 scope of NeedsHuman |
 | [0052](0052-one-executor-contract.md) | One executor contract: native OMP2, delegated agents and external harnesses | Proposed 2026-11-12; partially implemented (contract and ACP client exist, no router, no production caller) | `ExecutorRegistry` and `run_delegated_turn` have no use outside `delegated_host.rs` | Open: O1 router filters, O2 router location |
 | [0053](0053-independent-verdicts.md) | Acceptance is decided from evidence by an independent verdict | Proposed 2026-11-12; not started (Advisor Director and first-word Review verdict exist) | Review uses the producer's model selector; a producing phase is accepted on its own claim | Open: O1 unverified-by-default, O2 what counts as independent, O3 EGM dependency |
+| [0054](0054-shell-builtins.md) | Port the missing shell utilities as opt-in in-process builtins | Proposed 2026-11-13; reviewed (EGM); not started | 19 utilities absent; external commands run instead | Open: O1 usage-evidence source for slices 7-10, O2 Windows verification owner, O3 move existing writers to Host::open_write |
 
 Totals: 25 implemented, 21 partially implemented, 4 not started.
 

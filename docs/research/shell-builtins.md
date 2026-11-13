@@ -66,6 +66,8 @@ Choice: A, in ten slices, off by default and enabled per name (see the ADR).
 
 ## 5. Plan
 
+> Superseded for slice order and gating by ADR 0054 (Review, EGM 2026-11-13): path-changing builtins first, a write-seam slice before cp/dd/tar, the rest gated on usage evidence. Kept below as first drafted.
+
 Gate shared by every slice: convar `sv_shell_builtins_extra: Vec<Str>` (default empty, declared next to `SV_SHELL_EMBEDDED_BUILTINS` in `crates/envd/src/exec_settings/shell.rs`) plus a new factory function `extra_builtins(enabled)`; tar's compression crates sit behind the cargo feature `cap-shell-archive`. Linux tests run with `just remote-test-pkg omp-shell-builtins` (`justfile:129`); the macOS and Windows branches need a local `just test-pkg omp-shell-builtins` (`justfile:294`) on those hosts.
 
 | # | Slice | Acceptance |
