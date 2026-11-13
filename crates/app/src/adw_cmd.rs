@@ -21,7 +21,18 @@ pub async fn run(command: AdwCommand) -> miette::Result<()> {
 	match command {
 		AdwCommand::List { project } => list(&project),
 		AdwCommand::Run { workflow, project, model, max_attempts, exec_policy } => {
-			execute(&workflow, &project, model, max_attempts, exec_policy).await
+			let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+			let (_, code) =
+				execute(&workflow, &project, data_dir, model, max_attempts, exec_policy).await?;
+			if code == 0 {
+				Ok(())
+			} else {
+				Err(miette::miette!("workflow exited with status {code}"))
+			}
+		},
+		AdwCommand::Resume { journal, project, exec_policy } => {
+			let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+			resume(&journal, &project, data_dir, exec_policy).await
 		},
 	}
 }
@@ -53,22 +64,26 @@ fn list(project: &Path) -> miette::Result<()> {
 async fn execute(
 	workflow: &str,
 	project: &Path,
+	data_dir: PathBuf,
 	model: Option<Str>,
 	max_attempts: u32,
 	exec_policy: Option<AdwExecPolicy>,
-) -> miette::Result<()> {
+) -> miette::Result<(PathBuf, u8)> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
-	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let explicit = model.is_some();
 	let model = model.unwrap_or_else(|| Str::new_static("default"));
-	let host = open_host(project, data_dir, model, explicit)?;
+	let host = open_host(project, data_dir.clone(), model.clone(), explicit)?;
 	let host = match exec_policy {
 		Some(policy) => host.with_exec_policy(policy),
 		None => host,
 	};
+	let (mut log, journal_path) =
+		create_run_log(&definition, project, &data_dir, max_attempts, &model, explicit, &host)?;
+	println!("Recording run to `{}`.", journal_path.display());
 	let cancel = CancellationToken::new();
 	let exit = {
-		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);
+		let run =
+			omp_driver::adw::run_with_log(&definition, max_attempts, &host, &cancel, Some(&mut log));
 		tokio::pin!(run);
 		tokio::select! {
 			exit = &mut run => exit,
@@ -113,10 +128,108 @@ async fn execute(
 		RunStatus::Failed(failure) => println!("Workflow `{workflow}` failed: {failure:?}."),
 		RunStatus::Cancelled => println!("Workflow `{workflow}` cancelled."),
 	}
+	Ok((journal_path, exit.code))
+}
+
+/// Creates the run's journal at `<data dir>/adw/runs/<run-id>.oms` (ADR 0051
+/// S2) and commits its start record.
+fn create_run_log(
+	definition: &omp_driver::adw::definition::WorkflowDefinition,
+	project: &Path,
+	data_dir: &Path,
+	max_attempts: u32,
+	model: &Str,
+	model_explicit: bool,
+	host: &ProductionAdwHost,
+) -> miette::Result<(omp_journal::runlog::RunLog, PathBuf)> {
+	let run = omp_core::ulid::Ulid::generate().to_string();
+	let path = data_dir.join("adw").join("runs").join(format!("{run}.oms"));
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent).into_diagnostic()?;
+	}
+	let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+	let head = omp_vcs::detect(&root)
+		.ok()
+		.flatten()
+		.and_then(|repo| repo.head_id().ok().flatten());
+	let start = omp_journal::runlog::RunStart {
+		run: Str::from(run),
+		workflow: Str::from(definition.workflow().name().as_str()),
+		workflow_digest: Str::from(definition.digest()),
+		// `omp adw run` takes no run inputs yet, so there is nothing to digest.
+		input_digest: Str::default(),
+		max_attempts,
+		model: model.clone(),
+		model_explicit,
+		// What the host actually runs under, not what the command line said.
+		exec_policy: Str::new_static(<&'static str>::from(host.exec_policy())),
+		exec_fallback_local: host.exec_fallback_local(),
+		workspace_trusted: host.workspace_trusted(),
+		workspace_root: Str::from(root.display().to_string()),
+		workspace_head: head.map(Str::from),
+		created: Str::from(jiff::Timestamp::now().to_string()),
+	};
+	let log = omp_journal::runlog::RunLog::create(&path, start)
+		.map_err(|error| miette::miette!("could not create run log: {error}"))?;
+	Ok((log, path))
+}
+
+/// The execution policy a run journal recorded, when it names one.
+fn recorded_exec_policy(start: &omp_journal::runlog::RunStart) -> Option<AdwExecPolicy> {
+	start.exec_policy.as_str().parse().ok()
+}
+
+async fn resume(
+	journal_path: &Path,
+	project: &Path,
+	data_dir: PathBuf,
+	exec_policy: Option<AdwExecPolicy>,
+) -> miette::Result<()> {
+	let start = match omp_journal::runlog::RunLog::read(journal_path) {
+		Ok(records) => match records.into_iter().next() {
+			Some(omp_journal::runlog::RunRecord::Start(start)) => start,
+			_ => return Err(miette::miette!("run log carries no start record")),
+		},
+		Err(error) => return Err(miette::miette!("could not read run log: {error}")),
+	};
+
+	let definition = definition::load(project, &start.workflow).into_diagnostic()?;
+	if definition.digest() != start.workflow_digest.as_str() {
+		return Err(miette::miette!(
+			"workflow definition `{}` changed since the run started (digest mismatch)",
+			start.workflow
+		));
+	}
+
+	let host = open_host(project, data_dir, start.model.clone(), start.model_explicit)?;
+	// The run continues under the policy it recorded; the flag overrides it.
+	let host = match exec_policy.or_else(|| recorded_exec_policy(&start)) {
+		Some(policy) => host.with_exec_policy(policy),
+		None => host,
+	};
+
+	// The records `open` returns were read under the log's lock; the earlier
+	// lock-free read only located the start record and its digest.
+	let (log, records) = omp_journal::runlog::RunLog::open(journal_path, &start.workflow_digest)
+		.map_err(|error| miette::miette!("could not reopen run log: {error}"))?;
+
+	let cancel = CancellationToken::new();
+	let exit = omp_driver::adw::resume_from_log(
+		&definition,
+		start.max_attempts,
+		&host,
+		&cancel,
+		log,
+		&records,
+	)
+	.await
+	.into_diagnostic()?;
+
+	println!("Resumed workflow `{}` from `{}`.", start.workflow, journal_path.display());
 	if exit.code == 0 {
 		Ok(())
 	} else {
-		Err(miette::miette!("workflow exited with status {}", exit.code))
+		Err(miette::miette!("resumed workflow exited with status {}", exit.code))
 	}
 }
 

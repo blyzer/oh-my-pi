@@ -128,7 +128,7 @@ A second workflow engine; distributed scheduling (ADR 0039 Part B owns it); exac
 
 ## Status in omp
 
-**Status: Started.** `omp_adw::replay` and `Run::snapshot` (`crates/adw/src/replay.rs, run.rs@S) rebuild a `Run` from recorded dispatch and settle events and stop at the first event that diverges from what the engine would do; the key test shows a replayed run has the same `RunSnapshot` as the original, including a rejection and a retry. Slice 1 of S1 is done: `omp_journal::Vocabulary` with `Journal::create_with`, `open_with` and `scan_with` (`crates/journal/src/kind.rs, lib.rs, sse.rs, tests/vocabulary.rs: a run journal accepts only its registered kinds; session journals and session readers are unchanged and refuse a run journal). Nothing writes a run journal yet. `omp-adw::Run` and `omp_driver::adw::run` exist and are in memory only. Unverified: whether `crates/driver/src/adw/remote.rs` keeps any state across processes (not read).
+**Status: Implementing.** `omp_adw::replay` and `Run::snapshot` (`crates/adw/src/replay.rs, run.rs`) rebuild a `Run` from recorded dispatch and settle events and stop at the first event that diverges from what the engine would do; `Run::interrupt` allows recovery to return an in-flight attempt to pending without spending attempts. `omp-journal` defines the typed `RunRecord` kinds and `RunLog` reader/writer. `omp_driver::adw::run_with_log` logs `Dispatch`, `Settle`, `Halt`, and `Done` events, and `omp_driver::adw::resume_from_log` re-plays recorded events to continue workflow execution (`omp adw resume`).
 
 ## References
 
