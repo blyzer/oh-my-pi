@@ -9,11 +9,11 @@ use std::{path::PathBuf, sync::Arc};
 use omp_chat::{
 	history::{HistoryEntry, HistoryStorage},
 	overlays::services::{
-		AccountRow, ActiveAccountUsage, ActiveUsageRequest, AgentRow, AgentView, ApprovalPostureRow,
-		CleanseRequest, CleanseRun, ExtensionRow, ForeignSessionRow, ForeignSessionSource, LoginFlow,
-		MemoryOp, Mutation, Mutations, Pending, PluginsReport, ServiceError, ServiceResult, Services,
-		SessionRow, SessionScope, SettingsChoice, SettingsInventory, SshHostRow, SshHostSpec,
-		ToolRow, UsageReport,
+		AccountRow, ActiveAccountUsage, ActiveUsageRequest, AdwResumeRun, AgentRow, AgentView,
+		ApprovalPostureRow, CleanseRequest, CleanseRun, ExtensionRow, ForeignSessionRow,
+		ForeignSessionSource, LoginFlow, MemoryOp, Mutation, Mutations, Pending, PluginsReport,
+		ServiceError, ServiceResult, Services, SessionRow, SessionScope, SettingsChoice,
+		SettingsInventory, SshHostRow, SshHostSpec, ToolRow, UsageReport,
 	},
 };
 use omp_core::{Str, sf};
@@ -261,6 +261,29 @@ impl Services for AppServices {
 		&self,
 	) -> ServiceResult<Pending<Vec<omp_chat::overlays::services::ResetAccountRow>>> {
 		usage::reset_accounts(&self.state)
+	}
+
+	fn adw_runs(&self) -> ServiceResult<Vec<Str>> {
+		crate::adw_cmd::recorded_run_ids()
+			.map(|ids| ids.into_iter().map(Str::from).collect::<Vec<Str>>())
+			.map_err(ServiceError::failed)
+	}
+
+	fn adw_resume(&self, run_id: Str) -> ServiceResult<AdwResumeRun> {
+		let cancel = tokio_util::sync::CancellationToken::new();
+		let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+		let (tx, rx) = flume::bounded(1);
+		let token = cancel.clone();
+		self.state.runtime.spawn(async move {
+			let _ = cancel_rx.recv_async().await;
+			token.cancel();
+		});
+		let state = Arc::clone(&self.state);
+		self.state.runtime.spawn(async move {
+			let result = resume_adw_run(&state, run_id.as_str(), &cancel).await;
+			let _ = tx.send(result);
+		});
+		Ok(AdwResumeRun { done: rx, cancel: cancel_tx })
 	}
 
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
@@ -561,6 +584,29 @@ impl Mutations for AppServices {
 			Mutation::ResetUsage { target } => Ok(ready(usage::reset(&self.state, &target))),
 		}
 	}
+}
+
+async fn resume_adw_run(
+	state: &ServiceState,
+	run_id: &str,
+	cancel: &tokio_util::sync::CancellationToken,
+) -> ServiceResult<Str> {
+	let data_dir = omp_core::dirs::data_dir(None).map_err(ServiceError::failed)?;
+	let runs_dir = omp_envd::tool_url::runs_dir(&data_dir);
+	let request = omp_driver::adw::resume::ResumeRequest {
+		run:              omp_driver::adw::resume::RunRef::Id {
+			runs_dir: &runs_dir,
+			id:       run_id,
+		},
+		project:          &state.project,
+		require_trusted:  true,
+		approval_ceiling: Some(misc::adw_approval_ceiling(state)),
+	};
+	let outcome =
+		crate::adw_cmd::resume_recorded(request, &data_dir, Arc::clone(&state.con), None, cancel)
+			.await
+			.map_err(ServiceError::failed)?;
+	Ok(crate::adw_cmd::outcome_line(&outcome))
 }
 
 impl AppServices {

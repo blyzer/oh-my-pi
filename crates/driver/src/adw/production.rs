@@ -271,9 +271,6 @@ impl ProductionAdwHost {
 		attempt: u32,
 		cancel: &CancellationToken,
 	) -> Result<Str, ProductionError> {
-		if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
-			return Err(ProductionError::UntrustedWorkspace);
-		}
 		let registry = ExecutorRegistry::from_ctx(&self.ctx);
 		let journals = self.data_dir.join("adw").join("delegated");
 		fs::create_dir_all(&journals)?;
@@ -428,6 +425,16 @@ impl ProductionAdwHost {
 				event = run.next_event() => event,
 				() = cancel.cancelled() => {
 					let _ = run.cancel().await;
+					// Teardown is asynchronous; wait for the terminal event so no process
+					// of the cancelled tree outlives the phase.
+					let _ = tokio::time::timeout(CANCEL_TEARDOWN, async {
+						while let Some(event) = run.next_event().await {
+							if matches!(event, ExecutionEvent::Settled(_)) {
+								break;
+							}
+						}
+					})
+					.await;
 					return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
 				},
 			};
@@ -502,6 +509,9 @@ fn child_kernel_options(workspace_trust: &TrustDecision, model_override: bool) -
 	}
 }
 
+/// Longest a cancelled command phase may take to report its process tree gone.
+const CANCEL_TEARDOWN: Duration = Duration::from_secs(10);
+
 fn local_platform() -> Platform {
 	#[cfg(target_arch = "aarch64")]
 	let arch = omp_exec::Arch::Aarch64;
@@ -569,6 +579,22 @@ impl AdwHost for ProductionAdwHost {
 		})
 	}
 
+	fn admit(&self, phase: &Phase, spec: &PhaseSpec) -> Result<(), Self::Error> {
+		let trusted = self.workspace_trust.trust() == WorkspaceTrust::Trusted;
+		match spec {
+			PhaseSpec::Command { .. } if !trusted => Err(ProductionError::UntrustedWorkspace),
+			PhaseSpec::Prompt { executor: Some(_), .. }
+				if phase.requires != Requirement::default() =>
+			{
+				Err(ProductionError::DelegatedRequirement)
+			},
+			PhaseSpec::Prompt { executor: Some(_), .. } if !trusted => {
+				Err(ProductionError::UntrustedWorkspace)
+			},
+			PhaseSpec::Command { .. } | PhaseSpec::Prompt { .. } => Ok(()),
+		}
+	}
+
 	async fn dispatch(
 		&self,
 		phase: &Phase,
@@ -580,9 +606,6 @@ impl AdwHost for ProductionAdwHost {
 	) -> Result<PhaseResult, Self::Error> {
 		match spec {
 			PhaseSpec::Command { binary, args, cwd } => {
-				if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
-					return Err(ProductionError::UntrustedWorkspace);
-				}
 				self
 					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
@@ -591,9 +614,6 @@ impl AdwHost for ProductionAdwHost {
 				let prompt = phase_prompt(phase, text, attempt, correction, inputs);
 				let answer = match executor {
 					Some(id) => {
-						if phase.requires != Requirement::default() {
-							return Err(ProductionError::DelegatedRequirement);
-						}
 						let answer = self
 							.run_delegated(id.as_str(), &prompt, phase, attempt, cancel)
 							.await?;
@@ -991,10 +1011,9 @@ requires = { network = "disabled" }
 
 		for decision in [TrustDecision::Untrusted, TrustDecision::Denied] {
 			let host = host_under(&project_root, off(), decision);
-			let refused =
-				Box::pin(host.dispatch(&phase, &spec, 1, None, &[], &CancellationToken::new()))
-					.await
-					.expect_err("an untrusted workspace ran a code phase");
+			let refused = host
+				.admit(&phase, &spec)
+				.expect_err("an untrusted workspace admitted a code phase");
 			assert!(matches!(refused, ProductionError::UntrustedWorkspace), "{refused:?}");
 			assert!(!project_root.join("ran").exists(), "the refused command ran");
 		}
@@ -1078,9 +1097,7 @@ requires = { network = "disabled" }
 		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent)
 			.requiring(Requirement { write: Some(WriteScope::ReadOnly), ..Requirement::default() });
 		let spec = PhaseSpec::Prompt { text: sf!("do it"), executor: Some(sf!("codex")) };
-		let result = host
-			.dispatch(&phase, &spec, 1, None, &[], &CancellationToken::new())
-			.await;
+		let result = host.admit(&phase, &spec);
 		assert!(matches!(result, Err(ProductionError::DelegatedRequirement)), "{result:?}");
 		assert!(!project.path().join("data").join("adw").exists(), "a refused phase left a journal");
 	}
@@ -1098,11 +1115,70 @@ requires = { network = "disabled" }
 		)
 		.expect("workflow host");
 		let phase = Phase::new(PhaseName::new("build"), PhaseKind::Agent);
-		let result = host
-			.run_delegated("codex", &sf!("do it"), &phase, 1, &CancellationToken::new())
-			.await;
+		let spec = PhaseSpec::Prompt { text: sf!("do it"), executor: Some(sf!("codex")) };
+		let result = host.admit(&phase, &spec);
 		assert!(matches!(result, Err(ProductionError::UntrustedWorkspace)), "{result:?}");
 		assert!(!project.path().join("data").join("adw").exists(), "a withheld phase left a journal");
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_command_phase_leaves_no_child_running() {
+		let project = tempfile::tempdir().expect("project");
+		let project_root = project.path().canonicalize().expect("canonical project");
+		let ctx = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&ctx, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		let host = host(&project_root, ctx);
+		let pid_file = project_root.join("child.pid");
+		let script = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
+		let (phase, spec) = code_phase(&project_root, &["sh", "-c", script.as_str()]);
+		let cancel = CancellationToken::new();
+		let dispatching = host.dispatch(&phase, &spec, 1, None, &[], &cancel);
+		let cancelling = async {
+			for _ in 0..500 {
+				if fs::metadata(&pid_file).is_ok_and(|meta| meta.len() > 0) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(20)).await;
+			}
+			cancel.cancel();
+		};
+		let (result, ()) = tokio::join!(dispatching, cancelling);
+		let result = result.expect("a cancelled phase is a result");
+		assert!(!result.accepted, "{}", result.feedback);
+		assert_eq!(result.feedback.as_str(), "cancelled");
+		let pid: u32 = fs::read_to_string(&pid_file)
+			.expect("the shell reported its background child")
+			.trim()
+			.parse()
+			.expect("a pid");
+		let mut running = process_running(pid);
+		for _ in 0..250 {
+			if !running {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			running = process_running(pid);
+		}
+		if running {
+			let _ = std::process::Command::new("kill")
+				.arg(pid.to_string())
+				.status();
+		}
+		assert!(!running, "the cancelled phase left child {pid} running");
+	}
+
+	/// Whether `pid` names a live process; a zombie does not count.
+	fn process_running(pid: u32) -> bool {
+		let pid_text = pid.to_string();
+		let stat = std::process::Command::new("ps")
+			.args(["-o", "stat=", "-p", pid_text.as_str()])
+			.output()
+			.expect("ps");
+		let stat = String::from_utf8_lossy(&stat.stdout);
+		let stat = stat.trim();
+		!stat.is_empty() && !stat.starts_with('Z')
 	}
 
 	#[test]

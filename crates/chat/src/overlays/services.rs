@@ -819,6 +819,15 @@ pub struct CleanseRun {
 	pub cancel: Sender<()>,
 }
 
+/// An in-flight `/adw resume`: its settled outcome and the sender that cancels
+/// it.
+pub struct AdwResumeRun {
+	/// Settles with the outcome line, or with the failure to start or finish.
+	pub done:   Pending<Str>,
+	/// Cancels the resume (Esc in the panel); the run log stays resumable.
+	pub cancel: Sender<()>,
+}
+
 /// One `/ssh add` declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshHostSpec {
@@ -1257,6 +1266,11 @@ pub trait Services: Send + Sync {
 		Err(ServiceError::Unavailable { feed: "saved reset accounts" })
 	}
 
+	/// Recorded ADW run ids for `/adw resume` completion, newest first.
+	fn adw_runs(&self) -> ServiceResult<Vec<Str>> {
+		Err(ServiceError::Unavailable { feed: "adw runs" })
+	}
+
 	/// The kernel's registered tools.
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
 		Err(ServiceError::Unavailable { feed: "tool roster" })
@@ -1466,6 +1480,12 @@ pub trait Services: Send + Sync {
 	/// Starts a cleanse run over the project.
 	fn cleanse(&self, _request: CleanseRequest) -> ServiceResult<CleanseRun> {
 		Err(ServiceError::Unavailable { feed: "cleanse" })
+	}
+
+	/// Starts `/adw resume <run-id>` in the background; Esc cancels it through
+	/// the returned sender.
+	fn adw_resume(&self, _run_id: Str) -> ServiceResult<AdwResumeRun> {
+		Err(ServiceError::Unavailable { feed: "adw resume" })
 	}
 
 	/// The session's working directory (`/dirs`, `/add-dir`, `/move`

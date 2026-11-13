@@ -23,7 +23,7 @@ use omp_tools::read::{
 };
 
 /// File extension of a run journal.
-const RUN_EXTENSION: &str = "oms";
+pub const RUN_EXTENSION: &str = "oms";
 /// Description attached to every run completion.
 const RUN_DESCRIPTION: &str = "recorded ADW workflow run";
 
@@ -38,14 +38,8 @@ pub(crate) enum AdwError {
 		source: DataDirError,
 	},
 	/// A run id was empty, escaped the runs directory, or held odd characters.
-	#[error(
-		"invalid ADW run id '{id}': ids may contain only ASCII letters, digits, '-', '_' and '.', \
-		 and cannot contain path separators or '..'"
-	)]
-	InvalidRunId {
-		/// The rejected run id.
-		id: String,
-	},
+	#[error(transparent)]
+	InvalidRunId(#[from] InvalidRunId),
 	/// No journal exists for the run id.
 	#[error("unknown ADW run: adw://{id}. Read adw://runs to list recorded runs.")]
 	UnknownRun {
@@ -76,7 +70,7 @@ impl From<AdwError> for Fault {
 	fn from(error: AdwError) -> Self {
 		let message = Str::new(render_chain(&error));
 		match error {
-			AdwError::InvalidRunId { .. } => Self::Invalid { message },
+			AdwError::InvalidRunId(_) => Self::Invalid { message },
 			_ => Self::Source { message },
 		}
 	}
@@ -113,7 +107,7 @@ impl AdwResolver {
 	/// writes to. A data directory that cannot be resolved is reported by
 	/// every read as a typed fault instead of failing registration.
 	pub(crate) fn from_data_dir() -> Self {
-		Self { runs: omp_core::dirs::data_dir(None).map(|dir| dir.join("adw").join("runs")) }
+		Self { runs: omp_core::dirs::data_dir(None).map(|dir| runs_dir(&dir)) }
 	}
 
 	fn runs_dir(&self) -> Result<&Path, AdwError> {
@@ -126,27 +120,7 @@ impl AdwResolver {
 	/// Run ids with a journal on disk, newest first (ids are ULIDs).
 	fn run_files(&self) -> Result<Vec<(String, PathBuf)>, AdwError> {
 		let dir = self.runs_dir()?;
-		let entries = match std::fs::read_dir(dir) {
-			Ok(entries) => entries,
-			Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-			Err(error) => {
-				return Err(AdwError::Io { path: dir.to_path_buf(), source: error });
-			},
-		};
-		let mut runs = entries
-			.filter_map(Result::ok)
-			.filter_map(|entry| {
-				let path = entry.path();
-				if path.extension().and_then(|ext| ext.to_str()) != Some(RUN_EXTENSION) {
-					return None;
-				}
-				let id = path.file_stem()?.to_str()?.to_owned();
-				validate_run_id(&id).ok()?;
-				Some((id, path))
-			})
-			.collect::<Vec<_>>();
-		runs.sort_unstable_by(|left, right| right.0.cmp(&left.0));
-		Ok(runs)
+		scan_runs(dir).map_err(|source| AdwError::Io { path: dir.to_path_buf(), source })
 	}
 
 	fn load(&self, id: &str) -> Result<Vec<RunRecord>, AdwError> {
@@ -258,8 +232,30 @@ impl AdwResolver {
 	}
 }
 
+/// `<data dir>/adw/runs`, the directory `omp adw run` records run journals in.
+#[must_use]
+pub fn runs_dir(data_dir: &Path) -> PathBuf {
+	data_dir.join("adw").join("runs")
+}
+
+/// A run id that was empty, escaped the runs directory, or held odd characters.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+	"invalid ADW run id '{id}': ids may contain only ASCII letters, digits, '-', '_' and '.', and \
+	 cannot contain path separators or '..'"
+)]
+pub struct InvalidRunId {
+	/// The rejected run id.
+	pub id: String,
+}
+
 /// Rejects ids that could leave the runs directory or name no ULID-like file.
-fn validate_run_id(id: &str) -> Result<&str, AdwError> {
+///
+/// # Errors
+///
+/// [`InvalidRunId`] when `id` is empty, starts with `.`, contains `..`, or
+/// holds a character other than an ASCII letter, digit, `-`, `_` or `.`.
+pub fn validate_run_id(id: &str) -> Result<&str, InvalidRunId> {
 	let valid = !id.is_empty()
 		&& !id.starts_with('.')
 		&& !id.contains("..")
@@ -269,8 +265,41 @@ fn validate_run_id(id: &str) -> Result<&str, AdwError> {
 	if valid {
 		Ok(id)
 	} else {
-		Err(AdwError::InvalidRunId { id: id.to_owned() })
+		Err(InvalidRunId { id: id.to_owned() })
 	}
+}
+
+/// Ids of the runs with a journal under `runs_dir`, newest first (ids are
+/// ULIDs). A directory that does not exist holds no runs.
+///
+/// # Errors
+///
+/// The directory exists but cannot be read.
+pub fn recorded_run_ids(runs_dir: &Path) -> Result<Vec<String>, std::io::Error> {
+	Ok(scan_runs(runs_dir)?.into_iter().map(|(id, _)| id).collect())
+}
+
+/// Journals under `dir` whose file stem is a valid run id, newest first.
+fn scan_runs(dir: &Path) -> Result<Vec<(String, PathBuf)>, std::io::Error> {
+	let entries = match std::fs::read_dir(dir) {
+		Ok(entries) => entries,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+		Err(error) => return Err(error),
+	};
+	let mut runs = entries
+		.filter_map(Result::ok)
+		.filter_map(|entry| {
+			let path = entry.path();
+			if path.extension().and_then(|ext| ext.to_str()) != Some(RUN_EXTENSION) {
+				return None;
+			}
+			let id = path.file_stem()?.to_str()?.to_owned();
+			validate_run_id(&id).ok()?;
+			Some((id, path))
+		})
+		.collect::<Vec<_>>();
+	runs.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+	Ok(runs)
 }
 
 /// Splits a resource into its target: the run listing (`None`) or one run id.
@@ -446,7 +475,7 @@ impl Resolve for AdwResolver {
 		max_bytes: usize,
 	) -> Result<ResourceList, Fault> {
 		if let Some(id) = target(resource) {
-			validate_run_id(id)?;
+			validate_run_id(id).map_err(AdwError::from)?;
 			return Err(Fault::Invalid {
 				message: Str::new_static("ADW runs cannot be listed; read the run to see its phases."),
 			});

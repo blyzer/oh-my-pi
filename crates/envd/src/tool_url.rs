@@ -12,8 +12,11 @@ mod memory;
 pub(super) mod ssh;
 pub(super) mod vault;
 
+// Run-journal naming (`<data dir>/adw/runs/<run-id>.oms`) shared with the
+// driver.
 use std::{fmt::Display, path::PathBuf, sync::Arc};
 
+pub use adw::{InvalidRunId, RUN_EXTENSION, recorded_run_ids, runs_dir, validate_run_id};
 use omp_cache::forge_cache::ForgeCache;
 use omp_contract::{SessionAuthority, SessionEndpoint};
 use omp_core::{CowBytes, Str, sf};
