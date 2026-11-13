@@ -11,7 +11,8 @@ use std::{
 
 use omp_core::{CowBytes, Str, dirs::DataDirError};
 use omp_journal::runlog::{
-	PhaseDispatch, PhaseSettle, PhaseUncertain, RunLog, RunRecord, RunStart, SettleStatus,
+	PhaseDispatch, PhaseSettle, PhaseUncertain, RunLog, RunLogError, RunRecord, RunStart,
+	SettleStatus,
 };
 use omp_tools::read::{
 	Fault,
@@ -30,43 +31,68 @@ const RUN_DESCRIPTION: &str = "recorded ADW workflow run";
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AdwError {
 	/// The data directory holding `adw/runs` could not be resolved.
-	#[error("the ADW data directory is unavailable: {0}")]
-	DataDir(String),
+	#[error("the ADW data directory is unavailable")]
+	DataDir {
+		/// The data-directory resolution failure.
+		#[source]
+		source: DataDirError,
+	},
 	/// A run id was empty, escaped the runs directory, or held odd characters.
 	#[error(
-		"invalid ADW run id '{0}': ids may contain only ASCII letters, digits, '-', '_' and '.', \
+		"invalid ADW run id '{id}': ids may contain only ASCII letters, digits, '-', '_' and '.', \
 		 and cannot contain path separators or '..'"
 	)]
-	InvalidRunId(String),
+	InvalidRunId {
+		/// The rejected run id.
+		id: String,
+	},
 	/// No journal exists for the run id.
-	#[error("unknown ADW run: adw://{0}. Read adw://runs to list recorded runs.")]
-	UnknownRun(String),
+	#[error("unknown ADW run: adw://{id}. Read adw://runs to list recorded runs.")]
+	UnknownRun {
+		/// The run id that has no journal.
+		id: String,
+	},
 	/// The runs directory could not be listed.
-	#[error("could not list ADW runs in {path}: {message}")]
+	#[error("could not list ADW runs in {}", path.display())]
 	Io {
 		/// Directory that failed.
-		path:    String,
-		/// Rendered OS error.
-		message: String,
+		path:   PathBuf,
+		/// The OS failure.
+		#[source]
+		source: std::io::Error,
 	},
 	/// A run journal could not be read.
-	#[error("ADW run {id} is unreadable: {reason}")]
+	#[error("ADW run {id} is unreadable")]
 	Log {
 		/// Run id.
 		id:     String,
-		/// One-line cause.
-		reason: String,
+		/// The journal failure.
+		#[source]
+		source: RunLogError,
 	},
 }
 
 impl From<AdwError> for Fault {
 	fn from(error: AdwError) -> Self {
-		let message = Str::new(error.to_string());
+		let message = Str::new(render_chain(&error));
 		match error {
-			AdwError::InvalidRunId(_) => Self::Invalid { message },
+			AdwError::InvalidRunId { .. } => Self::Invalid { message },
 			_ => Self::Source { message },
 		}
 	}
+}
+
+/// Renders an error and its source chain on one line. This is the single
+/// model-facing render point for `adw://` failures.
+fn render_chain(error: &(dyn std::error::Error + 'static)) -> String {
+	let mut text = String::new();
+	let _ = write!(text, "{error}");
+	let mut source = error.source();
+	while let Some(cause) = source {
+		let _ = write!(text, ": {cause}");
+		source = cause.source();
+	}
+	one_line(&text)
 }
 
 /// Read-only resolver for recorded ADW workflow runs.
@@ -94,7 +120,7 @@ impl AdwResolver {
 		self
 			.runs
 			.as_deref()
-			.map_err(|error| AdwError::DataDir(error.to_string()))
+			.map_err(|source| AdwError::DataDir { source: source.clone() })
 	}
 
 	/// Run ids with a journal on disk, newest first (ids are ULIDs).
@@ -104,10 +130,7 @@ impl AdwResolver {
 			Ok(entries) => entries,
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
 			Err(error) => {
-				return Err(AdwError::Io {
-					path:    dir.display().to_string(),
-					message: error.to_string(),
-				});
+				return Err(AdwError::Io { path: dir.to_path_buf(), source: error });
 			},
 		};
 		let mut runs = entries
@@ -130,9 +153,9 @@ impl AdwResolver {
 		validate_run_id(id)?;
 		let path = self.runs_dir()?.join(format!("{id}.{RUN_EXTENSION}"));
 		if !path.is_file() {
-			return Err(AdwError::UnknownRun(id.to_owned()));
+			return Err(AdwError::UnknownRun { id: id.to_owned() });
 		}
-		read_records(id, &path)
+		read_records(&path).map_err(|source| AdwError::Log { id: id.to_owned(), source })
 	}
 
 	fn render_runs(&self) -> Result<String, AdwError> {
@@ -140,7 +163,7 @@ impl AdwResolver {
 		let mut rows = Vec::new();
 		let mut skipped = Vec::new();
 		for (id, path) in self.run_files()? {
-			match read_records(&id, &path) {
+			match read_records(&path) {
 				Ok(records) => {
 					if let Some(start) = start_of(&records) {
 						rows.push((
@@ -151,7 +174,7 @@ impl AdwResolver {
 						));
 					}
 				},
-				Err(error) => skipped.push(one_line(&error.to_string())),
+				Err(source) => skipped.push((id, source)),
 			}
 		}
 		rows.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
@@ -173,8 +196,8 @@ impl AdwResolver {
 		}
 		if !skipped.is_empty() {
 			let _ = writeln!(out, "\nSkipped {} unreadable run log(s):", skipped.len());
-			for note in skipped {
-				let _ = writeln!(out, "- {note}");
+			for (id, source) in skipped {
+				let _ = writeln!(out, "- adw://{id}: {}", render_chain(&source));
 			}
 		}
 		Ok(out)
@@ -184,7 +207,7 @@ impl AdwResolver {
 		let records = self.load(id)?;
 		let start = start_of(&records).ok_or_else(|| AdwError::Log {
 			id:     id.to_owned(),
-			reason: "no start record".to_owned(),
+			source: RunLogError::MissingStart,
 		})?;
 		let mut out = format!("# ADW run {id}\n\n");
 		let _ = writeln!(out, "- Workflow: {}", start.workflow);
@@ -246,7 +269,7 @@ fn validate_run_id(id: &str) -> Result<&str, AdwError> {
 	if valid {
 		Ok(id)
 	} else {
-		Err(AdwError::InvalidRunId(id.to_owned()))
+		Err(AdwError::InvalidRunId { id: id.to_owned() })
 	}
 }
 
@@ -256,20 +279,10 @@ fn target(resource: &str) -> Option<&str> {
 	(!resource.is_empty() && resource != "runs").then_some(resource)
 }
 
-fn read_records(id: &str, path: &Path) -> Result<Vec<RunRecord>, AdwError> {
-	let log_error =
-		|reason: String| AdwError::Log { id: id.to_owned(), reason: one_line(&reason) };
-	let records = RunLog::read(path).map_err(|error| {
-		let mut reason = error.to_string();
-		let mut source = std::error::Error::source(&error);
-		while let Some(cause) = source {
-			let _ = write!(reason, ": {cause}");
-			source = cause.source();
-		}
-		log_error(reason)
-	})?;
+fn read_records(path: &Path) -> Result<Vec<RunRecord>, RunLogError> {
+	let records = RunLog::read(path)?;
 	if start_of(&records).is_none() {
-		return Err(log_error("a run journal must begin with a start record".to_owned()));
+		return Err(RunLogError::MissingStart);
 	}
 	Ok(records)
 }
