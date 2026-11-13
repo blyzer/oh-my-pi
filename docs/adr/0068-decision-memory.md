@@ -20,6 +20,7 @@ Research: [docs/research/memory-backends.md](../research/memory-backends.md) (Ga
 
 - `omp-memory` is the default-off Mnemopi backend (`crates/memory/README.md:1-5`). Its selector is a closed enum, `Off` and `Mnemopi` (`crates/memory/src/config.rs:25-31`), mirrored by a private `RuntimeBackend` (`crates/memory/src/runtime.rs:248-251`) and the convar `ai_memory_backend` (`crates/envd/src/host_settings.rs:74-87`). The crate never reads settings or discovers Git roots (`crates/memory/src/lib.rs:1-6`).
 - Prompt injection has three slots, `memory`, `standing` and `recall` (`crates/agent/src/prompt/mod.rs:138-147`). The standing text says memory is non-directive background that must never override the conversation or policy (`crates/memory/src/runtime.rs:566-569`).
+- **Nothing may produce those slots yet.** The prompt reads a `memory` property (`crates/agent/src/prompt/mod.rs:139-147`), and `prompt_snapshot` has two callers outside the memory crate: the envd wrapper and `/memory view` (`crates/envd/src/memory.rs:111`, `crates/app/src/chat_services/misc.rs:111`). I found no code in agent, driver or app that writes the property into a session (searched `prompt_snapshot` and the `PromptMemoryInput` producers; UNVERIFIED, since a producer could use another name). A sibling research draft reaches the same conclusion. If it is right, Mnemopi injection is inactive today and the decision files need a producer of their own (slice S0).
 - Reusable pieces: the `@memory` role (`crates/catalog/src/selection.rs:175-178`), isolated Director inference with `execute_on` (`crates/contract/src/director.rs:612-619`), the `omp-secrets` redactor (`crates/secrets/src/redact.rs:35`), the canonical project bank identity (`crates/memory/src/bank.rs:20-23`).
 - Nothing for decision files exists in core (searched: `sharpshooter`, `decision`). The v1 importer refuses `hindsight` and `sharpshooter` as backends with a typed error (`crates/driver/src/legacy_settings.rs:446-449`); that stays.
 - Extension seams: tools (`@omp.tool`), a `memory` prompt slot (`docs/py/00-overview.md:1157-1159`), hooks `before_agent_start`, `turn_end`, `agent_end` (`docs/py/05-hooks.md:1264-1329`), egress policy profiles (`docs/py/06-policy.md:1091`). Whether an extension can read item text to retain it is not shown there (UNVERIFIED).
@@ -60,6 +61,10 @@ Research: [docs/research/memory-backends.md](../research/memory-backends.md) (Ga
 ## Slices
 
 Each slice is one PR; tests are written first and not edited to pass.
+
+**S0. A producer for the memory prompt property.** If the search above is right, add the code that writes the `memory` property into the session at composition, bounded by a token limit, and prove it with one fixed string before any file exists.
+- Tests: `property_is_written_at_composition`, `absent_content_leaves_the_prompt_unchanged_byte_for_byte`, `content_over_the_limit_is_truncated_with_a_marker`.
+- Gate: `cap-decision-memory` and `sv_decision_memory`. If a producer already exists, drop S0.
 
 **S1. Storage and rules, no model.** A new small crate or a module near `omp-memory` (O3).
 - Tests: `delta_round_trips`, `crash_between_apply_and_unlink_redelivers_and_applying_twice_gives_the_same_files`, `two_processes_cannot_consolidate_at_once`, `file_over_120_lines_is_rejected`, `bank_id_from_a_hostile_directory_name_cannot_escape_the_bank_root`.
