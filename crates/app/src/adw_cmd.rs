@@ -212,7 +212,7 @@ async fn resume(
 				"Workflow `{workflow}` already finished in `{}`; nothing to resume.",
 				journal.display()
 			);
-			exit_status(if accepted { 0 } else { 1 })
+			exit_status(u8::from(!accepted))
 		},
 	}
 }

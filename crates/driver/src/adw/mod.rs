@@ -1018,6 +1018,10 @@ mod tests {
 		})
 	}
 
+	#[allow(
+		clippy::unnecessary_wraps,
+		reason = "the host factory is fallible by signature; this test host never fails"
+	)]
 	fn opened(
 		host: Scripted,
 		trust: WorkspaceTrust,
