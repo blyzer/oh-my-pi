@@ -20,6 +20,7 @@ Limits [code-v1]: `FIND_TIMEOUT_MS = 20_000` (`index.ts:53`), `PARALLEL = 16` re
 - `keywords.ts`: quoted phrases of at least 3 bytes stay whole; the rest is split on non-letter, non-digit, non-underscore characters; tokens under 3 bytes, stopwords and pure digits drop; a suffix stemmer strips `ing`, `ed`, `es` or `s` when at least 4 characters remain. The model's `grep_keywords` are appended lowercased and deduplicated.
 - `passages.ts`: whole-line windows of at most `WINDOW_BYTES`, each line tagged `L<n>| `. A window scores `sum(weight_k * ln(1 + occurrences_k))`. `selectWindows` keeps the best `WINDOWS`; if every window scores zero it spreads evenly through the file instead of taking the opening bytes. `sketch` is a budgeted set of verbatim lines, ranked by keyword weight plus 0.1 for lines containing `(`, clipped to 180 bytes, emitted in file order; never a model summary. `mergeHeat` unions judged-positive spans at or above the threshold, never bridging an unjudged gap, and keeps the maximum probability.
 - `text.ts`: budgets are UTF-8 bytes "(what the judge is billed on)", clipped on code-point boundaries. `readText` reads at most `maxBytes`, treats a NUL in the first 8 KB as binary, trims a truncated read to the last full line, and rejects blank files.
+- Lexical formulas (`lexical.ts`): `idf_k = clamp(ln((filesScanned + 1) / (df_k + 1)), 0.5, 6)`; `fileScore = sum_k idf_k * (2 * inPath_k + ln(1 + count_k))` where counts are occurrences on lines that matched; candidates sort by score then relative path. Selection (`cascade.ts`): the 2 best lexical files are always read; the rest follow name score then lexical score up to 20; a failed sketch card scores 1.
 - `tree.ts` (header): the cascade works from one flat list of eligible files built up front, with deny-lists for build noise, lockfiles, binaries and "obvious credential material"; the scope may be a directory, one file or an internal URL; a `:N-M` selector is rejected.
 
 **How v1 uses the judge role.** [code-v1] `index.ts:118` calls `resolveJudge` with purpose `"find"`, the session usage journal, telemetry, a shared answer cache and the session cost gate. Questions are "noul" questions returning absolute probabilities (`tools/jfind/questions.ts` header), so entries are thresholded independently. `judgment/index.ts:290` (`textJudgeRoleChain`): from the first native candidate on, only native candidates remain, because "a prompted model never stands in for a failed native judgment, whose calibrated probabilities it cannot reproduce". `kindOf` (`judgment/index.ts:265`) classifies candidates native, local or online by model API. `isFindEnabled` (`index.ts:61`) with the default `find.enabled: auto` (`tools/settings.ts:564`) enables the tool only when `hasNativeJudge` (`judgment/index.ts:392`) is true; `on` overrides, with a warning that other models calibrate differently and may need a higher `find.hitThreshold`.
@@ -48,7 +49,7 @@ Spotlight [code-v1]: a hosted Stencil service (`DEFAULT_SPOTLIGHT_URL = https://
 - ADR 0024 keeps the permanent roster small: a tool takes a wire slot only if used on most turns, and rarely used capabilities "NEVER enter the permanent roster" but ride `dyn` (ADR 0025). The roster table already supports this: `PresentationClass::Device` is "Always a catalog device" and `ClaimsClass::BuiltinDevice` gives enhancement precedence (`crates/tools/src/roster.rs:74-98`); `security_scan` is such a row (`roster.rs` near line 566). So semantic search can be a Rust builtin device behind `dyn` with no wire schema slot.
 - The roster has a Composer phase for driver-owned tools (`roster.rs:887`: `Family::Task | Family::Hub`), with an inventory test asserting exactly `["task", "hub"]` (`roster.rs:1868`).
 
-**Searches that found no omp2 equivalent.** Semantic search, ratchet-like judge-ranked retrieval and a `Judge` trait: none exist.
+**Searches that found no omp2 equivalent.** Semantic search and a `Judge` trait: none exist. The only `locate` name in `crates/` is `crates/driver/src/v1_import/locate.rs`, a path resolver. Also relevant: `DEFAULT_UPLOAD_DENY` (`crates/exec/src/deny.rs:16`, 21 never-upload name patterns) is the existing deny list; `GrepSink::matched` (`crates/grep/src/lib.rs:321`) is called once per match, so per-line counting must dedupe on (path, line number); `crates/ai/src/layer/budget.rs` (`InferenceBudget`, `InferenceLedger`, request check at line 169) enforces per-extension turn and session ceilings and a builtin tool has no attribution of its own there (unverified); a Composer-phase roster row is registered by the driver (`crates/driver/src/roster.rs:10-60`) and `ComposerHost::tool_enabled` returns true for everything, so a convar gate needs a new `ComposerInstall::locate_enabled()` like `py_eval_enabled()` (`roster.rs:1139`, `1173`).
 
 ## 3. Class
 
@@ -65,19 +66,20 @@ Spotlight [code-v1]: a hosted Stencil service (`DEFAULT_SPOTLIGHT_URL = https://
 | E. New wire-slot tool `locate` | Permanent roster tool | Simplest to discover | Violates ADR 0024 rules 3 and 5 (not used on most turns; per-turn cost unproven) |
 | F. Do nothing | `grep`, `glob`, `omp kb query`, a read-only `task` subagent | Zero cost | Leaves the capability absent; the subagent has no request budget or per-call cost record |
 
-**Choice: A.** B fails on the data model, C is a separate project, D lacks the capability, E is barred by ADR 0024. A is the only option that reproduces v1 within the locked ADRs. `omp-kb` may supply an optional lexical prior later (slice 6), never retrieval.
+**ADR 0049 placement.** New capabilities default to T2 (a first-party Python extension) and T1 promotion needs evidence from the T1 test (hot-path budget, scheme, repo lock or raw credentials). Option D is therefore the default and A needs measured evidence; ADR 0060 puts a measurement spike first and promotes to a T1 crate behind `cap-locate` only if it shows the cascade beats `grep` at bearable cost and a Python version misses the latency limit.
+
+**Choice: A,** conditional on that spike. B fails on the data model, C is a separate project, D lacks the capability, E is barred by ADR 0024. A is the only option that reproduces v1 within the locked ADRs. `omp-kb` may supply an optional lexical prior later (slice 6), never retrieval.
 
 ## 5. Plan
 
-All slices ship behind `sv_locate_enabled` (bool, default false), except the last, which also adds the feature `cap-kb`. Detailed acceptance tests are in ADR 0060.
+The slices, acceptance tests and gates are in [ADR 0060](../adr/0060-semantic-find.md). Shape:
 
-0. Pure ports (keywords, byte clipping, windowing, window selection, sketching, heat merging): deterministic string functions with unit tests; no gate needed because nothing reaches them.
-1. Lexical prior and eligibility filter on `omp_grep` and `omp_walker` (lockfile, binary, credential deny-list; NUL probe).
-2. The cascade against a recording fake judge: budgets, deadline, partial results, failure reporting.
-3. Typed judgment in `omp-ai` and the driver `Judge` on the `@judge` route, flagged `calibrated: false`.
-4. The builtin device `locate@1` (`PresentationClass::Device`, `ClaimsClass::BuiltinDevice`), behind `sv_locate_enabled`; the Composer inventory test changes.
-5. Measurement gate on a fixed query set against `grep`; set the hit-threshold default.
-6. Optional `omp-kb` prior behind `cap-kb` and `sv_locate_kb_prior`.
+- **S0, measurement spike (no product code):** a fixed query set over this repository; the v1 cascade run in Python on the eval kernel against `grep` alone. Go only if top-5 recall improves by at least 20 percentage points, median cost is at most US$0.10 and p95 wall time is at most 20 s. The same results answer the ADR 0049 T1 test.
+- **L1 to L4:** crate `omp-locate` with the pure functions, the lexical counter over `omp_grep`, eligibility (reusing `DEFAULT_UPLOAD_DENY`), and the cascade against a fake judge. Unreachable from any roster row.
+- **L5:** typed judgment (absolute probabilities per entry) and the driver judge on `@judge` with the `@slow` fallback failing closed.
+- **L6:** the device `locate@1` behind the Cargo feature `cap-locate` and the convar `sv_locate_enabled` (default false); the row is ungated by `sv_tools_enabled` (its missing-key default is enabled) and registered by the driver only when the new `locate_enabled()` answer is true.
+- **L7:** calibrate ceilings (placeholders: 64 requests, US$0.25, 576 KiB per call) and the hit threshold.
+- **L8:** optional `omp-kb` prior behind `cap-kb`.
 
 ## 6. Open questions
 

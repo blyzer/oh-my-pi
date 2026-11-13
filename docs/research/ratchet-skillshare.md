@@ -56,11 +56,11 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 
 **Skill-only packaging.** [code] The parse layer allows a content-only package: `DeploymentManifest.entry` is `#[serde(default)]` (`config.rs:1366`) and `validate_static_row` (`config.rs:1906`) accepts `skills` rows that carry only a path and "cannot carry executable fields". The load path does not: `validate_manifest` in `crates/driver/src/discovery/native.rs:506` rejects an empty `entry` as `MissingIdentity`, and `validate_extension_spec` in `crates/envd/src/worker.rs:3160` requires a nonempty `manifest.entry`. `omp ext new` (`ext_cli/mod.rs:1283`) takes only an id and scaffolds a Python hard-tool and hook example.
 
-**Credential scanning.** [code] No shared credential-pattern set exists for `omp ext publish`. `crates/envd/src/security_scan.rs` is a repository-scan service; the `AKIA` hits in `crates/ai/src/auth/aws.rs` and `crates/minimizer/src/filters/cloud.rs` are unrelated. `omp ext publish` has no scan; its only secret handling is for settings (`crates/ext/src/config.rs`, `ESettingSecret`).
+**Credential scanning.** [code] `omp ext publish` has no scan; its only secret handling is for settings (`crates/ext/src/config.rs`, `ESettingSecret`). A Rust pattern set does exist for masking: `crates/secrets/src/builtins.rs:7-13` defines `CREDENTIAL_PATTERN` (GitHub `gh[opusr]_` and `github_pat_`, GitLab `glpat-`, OpenAI `sk-proj-` and `sk-`, Anthropic `sk-ant-`) used by `credential_rules()`. `omp-secrets` depends only on `omp-core`; `omp-app` does not depend on it today. It is narrower than upstream's list (`secrets/patterns.ts:60-96`: also AWS, Google, Slack, npm, Stripe, Hugging Face, SendGrid, JWT, Bearer, PEM keys). `crates/envd/src/security_scan.rs` is a repository-scan service and the `AKIA` hits in `crates/ai/src/auth/aws.rs` and `crates/minimizer/src/filters/cloud.rs` are unrelated. An earlier draft of this note said no shared pattern set existed; that was wrong.
 
 ## 3. Class
 
-### Skillshare: class a, with two small d items
+### Skillshare: class a for the signed-index core, plus two class d items
 
 | Upstream capability | omp2 equivalent | Class |
 |---|---|---|
@@ -75,7 +75,7 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 | Yank, deprecate | `yanked` flag; no deprecation message | **a** for yank; deprecate **b** |
 | Verified provenance through GitHub OIDC | `attested` flag and publisher key; no OIDC | **b**: a concern of whoever builds the index |
 | `omp skill import <file.skill>` | none; Claude plugin skills are read through `claude_plugin.rs` | **b**: only useful with a registry |
-| Publish-time credential scan (`pack.ts`) | none for `omp ext publish` | **d** (small) |
+| Publish-time credential scan (`pack.ts`) | none for `omp ext publish`; `omp-secrets` has a narrower masking pattern set (`builtins.rs:7-13`) | **d** (small) |
 | Skill-only package (a directory with `SKILL.md`, no code) | Parse layer allows it; load path requires a Python `entry`; `ext new` scaffolds only Python | **d** (small): a stub-entry template first; an empty-`entry` load path only if the owner wants it |
 
 ### `/ratchet`
@@ -106,7 +106,7 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 
 | Option | Fit | Cost and risk |
 |---|---|---|
-| Ratchet A: a pure decision crate in Rust (split, gate, approvals, plateau), driven from the autoresearch Director and a thin prelude facade | Matches ADR 0035 (engine logic in Rust), ADW's pure-state-machine style and the "host owns truth" rule; state not writable by the model | New crate plus the autoresearch tool layer it needs |
+| Ratchet A: a pure decision crate in Rust named `omp-evalgate` (the name avoids the dev lint `tools/lintx/src/ratchet.rs`; split, gate, approvals, plateau), driven from the autoresearch Director and a thin prelude facade | Matches ADR 0035 (engine logic in Rust), ADW's pure-state-machine style and the "host owns truth" rule; state not writable by the model | New crate plus the autoresearch tool layer it needs |
 | Ratchet B: a Python extension shipping an `@omp.prelude` helper (ADR 0036) | Fast to write; no core change | A helper that can write its own state cannot enforce "never hand-edit"; trust model fails |
 | Ratchet C: model ADW workflow recipes only | No new code | No statistics, no split, no held-out guard; the gap stays |
 | Ratchet D: a second Director or workflow engine | none | Duplicates the loop; rejected |
@@ -119,13 +119,13 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 
 The ordering question and the PR-sized slices with acceptance tests are in [ADR 0061](../adr/0061-ratchet-policy.md). Shape:
 - **Autoresearch (independent, owner-scheduled):** finish the init, run and log_experiment tools and wire the isolation primitives; ratchet does not depend on it.
-- **Ratchet:** pure gate crate (split, paired deltas, noise floor, decision, plateau) with exhaustive unit tests; state and approval digests; the prelude facade and prompt mode; a Director plateau stop; stall categorisation last, blocked on the typed-judgment prerequisite from ADR 0060.
+- **Ratchet:** a pure crate `omp-evalgate` (depends on `omp-core` only, so both the Director and the host bridge can use it) with the split, paired deltas, noise floor, decision and plateau; verdict, split, approvals and round table in host-owned storage outside the workspace, reached through a new bridged eval operation that needs an ADR 0006 amendment (the bridge set is closed); the prelude helper and prompt mode; a Director engagement only if a spike shows a Director can read a handler-written journal entry; stall categorisation last, blocked on ADR 0060.
 - **Skillshare:** publish-time credential scan in `omp-ext`; a stub-entry `omp ext new` skill template; empty-`entry` load path only on owner request.
 
 ## 6. Open questions
 
 - Should autoresearch's tool layer and isolation wiring be finished before ratchet starts? Recommendation: no, ratchet does not depend on them (patch-based revert); build the pure gate and state first, schedule autoresearch as an independent change. ADR 0061 O1 gives the full order.
-- Gate and state in Rust or a Python extension (trust)? Recommendation: Rust, with a prelude facade.
+- Gate and state in Rust or a Python extension (trust)? Recommendation: Rust, with host-owned storage outside the workspace and a prelude facade over a bridged op (ADR 0061 D7 to D9). ADR 0006 has no project-path deny, so keeping state in the tree cannot protect it.
 - Does the gate take prices from `omp-catalog`'s `Pricing` (exists) or from user overrides like v1's `prices` for models the catalog cannot price? Recommendation: catalog first, overrides for the rest.
 - One ADW `Run` per ratchet round, or keep the gate outside ADW entirely? Recommendation: outside ADW.
 - v1's `import` action is class b; not read beyond `handleImport`.
