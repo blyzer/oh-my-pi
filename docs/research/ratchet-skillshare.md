@@ -99,7 +99,7 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 ### Overlap, stated plainly
 
 - Autoresearch (benchmark-driven code experiments with keep or discard) and ratchet (eval-driven tuning of an LLM flow with held-out validation) share one thing: the keep/revert loop. Ratchet's value is the statistics and held-out discipline around it. A second Director would duplicate the loop for no gain.
-- The autoresearch tool layer (`init`, `run`, `log_experiment`) is advertised but absent and the isolation primitives have no callers. That is a gap in autoresearch itself, not in Gap 16, but ratchet cannot keep or revert without it.
+- The autoresearch tool layer (`init`, `run`, `log_experiment`) is advertised but absent and the isolation primitives have no callers. That is a gap in autoresearch itself, not in Gap 16. Ratchet does not need those tools: v1 reverts by reverse-applying the round's patch, which the model can do with existing tools, so ratchet can be built without finishing autoresearch.
 - ADW can express one round (an `Agent` change phase, a `Code` eval-and-gate phase, `OnReject::Correct`), but with a default cap of 3 attempts and no loop after accept, the multi-round climb needs a new run per round with best-so-far held elsewhere. Forcing ratchet into ADW would stretch a state machine that is deliberately small.
 
 ## 4. Options (`/ratchet` and the two skillshare d items)
@@ -118,13 +118,13 @@ The prompt says it is "Adapted from the claude-api skill's build-eval, eval-audi
 ## 5. Plan
 
 The ordering question and the PR-sized slices with acceptance tests are in [ADR 0061](../adr/0061-ratchet-policy.md). Shape:
-- **Prerequisite (autoresearch, not ratchet):** finish the `init`, `run`, `log_experiment` tools and wire the isolation primitives, behind a default-off convar.
+- **Autoresearch (independent, owner-scheduled):** finish the init, run and log_experiment tools and wire the isolation primitives; ratchet does not depend on it.
 - **Ratchet:** pure gate crate (split, paired deltas, noise floor, decision, plateau) with exhaustive unit tests; state and approval digests; the prelude facade and prompt mode; a Director plateau stop; stall categorisation last, blocked on the typed-judgment prerequisite from ADR 0060.
 - **Skillshare:** publish-time credential scan in `omp-ext`; a stub-entry `omp ext new` skill template; empty-`entry` load path only on owner request.
 
 ## 6. Open questions
 
-- Should autoresearch's tool layer and isolation wiring be finished before ratchet starts? Recommendation: yes, as its own change.
+- Should autoresearch's tool layer and isolation wiring be finished before ratchet starts? Recommendation: no, ratchet does not depend on them (patch-based revert); build the pure gate and state first, schedule autoresearch as an independent change. ADR 0061 O1 gives the full order.
 - Gate and state in Rust or a Python extension (trust)? Recommendation: Rust, with a prelude facade.
 - Does the gate take prices from `omp-catalog`'s `Pricing` (exists) or from user overrides like v1's `prices` for models the catalog cannot price? Recommendation: catalog first, overrides for the rest.
 - One ADW `Run` per ratchet round, or keep the gate outside ADW entirely? Recommendation: outside ADW.
