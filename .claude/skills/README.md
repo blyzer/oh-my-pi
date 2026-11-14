@@ -9,6 +9,10 @@ tools or verification gates. Existing project/user rules remain authoritative.
 | [omp-adr-plan](omp-adr-plan/SKILL.md) | Turn evidence into a repo-format decision and bounded implementation slice |
 | [omp-implement-slice](omp-implement-slice/SKILL.md) | Implement one owned slice with native seams and appropriate checks |
 | [omp-evidence-review](omp-evidence-review/SKILL.md) | Review current artifacts against complete, source-bound evidence |
+| [omp-gap-research](omp-gap-research/SKILL.md) | Study / inventory / classify / research a capability gap (`docs/research/`) |
+| [omp-adr](omp-adr/SKILL.md) | Author ADRs with this repo's format, numbering, and STATUS/TASKS rows |
+| [omp-slice-plan](omp-slice-plan/SKILL.md) | Slice an ADR into one-PR units with acceptance criteria and test kinds |
+| [omp-pre-pr](omp-pre-pr/SKILL.md) | Diff review plus `just` check/test/lintx before opening a slice PR |
 
 Seven upstream EGM skills are included separately: brainstorm, draft, resolve,
 review, review-loop, bootstrap and drift-report. Read their

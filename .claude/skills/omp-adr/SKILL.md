@@ -1,117 +1,92 @@
 ---
 name: omp-adr
-description: Use when a gap is classified c (port) or d (propose), or any design needs a record, to write a new ADR under docs/adr/ in this repo's format, number it, run and record the EGM review, and add its STATUS.md row (and TASKS.md entry when code moves).
+description: >-
+  Author or amend an Architecture Decision Record under docs/adr/ using this
+  repo's format, numbering, status vocabulary, and STATUS.md / TASKS.md ledger
+  rows. Development aid only.
 ---
 
-# omp ADR
+# omp-adr
 
-Sources: `docs/adr/README.md` (format and rules), `docs/adr/STATUS.md`, `docs/adr/TASKS.md`, the
-brief `docs/research/upstream-gap-closure-brief.md` ("Method" steps 5-6, "Design review"), and the
-gap-era records 0053-0071 as worked examples.
+Authority: `docs/adr/README.md`, existing ADRs, `docs/adr/STATUS.md`,
+`docs/adr/TASKS.md`, and `AGENTS.md` locked deviations. Do not invent a second
+format.
 
-## Number
+## Numbering
 
-- Next free number = highest `NNNN-*.md` prefix in `docs/adr/` + 1:
-  `ls docs/adr | grep -o '^[0-9]\{4\}' | sort -u | tail -1`. At omp2 `9cb6fd6389` the highest is
-  0071 and 0001-0071 has no gap, so the next is 0072.
-- Not every numbered file is a record: `0049-ci-dyn-device-schema.md` and
-  `0049-forge-dyn-device-schema.md` are ADR 0049 companion schemas; `docs/adr/0034/` is a directory.
-- Also check the ledger's ADR column (`docs/research/upstream-gap-closure.md`) for a number already
-  claimed by a gap whose file is not yet written.
-- File name: `NNNN-<kebab-slug>.md`, ideally the gap's research slug.
+- Next free number = highest existing `docs/adr/NNNN-*.md` + 1 (zero-padded to 4).
+- One decision per file: `docs/adr/NNNN-kebab-title.md`.
+- Revising a decision in place keeps the number and adds
+  `## Amendment (YYYY-MM-DD)`; supersession gets a new record and a
+  `Superseded by` line.
 
-## Header (README "Format"; recent practice)
+## Status vocabulary (ADR header)
+
+Use the same spellings the ledger already uses:
+
+- `proposed` / `Proposed YYYY-MM-DD`
+- `accepted` / `accepted by the owner on YYYY-MM-DD, with conditions …`
+- `accepted YYYY-MM-DD` with phase notes when partial
+- `superseded by NNNN`
+
+Implementation labels in `## Status in omp` and `STATUS.md`:
+
+- **Implemented** — decision realized; remaining limits listed in the ADR
+- **Partially implemented** — named parts missing
+- **Not started** — not yet started or not authorized
+- **Superseded or diverged** — rare; prefer "Gap or divergence" column instead
+
+## ADR body shape
 
 ```markdown
-# NNNN. <Decision stated as a sentence>
+# NNNN. Title
 
-Status: proposed
+Status: …
 Date: YYYY-MM-DD
-Area: <area>
+Area: foundations | state | runtime | control-plane | inference | tools | interface | stack
 
-Research: [docs/research/<slug>.md](../research/<slug>.md) (Gap N of the upstream gap closure). Upstream pin `c308970263` (v18.20.0); omp2 base `origin/omp2 <sha>`. Citations: `upstream:` is the OMPv1 pin; bare paths are omp2. <What was read, built, run.>
+## Context
+Evidence with path:line. Forces, not opinion.
+
+## Decision
+Normative MUST/NEVER rules (D1, D2, …). Call sites and shapes where useful.
+
+## Alternatives considered
+| Alternative | Why not |
+
+## Consequences
+Easier / Prohibited / Costs accepted.
+
+## Implementation gate
+What authorizes production change (owner acceptance, conditions, slice order).
+
+## Status in omp
+Status: Implemented | Partially implemented | Not started | …
+Evidence bullets (paths, symbols). Gaps marked plainly.
+
+## References
+Related ADRs, code, research notes.
 ```
 
-- README vocabulary: `Status: accepted | proposed | superseded by NNNN`. Of 0051-0071, most write
-  `Status: proposed`; 0054, 0055, 0059 and 0062 write `Status: Proposed 2026-11-13`; 0050 writes
-  `accepted by the owner on 2026-11-11, with conditions (...)`. Use `proposed`; the date is on the
-  `Date:` line and the review state goes in STATUS.md.
-- README Areas: `foundations | state | runtime | control-plane | inference | tools | interface | stack`.
-  Gap ADRs also used `ai` (0059), `ui` (0066), `memory` (0068). Prefer a README area.
+Optional after EGM review: `## What the review changed` listing each finding,
+whether confirmed against source (`path:line`), and what changed.
 
-## Sections, in the order the gap ADRs use (0054, 0062, 0071)
+## Ledger rows (same change)
 
-1. `## Context` - evidence, not opinion (README "Rules"): what upstream does (`upstream:path:line`),
-   what omp2 has (`path:line`), the rules that bind (0071 "### Rules that bind").
-2. `## Decision` - normative MUST/NEVER (README "Rules"), as bold numbered items `**D1. ...**`.
-   Name every new convar, feature, crate and file. State gates: default-off convar for behaviour,
-   `cap-*` only for build weight (see `omp-slice-plan`).
-3. `## Alternatives considered` / `## Rejected options` - table `| Option | Why not |`.
-4. `## Slices` - one PR each, with gate and acceptance tests (format in `omp-slice-plan`).
-5. `## Upstream origin and license` - files drawn from, licence with `upstream:LICENSE:N`
-   copyright lines, NOTICE / `THIRD-PARTY-NOTICES.txt` needs (brief "Hard constraints": record the
-   upstream origin of each port in its ADR and NOTICE where required).
-6. `## Consequences` - what becomes easy, prohibited, costs accepted (README "Format").
-7. `## Open questions for the owner` - `**O1. Question?**` plus `Recommendation:`. An
-   additive-rule conflict lands here and stops that gap (brief "Hard constraints"). A gap ADR
-   records, it does not edit other ADRs (0071 Consequences: "This record does not edit ADR 0007").
-8. `## What the review changed` - see below.
-9. `## Acceptance tests` - numbered, each naming its slice, observable and checkable.
-10. `## Status in omp` - opens with exactly one label (README "Implementation status"):
-    `**Status: Implemented | Partially implemented | Not started | Superseded or diverged.**`, then
-    evidence bullets with real paths and symbols, then divergences; say "not yet implemented" or
-    "unverified" where true (README "Rules").
-11. `## References` - related ADRs (always the ones checked: 0006, 0012, 0024, 0035, 0036, 0049
-    as relevant), code paths, research note.
+1. **STATUS.md** — one table row: ADR link, title, Status, Gap or divergence,
+   Owner decision.
+2. **TASKS.md** — when the ADR has an active queue: section `## ADR NNNN — …`
+   with DONE / OPEN / BLOCKED / PARTIAL items and slice sequencing.
+3. Update `docs/adr/README.md` index only when adding a permanent area entry
+   that other ADRs already follow.
 
-Revising an existing record in place needs the owner: a dated `## Amendment (YYYY-MM-DD)`;
-replacing it is a new record plus a `Superseded by` line (README, opening paragraph).
+## Rules
 
-## EGM review (brief, "Design review: Elephant-Goldfish Model")
-
-- Scope: classes c and d. Skip for a and b and for data or small mechanical gaps (6, 7, 8, 15).
-- Reviewers are fresh subagents given only the ADR path and the files it cites; never a fork, never
-  your own context. Personas (ADR 0053 D7): zoom-out, comprehension, design critic, implementation
-  readiness, then a synthesis pass. Vendored files: `.claude/agents/{zoom_out,comprehension,
-  design_critic,implementation_readiness,synthesizer}.md`; loop: `.claude/skills/egm-review-loop/`.
-  Subagents in a Claude Code session have no Agent tool, so the orchestrating session spawns the
-  reviewers itself; a delegated driver resolves findings, it does not review.
-- Verify every finding against source before accepting or rejecting it; cite `path:line` either way.
-  At most three rounds. A blocker still open after round three: stop at the ADR, list it for the
-  owner, move on. No fresh contexts available: mark the ADR "unreviewed" and do not implement.
-- Clean review: implement only behind a default-off gate and record that the design was
-  machine-reviewed and not owner-approved.
-
-`## What the review changed` (brief, Method step 6) lists each finding, whether it was confirmed
-against source, and what changed. Shape it like 0054's `## Review (EGM, 2026-11-13)`: one line on
-reviewers and verdict, then bullets `Accepted unchanged`, `<Finding>, verified in this tree:
-<path:line>; resolved by Dn`, `Corrected against this tree`, `Not settled` (-> open questions),
-and the line "Machine-reviewed (EGM), not owner-approved."
-
-## STATUS.md row
-
-Columns (`docs/adr/STATUS.md:11`):
-`| ADR | Title | Status | Gap or divergence | Owner decision |`. Insert in number order after the
-last row (0071 at line 83), before the `Totals:` line. Shape used by 0054-0071:
-
-```markdown
-| [NNNN](NNNN-<slug>.md) | <short title> | Proposed YYYY-MM-DD; reviewed (EGM)[: <verdict>]; not started | <what is missing today> | Open: O1 <topic>, O2 <topic> |
-```
-
-- Review state wording in use: `reviewed (EGM)`, `reviewed (EGM): changes required`,
-  `reviewed (EGM): research-only confirmed`, `EGM review in progress`; use `unreviewed` when no
-  Goldfish review ran (brief).
-- Implementation labels come from line 7: Implemented, Partially implemented, Not started,
-  Superseded or diverged. Owner column: `-`, `Open: ...`, or `Decided YYYY-MM-DD`.
-
-## When TASKS.md changes
-
-- `docs/adr/TASKS.md` is the active queue for unresolved ADR work and owner decisions
-  (README "Implementation status"). Its vocabulary: DONE, OPEN, BLOCKED, PARTIAL, HISTORICAL
-  (TASKS.md "Authority").
-- A docs-only proposal adds the ADR and its STATUS.md row (brief step 5); 0054-0071 added no
-  TASKS.md entry.
-- When a slice moves code: update the ADR's `Status in omp`, its STATUS.md row and TASKS.md in the
-  same change (README "Implementation status"; TASKS.md "Validation rule for future sessions").
-- An owner decision that blocks implementation becomes a BLOCKED item in TASKS.md.
-- At gap close also update the ADR status and append or update the ledger row (brief step 9).
+- `Decision` is normative; `Context` is evidence.
+- Cite real paths; lead Status in omp with one status label.
+- Do not reopen locked ADRs (0036 Python-only, 0024 latched roster, 0006 sandbox,
+  …). Record "not adopted" with reason if a gap collides.
+- Proposed ADRs with open owner questions (O1, O2, …) must not claim
+  implementation authorization. Accepted-with-conditions ADRs may start only
+  the slices the gate names (example: ADR 0050 S1/S2).
+- Hand off slicing to `omp-slice-plan`. Do not implement in this skill.
