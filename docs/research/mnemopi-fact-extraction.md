@@ -136,6 +136,15 @@ Correction, 2026-11-14 (ADR 0062 D11 and its "What the review changed"): option 
 
 Superseded, 2026-11-14 (ADR 0062 after EGM round 2): the ADR now has four slices. S1 is journal-keyed retention for main sessions through a native hook host. S2 is the English rules in `llm_mode = none`. S3 is the Spanish and technical rules. S4 is fact expiry, held for O3. It has three convars: `sv_memory_session_retention`, `sv_memory_llm_mode` and `sv_memory_fact_expiry`; `sv_memory_rule_facts` was dropped. The rules run only in `none` (the narrow reading of O1 below), and retention is keyed by the journal name, not the runtime's per-process id (`crates/envd/src/lib.rs:1617`). Moved to a follow-up ADR: the structured tool observations of 4.3 and S3 below (no transport from the journal to the rules exists, `retain.rs:31-40,177-187`), the Apple FM lane of 4.4 and S5, the fallback of 4.5, the worker, and the sixth `FACT` field. The ADR's D5 table replaces the rule lists below. Where this section and the ADR differ, the ADR wins; the upstream vectors cited below still apply.
 
+Further changes after EGM round 3 (2026-11-14), all in ADR 0062:
+- Retention projects only the user's own `msg.user@1` text. Assistant text is deferred, because thinking and text streams both open on prop `text`, `crates/agent/src/loop.rs:4765-4797`. Tool results and messages with an `author` are not projected.
+- The key is `journal_name` (the file name), and only journals with a ULID stem are retained.
+- The trigger is `agent_end`, not `turn_end`.
+- Clauses split at `.`, `!`, `?` and `;` only before whitespace, as in `upstream:packages/mnemopi/test/beam-consolidate-unit.test.ts:424-455`, and patterns are anchored at the clause start.
+- The `I am X` row and the bound rows other than `deadline` were removed.
+- Redaction uses the session's `SecretSessionSnapshot`.
+- A missing cursor, for example after `/memory clear`, is seeded instead of retained.
+
 Five PR-sized slices, ordered so the wiring lands with the first extractor and nothing ships unreachable. Three convars, all declared in `host_settings.rs` beside `SV_WORKTREE_BASE` (`:139`), read in `HostSettings::from_con` (`:204-234`) and carried to the runtime in new `#[serde(default)]` fields of `MnemopiSettings` (pattern `config.rs:196-198`), so `omp-memory` gains no `omp-con` dependency: `sv_memory_session_retention` (bool, off), `sv_memory_llm_mode` (default `smol`, today's value) and `sv_memory_fact_expiry` (bool, off). Names use the `sv_` prefix because they are omp2-native host policy with no upstream counterpart (the `ai_mnemopi_*` family carries pi aliases, `host_settings.rs:85`). All Rust verification runs remotely (`just remote-plain-test omp-memory`, a clippy run, and `just remote-plain-test omp-driver`; `AGENTS.md:90-94`).
 
 ### S1. Wire retention and the extraction drain, with the first extractor
