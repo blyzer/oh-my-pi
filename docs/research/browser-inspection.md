@@ -75,7 +75,7 @@ What that means (revised 2026-11-14). ABKit's source licence is published: LGPL 
 | Capability | Upstream | omp2 | Gap |
 |---|---|---|---|
 | React tree, inspect, renders, Suspense | page hook plus 4 helpers, about 770 lines | none | port; page script via `evaluate` |
-| Accessibility audit | axe-core 4.13.0 injected, bounded report | `ariaSnapshot` only | new op; axe is MPL-2.0 |
+| Accessibility audit | axe-core 4.13.0 injected, bounded report | `ariaSnapshot` only | new `tab.a11y` helper on axe-core; axe is MPL-2.0 |
 | ABKit engine | WebKit host over Tern JSON on stdio | none | licence (LGPL 2 / BSD) and protocol public; archives lack notices; research only |
 | Engine abstraction | process kinds | `Engine` enum | a new engine needs a new variant and a driver |
 
@@ -101,7 +101,7 @@ Choice: option 2, which is option 1 seeded from upstream. [INFERENCE]
 2. **A small deterministic rule set** over the DOM and the accessibility snapshot omp2 already captures: images without alternative text, controls without an accessible name, duplicate ids, missing `lang`, heading-level skips, landmark gaps, empty links. Cost: 3 to 5 days. Fit: good with AGENTS.md's "deterministic rules first". Fewer rules, no licence question.
 3. **Both**: own rules first, axe-core as an opt-in extra.
 
-Choice: option 3, starting with option 2. [INFERENCE]
+Choice (first draft): option 3, starting with option 2. [INFERENCE] **Revised 2026-11-14 (ADR 0067 review round 2): option 1 only, pending the owner's MPL-2.0 ruling.** Option 2 would be a second audit engine, with its own rule predicates, accessible-name computation and selector generation to specify and maintain, and a short rule list risks reading as a pass.
 
 ### ABKit
 
@@ -113,12 +113,12 @@ Choice: option 3. [INFERENCE]
 
 ## 5. Plan
 
-The plan lives in ADR 0067 "Slices" (revised 2026-11-14); this section only summarises it. The first draft here had the helpers as daemon ops, a `cap-browser-inspect` feature, document-start scripts as UNVERIFIED, and "frames are audited and merged"; all four were corrected by the review.
+The plan lives in ADR 0067 "Slices" (revised 2026-11-14, review round 2); this section only summarises it. The first draft here had the helpers as daemon ops, a `cap-browser-inspect` feature, document-start scripts as UNVERIFIED, "frames are audited and merged" and an own-rule audit; the review corrected all five.
 
-- **S1.** `omp-webview` gains post-construction `add_init_script` and `remove_init_script`, because `init_script` exists only on the builder (section 2).
-- **S2.** Default-off convar `sv_browser_inspect`; React helpers as `tab.*` methods of the `run` runtime; `reactEnable` reloads owned tabs only, registers the hook at document start so it survives navigation, and removes it when an attached or relay tab closes. Main frame only.
-- **S3.** `tab.a11y` with seven deterministic rules (engine `omp`) over the main document and same-origin iframes; cross-origin frames counted as skipped.
-- **S4 (optional).** axe-core 4.13.0 behind `cap-browser-axe`, blocked on the owner's MPL-2.0 decision. The tarball also bundles MIT and ISC components listed in its `LICENSE-3RD-PARTY.txt`; `axe.min.js` is 580,491 bytes, SHA-256 `c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1` (`https://registry.npmjs.org/axe-core/-/axe-core-4.13.0.tgz`, fetched 2026-11-14).
+- **S1.** `omp-webview` gains post-construction `add_init_script` and `remove_init_script` on Chromium only, because `init_script` exists only on the builder (section 2) and the browser tool's tabs are Chromium in practice; Firefox and the system engine report unsupported. S1 also adds browser-test support and the CI step that makes those tests gate.
+- **S2.** Default-off convar `sv_browser_inspect`; `reactEnable`, `reactDisable`, `reactTree`, `reactInspect` as `tab.*` methods of the `run` runtime, tested on a pinned React 18.3.1 fixture. `reactEnable` reloads owned tabs only, never replaces an existing DevTools hook, registers the hook at document start so it survives navigation, and removes it whenever an attached tab's session is dropped. A hook installed after the page loaded is reported, not mistaken for "no React". Main frame only; results bounded page-side.
+- **S3.** `reactRenders` and `reactSuspense`; the hook walks the fiber tree on commit only while recording.
+- **S4 (optional).** `tab.a11y` on axe-core 4.13.0 only, main document only, behind `cap-browser-axe`, blocked on the owner's MPL-2.0 decision. The tarball also bundles MIT and ISC components listed in its `LICENSE-3RD-PARTY.txt`; `axe.min.js` is 580,491 bytes, SHA-256 `c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1` (`https://registry.npmjs.org/axe-core/-/axe-core-4.13.0.tgz`, fetched 2026-11-14).
 - **S5.** Advertising the helpers in the `browser@3` description, blocked on an owner ruling about the tool revision (ADR 0026).
 - **ABKit.** No slice. See section 6.
 
