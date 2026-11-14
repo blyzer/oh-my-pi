@@ -72,8 +72,10 @@ replacing it is a new record plus a `Superseded by` line (README, opening paragr
 - Scope: classes c and d. Skip for a and b and for data or small mechanical gaps (6, 7, 8, 15).
 - Reviewers are fresh subagents given only the ADR path and the files it cites; never a fork, never
   your own context. Personas (ADR 0053 D7): zoom-out, comprehension, design critic, implementation
-  readiness, then a synthesis pass. Vendored files: `.claude/skills/agents/{zoom_out,comprehension,
+  readiness, then a synthesis pass. Vendored files: `.claude/agents/{zoom_out,comprehension,
   design_critic,implementation_readiness,synthesizer}.md`; loop: `.claude/skills/egm-review-loop/`.
+  Subagents in a Claude Code session have no Agent tool, so the orchestrating session spawns the
+  reviewers itself; a delegated driver resolves findings, it does not review.
 - Verify every finding against source before accepting or rejecting it; cite `path:line` either way.
   At most three rounds. A blocker still open after round three: stop at the ADR, list it for the
   owner, move on. No fresh contexts available: mark the ADR "unreviewed" and do not implement.
