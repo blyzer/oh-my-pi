@@ -96,7 +96,7 @@ Verdict: implement the decision files in four slices behind a default-off convar
 ### Decision files
 
 1. **Build on existing omp2 code: add `Sharpshooter` to `MemoryBackend`.** Cost: low in code. Fit: poor. It changes the accepted values of the existing `ai_memory_backend` convar, which the additive-only rule forbids without a ruling, and it makes decision files exclusive with Mnemopi. Upstream's backends are exclusive; the two do different jobs, so exclusivity is a limit, not a feature. It also pulls a rewrite of every `match` on `RuntimeBackend`.
-2. **A separate subsystem with its own convar**, in a new small crate for storage and consolidation logic, a standing Director for extraction, and a prompt slot for injection. Cost: about 2 weeks. Fit: good. It is additive, runs beside Mnemopi, and uses seams omp2 already has.
+2. **A separate subsystem with its own convar**, in a new small crate for storage and consolidation logic, a driver-owned worker fed by a `before_agent_start` hook host for extraction (a Director is the wrong seam, ADR 0015), and a prompt slot for injection. Cost: about 2 weeks. Fit: good. It is additive, runs beside Mnemopi, and uses seams omp2 already has.
 3. **A Python extension.** Cost: unknown. Fit: unclear. Extraction and consolidation need isolated model calls and atomic writes beside the journal. Whether an extension can make those calls is UNVERIFIED. Directive text in the system prompt from an extension is also a larger trust question than a first-party slot.
 4. **Skip it and tell the user to keep decisions in `AGENTS.md`.** Cost: zero. Fit: honest for users who write them by hand, but it loses the automatic, friction-gated part, which is the point.
 
@@ -110,7 +110,7 @@ Choice: option 2. Where to place the code (new crate or inside `omp-memory`) is 
 
 ## 5. Plan
 
-Revised 2026-11-14 after EGM round 1: ADR 0068 is authoritative for the slice plan (S0 gate and prompt producer, S1 crate, S2 read path, S3 extraction, S4 consolidation). Where this section differs, the ADR wins: the gate is the default-off convar `sv_decision_memory` alone (no `cap-*` feature, no `PROJECT` flag); the bank is `<data>/decisions/<hex>/`, keyed by the repository snapshot's primary root or the workspace root, computed without Mnemopi; the controls are a new `/decisions` command and `/memory` does not change; redaction applies to the extraction envelope, queued deltas, file writes and the injected text. No existing convar, tool, scheme or command changes.
+Revised 2026-11-14 after EGM rounds 1-2: ADR 0068 is authoritative for the slice plan (S0 gate and prompt producer, S1 redaction in `omp-secrets`, S2 `omp-decisions` store, S3 identity and read path, S4 extraction, S5 consolidation). Where this section differs, the ADR wins: the gate is the default-off convar `ai_decision_memory` (no `cap-*` feature, no `PROJECT` flag); the bank is `<data>/decisions/<hex>/`, keyed by the primary Git root from `omp_vcs::detect`, computed by the driver without Mnemopi or envd; extraction is a native `before_agent_start` hook host feeding a driver worker, not a Director; consolidation runs on `/decisions sync`, worker start and session switch, never at shutdown; a consolidated generation is injected only after `/decisions accept`; the controls are a new `/decisions` command and `/memory` does not change; redaction (fixed `[REDACTED]` marker) applies to the extraction envelope, consolidation replies and every read of the files. No existing convar, tool, scheme or command changes.
 
 ### Slice 1: storage and rules, no model
 
@@ -124,9 +124,9 @@ Revised 2026-11-14 after EGM round 1: ADR 0068 is authoritative for the slice pl
 - Acceptance: with files present the prompt golden test shows the slot once, in the same place every turn; with none the prompt is unchanged byte for byte; an oversize file is truncated at the limit with a marker.
 - Tests: extend the prompt golden tests (`crates/agent/tests/prompt_golden.rs:229`).
 
-### Slice 3: extraction Director
+### Slice 3: extraction (superseded in shape by ADR 0068 D5: hook host plus driver worker)
 
-- A standing Director, main agent only, that sends each user prompt to the `@memory` role through the isolated inference path, with a forced `record_deltas` schema. Skip slash commands and prompts under a minimum length. Redact credential-shaped text with the `omp-secrets` redactor before sending. Reject any delta whose evidence is not an exact substring of the prompt. One extraction at a time.
+- A background worker, main agent only, that sends each user prompt to the `@memory` role through the isolated inference path, with a forced `record_deltas` schema. Skip slash commands and prompts under a minimum length. Redact credential-shaped text with the `omp-secrets` redactor before sending. Reject any delta whose evidence is not an exact substring of the prompt. One extraction at a time.
 - Acceptance: with a fake inference service, a valid delta lands in the queue; a delta with invented evidence is dropped; a prompt containing a token-shaped secret reaches the model redacted; a subagent session queues nothing; extraction failure never fails the turn.
 - Gate: same convar, plus the role resolving. Tests: fake `ErasedInference`.
 
@@ -143,7 +143,7 @@ A separate effort outside this repository's core: E1, a spike extension that reg
 ## 6. Open questions
 
 1. **Directive versus non-directive.** omp2's standing text says memory never overrides the conversation or policy (`crates/memory/src/runtime.rs:566-569`). Sharpshooter's value is that its decisions are followed unless the user overrides them. They are the user's own earlier statements, so a directive header is defensible, but it is a different trust stance from Mnemopi. The owner must choose the wording; the plan assumes a separate slot with its own header.
-2. **Convar versus enum value.** The plan uses a separate `sv_decision_memory` convar so `ai_memory_backend` keeps its meaning. If the owner prefers a third `ai_memory_backend` value, that changes an existing convar's accepted values and needs a ruling.
+2. **Convar versus enum value.** The plan uses a separate `ai_decision_memory` convar so `ai_memory_backend` keeps its meaning. If the owner prefers a third `ai_memory_backend` value, that changes an existing convar's accepted values and needs a ruling.
 3. **Where the code lives**: a new crate, or inside `omp-memory`. Check the crate rules in `AGENTS.md`.
 4. **Role.** The plan uses `@memory`. Upstream uses a dedicated setting that falls back to `smol`. Does the owner want a separate role or setting?
 5. **Consolidation trigger.** Upstream runs a 5-minute scheduler. The plan runs on `/decisions sync` and at session close. A timer can be added later.
