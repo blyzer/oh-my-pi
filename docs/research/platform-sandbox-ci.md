@@ -1,8 +1,8 @@
 # Gap 19: a VM-backed macOS sandbox beside Seatbelt, and Windows CI
 
 Status: research only. Nothing here is implemented or authorized.
-Date: 2026-11-13
-Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout).
+Date: 2026-11-13, revised 2026-11-14 (EGM round 1: reopen triggers and V0 thresholds, which now live in ADR 0070 D4 to D7)
+Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout). The 2026-11-14 additions were read at omp2 `9cb6fd6389`.
 
 Evidence keys:
 
@@ -59,6 +59,7 @@ Licences were read from the GitHub API on 2026-11-13.
 | Apple `container` (`apple/container`) | Linux containers as lightweight VMs | Linux only | Apache-2.0 | "Needs a Mac with Apple silicon" and "designed to run on macOS 26 or later" (its README). |
 | Colima (`abiosoft/colima`) | Container runtime in a Lima VM | Linux | MIT | Docker-compatible; already usable through omp2's Docker backend. |
 | UTM (`utmapp/UTM`) | GUI VM manager | many | Apache-2.0 | Not scriptable enough for a backend. |
+| Vibemon (`stencil-hq/vibemon`) | Self-hosted microVM platform speaking the E2B API; KVM on Linux, HVF on macOS 15+ | Linux (x86_64 and aarch64 on KVM; aarch64 on HVF) | MIT, Apache-2.0 for E2B-derived parts (README, 2026-11-14) | Linux guests, so a Linux VM boundary like Docker Desktop, not macOS-native. Compat page says Linux/KVM end-to-end testing is "not yet run"; macOS egress filter admits only domains on TCP 80 and 443. No start-latency figure published. E2B documents pause at about 4 s per GiB of RAM and resume at about 1 s. The upstream reference adapter `vmon.ts` uses Vibemon SDK calls (OCI image boot, host gateway) not shown in the E2B pages (`upstream:packages/metaharness/src/tb/vmon.ts:201-224`, `:308-315`). URLs: <https://github.com/stencil-hq/vibemon>, <https://github.com/stencil-hq/vibemon/blob/main/docs/src/reference/e2b-compat.md>, <https://docs.e2b.dev/sandbox/persistence.md>. |
 
 Tart's licence text, read from the repository's `LICENSE`: a "Competing Use" is "making the Software available to others in a commercial product or service that substitutes for the Software; ... or offers the same or substantially similar functionality", and permitted purposes "specifically include ... for your internal use and access".
 
@@ -122,6 +123,7 @@ Nothing below is implemented. Each item is a proposal with its own acceptance te
 
 - Measure, on the self-hosted Mac, the time to start a clean guest and run `true` for Tart, Lima and Apple `container`, the speed of a shared-directory `cargo build` against a native one, and what network filtering is available. Record the numbers in a research note.
 - Acceptance: a table of measured times and a yes or no per tool on "can run a macOS-native command" and "can filter egress". Until measured, every number about VM speed in this document is UNVERIFIED.
+- Revised 2026-11-14: the pass lines for a MicroVM execution backend tested against Vibemon (gates X1 to X9, baseline B0) and for a VM subagent-isolation backend (I1 to I4) are in ADR 0070 D5 and D6. Reopen events are in D4 (Apple `sandbox-exec` signals S1 to S3, owner need H, measured thresholds V) and D7 (Windows WIN1 to WIN4). The `sandbox-exec` removal detector already exists: `seatbelt::probe()` (`crates/sandbox/src/backends/seatbelt.rs:436-473`) and proof P12, which fails on macOS when the probe fails (`crates/e2e/tests/p12_daemon_approvals.rs:13-14`, `:64-72`).
 
 ### VM: slice V1, the recipe
 
@@ -160,7 +162,7 @@ Nothing below is implemented. Each item is a proposal with its own acceptance te
 2. **Nested virtualization.** GitHub-hosted macOS runners are themselves VMs; whether Virtualization.framework works inside them is UNVERIFIED. A VM backend could be tested only on the self-hosted Mac.
 3. **Entitlements and signing.** Virtualization.framework use requires a signed binary with an entitlement. UNVERIFIED. The `package-macos.yml` workflow exists but its signing was not read.
 4. **Tart's licence.** FSL-1.1-ALv2 with a Competing Use clause, copyright line naming OpenAI as read. The owner should decide whether even a documented recipe that points at Tart is acceptable, or whether to name only Apache-2.0 tools (Lima, Apple `container`).
-5. **Seatbelt's future.** The man page says deprecated. No removal date was found. The owner decides the trigger for V2.
+5. **Seatbelt's future.** The man page says deprecated. No removal date was found. Apple DTS said in September 2020 that the deprecation exists because the profile language is undocumented for third parties (<https://developer.apple.com/forums/thread/661939>), and the binary is still present in 2026. The triggers for V2 are now defined in ADR 0070 D4; the owner ratifies them.
 6. **General tool execution over SSH.** Whether read, write and shell tools can target an SSH host, not only build runs, decides whether V1 works for agent sessions.
 7. **Windows release.** Does the owner want a Windows binary? That decides W3 and the `omp-py` work.
 8. **Cost.** Hosted Windows minute rates and per-run cost were not checked. NOT MEASURED.
