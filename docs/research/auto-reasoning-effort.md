@@ -12,6 +12,8 @@ Evidence keys:
 
 No build, test or run was made for this document.
 
+Revision 2026-11-14 (EGM round 1): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the pre-pass thresholds and the judge's own effort. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064".
+
 ## Question
 
 Upstream lets the user set `defaultThinkingLevel: auto`. A small classifier picks the reasoning effort for each user prompt, and `providers.autoThinkingMaxEffort` raises the ceiling it may reach. How would omp2 offer the same as a Director, under one hard rule: the Director chooses effort only and never switches the model in the middle of a session?
@@ -56,7 +58,7 @@ Upstream never changes the model in this path. It only sets effort.
 - The catalog has its own `ai_default_thinking` (`crates/catalog/src/settings.rs:1191`) and a universal `ai_thinking_ceiling` defaulting to `Max` (`crates/catalog/src/settings.rs:1203`). The legacy path for the default is `defaultThinkingLevel` (`crates/catalog/src/settings.rs:1199`).
 - The type is `ThinkingEffort` (`crates/catalog/src/thinking.rs:36`). There is a coarse `ThinkingEffortSelector` (`Lo | Med | Hi`) used by delegated tasks (`crates/catalog/src/thinking.rs:113`).
 - The router clamps every request. `clamp_thinking_effort` bounds the requested effort by a configured ceiling and by the model's own, picking the greatest supported effort at or below it (`crates/catalog/src/thinking.rs:320`). The router calls it with the request's `thinking_ceiling` (`crates/ai/src/router.rs:143`, `crates/ai/src/router.rs:682-687`).
-- The kernel builds the request with `reasoning: Setting::Unset` (`crates/agent/src/loop.rs:2343`). The effort that finally goes out is decided in the router. How the session's `ai_thinking` value reaches that decision I did not trace: UNVERIFIED. `ModelWatch` reads the resulting effort and reports changes (`crates/agent/src/model_watch.rs:1-11`, `crates/agent/src/model_watch.rs:24-34`).
+- The kernel builds the request with `reasoning: Setting::Unset` (`crates/agent/src/loop.rs:2343`). The effort that finally goes out is decided in the driver and the router: `ProductionInference::apply_convars` fills a still-`Unset` reasoning from the effective `ai_thinking` through `convar_reasoning` (`crates/driver/src/headless/kernel.rs:342-348`, `crates/driver/src/headless/kernel.rs:492-530`), and the router clamps it again and rejects an effort on a model without a thinking policy (`crates/ai/src/router.rs:1168-1187`). OBSERVED 2026-11-14. `ModelWatch` reads the resulting effort and reports changes (`crates/agent/src/model_watch.rs:1-11`, `crates/agent/src/model_watch.rs:24-34`).
 - A Director bind that supplies `ai_thinking` is already a known case: `ModelWatch` checks `engagement_owner(AI_THINKING)` (`crates/agent/src/model_watch.rs:88`).
 
 ### Directors
@@ -69,7 +71,7 @@ Upstream never changes the model in this path. It only sets effort.
 - `MutDirectorCx.inference` is an `ErasedInference`. `execute_on(selector, request)` runs an isolated request on any catalog key or `@role` and leaves the live route untouched (`crates/contract/src/director.rs:612`, `crates/contract/src/director.rs:619`). The advisor Director already uses it for its second-model review (`crates/agent/src/directors/advisor.rs:344`).
 - A `@judge` role exists. It falls back to the slow selection when unset (`crates/catalog/src/selection.rs:177`, `crates/catalog/src/selection.rs:465`, tests at `crates/catalog/src/selection.rs:1228` and `crates/catalog/src/selection.rs:1243`).
 - `DirectorEffect` can carry session-layer convar writes. `Plan` and `Prewalk` use that to set `ai_model` and `ai_thinking` on handoff (`crates/contract/src/director.rs:457`, `crates/contract/src/director.rs:489`, `crates/agent/src/directors/plan.rs:137`, `crates/agent/src/directors/prewalk.rs:60`). `Prewalk` documents that it "switches models exactly once" (`crates/agent/src/directors/prewalk.rs:19-20`). The new Director must not copy that.
-- Binds are written into the Director's DOM node when it is built (`crates/contract/src/director.rs:1580`, `crates/contract/src/director.rs:1591`). Whether a bind can change while the engagement stays active: UNVERIFIED.
+- Binds are written into the Director's DOM node when it is built (`crates/contract/src/director.rs:1580`, `crates/contract/src/director.rs:1591`). A bind can change while the engagement stays active: binds are the element's `bind/*` props, re-derived from the DOM on every derivation (`crates/contract/src/director.rs:900-936`), so one `Op::Set` changes one and a `Null` value clears it (`crates/contract/src/director.rs:235-246`). OBSERVED 2026-11-14.
 - Standing Directors are registered in `register_standard` (`crates/agent/src/directors/mod.rs:43` shows the pattern) and the kernel engages `CompactionDirector` itself when a runtime flag is on and none is active or queued (`crates/agent/src/loop.rs:1421-1425`). The stack runs `before_inference` on every request round trip (`crates/contract/src/director.rs:1066`; call site `crates/agent/src/loop.rs:1592`).
 - Not related, do not confuse: `RecoveryKind::ThinkingClassification` heals reasoning text leaked into the answer; it is not effort selection (`crates/ai/src/recovery/thinking.rs:1`).
 
@@ -106,6 +108,8 @@ Verdict: implement, in four slices, with the application mechanism settled first
 Choice: option 3, with option 1's rules as its first pass. A deterministic rule decides the obvious cases; the model decides only where rules cannot. [INFERENCE]
 
 ## 5. Plan
+
+Superseded by ADR 0064: the slice plan there (S0a, S0b, S1 to S4) replaces the four slices below, adds the drop-safe isolated call and the judge's own effort, and applies the choice as an `ai_thinking` bind, not a request edit.
 
 ### Slice 1: settings, no behaviour
 
@@ -156,7 +160,7 @@ Three ways to apply it. All three only change effort.
 2. **Bind.** `binds()` supplies `ai_thinking` while engaged. `ModelWatch` already treats that as a Director-supplied effort (`crates/agent/src/model_watch.rs:88`). The user's `auto` stays stored under the engagement. Problem: binds look fixed at node build time, so a changing value may need a re-engagement or a state update path. UNVERIFIED.
 3. **Request edit.** `prepare_inference` sets `req.reasoning` (the field built as `Unset` at `crates/agent/src/loop.rs:2343`) from the stored choice. Simple and local; not journaled, so `ModelWatch` and the UI badge would not show it unless the choice is also journaled in Director state. [INFERENCE]
 
-Recommendation: store the choice in Director state (`StateUpdate`), apply it with option 3 on every request of the turn, and publish it for the UI through the existing `ModelWatch` path if it can be made to observe it. Option 2 is better if a bind can be updated cheaply. The first slice should settle this by reading how `ai_thinking` flows into the router, which this research did not trace.
+Superseded by ADR 0064 D8: option 3 skips `convar_reasoning`, because the driver fills only an `Unset` reasoning (`crates/driver/src/headless/kernel.rs:346`), so a model without a thinking policy fails the request (`crates/ai/src/router.rs:1179-1185`); the ADR chooses option 2, which the bind trace above makes cheap. The original recommendation, kept for the record: store the choice in Director state (`StateUpdate`), apply it with option 3 on every request of the turn, and publish it for the UI through the existing `ModelWatch` path if it can be made to observe it. Option 2 is better if a bind can be updated cheaply. The first slice should settle this by reading how `ai_thinking` flows into the router, which this research did not trace.
 
 #### The invariant: effort only, never the model
 
@@ -184,7 +188,8 @@ Recommendation: store the choice in Director state (`StateUpdate`), apply it wit
 - **Judge availability.** `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`), which may be expensive. Consider a dedicated cheap default or let the user opt out.
 - **Subagents.** A child session inherits `ai_thinking`. Whether a child of an `auto` parent should also classify, or take the delegator's `solutionSpace`, is open.
 - **Wire visibility.** Adding a value to `ai_thinking` touches `ModelWatch`, the chat badge (`crates/chat/src/host.rs:953`) and RPC (`crates/app/src/rpc_mode.rs:1156`). Each reads it as an effort string today. That is a change to an existing convar's accepted values, so under the additive-only rule the separate boolean is the safer fallback; the owner should choose.
-- UNVERIFIED: how `ai_thinking` reaches the router; whether binds can change while engaged; whether `solutionSpace` is available to a child's Director.
+- UNVERIFIED: whether `solutionSpace` is available to a child's Director. (How `ai_thinking` reaches the router and whether binds can change while engaged are now traced in section 2.)
+- Found in round 1 (ADR 0064 Context): an isolated `chat_on` call leaves the client on the judge's model if its future is dropped (`crates/driver/src/headless/kernel.rs:1822-1839`), and it gives an `Unset` request the session's `ai_thinking` (`crates/driver/src/headless/kernel.rs:424-436`).
 
 ## 7. Upstream origin and license
 
