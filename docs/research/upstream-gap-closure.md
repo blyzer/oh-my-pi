@@ -46,3 +46,9 @@ brief.
   exist; the previous copy still said "pending" for gaps 1, 13, 14, 18 and 19).
   Bootstrap (brief, EGM skills, `omp-*` skills) in its own PR. EGM rounds 2-3
   started for gaps 1, 2, 4 and 5.
+- 2026-11-14 07:10 UTC: bootstrap PR #617 opened (brief, vendored EGM skills at
+  google/elephant-goldfish-model `964a4f1`, four `omp-*` skills). Every running
+  agent stopped at the 5-hour API limit and was resumed after the reset;
+  in-flight ADR edits live only in the gap worktrees until each driver commits.
+  Subagents have no Agent tool, so gap drivers resolve round 1 only and the
+  orchestrator spawns the fresh-context Goldfish reviewers for rounds 2-3.
