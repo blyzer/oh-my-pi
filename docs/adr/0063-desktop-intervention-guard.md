@@ -1,304 +1,364 @@
-# 0063. Desktop input: a user-intervention guard on macOS and layout-aware XKB typing on Wayland
+# 0063. Desktop input: layout-aware XKB typing on Wayland and release of held input on abort; the macOS intervention guard is deferred
 
-Status: Proposed 2026-11-14; EGM round 1 resolved, rounds 2-3 pending
+Status: Proposed 2026-11-14; EGM round 2 resolved, round 3 pending
 Date: 2026-11-14 (first draft 2026-11-13)
 Area: tools
 
 Research: [docs/research/desktop-intervention-guard.md](../research/desktop-intervention-guard.md) (Gap 4 of the upstream gap closure). This record states decisions; the note holds the evidence.
 
-Review state: round 1 of the Elephant-Goldfish review returned five findings, and this revision resolves all five (see "What the review changed"). Rounds 2 and 3 are still to run, with fresh-context reviewers, and no slice below may be implemented before they pass.
+Review state: this record is under Elephant-Goldfish (EGM) review. In each round, fresh-context reviewers ("Goldfish") read only this record and the files it cites, and the author verifies every finding against source. Round 1 returned five findings. Round 2 returned two blockers, seventeen majors and sixteen minors. Both rounds are resolved (see "What the review changed"). No slice below may be implemented before round 3 passes.
+
+Round 2 cut the scope. This record now decides two small fixes:
+
+- **Part A**: layout-aware typing on Wayland.
+- **Part C**: release of held input when an input call stops early.
+
+**Part B**, the macOS user-intervention guard, is deferred to its own future record. The section "Part B: deferred" lists what that record must settle.
+
+Terms used here:
+
+- "run": one `action=run` program of the `computer@3` tool.
+- "actor thread": the single native thread that owns a desktop backend (`crates/desktop/src/lib.rs:730-748`, `crates/desktop/src/linux/actor.rs:91`).
+- "libei": the Wayland emulated-input protocol that omp2 drives through the `reis` crate.
 
 Citation keys: omp2 paths are relative to the repository root at `omp2` 9cb6fd638. Upstream paths carry the `upstream:` prefix and refer to can1357/oh-my-pi at c308970263.
 
 ## Context
 
+### The problems in omp2
+
+**Part A: wrong characters on non-US Wayland layouts.**
+- Wayland typing goes through a fixed US table. `type_text` maps each character through `evdev_char` (`crates/desktop/src/linux/wayland/libei.rs:453-484`, `crates/desktop/src/linux/wayland/libei.rs:572`).
+- `key_chord` maps `KeyName::Char` through the same table (`crates/desktop/src/linux/wayland/libei.rs:429-451`, `crates/desktop/src/linux/wayland/libei.rs:517-570`).
+- The send loop knows only Shift, keycode 42 (`crates/desktop/src/linux/wayland/libei.rs:470-481`).
+- On a French layout, `a` presses the US-`A` key, which types `q`, and no error is reported. [INFERENCE from the evdev codes]
+- `ActorLibei::new` drops the libei event stream after the one discovery pass (`let (_connection, mut events)`, `crates/desktop/src/linux/wayland/libei.rs:84-91`).
+- `EiDevice` holds only a device and a serial (`crates/desktop/src/linux/wayland/libei.rs:45-48`), and nothing in `crates/desktop/src` handles `KeyboardModifiers` or a keymap. So omp2 cannot know the active group even after discovery.
+
+**Part C: held buttons and keys after an early exit.**
+- On macOS:
+  - `background_drag` posts button-down, then can leave through `crate::operation_checkpoint()?` without button-up (`crates/desktop/src/macos/input.rs:497-529`, checkpoint at `:513`).
+  - `global_pointer`'s drag arm has the same shape (`crates/desktop/src/macos/input.rs:902-905`).
+  - `key_chord` releases keys only after every press succeeded (`crates/desktop/src/macos/input.rs:684-698`).
+- On Wayland, the libei drag presses the modifiers and the button, then can leave through the checkpoint at `crates/desktop/src/linux/wayland/libei.rs:401` with both still held (`crates/desktop/src/linux/wayland/libei.rs:379-410`).
+- A cancelled run or an expired deadline therefore leaves a button or key held on the user's desktop.
+
 ### What OMPv1 does
 
-- There are two separate protections, and they are easy to confuse:
-  - A physical-Escape emergency stop for takeover input, with one monitor per OS (`upstream:crates/pi-natives/src/desktop/control.rs:48`, `upstream:crates/pi-natives/src/desktop/control.rs:509`).
-  - A user-intervention guard. Input aimed at an app the user has used since the session last read it waits for the user to pause, then fails without sending, so the agent reads again. Input already being sent stops at the user's first key or click (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:1-7`).
-- The guard is a per-app state machine:
-  - Per app, a count of the user's inputs and the time of the last input that no read has shown yet (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:28-36`).
-  - A 5 s quiet period (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:24`).
-  - Admission before sending (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:147-183`).
-  - A mid-call check before each press or accessibility action (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:232-246`).
-  - Seven unit tests run it with a simulated listener (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:351-575`).
-- Upstream builds each refusal message with `format!`, putting the app name and the idle time into it (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:169-179`, `upstream:crates/pi-natives/src/desktop/control/intervention.rs:238-242`).
-- The admission wait is cancellable. `Listener::admit` waits through `OperationToken::wait` (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:307-311`), which blocks on a `parking_lot::Condvar` that `cancel` and `retire` notify (`upstream:crates/pi-natives/src/desktop/control.rs:205-216`, `upstream:crates/pi-natives/src/desktop/control.rs:79-98`). The wait ends `DEADLINE_MARGIN` (250 ms) before the run's deadline or the caller's reply timeout, whichever is earlier (`upstream:crates/pi-natives/src/desktop/control.rs:41`, `upstream:crates/pi-natives/src/desktop/control.rs:166-172`, `upstream:crates/pi-natives/src/desktop/control/intervention.rs:154-157`).
-- Held input is always released. `control::cleanup` runs release posts with cancellation checks off (`upstream:crates/pi-natives/src/desktop/control.rs:344-355`). Uses of it:
-  - `hold_transitions` releases every held key, in reverse order, when a post, the body or the guard fails (`upstream:crates/pi-natives/src/desktop/macos/input.rs:3621-3657`).
-  - `stroke_path` posts the drag's button-up at the last point it reached, whatever happened before (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2700-2735`).
-  - `post_guarded` runs the guard only before a press; "releases always go out so nothing stays held" (`upstream:crates/pi-natives/src/desktop/macos/input.rs:1078-1089`).
-- On macOS a listen-only event tap records key-down and mouse-down events. It tells the user's input from the agent's by omp's synthetic event tag and by the source pid (`upstream:crates/pi-natives/src/desktop/control/macos.rs:663`, `upstream:crates/pi-natives/src/desktop/control/macos.rs:413`). Upstream's tag value is `0x7069_6465_736b`, which is ASCII `pidesk` (`upstream:crates/pi-natives/src/desktop/control/macos.rs:20`). If the session lacks event-listening permission, the tap does not start and nothing waits (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:257-281`).
-- On X11 a counterpart that works during takeover only reads XI2 raw presses (`upstream:crates/pi-natives/src/desktop/linux/x11/activity.rs:1-9`). Wayland and Windows have no intervention guard. Windows has only the Escape hook (`upstream:crates/pi-natives/src/desktop/control/windows.rs:1`).
-- On Wayland, typing goes through a keymap parser:
-  - libei hands over the compositor's compiled keymap. The parser reads keycodes, types and per-group levels directly, and never borrows a key from another group (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:1-7`).
-  - Eight tests cover it (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:584-676`). They read two checked-in keymaps (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:570-571`).
-  - Those two files, `testdata/fr.xkb` (66,390 bytes) and `testdata/us-fr.xkb` (70,112 bytes), carry no copyright or licence header. The only match for "copyright" in them is the `copyright` keysym (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1472`).
+**Typing on Wayland.**
+- libei hands over the compositor's compiled keymap. `KeyboardLayout` parses keycodes, types and per-group levels, and never borrows a key from another group (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:1-7`).
+- The backend keeps the event stream (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:389-414`) and drains it before each input in `refresh_devices`, at 1 ms per poll and at most 256 events, failing with "did not settle; no input was sent" (`:459`, `:711`, `:751`).
+- `handle_event` reads a keyboard device's keymap at `DeviceAdded` and tracks `DeviceResumed`, `DevicePaused`, `DeviceRemoved` and `SeatRemoved`. It feeds `KeyboardModifiers` into `KeyboardLayout::update_modifiers` (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:316-388`).
+- `char_stroke` sends control characters (`\n`, `\t`) through fixed evdev keys in every group, because the keymap would resolve `'\n'` to `<LNFD>`. It sends ASCII through fixed keys only when `can_use_us_ascii_fast_path` holds; that is decided by the `group_is_us` row check, not by group names. Everything else resolves through the active group.
+- With no usable keymap, printable text is an error and is never assumed to be US (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:871-896`, `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:521-540`, test `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:1117-1121`).
+- `read_keymap` rejects non-XKB keymaps, size 0 and sizes over 16 MiB (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:860-869`).
+- Chords route `KeyName::Char` through the layout and press every modifier in the stroke, including AltGr (100) (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:815-833`).
+- Tests: eight in `xkb.rs`, including a helper that rewrites `symbols[GroupN]` to the numeric form newer libxkbcommon writes (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:560-676`). Two more in `libei.rs` (`:1117-1128`).
 
-### What omp2 has
-
-- `omp-desktop` has the same overall shape: a session facade, one actor thread and per-OS backends (`crates/desktop/README.md:1-4`). It has no part of the guard: no takeover mode, no `UserIntervened`, no event tap and no synthetic event tag (`crates/desktop/src/error.rs:3-40`, `crates/desktop/src/macos/input.rs:572`).
-- Cancellation:
-  - `OperationState` holds only an `AtomicBool` and a deadline (`crates/desktop/src/lib.rs:62-75`). Nothing can wake a sleeping actor thread.
-  - `CancelOnDrop` sets the flag when the async caller goes away (`crates/desktop/src/lib.rs:82-88`). `call` sets the flag after `recv_deadline` times out (`crates/desktop/src/lib.rs:763-781`).
-  - Each operation's deadline is `OPERATION_TIMEOUT`, one minute (`crates/desktop/src/lib.rs:46`, `crates/desktop/src/lib.rs:1140-1150`).
-  - The run's own timeout lives only in `omp-envd`: a default of 20 s and a maximum of 300 s, enforced by `tokio::time::timeout` (`crates/envd/src/computer.rs:183-197`). `omp-desktop` never sees it.
-  - `close` cancels the active run token before it takes the run lock (`crates/envd/src/computer.rs:150-161`).
-- Errors reach the model with fixed text only. `native_fault` maps each `ErrorCode` to a `FaultCode` and a static string, and drops `DesktopError::message` (`crates/envd/src/computer.rs:1724-1755`). Upstream's formatted refusal text would never reach the model.
-- Held input is not released on an early exit:
-  - `background_drag` posts button-down, then leaves the loop through `crate::operation_checkpoint()?` without posting button-up (`crates/desktop/src/macos/input.rs:497-529`, checkpoint at `crates/desktop/src/macos/input.rs:513`).
-  - `global_pointer`'s drag arm has the same shape (`crates/desktop/src/macos/input.rs:902-905`).
-  - `key_chord` presses keys with `?` and releases them only after every press succeeds (`crates/desktop/src/macos/input.rs:675-700`).
-  - So today a cancel or deadline in the middle of a drag leaves the mouse button held.
-- Delivery has two modes, background and foreground (`crates/desktop/src/backend.rs:12`).
-- Wayland typing uses a fixed US table. `type_text` maps each character through `evdev_char` and fails on anything the table lacks (`crates/desktop/src/linux/wayland/libei.rs:453-466`, `crates/desktop/src/linux/wayland/libei.rs:572`). On a French or Dvorak layout it types the wrong characters and reports no error. [INFERENCE]
-- The dependencies a port needs, `reis`, `x11rb` and `xkeysym`, are already in the crate (`crates/desktop/Cargo.toml:25-33`).
-- Features and convars:
-  - `omp-desktop`'s only feature is `wayland-pipewire` (`crates/desktop/Cargo.toml:11-13`).
-  - `omp-envd` has `cap-computer = ["dep:omp-desktop", "omp-tools/cap-computer"]` (`crates/envd/Cargo.toml:18`).
-  - `omp-app` turns on `cap-computer` by default and forwards it (`crates/app/Cargo.toml:24-37`).
-  - The computer convars are `sv_computer_*`. They are declared in `crates/envd/src/computer.rs:32-68`, read once in `ComputerSettings::from_con` (`crates/envd/src/computer.rs:76-84`), and passed to the desktop crate through `DesktopSessionOptions` (`crates/envd/src/computer.rs:99-104`, `crates/desktop/src/types.rs:137-141`).
-- The `computer@3` tool:
-  - Its description is a fixed string in `spec()` (`crates/tools/src/computer.rs:490-502`).
-  - Its capability payload `Capabilities` is a serde output struct (`crates/tools/src/computer.rs:338-363`).
-  - `FaultCode` is a serde `snake_case` enum (`crates/tools/src/computer.rs:385-430`).
+**Releasing held input.**
+- `control::cleanup` runs release posts with cancellation checks off (`upstream:crates/pi-natives/src/desktop/control.rs:344-355`).
+- `hold_transitions` releases every held key, in reverse order, when a post, the body or a check fails (`upstream:crates/pi-natives/src/desktop/macos/input.rs:3621-3657`).
+- `stroke_path` posts the drag's button-up at the last point it reached, whatever failed. Only when a drag-and-drop session has begun does it first move back to the start point (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2700-2735`).
 
 ### Rules that bind
 
-- Additive only. `ErrorCode` and the tool layer's `FaultCode` are visible on the wire (`crates/desktop/src/error.rs:3`, `crates/tools/src/computer.rs:389`). A new variant is additive, but it still needs the owner's agreement (O2). The description and the `Capabilities` output of `computer@3` stay as they are (O7, O9).
-- ADR 0035 errors:
-  - Static-message errors are unit variants with their text fixed at the definition site.
-  - No formatted strings in library errors (`docs/adr/0035-rust-for-the-engine.md:55-57`, `AGENTS.md` "Composition/errors/state").
-  - Failures are never silent: a guard that cannot start must say so.
-- ADR 0049. A capability is a Cargo feature `cap-<name>`; T1 capabilities are on by default in `omp-app` only (`docs/adr/0049-tiered-integration-architecture.md:47`). A convar belonging to a capability compiles only with that capability (`docs/adr/0049-tiered-integration-architecture.md:207`, the `cap-browser` paragraph). `just check-minimal-caps` must stay green (`justfile:232-254`).
-- Naming. No `pi` identity in anything ported, and that includes the synthetic event tag's value. Convars are named `sv_*` and capability features `cap-*`.
+- **Additive only, and implementation behind a default-off gate** (`/home/user/oh-my-pi/docs/research/upstream-gap-closure-brief.md:43-46`, `:95-97`, `:150-152`). Both parts change what an existing tool does, from wrong to right. Each ships behind its own default-off convar. Turning one on by default is the owner's call (O1, O8).
+- **ADR 0035.** Typed errors. A failure is never silent, so a layout that cannot be read must not fall back to a guessed US layout.
+- **Naming.** No `pi` identity in anything ported. The computer convars are `sv_computer_*`, declared in `crates/envd/src/computer.rs:32-68` with `ui.tab`, `ui.group` and `ui.label` meta, and compiled only with `cap-computer` (`crates/envd/src/lib.rs:28-29`).
 
 ## Decision
 
-**D1. Two independent parts.** Part A is layout-aware typing on Wayland. Part B is the macOS intervention guard. They share no code and ship separately.
+**D1. Two independent fixes, each with its own gate.**
+- Part A (Wayland layout) and Part C (release on abort) share no code, ship separately, and can be authorised separately.
+- Part B (the macOS intervention guard) is not decided here (D9).
 
-**D2. Part A: port the upstream XKB parser** into `crates/desktop/src/linux/wayland/xkb.rs`.
-- Read the keymap from the libei keyboard device and resolve each character through it.
-- Keep the US table as a fast path, used only when the active group is US.
-- A character that no level of the active group can produce fails with `ErrorCode::InputFailed`.
-- No new dependency.
-- Gate: the convar `sv_computer_xkb_layout` (bool, default `false`, flags `archive`). It is declared beside the other `sv_computer_*` convars in `crates/envd/src/computer.rs` under `cap-computer`, read in `ComputerSettings::from_con`, and passed as the new field `DesktopSessionOptions::xkb_layout: bool`. When it is off, `type_text` behaves exactly as it does today.
+**D2. Part A: the libei backend owns its event stream and a layout per keyboard.**
+- `ActorLibei` keeps the handshake's `EiConvertEventStream` and the `reis::event::Connection` instead of dropping them (`crates/desktop/src/linux/wayland/libei.rs:84-91`).
+- `EiDevice` gains `layout: Option<KeyboardLayout>` and `resumed: bool`.
+- One `handle_event` serves both discovery and refresh:
+  - `DeviceAdded`: read the keymap (`read_keymap`).
+  - `DeviceResumed` and `DevicePaused`: set `resumed`.
+  - `DeviceRemoved` and `SeatRemoved`: drop the device.
+  - `KeyboardModifiers`: call `update_modifiers` on that device's layout.
+  - `Disconnected`: return `InputFailed`.
+- Before each `type_text` and `key_chord`, `refresh_devices` drains the stream on the Linux actor thread through `runtime.block_on` (`crates/desktop/src/linux/actor.rs:91`, `:145`, `:152`). It polls 1 ms at a time, at most 256 events. If the stream has not settled, the call fails with `InputFailed` before sending anything.
+- `type_text` and `key_chord` take the actor's runtime handle so they can do this. Today they take only `&mut self`.
+- A user who switches layout mid-session gets the new group on the next call.
 
-**D3. Part A fixtures are generated, not copied.**
-- omp2 generates its own two keymaps (`fr`, and the two-group `us,fr`) with libxkbcommon's `xkbcli compile-keymap --rules evdev --model pc105 --layout fr` (and `--layout us,fr`). This produces the same serialisation a compositor hands to libei.
-- The command, the libxkbcommon version and the xkeyboard-config version go in a header comment at the top of each file.
-- The keymaps are data derived from xkeyboard-config. Its terms are a set of X11/MIT-style permission notices that require the copyright and permission notice in all copies. They were read from the Debian `xkb-data` 2.41 `copyright` file; it has twelve copyright lines and no copyleft clause (`/usr/share/doc/xkb-data/copyright` on the build host).
-- The slice adds `crates/desktop/NOTICE` in the shape of `crates/tui/NOTICE`. It lists the fixtures, xkeyboard-config's notices and the upstream MIT notice for the ported parser (`upstream:LICENSE:1-5`).
-- Fallback: if the ported tests fail on the regenerated files, the upstream fixtures may be copied instead, under the same NOTICE, and the failure is recorded as a parser finding.
+**D3. Part A: how a character becomes keys.**
+- `char_stroke(layout, char)` follows upstream (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:871-896`):
+  - Control characters go through fixed evdev keys in every group.
+  - ASCII goes through the fixed US table only when `can_use_us_ascii_fast_path` holds (upstream's `group_is_us` row check).
+  - Every other character resolves through the active group alone.
+- A character the active group cannot produce fails with `ErrorCode::InputFailed`.
+- With the convar on and no usable keymap (non-XKB, size 0, over 16 MiB, parse failure, or no keyboard device), printable characters fail with `InputFailed`. They are never typed through the US table, so the gate never brings back the silent wrong-character bug.
+- `key_chord` resolves `KeyName::Char` through `char_stroke` too. Every stroke carries a modifier list, which can include AltGr (100). It is pressed in order and released in reverse.
+- With the convar off, `type_text` and `key_chord` behave exactly as they do today.
 
-**D4. Part B: the macOS guard, behind a named capability and a convar.**
-- Feature chain, every link default-off:
-  - `omp-desktop` feature `intervention-guard`. This is crate-internal and not a `cap-*` name, matching `wayland-pipewire` (`crates/desktop/Cargo.toml:11-13`).
-  - `omp-envd` feature `cap-desktop-guard = ["cap-computer", "omp-desktop/intervention-guard"]`.
-  - `omp-app` feature `cap-desktop-guard = ["omp-envd/cap-desktop-guard"]`. It is **not** added to `omp-app`'s `default` list (`crates/app/Cargo.toml:25-33`).
-- Convar `sv_computer_intervention_guard` (bool, default `false`, flags `archive`, meta `ui.tab = "tools"`, `ui.group = "Computer"`). It is declared in `crates/envd/src/computer.rs` under `#[cfg(feature = "cap-desktop-guard")]`, read in `ComputerSettings::from_con`, and passed as `DesktopSessionOptions::intervention_guard: bool`. That field exists only with `intervention-guard`.
-- The guard runs only when the feature is compiled **and** the convar is `true` **and** the backend is macOS. Every other combination leaves input exactly as it is today.
+**D4. Part A: gate.**
+- Convar `sv_computer_xkb_layout`: bool, default `false`, flags `archive`. Meta: `ui.tab = "tools"`, `ui.group = "Computer"`, `ui.label = "Computer Wayland Keyboard Layout"`.
+- It is declared beside the other `sv_computer_*` convars and read in `ComputerSettings::from_con` (`crates/envd/src/computer.rs:76-84`).
+- It reaches the backend as a new field `DesktopSessionOptions::xkb_layout: bool`. The only struct literal is updated in the same change (`crates/desktop/src/types.rs:137-141`, `crates/envd/src/computer.rs:103`).
+- The worker hands the value to the Linux backend when it creates `ActorLibei`.
+- No Cargo feature. The code sits inside `omp-desktop`, which is already behind `cap-computer` (`crates/envd/Cargo.toml:18`).
 
-**D5. `UserIntervened` is a typed code with fixed text (ADR 0035).**
-- Add `ErrorCode::UserIntervened` (`crates/desktop/src/error.rs`) and `FaultCode::UserIntervened` (`crates/tools/src/computer.rs`; serde `user_intervened`). Both variants compile unconditionally; only the guard produces them.
-- Constructor: `DesktopError::user_intervened()` takes no arguments and uses one `&'static str`. It never formats an app name, a pid or an idle time into the message.
-- The new arm in `native_fault` (`crates/envd/src/computer.rs:1724-1755`) maps it to `FaultCode::UserIntervened` with this fixed text: "the user pressed a key or clicked in the target app since it was last read; no further input was sent, and input sent earlier in this call may have landed; read the window again before acting on it".
-- One text covers both of upstream's cases. A refusal at admission sent nothing; a refusal mid-call may follow input that landed. `native_fault` cannot tell the two apart, and the text is true for both.
+**D5. Part A: fixtures and licence.**
+- omp2 generates its own keymaps with libxkbcommon's `xkbcli compile-keymap --rules evdev --model pc105 --layout fr` and `--layout us,fr` (US first, French second). That is the serialisation a compositor hands to libei.
+- They are stored at `crates/desktop/src/linux/wayland/testdata/fr.xkb` and `us-fr.xkb`, the paths the tests' `include_str!` expects.
+- `crates/desktop/NOTICE`, in the shape of `crates/tui/NOTICE`, records three things:
+  - the exact command and the libxkbcommon and xkeyboard-config versions;
+  - xkeyboard-config's notices: the `COPYING` at tag `xkeyboard-config-2.41`, 190 lines, twelve copyright lines, all X11/MIT-style permission notices, no copyleft clause;
+  - upstream's MIT notice for the ported parser (`upstream:LICENSE:1-5`).
+- The provenance lives in the NOTICE, not in the fixture files, because the ported parser is not specified to skip comments.
+- Both group-label forms are tested. The fixtures carry whichever form the generator writes. A test helper rewrites them into the other form, as upstream's `numeric_group_labels` does in one direction (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:577-582`).
+- If a ported assertion disagrees with the generated keymap, the fix is to the assertion (citing the fixture's line) or to the parser. Upstream's fixtures are never copied.
 
-**D6. Synthetic event tag.**
-- Every event omp posts on macOS carries an omp-owned constant in the source user data: `OMP_EVENT_TAG = 0x6f6d_7064_736b` (ASCII `ompdsk`). This applies to the posts at `crates/desktop/src/macos/input.rs:572` and `crates/desktop/src/macos/input.rs:656`, and to every other `post_*` helper.
-- Upstream's `pidesk` value is not ported. The tag is set only when `intervention-guard` is compiled.
+**D6. Part C: release on abort.**
+- Each input routine that presses something owns its release. On any exit after a press attempt (a cancel, an expired deadline or a failed post), it posts the release for what it still holds. Those release posts skip `operation_checkpoint`, as upstream's `control::cleanup` does.
+- What each routine tracks:
+  - macOS drags (`background_drag`, `crates/desktop/src/macos/input.rs:478-551`; `global_pointer` drag arm, `crates/desktop/src/macos/input.rs:883-913`): the button and the last point posted. On abort they post button-up at that last point.
+  - macOS clicks (`background_click`, `crates/desktop/src/macos/input.rs:362-415`; `global_pointer` click arm, `crates/desktop/src/macos/input.rs:840-872`): whether a down was attempted without its up. A failed down may still have been delivered, so it gets its up.
+  - macOS `key_chord` (`crates/desktop/src/macos/input.rs:675-700`): the keys pressed so far and the running modifier flags. On abort it releases them in reverse, with the flags each release would carry.
+  - libei drag (`crates/desktop/src/linux/wayland/libei.rs:379-410`): the button and the pressed modifiers. On abort it releases the button, then the modifiers.
+- If a release fails, the routine returns the original error. The release failure goes to `tracing::warn!` without key codes.
+- A drag released mid-path drops whatever it carries at the last point. Upstream does the same for strokes that have not begun a drag-and-drop session (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2728-2734`). omp2 has no drag-session detection, so the move back to the start point is not ported (O10).
+- Seam: each routine takes its post and checkpoint as closures, like `stroke_path(path, picked_up, post)` upstream. Tests inject a failing checkpoint and record the posts. No guard is involved.
 
-**D7. The admission wait is cancellable on the actor thread.**
-- `OperationState` gains three things under `intervention-guard`:
-  - a `parking_lot::Mutex<()>` and a `parking_lot::Condvar`;
-  - `cancel(&self)`, which stores the flag and then calls `notify_all`;
-  - `wait(&self, duration) -> CoreResult<()>`, which blocks on the condvar and returns the existing `check()` error as soon as the operation is cancelled or past its deadline.
-- `CancelOnDrop::drop` (`crates/desktop/src/lib.rs:82-88`) and the timeout path in `call` (`crates/desktop/src/lib.rs:776-777`) call `cancel()` instead of storing the flag directly.
-- The wait never uses `thread::sleep` and never polls on a timer.
-- Run deadline: add the method `DesktopSession::set_run_deadline(&self, Option<Instant>)`, under the feature. `omp-envd` calls it at the start of each run with the instant its `tokio::time::timeout` will fire (`crates/envd/src/computer.rs:183-197`).
-- The wait limit is `min(operation deadline, run deadline) − DEADLINE_MARGIN`, with `DEADLINE_MARGIN = 250 ms` as upstream has it. A user who is still typing at the limit therefore gets `UserIntervened` before the caller times out, not a `Timeout`.
-- Closing the session ends a wait. `close` already cancels the active run token (`crates/envd/src/computer.rs:150-153`). Dropping the run future fires `CancelOnDrop`, and that now wakes the condvar.
-- The wait holds the actor thread. This is acceptable because runs are already serialised by `run_lock` (`crates/envd/src/computer.rs:94`).
+**D7. Part C: gate.**
+- Convar `sv_computer_release_on_abort`: bool, default `false`, flags `archive`. Meta: `ui.tab = "tools"`, `ui.group = "Computer"`, `ui.label = "Computer Release Held Input On Abort"`.
+- It is declared and plumbed like D4, as `DesktopSessionOptions::release_on_abort: bool`.
+- With the convar off, the routines behave exactly as they do today.
+- Win32 posted-message drags (`crates/desktop/src/win32/input.rs:324-341`) and X11 drags were not checked for the same defect. They are out of this record (O8).
 
-**D8. Release on abort.**
-- With the guard active, every macOS input routine that presses something owns its release. Those routines are `background_click`, `background_drag`, `global_pointer` (click and drag arms) and `key_chord` (`crates/desktop/src/macos/input.rs:362-415`, `crates/desktop/src/macos/input.rs:478-551`, `crates/desktop/src/macos/input.rs:838-940`, `crates/desktop/src/macos/input.rs:675-700`).
-- On any early exit after a press, the routine posts the release for everything still held: the button-up at the last point the pointer reached, and held keys in reverse order. An early exit is a guard refusal, a cancel, a deadline or a failed post.
-- Release posts skip both the guard check and `operation_checkpoint`, as upstream's `control::cleanup` does.
-- If the release itself fails, the routine returns the original error. The release failure is logged with `tracing::warn!` and no key codes.
-- With the guard off, these routines behave exactly as they do today. Making the release unconditional fixes an existing bug, but it is a change to existing behaviour, so it is an owner question (O8).
+**D8. Proceeding while owner questions are open.** Every slice lands behind its default-off convar on the recommendation stated here. Only turning a default on waits for the owner's answer (O1, O8). No slice depends on O2-O7 or O9.
 
-**D9. Where the guard checks.**
-- `admit(pid)` runs before the first press of an input request. `check_press()` runs before each press and accessibility action, the same call sites upstream uses (`upstream:crates/pi-natives/src/desktop/macos/input.rs:968`, `upstream:crates/pi-natives/src/desktop/macos/input.rs:1072-1077`, `upstream:crates/pi-natives/src/desktop/macos/ax.rs:1219`).
-- omp2 also runs `check_press()` at each existing drag-step checkpoint (`crates/desktop/src/macos/input.rs:513`, `crates/desktop/src/macos/input.rs:904`), so a user's click in the middle of a drag stops the stroke and D8 releases it.
-- This is stricter than upstream, whose `stroke_path` checks only for cancellation between points (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2716-2723`). omp2 accepts the difference because the checkpoint already exists.
-- Reads clear an app's unread input by upstream's rule (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:133-141`). The reads that count are a capture of one of the app's windows and an accessibility snapshot.
-
-**D10. Not ported now.**
-- The X11 guard and the Escape monitors. omp2 has no takeover mode and no input lease for them to attach to.
-- The Wayland and Windows guards, because upstream has none.
-
-**D11. Privacy.** The tap records a pid and a time only. It never logs or stores key codes or click positions.
-
-**D12. Honest failure when the tap cannot start.**
-- If the user turned the guard on (feature compiled and convar `true`) and the tap cannot start, input calls fail with `ErrorCode::PermissionDenied`. That maps to the existing fixed fault "required desktop permission is unavailable" (`crates/envd/src/computer.rs:1726-1728`).
-- The cause is usually a missing Input Monitoring permission. A one-time `tracing::warn!` names that permission.
-- This differs from upstream, where input simply goes ahead unguarded (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:257-260`). Going ahead unguarded would be silent degradation for a user who asked for protection.
-- Reporting the guard's state in the `capabilities` action would change `computer@3`'s output shape, so it is O7.
+**D9. Part B, the macOS intervention guard, is deferred.**
+- It is not ported in this record.
+- A future record must design the following against omp2's code:
+  - the per-site admission and `check_press` map;
+  - the pid source for `Target::Desktop` and for accessibility handles;
+  - the tap's attribution, lifecycle and re-enable;
+  - the `UserIntervened` wire code;
+  - a lost-wakeup-free cancellable wait;
+  - how its feature-gated tests run in CI.
+- That record must pass its own review. The requirements and the evidence gathered so far are in "Part B: deferred" below.
+- Reason for deferring:
+  - The design is large and cannot be proven in CI: no runner grants Input Monitoring.
+  - It depends on owner rulings (O2, O3).
+  - Without it, the agent's read-before-act loop leaves a race, not a hole.
+  - Parts A and C fix observable defects now.
 
 ## Rejected options
 
 - **Extend `evdev_char` with more layouts.** Cheap for one layout and unbounded for the rest, and still wrong for any layout it leaves out.
-- **Link `libxkbcommon`.** A C dependency in a Rust-only workspace, with packaging cost on every platform. Using `xkbcli` once to generate test fixtures adds no build dependency.
-- **Copy upstream's `.xkb` fixtures as they are.** They carry no notice (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1`) and no record of how they were made. Generated fixtures with a recorded command and a NOTICE are traceable. Copying stays the fallback in D3.
-- **Carry the app name in the `UserIntervened` text.** `native_fault` drops the native message (`crates/envd/src/computer.rs:1724-1755`). Carrying the name would need a field on `Fault`, which is a `computer@3` output change. The model already knows which window it targeted.
-- **Gate with a convar only, with no feature.** That would compile the tap and the tag into every macOS build. ADR 0049 keeps optional capability code out of builds that do not ask for it.
-- **Let input go ahead unguarded when the tap cannot start (upstream).** This is silent degradation for a user who turned the guard on (ADR 0035).
-- **A frontmost-app check using the AX focus code omp2 already has.** About a day of work, but it catches only an app switch and misses typing inside the target app, which is the case that matters.
-- **Do nothing for Part B.** The agent already re-reads before it acts, so the gap is a race, not a hole. This is acceptable if the owner refuses the new error code.
-- **Port the X11 and Windows pieces now.** They need a takeover mode omp2 does not have.
+- **Link `libxkbcommon`.** A C dependency in a Rust-only workspace. `reis` 0.5.0 uses `xkbcommon` only as a dev-dependency, so the ported parser adds nothing. Using `xkbcli` once to generate fixtures adds no build dependency.
+- **Fall back to the US table when the keymap cannot be read.** This brings back the silent wrong-character bug (ADR 0035). Upstream refuses too (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:1117-1121`).
+- **No gate, using the layout whenever it parses.** The brief requires default-off gates for implementation and forbids changing existing behaviour without the owner. O1 asks the owner to turn it on.
+- **Read the keymap once at discovery.** That freezes the group (round 2, B1).
+- **Copy upstream's `.xkb` fixtures.** They carry no notice and no record of how they were made (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1`).
+- **Trim the fixtures to the keycodes the tests use.** The parser must be tested on what a compositor actually sends: a full compiled keymap.
+- **Drop the US ASCII fast path.** It is optional (round 2, m12). Keeping it ports upstream's behaviour and tests unchanged.
+- **Return to the start point before releasing an aborted drag.** Upstream does this only once a drag-and-drop session has begun, and omp2 cannot detect that (O10).
+- **Port the intervention guard now.** Deferred (D9).
 
 ## Slices
 
 Each slice is one PR. Tests are written first and are not edited to pass.
 
 Proof levels:
-- No slice has an e2e proof in `crates/e2e`. The e2e harness has no desktop (`crates/e2e/tests` holds no computer test), and no CI runner grants Input Monitoring or a Wayland RemoteDesktop portal.
-- No slice adds a golden-journal test. `Fault` and its serde shape already exist, and the journal shape does not change.
-- The owning seams are `omp-desktop` unit tests, which are headless and use pure functions or simulated listeners, and `omp-envd` tests.
-- macOS-only tests run in the macOS workspace job. They create `CGEvent`s and need no permission.
+- No slice has an e2e proof in `crates/e2e`. The harness has no desktop (`crates/e2e/tests` has no computer test), and no CI runner grants a Wayland RemoteDesktop portal.
+- No golden journal applies, because no journal shape changes.
+- Proof is at the owning seams:
+  - `omp-desktop` unit tests, headless;
+  - an in-process EIS peer for the libei seam. `reis` 0.5.0 exposes the server side as `reis::eis`, with `ei::Context::new(UnixStream)` and `eis::Context::new(UnixStream)` (`~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reis-0.5.0/src/lib.rs:8-12`, `src/eis.rs:98-99`);
+  - recorded-post unit tests for Part C. The macOS ones run in the macOS workspace job and need no permission to create `CGEvent`s.
+- Manual check before turning either default on (O1, O8), recorded in the PR that flips it:
+  - Part A: on a GNOME Wayland session with `us,fr`, `type_text` types `é@aq` correctly in each group, and switching group mid-session changes the result.
+  - Part C: on macOS, cancelling a run mid-drag leaves no button held.
 
-**A1. Layout parser and fixtures, as dead code.**
-- Scope: port `xkb.rs`; generate `testdata/fr.xkb` and `testdata/us-fr.xkb` (D3); add `crates/desktop/NOTICE`. Nothing calls the parser yet.
-- Acceptance: the eight upstream tests, ported under omp names, pass with no display: `reads_the_keymap_from_the_start_of_a_shared_fd`, `resolves_numeric_group_labels`, `resolves_french_levels_and_altgr`, `resolves_only_the_active_group_in_a_multi_layout_keymap`, `modifier_event_group_change_updates_resolution`, `serialized_modifier_fields_affect_resolution`, `num_lock_does_not_change_non_keypad_levels`, `caps_lock_uses_the_alphabetic_type_map` (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:584-676`). Each fixture's header names the command it was generated with.
-- Gate: none. It is unreachable code.
-
-**A2. Use the layout in `type_text`.**
-- Scope: read the keymap from the libei device (as upstream's `read_keymap` does, `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:860`); a pure `char_stroke(layout, char)` (as at `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:876`); the convar `sv_computer_xkb_layout` and the field `DesktopSessionOptions::xkb_layout`.
-- Acceptance: `french_keymap_types_accented_letter_and_at_sign_with_dictated_modifiers`, `character_absent_from_the_active_group_fails_with_input_failed`, `us_group_keeps_the_fast_path`, and `layout_off_keeps_the_us_table`, all unit tests on `char_stroke` against the A1 fixtures. The existing libei test `discovery_waits_for_every_granted_device` still passes.
-- Gate: `sv_computer_xkb_layout`, default `false` (O1).
-
-**B1. Plumbing, the error code and the tag.**
-- Scope: the D4 feature chain and convar; `ErrorCode::UserIntervened`, `FaultCode::UserIntervened` and the `native_fault` arm (D5); `OMP_EVENT_TAG` on every post (D6).
+**A1. Layout-aware typing on Wayland, behind `sv_computer_xkb_layout`.**
+- Scope:
+  - port `xkb.rs`;
+  - generate the fixtures and add `crates/desktop/NOTICE` (D5);
+  - stream ownership and `handle_event`/`refresh_devices` (D2);
+  - `char_stroke` and chords (D3);
+  - the convar and the options field (D4).
+- Documentation: `crates/desktop/README.md` names the convar and the layout rule.
 - Acceptance:
-  - `user_intervened_reaches_the_model_with_fixed_text_only` (envd). A `DesktopError` whose message holds an app name maps to `FaultCode::UserIntervened` and the D5 text; the name is absent.
-  - `user_intervened_fault_serializes_as_user_intervened` (tools; wire bytes).
-  - `posted_events_carry_the_omp_event_tag` (desktop, macOS).
-  - `just check-minimal-caps` passes, and `cargo check -p omp-app --features cap-desktop-guard` passes.
-- Gate: `cap-desktop-guard`. Nothing produces the code before B4.
+  - The eight ported `xkb.rs` tests pass on the generated fixtures:
+    - `reads_the_keymap_from_the_start_of_a_shared_fd`, under `cfg(target_os = "linux")` because it uses `memfd_create`;
+    - `resolves_numeric_group_labels` and its inverse-rewrite twin, `resolves_named_group_labels`;
+    - `resolves_french_levels_and_altgr`;
+    - `resolves_only_the_active_group_in_a_multi_layout_keymap`;
+    - `modifier_event_group_change_updates_resolution`;
+    - `serialized_modifier_fields_affect_resolution`;
+    - `num_lock_does_not_change_non_keypad_levels`;
+    - `caps_lock_uses_the_alphabetic_type_map`.
+  - The two ported `libei.rs` tests pass: `printable_text_without_a_keymap_never_assumes_us_layout` and `newline_presses_enter_even_when_the_keymap_has_a_linefeed_key`.
+  - New unit tests:
+    - `tab_and_return_use_fixed_keys_on_a_french_group`;
+    - `character_absent_from_the_active_group_fails_with_input_failed`;
+    - `char_chord_on_azerty_presses_the_layouts_key`;
+    - `altgr_stroke_presses_and_releases_its_modifiers_in_reverse`.
+  - EIS-peer seam tests:
+    - `keyboard_modifiers_event_switches_the_group_used_by_the_next_type_text`;
+    - `removed_keyboard_fails_typing_with_input_failed`;
+    - `unsettled_event_stream_fails_before_sending_any_key`;
+    - `convar_off_keeps_the_us_table`.
+  - The existing `discovery_waits_for_every_granted_device` still passes.
+- Gate: `sv_computer_xkb_layout`, default `false`.
 
-**B2. A cancellable wait and the run deadline.**
-- Scope: D7, all of it, under `intervention-guard`.
-- Acceptance (desktop unit tests, headless):
-  - `cancel_wakes_a_waiting_operation_without_polling`. A wait of 30 s returns within 50 ms of `cancel()`, and the error is the `check()` error.
-  - `dropping_the_caller_ends_the_wait`. Dropping `CancelOnDrop` wakes the wait.
-  - `the_wait_ends_a_margin_before_the_run_deadline`.
-  - `the_wait_ends_a_margin_before_the_operation_deadline`.
-- Gate: `cap-desktop-guard`.
+**C1. Release held input on abort, behind `sv_computer_release_on_abort`.**
+- Scope: D6 for the macOS drags, clicks and `key_chord` and for the libei drag; closure seams; the convar and the options field (D7).
+- Acceptance (recorded posts, injected failing checkpoint):
+  - `cancel_mid_drag_posts_button_up_at_the_last_point` (macOS background and global);
+  - `cancel_mid_chord_releases_held_keys_in_reverse_with_running_flags` (macOS);
+  - `failed_down_post_still_gets_its_up` (macOS click);
+  - `cancel_mid_libei_drag_releases_button_then_modifiers` (EIS peer);
+  - `release_posts_skip_the_checkpoint`;
+  - `failed_release_keeps_the_original_error`;
+  - `completed_drag_sequence_is_unchanged`. With the convar on or off, a drag that is not aborted posts exactly today's sequence.
+- Gate: `sv_computer_release_on_abort`, default `false`.
 
-**B3. Release on abort.**
-- Scope: D8 for the four routines, with their `post` closures injectable for tests.
-- Acceptance (desktop unit tests, macOS, recorded posts):
-  - `guard_refusal_mid_drag_posts_button_up_at_the_last_point`.
-  - `cancel_mid_drag_with_guard_on_posts_button_up`.
-  - `guard_refusal_mid_chord_releases_held_keys_in_reverse`.
-  - `release_posts_skip_the_guard_and_the_checkpoint`.
-  - `failed_release_keeps_the_original_error`.
-  - `guard_off_keeps_todays_post_sequence`. With the guard off, the recorded posts equal today's sequence.
-- Gate: `cap-desktop-guard` and `sv_computer_intervention_guard`.
+## Part B: deferred
 
-**B4. The guard.**
-- Scope: `intervention.rs` (state machine, `QUIET`, `admit`, `check_press`, routes); the macOS `UserInputMonitor`; the call sites in D9; D12.
-- Acceptance:
-  - The seven upstream state-machine tests, ported with a simulated listener and run headless: `the_users_input_needs_a_read_after_they_pause_in_that_app_only`, `input_waits_for_the_user_to_pause_then_fails_until_a_read`, `the_runs_deadline_ends_the_wait_for_a_user_still_typing`, `input_into_a_process_drawing_the_apps_panel_counts_as_input_into_the_app`, `a_new_process_reusing_a_watched_id_starts_unwatched`, `a_new_process_reusing_a_panels_id_takes_none_of_the_apps_input`, `the_wait_ends_before_the_native_request_times_out` (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:351-575`). They assert `ErrorCode::UserIntervened`, not message text.
-  - `convar_off_never_blocks_input`.
-  - `guard_on_without_a_tap_fails_input_with_permission_denied`.
-  - `admission_wait_is_ended_by_cancel`. This uses B2's wait under a simulated user who keeps typing.
-- Gate: `cap-desktop-guard` and `sv_computer_intervention_guard`.
+The round-1 resolutions for the guard stand as requirements for its future record:
 
-**B5. Documentation.**
-- Scope: the computer documentation names the Input Monitoring permission, the convar, the feature and the meaning of `user_intervened`. The `computer@3` description does not change (O9).
-- Acceptance: documentation only; no test.
+- **Fixed fault text.** `native_fault` drops `DesktopError::message` (`crates/envd/src/computer.rs:1724-1755`). The code must be a typed `UserIntervened` with fixed text, never upstream's formatted app name (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:169-179`).
+- **A cancellable wait on the actor thread.** Today `OperationState` is only a flag and a deadline (`crates/desktop/src/lib.rs:62-75`).
+- **Named, default-off plumbing per ADR 0049**, or a reasoned choice of a convar alone (round 2, M11).
+- **An omp-owned synthetic event tag.** Upstream's `0x7069_6465_736b` spells `pidesk` (`upstream:crates/pi-natives/src/desktop/control/macos.rs:20`).
+
+Round 2's findings on the guard, all confirmed against source, are what that record must answer:
+
+- **B2.** Map every omp2 entry point and per-press site (`crates/desktop/src/macos/mod.rs:84-125`, `crates/desktop/src/macos/ax.rs:170-197`, `crates/desktop/src/macos/input.rs:56-132`). Decide the pid for `Target::Desktop`, which has none (`crates/desktop/src/types.rs:256-261`). Admit before focus is moved, as upstream's request-level `watch_app` does (`upstream:crates/pi-natives/src/desktop/mod.rs:1274`).
+- **M3.** `cancel` must store and notify under the wait's mutex, as upstream's `cancel` does under the state lock (`upstream:crates/pi-natives/src/desktop/control.rs:88-98`).
+- **M4.** State one wait bound, its function and where the run deadline is stored and cleared.
+- **M5.** Specify tap attribution and filtering by tag and source pid (`upstream:crates/pi-natives/src/desktop/control/macos.rs:413-440`). Choose one tagging choke point across all event-creation sites (`crates/desktop/src/macos/input.rs:572`, `:616`, `:656`, `:710`, `:927`, `:956`).
+- **M6, M7.** Specify the tap's lifecycle, its re-enable on the disabled pseudo-events (`upstream:crates/pi-natives/src/desktop/control/macos.rs:375`, `:494`, `:596`) and a permission preflight. Port the classification tests (`upstream:crates/pi-natives/src/desktop/control/macos.rs:786-914`). The upstream file is 929 lines.
+- **M8.** Port panel routes with their call sites (`upstream:crates/pi-natives/src/desktop/macos/input.rs:98`, `:573`, `:862`), or drop them and their tests.
+- **M9.** A recorded acceptance procedure on a real Mac.
+- **M10, M11.** A CI recipe and job that build and test the gated code, or no feature at all.
+- **M13.** No guard check between drag points without porting drag-session detection.
+- **Minors.** m5 (the constructor and test premise), m7 (a stale convar on a build without the feature), m9 (deadline clearing, close during a wait, the shape of the options struct), m11 (Decision altitude), m13 (thread-local watch), m14 (documentation path), m15 (older readers of a new `FaultCode`).
 
 ## Upstream origin and license
 
-- The port draws from these upstream files:
-  - `upstream:crates/pi-natives/src/desktop/control/intervention.rs`
-  - `upstream:crates/pi-natives/src/desktop/control/macos.rs`
-  - the cancellation and cleanup parts of `upstream:crates/pi-natives/src/desktop/control.rs`
+- The port draws from:
   - `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs`
-  - `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs`
-- Upstream's `LICENSE` is MIT, with copyright lines for Mario Zechner, Can Bölük and Stencil Labs, Inc. (`upstream:LICENSE:1-5`). The new `crates/desktop/NOTICE` keeps that notice.
-- The keymap fixtures are generated by omp2 from xkeyboard-config data (D3), and the same NOTICE carries xkeyboard-config's notices.
-- Nothing keeps a `pi` identity. The tag value, the module names and the feature names are omp's own.
+  - `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs` (`handle_event`, `refresh_devices`, `read_keymap`, `char_stroke`, `plan_keys`)
+  - the release pattern in `upstream:crates/pi-natives/src/desktop/control.rs` and `upstream:crates/pi-natives/src/desktop/macos/input.rs`
+- Upstream's `LICENSE` is MIT (copyright Mario Zechner, Can Bölük, Stencil Labs, Inc.; `upstream:LICENSE:1-5`). The new `crates/desktop/NOTICE` keeps it.
+- The keymap fixtures are generated by omp2 from xkeyboard-config 2.41 data, and their notices go in the same NOTICE (D5).
+- Nothing keeps a `pi` identity.
 
 ## Consequences
 
-- Non-US Wayland users get the characters they typed once `sv_computer_xkb_layout` is on. Before, they got the wrong ones and no error.
-- macOS builds with `cap-desktop-guard` and the convar on gain a refusal path: an input call can fail with `user_intervened`, and the agent must read again. The fixed fault text says so.
-- Two enums gain a variant. Consumers that match exhaustively need a new arm; `native_fault` is one of them, and the compiler enforces it.
-- Changing `crates/tools/src/computer.rs` moves `computer@3`'s `projection_code` (`crates/tools/src/computer.rs:522-527`), as any edit to that file does. The revision stays 3 unless the owner says otherwise (O2).
-- The tap needs the Input Monitoring permission. Without it, a guard the user turned on refuses input rather than pretending to guard (D12).
-- A guard wait blocks the session's actor thread for at most the run deadline minus 250 ms.
+- With `sv_computer_xkb_layout` on, non-US Wayland users get the characters they typed and the chords they named, including after a layout switch. A character the active group lacks fails loudly instead of typing a wrong glyph.
+- With `sv_computer_release_on_abort` on, a cancelled or expired run no longer leaves a mouse button or key held on macOS or Wayland. A drag aborted mid-path drops at its last point.
+- Accepted limitation: `native_fault` maps both failures to the existing generic text "desktop input delivery failed" (`crates/envd/src/computer.rs:1730`). Adding a typed code for a character the layout lacks is O11.
+- With either convar off, nothing changes.
+- The intervention guard is still missing on omp2. The read-before-act loop is the only protection against a user typing in the same app.
 
 ## What the review changed
 
-### Round 1 (Goldfish, five reviewers' findings as recorded in STATUS.md row 0063)
+### Round 1 (Goldfish, five findings as recorded in STATUS.md row 0063)
 
 1. **Release on abort mid-drag.** Confirmed against source.
-   - omp2's `background_drag` leaves through `operation_checkpoint()?` after button-down and posts no button-up (`crates/desktop/src/macos/input.rs:497-529`, `crates/desktop/src/macos/input.rs:513`). `global_pointer`'s drag arm does the same (`crates/desktop/src/macos/input.rs:902-905`).
-   - `key_chord` releases keys only after every press succeeds (`crates/desktop/src/macos/input.rs:684-698`).
-   - Upstream releases in every case (`upstream:crates/pi-natives/src/desktop/control.rs:344-355`, `upstream:crates/pi-natives/src/desktop/macos/input.rs:2700-2735`, `upstream:crates/pi-natives/src/desktop/macos/input.rs:3621-3657`).
-   - Changed: added D8 and slice B3. Making the release unconditional when the guard is off is O8, because it changes today's behaviour on cancel.
-2. **Fixed `UserIntervened` fault text; `native_fault` drops messages.** Confirmed against source.
-   - `native_fault` discards `DesktopError::message` and uses one static string per code (`crates/envd/src/computer.rs:1724-1755`).
-   - Upstream puts the app name and idle time into its messages with `format!` (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:169-179`, `upstream:crates/pi-natives/src/desktop/control/intervention.rs:238-242`). That also goes against ADR 0035's rule against formatted library errors (`docs/adr/0035-rust-for-the-engine.md:55-57`).
-   - Changed: D5 fixes the text, gives the constructor no arguments, and states the one sentence. B1's acceptance test proves the name never reaches the model. Carrying the name is now a rejected option.
-3. **The wait must be cancellable on the actor thread.** Confirmed against source.
-   - `OperationState` is an `AtomicBool` and a deadline, with nothing to wake on (`crates/desktop/src/lib.rs:62-75`).
-   - The run timeout is known only to envd (`crates/envd/src/computer.rs:183-197`).
-   - Upstream waits on a condvar that cancel notifies (`upstream:crates/pi-natives/src/desktop/control.rs:205-216`).
-   - Changed: added D7 (condvar wait, `cancel()` used by `CancelOnDrop` and `call`, `set_run_deadline`, the 250 ms margin) and slice B2. This also resolves the first draft's O6 (wait cost), so O6 is closed.
-4. **Feature and convar plumbing.** Confirmed against source.
-   - The first draft named `cap-desktop-guard` and `sv_desktop_intervention_guard` but no crate declared or forwarded either. `omp-desktop` has only `wayland-pipewire` (`crates/desktop/Cargo.toml:11-13`). Capability features live in envd and app (`crates/envd/Cargo.toml:17-22`, `crates/app/Cargo.toml:24-43`). Computer convars are `sv_computer_*` in envd (`crates/envd/src/computer.rs:32-68`).
-   - Changed: D4 names every link (`omp-desktop/intervention-guard`, `omp-envd/cap-desktop-guard`, `omp-app/cap-desktop-guard`, default-off) and the convar path (`ComputerSettings::from_con` to `DesktopSessionOptions`).
-   - The convars are renamed `sv_computer_intervention_guard` and `sv_computer_xkb_layout`, to sit with the existing `sv_computer_*` group. Neither name ever shipped.
-   - B1 now proves `just check-minimal-caps` and a `cap-desktop-guard` build.
-5. **`.xkb` fixture licence.** Confirmed against source.
-   - The upstream fixtures have no notice (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1`). The only "copyright" in them is a keysym at line 1472.
-   - xkeyboard-config's terms were read: X11/MIT-style permission notices with no copyleft clause, requiring the notice in copies (Debian `xkb-data` 2.41 `copyright`).
-   - Changed: added D3 (generate fixtures with a recorded `xkbcli` command, add `crates/desktop/NOTICE`, copy upstream's only as a fallback). The first draft's O5 is closed.
+   - `background_drag` leaves through `operation_checkpoint()?` after button-down (`crates/desktop/src/macos/input.rs:497-529`, `:513`), and so does the `global_pointer` drag arm (`:902-905`).
+   - `key_chord` releases only after every press succeeds (`:684-698`).
+   - Upstream always releases (`upstream:crates/pi-natives/src/desktop/control.rs:344-355`, `upstream:crates/pi-natives/src/desktop/macos/input.rs:2700-2735`, `:3621-3657`).
+   - Changed: added release on abort. Round 2 made it the standalone Part C.
+2. **Fixed `UserIntervened` text; `native_fault` drops messages.** Confirmed: `crates/envd/src/computer.rs:1724-1755`, against upstream's formatted text at `upstream:crates/pi-natives/src/desktop/control/intervention.rs:169-179`. Changed: fixed text and an argument-free constructor. Round 2 carried this into "Part B: deferred" as a requirement.
+3. **The wait must be cancellable on the actor thread.** Confirmed: `crates/desktop/src/lib.rs:62-75`, against `upstream:crates/pi-natives/src/desktop/control.rs:205-216`. Changed: a condvar wait and a run deadline. Round 2 carried this into "Part B: deferred", with M3 and M4 added.
+4. **Feature and convar plumbing.** Confirmed: the first draft declared neither (`crates/desktop/Cargo.toml:11-13`, `crates/envd/Cargo.toml:17-22`, `crates/app/Cargo.toml:24-43`). Changed: every link named, and the convars renamed `sv_computer_*` (`crates/envd/src/computer.rs:32-68`). Round 2 dropped the feature for Parts A and C (see M11) and kept the convars.
+5. **`.xkb` fixture licence.** Confirmed: the upstream fixtures carry no notice (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1`, "copyright" only as a keysym at `:1472`). Changed: generated fixtures plus a NOTICE. Round 2 replaced the evidence with xkeyboard-config's own `COPYING` (see m10).
 
-### Corrections found while verifying round 1 (not reviewer findings)
+Corrections found while verifying round 1:
+- Upstream's tag spells `pidesk`.
+- The test lists were incomplete: `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:647`, `upstream:crates/pi-natives/src/desktop/control/intervention.rs:514`.
+- A runtime test duplicated the compile-time exhaustive `match` (`crates/envd/src/computer.rs:1725`).
+- A change to the `computer@3` description and its `Capabilities` output became owner questions (`crates/tools/src/computer.rs:494-502`, `:338-363`). Round 2 deferred both with Part B.
 
-- Upstream's synthetic tag spells `pidesk` (`upstream:crates/pi-natives/src/desktop/control/macos.rs:20`). D6 uses an omp value.
-- The A1 test list lacked `serialized_modifier_fields_affect_resolution` (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:647`). The B2 list (now B4) lacked `a_new_process_reusing_a_panels_id_takes_none_of_the_apps_input` (`upstream:crates/pi-natives/src/desktop/control/intervention.rs:514`), and it named `listener_off_never_blocks_input` as if it came from upstream. That test is omp's own, now `convar_off_never_blocks_input`.
-- The first draft's B1 asked for a runtime test that every `ErrorCode` maps to a `FaultCode`. `native_fault`'s `match` is already exhaustive at compile time (`crates/envd/src/computer.rs:1725`). Replaced with a test of the fixed text.
-- The first draft's B3 changed the `computer@3` prompt snapshot, and D6 reported the guard in the capability report. Both change an existing tool's description or output (`crates/tools/src/computer.rs:494-502`, `crates/tools/src/computer.rs:338-363`). They are moved to O9 and O7. D12 now fails closed instead.
+### Round 2 (Goldfish, four fresh reviewers and a synthesis: 2 blockers, 17 majors, 16 minors)
 
-### Rounds 2 and 3
+Each finding was verified against source before it was accepted or rejected.
 
-Pending. Fresh-context Goldfish reviewers will review this revision, and their findings will be recorded here. Implementation waits until a round returns no confirmed blocker or major finding.
+- **B1 (blocker): the Wayland layout cannot track the active group.**
+  - Confirmed. The event stream is dropped at `crates/desktop/src/linux/wayland/libei.rs:84-91`. `EiDevice` has no layout (`:45-48`). A grep finds no `KeyboardModifiers` in `crates/desktop/src`. Upstream drains its stream before each input (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:316-414`).
+  - Changed: D2 (stream ownership, `handle_event`, `refresh_devices` bounded at 256 events and 1 ms polls on the actor thread, device lifecycle) and EIS-peer seam tests in A1.
+  - **Resolved.**
+- **B2 (blocker): no omp2 call-site, admission or pid map for the guard.**
+  - Confirmed. The draft's D9 cited only upstream lines. omp2's entry points are at `crates/desktop/src/macos/mod.rs:84-125`, and `Target::Desktop` carries no pid (`crates/desktop/src/types.rs:256-261`).
+  - Changed: a scope cut. Part B is deferred to its own record (D9), with this finding as a requirement.
+  - **Resolved for this record**, by not deciding the guard here.
+- **M1: control characters and the no-keymap case.**
+  - Confirmed: `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:871-896`, `:1117-1128`, and `upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:521-540`.
+  - Changed: D3 ports upstream's `char_stroke` rule and refuses printable text without a keymap (no US fallback). The rejected-options list says why.
+- **M2: chord scope and Shift-only sending.**
+  - Confirmed: `crates/desktop/src/linux/wayland/libei.rs:429-451`, `:470-481`, `:567-569`, and `upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:815-833`.
+  - Changed: D3 routes chords through the layout and presses a modifier list released in reverse. A1 adds two tests.
+- **M3 (lost wakeup), M4 (wait bound), M5 (tap attribution and tagging), M6 (tap lifecycle), M7 (size of the tap port), M8 (routes), M9 (real-Mac acceptance), M10 (CI for gated code).**
+  - Confirmed. The citations are in "Part B: deferred", for example `upstream:crates/pi-natives/src/desktop/control.rs:88-98`, `upstream:crates/pi-natives/src/desktop/control/macos.rs:375`, `:494`, `:596` (re-enable) and `crates/desktop/src/macos/input.rs:616`, `:710`, `:927`, `:956` (unnamed event sites).
+  - Changed: all move to Part B's future record.
+- **M11: the three-crate feature chain is ceremony.**
+  - Confirmed for Parts A and C. Their code sits in `omp-desktop`, already behind `cap-computer` (`crates/envd/Cargo.toml:18`, `crates/envd/src/lib.rs:28-29`). They add no dependency.
+  - Changed: no Cargo feature. A default-off convar each (D4, D7). For Part B, left to its record.
+- **M12: the release fix is gated behind the guard, and a test pins the bug.**
+  - Confirmed: `crates/desktop/src/macos/input.rs:513`, `:684-698`, `:902-905`.
+  - Changed: Part C is a standalone slice with its own convar (D7). The guard-off test is replaced by `completed_drag_sequence_is_unchanged`, which covers only the sequence that is not aborted.
+  - Partly rejected: the fix is not ungated. The brief forbids changing existing behaviour without the owner and requires default-off gates (`/home/user/oh-my-pi/docs/research/upstream-gap-closure-brief.md:43-46`, `:95-97`). O8 asks to turn it on.
+- **M13: releasing at the last point drops at an arbitrary place.**
+  - Confirmed that upstream returns to the start only once a drag session has begun (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2728-2734`).
+  - Changed: the per-step guard check that made mid-path aborts frequent went with Part B. D6 keeps upstream's rule for strokes with no drag session (release at the last point) and states the drop. Drag-session detection is O10.
+- **M14: B3 depends on B4 and has no seam.**
+  - Confirmed: `background_drag` and `background_click` call `post_mouse` directly (`crates/desktop/src/macos/input.rs:362-415`, `:478-551`).
+  - Changed: C1 needs no guard. D6 gives every routine post and checkpoint closures, and its tests use an injected failing checkpoint.
+- **M15: drop the Part A convar.**
+  - Rejected. The brief requires implementation behind a default-off gate and forbids changing existing tool behaviour without the owner (`/home/user/oh-my-pi/docs/research/upstream-gap-closure-brief.md:43-46`, `:95-97`). The silent-fallback concern is handled by D3's no-US-fallback rule. The `meta` part is accepted: D4 now carries `ui.tab`, `ui.group` and `ui.label` like `crates/envd/src/computer.rs:32-68`.
+- **M16: fixtures and the recipe.**
+  - Confirmed: upstream's tests hard-code keycodes and rewrite labels one way only (`upstream:crates/pi-natives/src/desktop/linux/wayland/xkb.rs:577-624`). The fixtures use `symbols[Group1]` (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb`, `xkb_symbols` section).
+  - Changed: D5 states the path, the group order and the generator versions recorded in the NOTICE; both label forms are tested; on a mismatch the assertion or parser is fixed and upstream's fixtures are never copied; `memfd_create` is under `cfg(target_os = "linux")`. The test names stay upstream's; "under omp names" was dropped.
+- **M17: no rule for proceeding while owner questions are open.**
+  - Confirmed: the draft's header and O-list gave none.
+  - Changed: D8. O-questions are now referenced only after they are defined, or by number with "see Open questions".
+- **m1: dead-code slices.** Confirmed: the draft's A1, B1 and B2 had no caller. Changed: the parser lands with its caller in one slice, A1. The other dead slices went with Part B.
+- **m2: two decisions in one record.** Confirmed. Changed: Part B is deferred, and Parts A and C are authorised independently (D1, D8).
+- **m3: the omp2 problem is never stated.** Confirmed. Changed: Context opens with the omp2 failures.
+- **m4: undefined terms.** Confirmed. Changed: a terms paragraph at the top. Most of the undefined terms belonged to Part B and left with it.
+- **m5, m7, m9, m11, m13, m14, m15.** Confirmed where they apply. All concern Part B and are listed under "Part B: deferred".
+- **m6: inconsistent review status.**
+  - Confirmed for the ADR's wording ("five reviewers' findings"), now "five findings".
+  - Rejected for `docs/adr/STATUS.md:75`: the gap orchestrator owns that file, and this record proposes the row text in its report instead.
+- **m8: distinct failures collapse into generic text.**
+  - Confirmed: `crates/envd/src/computer.rs:1730`.
+  - Changed: recorded as an accepted limitation in Consequences. O11 asks for a typed code. The draft's Part B `PermissionDenied` case went with Part B.
+- **m10: licence evidence and the fallback.**
+  - Confirmed: the draft cited a host file and a copy fallback that contradicted the draft's own rejection of copying.
+  - Changed: D5 cites xkeyboard-config's `COPYING` at tag `xkeyboard-config-2.41` (190 lines, twelve copyright lines, no copyleft), and the copy fallback is removed.
+  - Trimming the fixtures is rejected (see Rejected options).
+- **m12: drop the US fast path.** Rejected as optional. Keeping it ports upstream's rule and tests unchanged (`upstream:crates/pi-natives/src/desktop/linux/wayland/libei.rs:877-884`).
+- **m16: release state per routine.** Confirmed: `crates/desktop/src/macos/input.rs:684-698`. Changed: D6 lists what each routine tracks, including that clicks hold only between down and up.
+
+### Round 3
+
+Pending.
 
 ## Open questions for the owner
 
-- **O1.** Does a pure bug fix (Part A) need a default-off gate under the additive-only rule? Recommendation: yes, `sv_computer_xkb_layout` for one release, then on by default. It changes what is typed, from wrong to right.
-- **O2.** Accept a `UserIntervened` variant in `ErrorCode` and `FaultCode`? Does a new output enum value need a `computer@4` revision? Recommendation: accept, and keep `computer@3`, because the input schema (`Params`) does not change. Without the variant Part B cannot ship.
-- **O3.** Should omp2 grow a takeover mode? Recommendation: not in this record. Decide it separately, then revisit the X11 guard and the Escape stops.
-- **O4.** Should the 5 s quiet period be a convar? Recommendation: no. Keep it a constant matching upstream until someone needs to change it.
-- **O5.** Closed by D3 (fixtures are generated and carry a NOTICE).
-- **O6.** Closed by D7 (the wait is bounded by `min(run deadline, operation deadline) − 250 ms` and ended by cancel).
-- **O7.** May `computer@3`'s `Capabilities` gain an optional `intervention_guard` field (`active`, `no_permission` or `off`)? That is an output shape change to an existing tool. Recommendation: yes, as an additive optional field. Until then D12 fails closed.
-- **O8.** Should release on abort (D8) apply to every session, not only to guarded ones? Today a cancel in the middle of a drag leaves the button held (`crates/desktop/src/macos/input.rs:513`). Fixing that changes existing behaviour. Recommendation: yes, ungated, in its own PR after B3. The Wayland and X11 drag paths should be checked for the same defect.
-- **O9.** Should the `computer@3` description mention `user_intervened`? Recommendation: no. The fixed fault text already tells the agent to read again, and changing the description changes an existing tool and its prompt prefix.
+- **O1.** Turn `sv_computer_xkb_layout` on by default? Recommendation: yes, one release after A1, once the manual check in "Proof levels" passes. It changes what is typed, from wrong to right.
+- **O2-O7, O9.** These were about Part B: the `UserIntervened` code and a `computer@4` revision, a takeover mode, the quiet-period constant, the guard's capability field, and the tool description. They move to Part B's future record.
+- **O8.** Turn `sv_computer_release_on_abort` on by default, and check the Win32 and X11 drag paths for the same defect? Recommendation: yes to both. A button held after a cancel is never intended.
+- **O10.** Port drag-and-drop session detection, so an aborted drag that lifted an item returns it to the start before releasing (`upstream:crates/pi-natives/src/desktop/macos/input.rs:2716-2734`)? Recommendation: yes, as a follow-up after C1.
+- **O11.** Add a typed code for "the active layout cannot produce this character", so the model sees more than "desktop input delivery failed"? Recommendation: yes, additive, with the same wire caveat as any new `FaultCode`.
+- **O12.** Is the guard (Part B) still wanted, given that omp2 has no takeover mode? Recommendation: yes, as its own record, after the owner rules on the `UserIntervened` code.
 
 ## Status in omp
 
-**Status: Not started.** EGM round 1 is resolved and rounds 2-3 are pending. Implementation is not authorized until a round passes.
+**Status: Not started.** EGM round 2 is resolved and round 3 is pending. Implementation waits for round 3.
 
-- Reusable today: the `reis`, `x11rb` and `xkeysym` dependencies, the actor thread, `OperationState`, the typed error enums, and the `sv_computer_*` convar path.
-- Implementation, once authorized, sits behind the default-off feature `cap-desktop-guard` (`omp-envd`, `omp-app`) and the default-off convar `sv_computer_intervention_guard` (Part B). Part A sits behind the default-off convar `sv_computer_xkb_layout`.
+- Reusable today: `reis` (with `reis::eis` for test peers), `xkeysym`, the Linux actor thread and its runtime, the `sv_computer_*` convar path, and `DesktopSessionOptions`.
+- Implementation, once authorised, sits behind two default-off convars: `sv_computer_xkb_layout` (Part A) and `sv_computer_release_on_abort` (Part C). There is no new Cargo feature.
 
 ## References
 
@@ -306,5 +366,5 @@ Pending. Fresh-context Goldfish reviewers will review this revision, and their f
 - ADR 0035 (error discipline)
 - ADR 0049 (`cap-*` features)
 - ADR 0012 (convars)
-- ADR 0006 (host policy and the sandbox stub, for the trust boundary around desktop control)
 - `crates/tui/NOTICE` (the bundled-data notice pattern)
+- xkeyboard-config `COPYING` at tag `xkeyboard-config-2.41`

@@ -103,6 +103,13 @@ omp2 has the same crate shape (`omp-desktop`: session facade, actor thread, per-
 
 Verdict: implement Part A; Part B after owner agreement; the rest research only.
 
+Superseded on 2026-11-14 by ADR 0063 after EGM round 2:
+
+- Part A proceeds.
+- A release-on-abort fix (Part C) is added.
+- Part B is deferred to its own record. Round 2 found that its omp2 call sites, pid source, tap lifecycle and CI coverage were all undesigned.
+- One correction to section 2 below: omp2's libei backend drops its event stream after discovery (`crates/desktop/src/linux/wayland/libei.rs:84-91`). So reading the keymap once is not enough; the stream has to be drained before each input.
+
 ## 4. Options
 
 ### Part A: typing on a non-US Wayland layout
@@ -123,7 +130,14 @@ Choice: option 2, behind a default-off convar, once the owner accepts the new er
 
 ## 5. Plan
 
-ADR 0063 (revised 2026-11-14 after EGM round 1) supersedes this first-draft plan. Its slice list is A1, A2 and B1 to B5. That list adds a cancellable wait (B2) and release on abort (B3), and it renames the convars `sv_computer_xkb_layout` and `sv_computer_intervention_guard`. The plan below is kept as the original research record.
+ADR 0063 (revised 2026-11-14 after EGM rounds 1 and 2) supersedes this first-draft plan.
+
+- Slices: A1 and C1.
+  - A1 covers layout-aware Wayland typing. The libei event stream is kept and drained before each input, chords go through the layout, and it is gated by `sv_computer_xkb_layout`.
+  - C1 covers release of held input on abort, on macOS and in libei drags, gated by `sv_computer_release_on_abort`.
+- The macOS intervention guard (Part B below) is deferred to its own future record.
+
+The plan below is kept as the original research record.
 
 ### Slice A1: layout parser (no behaviour change)
 
@@ -161,7 +175,7 @@ ADR 0063 (revised 2026-11-14 after EGM round 1) supersedes this first-draft plan
 3. Should omp2 grow a takeover mode at all? The X11 guard and the Escape stops depend on it. That is a product decision larger than this gap.
 4. Privacy. The tap sees every key and click system-wide. Upstream stores only a pid and a time. Do the same and never log key codes. [INFERENCE]
 5. False positives. A dictation tool or a remote desktop posts under another pid and counts as the user. That matches upstream's intent (`upstream:crates/pi-natives/src/desktop/control/macos.rs:413`) but will make the agent wait.
-6. Wait cost. `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`). Resolved in ADR 0063 D7: a condvar wait that cancel wakes, bounded by `min(run deadline, operation deadline) − 250 ms`.
+6. Wait cost. `admit` can block up to the run deadline. omp2's `OperationState` has a deadline but no wait primitive (`crates/desktop/src/lib.rs:62`). ADR 0063 defers the guard. It records this as a requirement for the guard's own record: a lost-wakeup-free condvar wait that cancel wakes.
 7. UNVERIFIED: the X11 map's group handling upstream (`linux/x11/keymap.rs`), and whether omp2's X11 path behaves on a non-US layout. Neither was run.
 8. Conflicts with locked ADRs: none found. ADR 0006 (sandbox policy) is about sandboxing, not desktop input.
 
@@ -171,4 +185,5 @@ A port would draw from `upstream:crates/pi-natives/src/desktop/control/intervent
 
 - OBSERVED: they carry no copyright or licence header. The only "copyright" in `fr.xkb` is a keysym (`upstream:crates/pi-natives/src/desktop/linux/wayland/testdata/fr.xkb:1472`).
 - OBSERVED: xkeyboard-config's terms are X11/MIT-style permission notices that require the notice in all copies, with no copyleft clause. This was read from the Debian `xkb-data` 2.41 `copyright` file.
-- ADR 0063 D3 generates omp2's own fixtures with a recorded `xkbcli compile-keymap` command and adds `crates/desktop/NOTICE`. Copying the upstream files is the fallback.
+- OBSERVED: xkeyboard-config's own `COPYING` at tag `xkeyboard-config-2.41` agrees: 190 lines, twelve copyright lines, no copyleft clause.
+- ADR 0063 D5 generates omp2's own fixtures with `xkbcli compile-keymap` and records the command and the versions in a new `crates/desktop/NOTICE`. Upstream's fixtures are not copied.
