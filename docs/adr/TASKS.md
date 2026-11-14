@@ -241,7 +241,7 @@ Active items:
 - **DONE** B5 corpus replay and family identity: `crates/session/tests/golden_journals.rs:golden_journals_open_and_fold_to_their_recorded_snapshots` compares fixture names with `corpus()` and replays each against its snapshot.
 
 - **RESOLVED** golden-corpus replay/registry divergence. `crates/session/tests/golden_journals.rs:golden_journals_open_and_fold_to_their_recorded_snapshots` compares the sorted registered names with the discovered fixture names.
-- **OPEN** branch-protection documentation drift. `.github/rulesets/omp2-protected.json` requires 11 status contexts; `docs/BRANCH_PROTECTION.md` lists 10, omitting `Protobuf format and lint`. Found 2026-11-03.
+- **DONE** branch-protection documentation drift. `.github/rulesets/omp2-protected.json` requires 11 status contexts; `docs/BRANCH_PROTECTION.md` lists all eleven (including `Protobuf format and lint`) and its prose says eleven. Found 2026-11-03; prose count corrected.
 - **NOTE** a docs-only diff skips every code job: `.github/ci-paths.txt` gates `rust`, `remote_linux`, `protobuf` and the lint jobs out, observed on PR #466 (run 41594072179). Only `Detect CI-relevant changes` and the labelers run.
 
 `just proto-breaking` passes on the current tree. `just e2e-p8` passes. The latest non-gating P8 artifact is workflow run [40246613996](https://github.com/blyzer/oh-my-pi/actions/runs/40246613996), but it measures the synthetic recorder workload, not ADR 0045 workloads W1–W9.
