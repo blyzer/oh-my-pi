@@ -12,7 +12,13 @@ Evidence keys:
 
 No build, test or run was made for this document.
 
-Revision 2026-11-14 (EGM round 1): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the pre-pass thresholds and the judge's own effort. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064".
+Revision 2026-11-14 (EGM rounds 1 and 2): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the judge's role and effort, and child sessions. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064". The main corrections from round 2:
+
+- The classifier runs on `@tiny`, not `@judge`: accepted ADR 0023 puts "classify this prompt's difficulty" on the tiny role (`docs/adr/0023-tiny-local-model.md:9-10`, `docs/adr/0023-tiny-local-model.md:21-23`), and `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`). Upstream's judge role also chains to `@tiny` (`upstream:packages/coding-agent/src/config/model-resolver.ts:1280`).
+- The gate is `ai_auto_effort` and the ceiling `ai_auto_effort_ceiling` (not `sv_auto_effort` / `ai_auto_thinking_ceiling`); the gate is read live and the Director is never removed.
+- There is no short-prompt heuristic; only the single-tier and empty-prompt shortcuts remain. The judge input reuses `preprocess_tiny_message` (`crates/ai/src/local/message_preproc.rs:17`).
+- No pin detection: while the gate is on, the auto bind wins over every `ai_thinking` write; the gate is the pin.
+- Children spawn with the gate off (ADR 0064 D11); judge usage stays in Director state, not a receipt.
 
 ## Question
 
@@ -141,11 +147,13 @@ Estimate for all four slices: 3 to 5 days including tests. [INFERENCE]
 #### Shape
 
 - **Family** `auto_effort`, in `crates/agent/src/directors/auto_effort.rs`, registered in `register_standard`. It claims no `Slot` (it must not block Plan, Goal or Loop, which claim `Mode` or `Loop`; `Slot` is at `crates/contract/src/director.rs:190`). It never returns a verdict other than `Pass`, because it does not own yields.
-- **Engagement.** The kernel engages it, like compaction, when `ai_thinking` is `auto` (or when the auto setting is on). It disengages when the user pins a level.
+- **Engagement.** The kernel engages it, like compaction, when `ai_thinking` is `auto` (or when the auto setting is on). It disengages when the user pins a level. Superseded by ADR 0064 D2-D4: engaged per turn when `ai_auto_effort` is on, never removed, inert when the gate is off; no pin detection.
 - **When it runs.** `before_inference`, but only on the first request of a user turn. Detect that by remembering the last classified user-turn id in the Director's durable state (`state()` at `crates/contract/src/director.rs:645`) and comparing it with `cx.turn`. Tool-continuation round trips return `Prepared::Unchanged` at once. This also keeps the effort stable inside a turn, which protects the provider's cached prompt prefix. [INFERENCE]
 - **Inputs.** The latest user text (and, for a task-spawned child, the delegator's `solutionSpace`, which omp2 already carries; not traced here, UNVERIFIED). Nothing else is needed for a first slice.
 
 #### Classifier
+
+Superseded by ADR 0064 D6 and D7: the selector is `@tiny`, the short-prompt rule below is removed, and the call is bounded to one attempt per turn with a failure cooldown.
 
 - A heuristic pre-pass answers the obvious cases without a model call: an empty or very short prompt maps to `low`; a prompt that is only a slash command or a yes/no maps to `low`. [INFERENCE]
 - Otherwise one isolated request through `cx.inference.execute_on("@judge", request)`. The request asks for exactly one label of `low | medium | high | xhigh | max` with a fixed rubric stored as a prompt file next to the other prompts. It is cheap, short and non-streaming. The ladder offered excludes `max` unless the auto ceiling is `max`.
@@ -185,7 +193,7 @@ Superseded by ADR 0064 D8: option 3 skips `convar_reasoning`, because the driver
 
 - **Cache.** Changing effort between turns may break a provider's prefix cache on some routes. Upstream notes that only models taking per-message effort relax mid-run (`upstream:packages/coding-agent/src/session/model-controls.ts:735`); omp2 has no such flag that I found (searched: `per_message` effort in `crates/catalog`, not exhaustive). Classify once per user turn, never inside a turn.
 - **Cost and latency.** A judge call on every prompt costs tokens and up to 4 s. The heuristic pre-pass and the short-circuit when only one tier exists limit it.
-- **Judge availability.** `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`), which may be expensive. Consider a dedicated cheap default or let the user opt out.
+- **Judge availability.** `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`), which may be expensive. Resolved in ADR 0064 round 2: the classifier uses `@tiny` (ADR 0023).
 - **Subagents.** A child session inherits `ai_thinking`. Whether a child of an `auto` parent should also classify, or take the delegator's `solutionSpace`, is open.
 - **Wire visibility.** Adding a value to `ai_thinking` touches `ModelWatch`, the chat badge (`crates/chat/src/host.rs:953`) and RPC (`crates/app/src/rpc_mode.rs:1156`). Each reads it as an effort string today. That is a change to an existing convar's accepted values, so under the additive-only rule the separate boolean is the safer fallback; the owner should choose.
 - UNVERIFIED: whether `solutionSpace` is available to a child's Director. (How `ai_thinking` reaches the router and whether binds can change while engaged are now traced in section 2.)
