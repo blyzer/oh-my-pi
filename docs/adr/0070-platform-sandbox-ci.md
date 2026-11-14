@@ -35,9 +35,15 @@ Research: [docs/research/platform-sandbox-ci.md](../research/platform-sandbox-ci
 
 **D2. Do not bundle or redistribute Tart.** Its licence limits making it available in a competing product. Any documented recipe names Apache-2.0 tools (Lima, Apple `container`) first and treats Tart as an optional user-installed tool, pending the owner's view (O4).
 
-**D3. Reopen D1 on any of these triggers:** Apple announces removal of `sandbox-exec`; a measured spike shows a guest starts fast enough and a shared-directory build is fast enough; or the owner wants hardlink-style scope bypasses closed. Then the preferred shape is a VM as an environment target through the ADR 0039 work, not a new `Backend` variant.
+**D3. Reopen D1 on any of these triggers:**
 
-**D4. Do not add a Windows test job now.** A whole-workspace job is blocked by the embedded Python. The staged route is recorded here for later: (a) list the crates that do not depend on `omp-py` for a Windows target, (b) a non-required compile check of those crates, switched on by a repository variable and run on demand and nightly, (c) their unit tests on a hosted Windows runner, (d) only on an owner decision, embedded Python for Windows and a release smoke like upstream's.
+- **Seatbelt removal, watched.** Apple announces removal of `sandbox-exec`, or the Seatbelt probe reports unavailable on a macOS beta or on the `MACOS_RUNNER` image. The probe already exists (`SEATBELT_STATUS`, `crates/sandbox/src/runner.rs:26`, used at `:41`). No job runs it against a beta today and this record adds none (D5); until one does, the owner checks it by hand at each macOS beta.
+- **A measured spike passes its bar.** V0 shows both a clean guest start plus `true` and a shared-directory `cargo build` inside the bar in O9. Until the owner confirms the bar, no V0 timing counts as passing.
+- **An owner decision.** The owner states in writing that hardlink-style scope bypasses must be closed. This is a decision, not a measurement, and nothing in the repository can detect it.
+
+Then the preferred shape is a VM as an environment target through the ADR 0039 work, not a new `Backend` variant.
+
+**D4. Do not add a Windows test job now.** A whole-workspace job is blocked by the embedded Python. The staged route is recorded here for later: (a) list the crates that do not depend on `omp-py` for a Windows target (W0: `cargo metadata`, minutes, no repository change; do it before this record is accepted), (b) a non-required compile check of those crates, switched on by a repository variable and run on demand and nightly, (c) their unit tests on a hosted Windows runner, (d) only on an owner decision, embedded Python for Windows and a release smoke like upstream's. This record takes (a) only. (b) needs a non-empty W0 list and its own PR, because D5 forbids CI changes here; one cheap form of (b) is `cargo check --target x86_64-pc-windows-msvc` on the existing Ubuntu runner, which is untried (UNVERIFIED). Reopen D4, and so (c) and (d), on any of: the owner answers yes to O7; a `cfg(windows)` regression reaches `main` or is reported by a user; or the (b) check passes and its measured cost (O8) is acceptable.
 
 **D5. No convar, feature or CI change is made by this record.** If D3 or D4 is later accepted, the gates are a `cap-sandbox-vm` feature with a default-off `sv_sandbox_vm` convar for any VM work, and a `vars.CI_WINDOWS` repository variable, unset by default, for Windows CI.
 
@@ -54,7 +60,7 @@ Research: [docs/research/platform-sandbox-ci.md](../research/platform-sandbox-ci
 None. This record is research only and authorizes no implementation. If the owner accepts D3 or D4, each stage gets its own record with its own slices and tests. The measurements that would inform them are:
 
 - **V0 (spike, no repository change).** On the self-hosted Mac, time a clean guest start and `true` for Tart, Lima and Apple `container`; time a shared-directory `cargo build` against a native one; record what egress filtering each offers; record whether each can run a macOS-native command. Until measured, every VM speed claim is UNVERIFIED.
-- **W0 (list, no repository change).** List the workspace crates that do not depend on `omp-py` for a Windows target, using the dependency graph. Until listed, the claim that a subset can build on Windows is UNVERIFIED.
+- **W0 (list, no repository change).** List the workspace crates that do not depend on `omp-py` for a Windows target, using the dependency graph. Until listed, the claim that a subset can build on Windows is UNVERIFIED. Run W0 before this record is accepted.
 
 ## Upstream origin and license
 
@@ -75,8 +81,9 @@ Nothing from upstream is reused: it has no VM sandbox. For Windows CI the useful
 - **O4.** Is a recipe that names Tart acceptable, given its FSL licence and Competing Use clause? Recommendation: name Lima and Apple `container` first; mention Tart only as a user-installed option, or not at all.
 - **O5.** Seatbelt's removal date. None found. Recommendation: the triggers in D3 stand until Apple states one.
 - **O6.** Can general tools, not only build runs, target an SSH host? Not traced. Recommendation: trace it before writing any guest-over-SSH recipe.
-- **O7.** Does the owner want a Windows release? Recommendation: decide before spending on `omp-py` for Windows; until then take D4 steps (a) and (b) only if cheap.
+- **O7.** Does the owner want a Windows release? Recommendation: decide before spending on `omp-py` for Windows. Until then only D4 step (a) is taken, as W0; step (b) waits for a non-empty W0 list and a separate PR; steps (c) and (d) wait for a yes.
 - **O8.** Hosted Windows minute rates and the cost of one run: not checked. NOT MEASURED. Recommendation: measure with the compile check before adding unit tests.
+- **O9.** What bar must V0 meet? Proposed, not measured: a clean guest start plus `true` in 10 seconds or less, a shared-directory `cargo build` within 1.5 times a native build, and some form of egress filtering. These numbers are a starting point for the owner to change. Without a bar D3's second trigger cannot fire.
 
 ## Status in omp
 

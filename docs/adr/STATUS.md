@@ -82,7 +82,7 @@ investigations are historical evidence and do not override that ledger.
 | [0070](0070-platform-sandbox-ci.md) | No VM-backed macOS sandbox and no Windows test job now | Proposed 2026-11-13; reviewed (EGM): research-only confirmed; not started | Existing fallbacks stand | Open: concrete reopen triggers (sandbox-exec watcher, V0 thresholds, Windows trigger) |
 | [0071](0071-subagent-isolation.md) | Copy-on-write tree cloning in a leaf crate for worktrees; subagent view unchanged; ovnfs not adopted | Proposed 2026-11-13; reviewed (EGM): changes required; not started | No CoW tree clone | Open: one in-scope consumer for a new crate, `WorktreeClone::Prefer` has no caller, ignored-file secrets in forge checkout, O1 answered No from ADR 0007 |
 
-Totals: 25 implemented, 21 partially implemented, 4 not started.
+Totals: 25 implemented, 23 partially implemented, 23 not started (71 ADRs; 0054-0071 are proposals, counted as not started).
 
 ## Code departing from the decision text (owner decision needed)
 
