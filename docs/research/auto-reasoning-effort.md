@@ -12,13 +12,15 @@ Evidence keys:
 
 No build, test or run was made for this document.
 
-Revision 2026-11-14 (EGM rounds 1 and 2): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the judge's role and effort, and child sessions. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064". The main corrections from round 2:
+Revision 2026-11-14 (EGM rounds 1 to 3; the ADR is machine-reviewed, not owner-approved): ADR 0064 now decides how the choice is applied, the engagement gate, precedence, the judge's role and effort, and child sessions. Where sections 2 and 5 below differ from the ADR, the ADR wins; the points it corrects are marked "Superseded by ADR 0064". The main corrections from round 2:
 
 - The classifier runs on `@tiny`, not `@judge`: accepted ADR 0023 puts "classify this prompt's difficulty" on the tiny role (`docs/adr/0023-tiny-local-model.md:9-10`, `docs/adr/0023-tiny-local-model.md:21-23`), and `@judge` falls back to the slow model (`crates/catalog/src/selection.rs:465`). Upstream's judge role also chains to `@tiny` (`upstream:packages/coding-agent/src/config/model-resolver.ts:1280`).
 - The gate is `ai_auto_effort` and the ceiling `ai_auto_effort_ceiling` (not `sv_auto_effort` / `ai_auto_thinking_ceiling`); the gate is read live and the Director is never removed.
 - There is no short-prompt heuristic; only the single-tier and empty-prompt shortcuts remain. The judge input reuses `preprocess_tiny_message` (`crates/ai/src/local/message_preproc.rs:17`).
 - No pin detection: while the gate is on, the auto bind wins over every `ai_thinking` write; the gate is the pin.
-- Children spawn with the gate off (ADR 0064 D11); judge usage stays in Director state, not a receipt.
+- Children spawn with the gate off (ADR 0064 D11).
+
+Round 3 further changed: judge outcomes, latency and tokens go to `tracing`, not Director state, and there is no failure breaker (ADR 0064 O9 asks the owner about measurement); the ladder floors at `low` before the ceiling, as upstream does (`upstream:packages/tui/src/thinking.ts:290-299`); `state/effort` is written only by a judge answer; the S0a and S0b driver fixes wait for the owner (O7). A no-effort `Prefer` request would not avoid S0b, because the router fills an absent effort with its default (`crates/ai/src/router.rs:682-684`).
 
 ## Question
 
@@ -153,7 +155,7 @@ Estimate for all four slices: 3 to 5 days including tests. [INFERENCE]
 
 #### Classifier
 
-Superseded by ADR 0064 D6 and D7: the selector is `@tiny`, the short-prompt rule below is removed, and the call is bounded to one attempt per turn with a failure cooldown.
+Superseded by ADR 0064 D6 and D7: the selector is `@tiny`, the short-prompt rule below is removed, and the call is bounded to one attempt per turn (round 3 removed the failure cooldown).
 
 - A heuristic pre-pass answers the obvious cases without a model call: an empty or very short prompt maps to `low`; a prompt that is only a slash command or a yes/no maps to `low`. [INFERENCE]
 - Otherwise one isolated request through `cx.inference.execute_on("@judge", request)`. The request asks for exactly one label of `low | medium | high | xhigh | max` with a fixed rubric stored as a prompt file next to the other prompts. It is cheap, short and non-streaming. The ladder offered excludes `max` unless the auto ceiling is `max`.
@@ -175,7 +177,7 @@ Superseded by ADR 0064 D8: option 3 skips `convar_reasoning`, because the driver
 - The Director never writes `ai_model`, never reads or writes a model role, and never calls `execute_on` with a selector for the main route. Its only auxiliary model is `@judge`, and only through the isolated path that leaves the live route untouched (`crates/contract/src/director.rs:616-619`).
 - It never changes `ai_thinking_ceiling`. It reads the model's allowed range through the same clamp the router already applies (`crates/catalog/src/thinking.rs:320`), so an effort the model cannot take falls to the nearest supported one below.
 - Enforce it by construction and by test: the Director's `DirectorEffect` never contains a write named `ai_model`; a test fails if any `with_write` name other than `ai_thinking` appears (compare the existing plan test that asserts an `ai_thinking` write, `crates/agent/tests/directors/plan.rs:89`).
-- The `@judge` call may itself run on a different model. That is an isolated auxiliary request, not a change of the session's model, and its tokens must be journaled as judge usage (as the advisor does). Say so in the user-facing docs.
+- The `@judge` call may itself run on a different model. That is an isolated auxiliary request, not a change of the session's model, and its tokens must be journaled as judge usage (as the advisor does). Say so in the user-facing docs. Superseded by ADR 0064 D7: the role is `@tiny` and its usage goes to `tracing`, since the journal has no judge receipt role (O5).
 
 #### Settings
 
