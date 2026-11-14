@@ -32,12 +32,12 @@ brief.
 | 10 | Session tools | c, d, b | [session-tools](session-tools.md) | [0057](../adr/0057-session-tools.md) | reviewed | Ready to implement | |
 | 11 | Context tools | a, b, d | [context-tools](context-tools.md) | [0058](../adr/0058-context-url-schemes.md) | reviewed | Ready to implement (`cfg://`); `out://` waits on ADR 0050 S2-S4 | |
 | 12 | TUI job widgets and charts | c (widgets), c deferred (auto-graph) | [tui-job-widgets](tui-job-widgets.md) | [0066](../adr/0066-tui-job-widgets.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-3 blocker (multi-line `<pre>` in the `/hub` inspector) closed by cutting the output window to single-row entries | ADR done; S1 (newest output line of the selected async `bash` job in `/hub`) behind `cl_hub_job_output` (default off), not started; O5 (foreground coverage) should be settled before S1 merges; widgets, sparkline and auto-graph deferred | #639 (merged) |
-| 13 | Browser inspection, ABKit | c (React, a11y), b (ABKit) | [browser-inspection](browser-inspection.md) | [0067](../adr/0067-browser-inspection.md) | changes required | ADR revision pending | |
-| 14 | Memory backends | c (decision files), b (Hindsight as extension only) | [memory-backends](memory-backends.md) | [0068](../adr/0068-decision-memory.md) | changes required | ADR revision pending | |
+| 13 | Browser inspection, ABKit | c (React, a11y), b (ABKit) | [browser-inspection](browser-inspection.md) | [0067](../adr/0067-browser-inspection.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-2 blocker closed by cutting the audit to axe-core only | ADR done; S1 (Chromium init scripts, `just test-browser`, CI step) ungated with no caller, S2 (React tree/inspect helpers) behind `sv_browser_inspect` (default off), not started; S3-S5 wait on owner O6 (browser@3 revision), S4 axe-core also on O3 | #641 (merged) |
+| 14 | Memory backends | c (decision files), b (Hindsight as extension only) | [memory-backends](memory-backends.md) | [0068](../adr/0068-decision-memory.md) | round 1 resolved; EGM rounds 2-3 in progress | ADR revision on `docs/gap14-decision-memory-review` | |
 | 15 | Providers and sign-in | c, d | [providers-signin](providers-signin.md) | [0059](../adr/0059-provider-catalog-additions.md) | reviewed (EGM not required) | Ready to implement | |
 | 16 | Ratchet and skillshare | a (skillshare) + d (ratchet) | [ratchet-skillshare](ratchet-skillshare.md) | [0061](../adr/0061-ratchet-policy.md) | reviewed | Blocked on an ADR 0006 amendment for a bridged op (owner) | |
 | 17 | Forge URL schemes out of core | a (goal) + b (literal move) | [forge-url-schemes](forge-url-schemes.md) | none | not required | Closed: ADR 0049 D2.5 already routes pr:// and issue:// to forge extensions; moving the spellings is forbidden by ADR 0050 D1 and the additive rule | |
-| 18 | Generated RPC clients | d | [rpc-clients](rpc-clients.md) | [0069](../adr/0069-rpc-clients.md) | changes required | ADR revision pending | |
+| 18 | Generated RPC clients | d | [rpc-clients](rpc-clients.md) | [0069](../adr/0069-rpc-clients.md) | round 1 resolved; EGM rounds 2-3 in progress | ADR revision on `docs/gap18-rpc-clients-review` | |
 | 19 | VM sandbox fallback, Windows CI | d (research and ADR only) | [platform-sandbox-ci](platform-sandbox-ci.md) | [0070](../adr/0070-platform-sandbox-ci.md) | research-only, machine-reviewed (EGM, 2 rounds), not owner-approved | Closed for this pass: concrete reopen triggers recorded; no implementation | #623 (merged) |
 
 ## Log
@@ -57,3 +57,6 @@ brief.
   Merged as #639. Gap 13 (ADR 0067) finished round 3 with no blocker; its PR
   is pending. Gaps 14 and 18 wait on round 1; implementation slices for gaps
   6, 9 and 15 are in progress on their own branches.
+- 2026-11-14 12:55 UTC: gap 13 (ADR 0067) merged as #641 after three EGM
+  rounds with no open blocker. Gaps 14 (ADR 0068) and 18 (ADR 0069) resolved
+  round 1 on their review branches; Goldfish round 2 is running for both.
