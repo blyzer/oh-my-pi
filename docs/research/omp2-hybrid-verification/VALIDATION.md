@@ -22,3 +22,31 @@ No live model, reranker, Mac memory/latency, paid API or four-arm effectiveness
 benchmark was run. Procedures and blockers are provided rather than invented
 measurements. Git push/PR publication are recorded by Git/GitHub, not treated as
 evidence that the future verifier works.
+
+## Publication blocker
+
+Research branch: `research/omp2-native-hybrid-verification`, based directly on
+the pinned `omp2` commit. Local research commit before this blocker record:
+`dcd8285fa4efa4b9bd47d7ace0a19a172b1b2547`.
+
+Both authorized publication routes were attempted:
+
+```text
+git push -u origin research/omp2-native-hybrid-verification
+exit 128: remote: Permission to blyzer/oh-my-pi.git denied to blyzer.
+HTTP 403
+
+GitHub connected-app create_branch(repository_full_name="blyzer/oh-my-pi",
+  branch_name="research/omp2-native-hybrid-verification",
+  sha="9cb6fd638918de77913a3e6c8fc42f9d5b3365bc")
+GitHub API 403: Resource not accessible by integration
+```
+
+The token authenticates as `blyzer` and repository metadata reports push rights,
+but actual Git object/ref writes are denied. This is a credential/integration
+authorization limitation, not a request for task approval. No remote research
+branch or PR was created. Local branch and commits are preserved; an export patch
+and prepared PR description are retained in the workspace outside this document
+tree. Publication requires credentials/integration access that can write repository
+contents/refs and create pull requests. After that, push this existing branch and
+open a PR against `omp2`; do not merge it. No need to repeat the source research.

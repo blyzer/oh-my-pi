@@ -110,3 +110,8 @@ and pytest were unavailable. See chapters 02 and 08 for commands and repro proce
 Documentation validation checks local links, pinned source file/range targets,
 patch whitespace and research-only scope. This PR deliberately implements no
 production engine, changes no runtime behavior and adds no dependency or lockfile.
+
+Publication was blocked by HTTP 403 from both Git push and the connected GitHub
+app's branch-create operation. No PR exists; the complete local research branch
+and commits are preserved. See [publication blocker](VALIDATION.md#publication-blocker)
+for exact errors and the required access to publish without repeating research.
