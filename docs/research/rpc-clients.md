@@ -1,7 +1,7 @@
 # Gap 18: generated Go and Python RPC clients from the proto definitions
 
 Status: research only. Nothing here is implemented or authorized.
-Date: 2026-11-13
+Date: 2026-11-13 (revised 2026-11-14 after EGM round 1 on ADR 0069: command overlap recounted, Content-Length texts fixed upstream of this note, plan moved to ADR 0069)
 Baseline: omp2 f4186b783b; upstream c308970263 (pinned checkout).
 
 Evidence keys:
@@ -48,8 +48,10 @@ What upstream does **not** have: proto-generated clients. Its protocol is JSON, 
 ### The `omp rpc` embedding protocol is not proto
 
 - `omp rpc` is the stdio embedding protocol. Its types are serde structs that "intentionally leave application-owned model, message, and event payloads as `serde_json::Value`" (`crates/rpc/src/protocol.rs:1-6`). There is no JSON Schema for it: `JsonSchema` appears zero times in `protocol.rs`. The Rust client is the `client` module of `omp-rpc` (`crates/rpc/README.md:7`).
-- **The framing is the same as upstream's.** The stdio mode decodes newline-delimited JSON with protocol-v2 chunk reassembly (`JsonLineDecoder`, `RpcFrameDecoder`), with a 1 MiB cap per physical line and 64 MiB per reassembled payload (`crates/app/src/rpc_mode.rs:34`, `crates/rpc/src/framing.rs:1-2`, `crates/rpc/src/framing.rs:13-21`). The crate README and the CLI help say "Content-Length" (`crates/rpc/README.md:8`, `crates/app/src/cli.rs:1127`); `rpc_mode.rs` imports the JSON-line decoder, not the Content-Length one (`crates/rpc/src/framing.rs:159`). Those two texts look stale. An earlier draft of this note said the framing differed; that was wrong.
-- **Command overlap.** Upstream's schema lists 74 commands (`x-rpc.commands` in `upstream:packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json`). A scan of the match arms in `crates/app/src/rpc_mode.rs` finds 45 of those names handled by omp2, 29 upstream-only (for example `fork`, `goal`, `btw`, `live_start`, `dictation_start`, `navigate_tree`, `logout`) and 7 names only omp2 has (`approve`, `cancel`, `resume`, `shutdown` and three frame names). The scan is a string heuristic. Field shapes were not compared (UNVERIFIED). Upstream's SDKs may therefore work against omp2 for the shared commands.
+- **The framing is the same as upstream's.** The stdio mode decodes newline-delimited JSON with protocol-v2 chunk reassembly (`JsonLineDecoder`, `RpcFrameDecoder`), with a 1 MiB cap per physical line and 64 MiB per reassembled payload (`crates/app/src/rpc_mode.rs:34`, `crates/rpc/src/framing.rs:1-2`, `crates/rpc/src/framing.rs:13-21`). `rpc_mode.rs` imports the JSON-line decoder, not the `ContentLengthDecoder` defined in the same module (`crates/rpc/src/framing.rs:159-164`), which `omp rpc` does not use. The crate README and the CLI help used to say "Content-Length"; commit `0f17146ad` corrected both (`crates/rpc/README.md:3`, `crates/rpc/README.md:8`, `crates/app/src/cli.rs:1127`). An earlier draft of this note said the framing differed; that was wrong.
+- **Command overlap (recounted 2026-11-14).** Upstream's schema lists 74 commands (`name` fields of `x-rpc.commands`, `upstream:packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json:11`). The string patterns of the top-level request `match` in `crates/app/src/rpc_mode.rs:1944-2905`, including alternation arms, plus `session_startup` (answered before that match, `crates/app/src/rpc_mode.rs:156-170`) give 47 shared names and 27 upstream-only ones (for example `fork`, `goal`, `btw`, `live_start`, `dictation_start`, `navigate_tree`, `logout`; full list in ADR 0069). omp2's match also handles 11 names that are not upstream commands. Three are upstream inbound frames, not commands: `extension_ui_response`, `host_tool_update`, `host_tool_result` (`RpcInbound`, `rpc-wire.schema.json:5941`). One is `session_startup`. Seven are omp2-only verbs: `approve`, `cancel`, `interrupt`, `pause`, `resume`, `quit`, `shutdown`. The first count (45, 29, 7) missed alternation arms. Field shapes were not compared (UNVERIFIED). Upstream's SDKs may therefore work against omp2 for the shared commands.
+- **No JSON command is a gRPC RPC.** The daemon's 57 RPCs are inference, credential and blob operations. The only overlap with the agent-driving commands is `SessionControl.Submit`, whose seven verbs mirror rpc-mode verbs (`crates/proto/proto/omp/session/v1/session.proto:173-188`). Its socket registers no `Gateway` (`crates/driver/src/session_wire.rs:311-331`).
+- **Upstream's SDK suites test fakes.** The Python suite runs a Python fake server (`upstream:sdk/python/omp-rpc/tests/test_client.py:1142-1149`), and the Go unit tests use an in-memory fake (`upstream:sdk/go/omp-rpc/fake_test.go:21-26`). The Go smoke tests run upstream's Bun CLI with a `PI_*` variable (`upstream:sdk/go/omp-rpc/smoke_test.go:71-73`). A probe against omp2 therefore needs its own harness.
 
 ### Locked decisions
 
@@ -73,7 +75,7 @@ What upstream does **not** have: proto-generated clients. Its protocol is JSON, 
 
 ## 3. Class
 
-**Class d (propose)** for proto-generated gRPC clients. omp2 has proto definitions and a served gRPC surface, which is a good generation source, but no generator, no Go code and a locked ADR against `buf generate`. For the stdio `omp rpc` protocol there is a second, cheaper path that may be **class c**: upstream's MIT SDKs speak newline-delimited JSON, and omp2 uses the same framing and shares 45 of 74 command names, so they may work with little change. That needs a compatibility probe first (option 7).
+**Class d (propose)** for proto-generated gRPC clients. omp2 has proto definitions and a served gRPC surface, which is a good generation source, but no generator, no Go code and a locked ADR against `buf generate`. For the stdio `omp rpc` protocol there is a second, cheaper path that may be **class c**: upstream's MIT SDKs speak newline-delimited JSON, and omp2 uses the same framing and shares 47 of 74 command names, so they may work with little change. That needs a compatibility probe first (option 7).
 
 Verdict: do not generate gRPC clients yet. First ship the schema as a versioned bundle (cheap, no new tool, no ADR conflict), then ask for the ADR 0048 amendment before any Go or Python generation. In parallel, run the compatibility probe for upstream's SDKs against `omp rpc`; if it passes, adopting them is the cheapest way to give Go and Python users a typed client.
 
@@ -85,52 +87,28 @@ Verdict: do not generate gRPC clients yet. First ship the schema as a versioned 
 4. **Check generated clients into the repository.** Rejected: generated code is never committed (`docs/adr/0048-schema-and-serialization-boundaries.md:12`).
 5. **Port upstream's JSON-schema generator to `omp rpc`.** Cost: very high. It first needs a schema for a protocol whose payloads are free-form `Value`. Fit: poor. Superseded for the common case by option 7.
 6. **Generate clients for the stdio protocol from Rust types** with `schemars`. Cost: high, and the open payloads stay untyped. Fit: poor.
-7. **Reuse upstream's SDKs for `omp rpc`.** Take the Go, Python and Rust `omp-rpc` packages (MIT) and run them against omp2's stdio mode, fixing the differences. Cost: a probe of 1 to 2 days, then an unknown amount of adaptation for the 29 upstream-only and 7 omp2-only commands, whose wire shapes differ or are missing. Fit: good if the probe passes, because the framing is shared and the typed surface already exists. Risks: the generated `wire.go` and `_wire.py` encode upstream's schema, so omp2 changes need a regenerated or hand-patched wire file, and the generator is a Bun script (`upstream:package.json:161`), a runtime omp2 does not use.
+7. **Reuse upstream's SDKs for `omp rpc`.** Take the Go, Python and Rust `omp-rpc` packages (MIT) and run them against omp2's stdio mode, fixing the differences. Cost: a probe of 1 to 2 days, then an unknown amount of adaptation for the 27 upstream-only commands and the 7 omp2-only verbs, whose wire shapes differ or are missing. Fit: good if the probe passes, because the framing is shared and the typed surface already exists. Risks: the generated `wire.go` and `_wire.py` encode upstream's schema, so omp2 changes need a regenerated or hand-patched wire file, and the generator is a Bun script (`upstream:package.json:161`), a runtime omp2 does not use.
 
-Choice: option 2 now, then option 3 for Python first and Go second, subject to the ADR amendment; option 7's probe in parallel, and if it passes, option 7 for the stdio protocol. [INFERENCE]
+Choice: option 2 now, then option 3 for Python first and Go second, built on `protox` rather than `buf generate` or `protoc`. Option 3 publishes nothing until the owner has answered ADR 0048 Decision 2's revisit trigger. Option 7's probe runs in parallel, with an omp2-owned harness; if it passes, option 7 serves the stdio protocol. [INFERENCE]
+
+Revision 2026-11-14 (after EGM round 1): option 3 originally said "`buf generate` or `protoc` plugins". Neither fits. ADR 0048 Decision 3 rejects `buf generate` (`docs/adr/0048-schema-and-serialization-boundaries.md:74`), and the repository has no system `protoc` (`AGENTS.md:654`). ADR 0069 D7 replaces both with a `protox`-hosted plugin runner for Go and descriptor-built bindings for Python.
 
 ## 5. Plan
 
-None of these slices changes an existing proto, service, convar or command. Each ships as a build or release artifact, off unless invoked.
+The plan is ADR 0069's `## Slices` (S0 to S5), which supersedes the first draft that stood here. In short:
 
-### Slice 0: compatibility probe (no repository change)
+- S0, the stdio SDK probe, uses its own harness, because upstream's suites test fakes.
+- S1, the schema bundle, is built with `protox` behind the default-off `omp-proto` feature `cap-rpc-clients`.
+- S2 adds the conformance scenario list and a Rust reference proof against `omp serve`. The list includes the server-older-than-client abort (`crates/proto/proto/omp/gateway/v1/gateway.proto:55-56`).
+- S3 is the Python client (descriptor-built).
+- S4 is the `protox` plugin host.
+- S5 is the Go client.
 
-- Run upstream's Python and Go `omp-rpc` test suites and a short scripted session against `omp rpc`, and record for each of the 74 upstream commands whether it passes, fails or is missing.
-- Acceptance: a table of all 74 commands with a result and the failing field where there is one, and a yes or no on adopting the SDKs for the shared commands. Also fix or flag the stale "Content-Length" text in `crates/rpc/README.md:8` and `crates/app/src/cli.rs:1127`.
-
-### Slice 1: schema bundle
-
-- A small step in `crates/proto` (a bin or a `just` target) that compiles the 19 files with `protox`, writes `omp.binpb` (a descriptor set) and a tarball of the `.proto` sources plus `buf.yaml`, and records `SCHEMA_REV` and the git revision in a manifest.
-- Acceptance: the bundle contains the 19 files; the descriptor set decodes and lists the six services and 63 RPCs; the manifest's revision equals `SCHEMA_REV` (`crates/proto/src/lib.rs:51`); two builds are byte-identical.
-- Gate: a `just` target, not part of the default build.
-- Tests: a Rust test that decodes the descriptor set and asserts the service and RPC counts, so adding a service forces a deliberate update.
-
-### Slice 2: ADR 0048 amendment
-
-- Record the owner's ruling on client generation: which tool (`buf generate` with local plugins, or `protoc`), that output is never committed, and where artifacts are published. Fix the stale "does not run `buf breaking`" sentence.
-- Acceptance: the amendment names the generator, its pinned version and the licence check. CI already pins buf 1.73.0 (`.github/workflows/ci.yml:170-208`).
-
-### Slice 3: Python client (`omp-grpc`)
-
-- Generate modules from the bundle in a release job with `grpcio-tools`. Hand-write a thin layer: a UDS channel helper, TLS and bearer-token credentials, the `Hello` handshake that refuses a server whose `min_schema_rev` exceeds the client's revision, and receive limits raised to the server's 64 MiB. Cover `Gateway`, `Inference`, `Auth` and `Blob`; leave out `SessionControl` until a server exists.
-- Acceptance: against a live daemon on a socket, `Hello` returns the three capabilities, one unary `Auth` call succeeds, one `Inference` server stream delivers chunks, a `Blob` upload (client stream) round-trips; a client older than `min_schema_rev` fails with a typed error.
-- Tests: a conformance script run against `omp` in CI as an opt-in job; no network.
-- Name: `omp-grpc`. No `pi` identity anywhere.
-
-### Slice 4: Go client
-
-- Prerequisite: Go packages cannot import each other in a cycle, and `thread` and `inference` do. Map both proto packages to one Go import path in a generation-only configuration (buf managed mode or `M` flags), without editing the `.proto` files. Whether protoc-gen-go accepts two proto packages in one Go package is UNVERIFIED; if not, the cycle has to be broken in the schema, which would be a breaking proto change and needs its own decision.
-- Acceptance: `go build` and `go vet` pass on the generated module; the same conformance script runs in Go.
-- Gate: opt-in CI job; Go is installed only there.
-
-### Slice 5: conformance and versioning
-
-- One language-neutral scenario list (hello, unary, server stream, client stream, large message, schema mismatch) run by every client against one daemon.
-- Acceptance: every client passes the same list. Client packages carry the `SCHEMA_REV` they were generated at, and a release fails if the bundle and a client disagree.
+The first draft's "ADR 0048 amendment" slice is gone: a gap ADR does not amend ADR 0048, and the owner's revisit of its Decision 2 is open question 1 below. The stale Content-Length text the first draft's slice 0 mentioned was fixed by commit `0f17146ad`.
 
 ## 6. Open questions
 
-1. **ADR 0048.** Does the owner accept `buf generate` or `protoc` for non-Rust clients as a release step? The ADR's rejection was written about the Rust build. Without an answer, slices 3 and 4 do not start.
+1. **ADR 0048 Decision 2's revisit trigger.** Publishing independently released SDKs is the trigger written at `docs/adr/0048-schema-and-serialization-boundaries.md:65-67` ("then consider the BSR"). How does the owner answer it: git-versioned schemas plus the bundle, or the BSR? Until it is answered, no client is published.
 2. **Go in the repository.** Is a Go toolchain in CI acceptable under "no new language runtimes", or must Go generation live in a separate repository?
 3. **The thread/inference cycle** (above). UNVERIFIED whether one Go package for both proto packages generates cleanly.
 4. **Scope.** Should a client cover the five daemon services only, or also `SessionControl`, which a different server (the session host) exposes on a different socket?
