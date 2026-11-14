@@ -111,7 +111,8 @@ Documentation validation checks local links, pinned source file/range targets,
 patch whitespace and research-only scope. This PR deliberately implements no
 production engine, changes no runtime behavior and adds no dependency or lockfile.
 
-Publication was blocked by HTTP 403 from both Git push and the connected GitHub
-app's branch-create operation. No PR exists; the complete local research branch
-and commits are preserved. See [publication blocker](VALIDATION.md#publication-blocker)
-for exact errors and the required access to publish without repeating research.
+Publication initially encountered HTTP 403 from Git push and the connected
+GitHub app. Access was subsequently restored: the branch is pushed and
+[PR #618](https://github.com/blyzer/oh-my-pi/pull/618) is open against `omp2`.
+See [publication history](VALIDATION.md#publication-blocker) for the original
+errors and their resolution. The PR has not been merged.

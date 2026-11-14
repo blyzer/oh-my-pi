@@ -42,11 +42,14 @@ GitHub connected-app create_branch(repository_full_name="blyzer/oh-my-pi",
 GitHub API 403: Resource not accessible by integration
 ```
 
-The token authenticates as `blyzer` and repository metadata reports push rights,
-but actual Git object/ref writes are denied. This is a credential/integration
-authorization limitation, not a request for task approval. No remote research
-branch or PR was created. Local branch and commits are preserved; an export patch
-and prepared PR description are retained in the workspace outside this document
-tree. Publication requires credentials/integration access that can write repository
-contents/refs and create pull requests. After that, push this existing branch and
-open a PR against `omp2`; do not merge it. No need to repeat the source research.
+At the time of those attempts, the token authenticated as `blyzer` and repository
+metadata reported push rights, but actual Git object/ref writes were denied.
+The completed local branch, commits, export patch and PR description were preserved.
+
+**Resolved on retry, 2026-11-14:** connected-app branch creation succeeded, then
+`git push -u origin research/omp2-native-hybrid-verification` exited 0 and
+published the saved commits. The GitHub plugin created
+[PR #618](https://github.com/blyzer/oh-my-pi/pull/618), targeting `omp2` at the
+original inspected baseline. The PR is open and unmerged. No research needed
+to be repeated and no source baseline changed. The original failures above are
+retained as historical evidence, not current blockers.
