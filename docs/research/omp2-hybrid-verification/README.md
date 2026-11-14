@@ -73,6 +73,8 @@ executed experiment; no native runtime tests were rerun here.
    boundaries, dependencies, acceptance/tests, risks and relative effort.
 10. [Risks and open questions](10-risks-open-questions.md): material unknowns and
     conditions for further decisions.
+11. [Implementation execution plan](11-execution-plan.md): ordered first slices,
+    ownership, acceptance, parallel work boundaries and runner-limited readiness.
 
 ## Final comparison
 
