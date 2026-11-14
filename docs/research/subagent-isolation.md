@@ -1,0 +1,218 @@
+# Gap 1: subagent isolation and copy-on-write backends (`subagent-isolation`)
+
+Scope: (a) copy-on-write backends, upstream `crates/pi-iso` against omp2's per-file reflink with copy fallback, including pi-iso's second consumer, clone-first worktrees; (b) ovnfs (`packages/coding-agent/src/task/ovnfs.ts`, `crates/pi-vfs`).
+Classes: (a) **c**, narrowed to the tree-clone slice of pi-iso and its first consumer, clone-first worktrees; subagent isolation keeps its per-file path. (b) **b**.
+ADR: none written. Part (a) is class c, so Main numbers one. Upstream pin: `c308970263` (v18.20.0); omp2 base: `origin/omp2 f4186b783b`.
+Citations: `upstream:` is the OMPv1 pin; `ovnfs@c43f05a:` is `stencil-hq/ovnfs` at `c43f05a517`; bare paths are omp2. The ovnfs README and docs were read from a shallow clone earlier in this session. The clone was lost in the `/private/tmp` purge; afterwards `LICENSE`, `go.mod` and `docs/limitations.md` were re-read and matched, and code search still resolves the default branch to `c43f05a517`. Everything below comes from reading. Nothing was built, run or timed; claims that rest on inference are marked [INFERENCE].
+
+Answer in brief: (a) Do not port pi-iso's backends for subagent isolation; omp2's per-file view is the equivalent and keeps ADR 0007. Port only the tree-clone slice as a new leaf crate `omp-iso`, and use it for clone-first worktrees (`/wt`, forge checkout) behind a new convar, `sv_worktree_clone`, off by default: three slices. (b) ovnfs is not adopted. `pi-vfs` is unrelated to it, and ovnfs is not tied to a host filesystem, so the brief's test does not apply; it is not adopted on other grounds (section 3).
+
+## 1. Upstream
+
+OMPv1's `pi-iso` is a cross-platform isolation layer: eight backends (APFS `clonefile`, btrfs snapshot, ZFS clone, Linux `FICLONE` tree, kernel overlayfs with a `fuse-overlayfs` fallback, Windows block clone, ProjFS, and an always-available `Rcopy`) behind one `IsolationBackend` trait with `probe`, `start`, `clone_tree`, `stop` and `diff`, and a per-OS fallback order (`upstream:crates/pi-iso/src/lib.rs:8-13`, `:51-71`, `:136-148`, `:267-299`). Users meet it twice. Isolated subagents get a copy-on-write view of the repo: `isolation.backend` picks a backend and `ensureIsolation` walks the candidates until one starts (`upstream:packages/coding-agent/src/task/settings.ts:44`, `upstream:packages/coding-agent/src/task/worktree.ts:629-674`). New worktrees (`/wt`, PR checkout, `git worktree add` in bash) are copy-on-write clones of the source checkout, "so ignored build caches come along for free", with `worktree.clone` on by default and a plain checkout when the filesystem cannot clone (`upstream:crates/pi-shell/src/git/mod.rs:17-22`, `upstream:packages/coding-agent/src/task/settings.ts:82-94`, `upstream:packages/coding-agent/src/session/session-worktree.ts:150-155`, `upstream:docs/tools/github.md:156`). Separately, when an `ovnfs` binary is on PATH and `isolation.backend` is `auto`, isolated subagents run in ovnfs checkouts instead, with no fallback once ovnfs is found (`upstream:packages/coding-agent/src/task/structured-subagent.ts:910-911`, `upstream:packages/coding-agent/src/task/ovnfs.ts:1-3`, `:260-264`).
+
+What each backend does:
+
+- **APFS.** One `clonefile(2)` call clones a whole directory tree and `stop` is a recursive remove (`upstream:crates/pi-iso/src/apfs.rs:3-8`, `:114-115`, `:174-183`). `clone_tree` clones each top-level entry except a skip list, with `CLONE_NOFOLLOW` (`:118-172`). Its probe is "always available on macOS"; an unsupported volume surfaces at clone time as `Unavailable` (`:30-34`, `:88-98`).
+- **Linux reflink.** Recreates directories and symlinks, `FICLONE` per file, copies mode and times (`upstream:crates/pi-iso/src/linux_reflink.rs:1-9`, `:96-109`, `:157-170`). `cow.rs` holds the file-level primitive and the errno set that means "cannot clone" (`upstream:crates/pi-iso/src/cow.rs:54`, `:75`, `:260`, `:283`).
+- **btrfs and ZFS.** `btrfs subvolume snapshot` and `zfs snapshot` plus `zfs clone` through the CLIs, only when `lower` is a subvolume root (inode 256 on btrfs) or exactly a dataset mountpoint (`upstream:crates/pi-iso/src/btrfs.rs:1-6`, `:77-79`, `:121-134`; `upstream:crates/pi-iso/src/zfs.rs:1-6`, `:118-128`, `:143-146`).
+- **overlayfs.** `mount(2)` of a kernel overlay, falling back to `fuse-overlayfs` when the mount is denied (`EPERM` "outside a user namespace" is the documented case); teardown is `umount2` or `fusermount` (`upstream:crates/pi-iso/src/overlayfs.rs:1-15`, `:206-209`, `:221-224`, `:233`, `:257`).
+- **Windows.** Block clone through `FSCTL_DUPLICATE_EXTENTS_TO_FILE` on ReFS and Dev Drive (`upstream:crates/pi-iso/src/windows_block_clone.rs:1-9`, `upstream:crates/pi-iso/src/cow.rs:307`). ProjFS is 978 lines with 46 occurrences of `unsafe` and is refused on x64 under ARM64 emulation (`upstream:crates/pi-iso/src/projfs.rs:1-6`, `:31-40`).
+- **Rcopy.** `git worktree add --detach` when `lower` has a `.git`, otherwise a recursive copy (`upstream:crates/pi-iso/src/rcopy.rs:1-12`, `:52-60`).
+- **Size and tests.** 5,094 lines in 12 files. 15 `#[test]`s, none in `btrfs`, `zfs`, `linux_reflink`, `windows_block_clone` or `cow` (counted: apfs 1, diff 6, overlayfs 1, projfs 2, rcopy 5).
+- **Other consumers.** The napi shim (`upstream:crates/pi-natives/src/iso.rs:103-150`), the `cp` builtin's file clone (`upstream:crates/pi-builtins/src/cp.rs:7`, `:2878`, `:2947`), and `pi-vcs` worktree creation, which tries `clone_candidates`, clones the tree minus `.git`, registers the worktree, copies the index and rewrites only the paths that differ (`upstream:crates/pi-vcs/src/git/mutate.rs:678-696`, `:759-790`). Directories holding `pyvenv.cfg` or `CMakeCache.txt` are pruned from the clone (`:1839-1872`).
+
+ovnfs and `pi-vfs` are not what the brief grouped them as:
+
+- ovnfs is not a crate upstream. It is the external Go program `stencil-hq/ovnfs`. The upstream side is four TypeScript files (1,014 lines) that start the daemon, talk to its admin socket in length-prefixed JSON frames, and open, diff and remove checkouts (`upstream:packages/coding-agent/src/task/ovnfs.ts:16-18`, `:171-181`, `upstream:packages/coding-agent/src/ovnfs/client.ts:1-12`, `:21`). 25 upstream files mention it: the system prompt tells agents to use checkouts instead of `git worktree add` or `cp -r`, `grep` and `glob` are answered by the daemon inside a checkout (`upstream:packages/coding-agent/CHANGELOG.md:419`), the git guard names the command, and `omp worktree clear` releases crashed runs' checkouts (`upstream:packages/coding-agent/src/prompts/system/system-prompt.md:138-145`, `upstream:docs/tools/grep.md:188`, `upstream:crates/pi-shell/src/git/guard.rs:59-62`, `upstream:packages/coding-agent/src/task/ovnfs.ts:20-22`).
+- `pi-vfs` has nothing to do with ovnfs or isolation. It is the embedded shell's injectable async filesystem (host paths plus `scheme://` providers), referenced by 133 files, 79 of them in `pi-builtins`. Its only "overlay" is the descriptor overlay of `Fs::mount_file` (`upstream:crates/pi-vfs/src/lib.rs:1-17`, `upstream:crates/pi-vfs/src/provider.rs:23-32`, `upstream:crates/pi-vfs/src/fs.rs:3`, `:64`, `upstream:packages/coding-agent/src/internal-urls/url-filesystem.ts:1-14`).
+
+## 2. omp2 inventory
+
+**Subagent isolation (ADR 0007, implemented).**
+
+- Every composed child runs in an isolated view. The hook payload reports `worktree: true` (`crates/driver/src/subagent/spawn.rs:487-509`); `run_child` calls `create_isolation` (`:927`), which sends `CreateWorktree` named `subagent-<id>` (`:1018-1040`); `finish_isolation` sends `MergeWorktree` in patch or branch mode with `dry_run` taken from `sv_task_isolation_apply` (`:1042-1058`; convars at `crates/driver/src/subagent/settings.rs:293-316`). `CreateWorktree` has no backend field (`crates/proto/proto/omp/env/v1/env.proto:1154-1160`), and the `sv_task_isolation_mode` selector was deleted because it advertised backends that did not exist (`docs/adr/0007-subagent-filesystem-isolation.md:94`).
+- `create_worktree` snapshots the live workspace into a content-addressed manifest, then for each manifest entry canonicalises the source, creates parents, clones the file and sets its mode (`crates/envd/src/workspace/operations.rs:673-746`; clone call `:725`). The walk is `hidden(true).gitignore(true).skip_git(true)` and keeps regular files only (`:1036-1038`, `:1053`). That is ADR 0007's rule that gitignored files are not copied, confirmed by the owner on 2026-11-01 (`docs/adr/0007-subagent-filesystem-isolation.md:89`, `:93`).
+- The clone is per file: `clonefile` with flags 0 on macOS (`crates/envd/src/workspace/operations.rs:2051-2065`), `FICLONE` on Linux (`:2067-2085`), always `Unsupported` elsewhere (`:2087-2090`). `ENOTSUP` or `EXDEV` (macOS), and `EOPNOTSUPP`, `EXDEV`, `ENOTTY` or `EINVAL` (Linux), select `hardlink_copy_fallback`, which links, copies to a temporary name and renames over the link, or plain-copies when the link fails (`:2041-2049`, `:2092-2128`). Nothing selects a backend.
+- Return path: `merge_worktree` snapshots the child root and the parent root, writes a content-addressed manifest diff, and in patch mode applies it through the restore plan and reports conflicts; branch mode records `omp/agent/<id>` against the child snapshot (`crates/envd/src/workspace/operations.rs:789-860`, `:824-846`).
+- Where the time goes, from reading: `hash_file` reads and stages every file whose fingerprint (length, mtime, mode, inode, ctime) is not in an in-memory cache keyed by absolute path (`crates/envd/src/workspace/operations.rs:1182-1218`, `:210-250`). A file cloned into the child is therefore a miss at merge time, and a merge takes two full-tree snapshots (`:805`, `:821`). [INFERENCE, unmeasured] The byte reads in those snapshots cost more than the clone syscalls. The repo records no timing: the W7 workload measures creation, readiness and cleanup of isolated slots (`crates/e2e/src/baseline/workloads.rs:795-830`) and the P8 recorder keeps its results as non-gating CI artifacts (`AGENTS.md:103-105`).
+- Tests and CI: `clone_file_cow`, `cow_is_unsupported` and `hardlink_copy_fallback` are referenced only inside `operations.rs` and have no direct test; its unit tests cover baseline sizing (`crates/envd/src/workspace/operations.rs:2135-2182`). The paths run end to end in `crates/app/tests/it/envd_workspace.rs:215` (clean patch applied, conflict recovery) and `crates/e2e/tests/p9_isolation.rs:261`. P9 runs on `ubuntu-24.04` (`.github/workflows/ci.yml:807-811`, `:882`); the workspace test run is on the macOS job (`:426`, `:457`, `:569`). So `clonefile` is exercised on macOS and the copy fallback on Linux. [INFERENCE] No job has a reflink-capable filesystem, so the `FICLONE` success path is untested.
+
+**Other copy and isolation code.**
+
+- `omp-sandbox` has its own macOS copy for `WriteMode::Ephemeral`: per entry `clonefile` with `CLONE_NOFOLLOW` and a copy fallback (`crates/sandbox/src/runtime/macos.rs:19-52`, `:162-196`). Windows copies (`crates/sandbox/src/runtime/windows.rs:64-88`, `:298`).
+- `crates/envd/src/vcs/git/mutation.rs:391-432` has `create_isolation_branch`, `commit_isolation` and `rollback_isolation` for autoresearch. They are git-level and give no filesystem view.
+- No extension provides an isolation backend. The `isolation` fields in `extensions/` say how much parent conversation a child inherits (`extensions/workflows/src/omp_workflows/dag.py:35`, `crates/py/python/omp/agents.py:483-488`).
+
+**User worktrees (pi-iso's second consumer).**
+
+- `/wt` shells out to the git binary: `git stash create`, `git worktree add -b`, `git stash apply`, then a best-effort `fs::copy` of untracked files. Ignored files are not carried (`crates/app/src/chat_services/workspace.rs:26-92`; test `:160-183`). Its only setting is `sv_worktree_base` (`:110-118`; declared at `crates/envd/src/host_settings.rs:138-148`).
+- Forge checkout is core, vendor-neutral code that calls `GitRepo::worktree_add(path, branch, false)` (`crates/envd/src/forge_worktree.rs:304-306`; `docs/adr/0049-forge-dyn-device-schema.md:49-56`; test `crates/envd/src/forge_worktree.rs:363-364`).
+- `omp-vcs`'s `worktree_add` writes the admin files and checks out the tree. It has no clone option, and none of upstream's clone helpers exist (searched by name: `register_worktree`, `index_diff_paths`, `refresh_clean_index_stats`, `collect_clone_reconciliation_paths`, `copy_worktree_path`, `prune_nonrelocatable_clone_dirs`) (`crates/vcs/src/git/mutate.rs:446-496`; existing tests `:1609-1642`).
+- Importer: `worktree.base` maps through `legacy.path` (`crates/envd/src/host_settings.rs:146`). `worktree.clone`, `isolation.backend`, `task.isolation.enabled` and `ovnfs.path` have no mapping and import as unmapped (`crates/driver/src/v1_import/settings.rs:480-557`; `docs/adr/0007-subagent-filesystem-isolation.md:94`).
+- `omp worktree` maintains the shared isolation base and honours v1's owner markers (`crates/app/src/worktree_cmd.rs:1-22`).
+
+**Crates, dependency direction and platforms.**
+
+- `omp-envd` depends on `omp-core`, `omp-sandbox`, `omp-shell-builtins` and `omp-vcs` (`crates/envd/Cargo.toml:48`, `:69-70`, `:76`). `omp-sandbox` depends on `omp-core` only (`crates/sandbox/Cargo.toml:18`). `omp-vcs` depends on `omp-core`, `gix` and `libc` (`crates/vcs/Cargo.toml:19-20`, `:30`), and `omp-app` on `omp-vcs` (`crates/app/Cargo.toml:112`). `omp-shell-builtins` depends on `omp-core`, `omp-shell`, `omp-tool` and `omp-walker` (`crates/shell-builtins/Cargo.toml:51-54`). So the sandbox cannot reuse envd's clone code, and shell builtins cannot reuse vcs's without pulling in `gix`. `libc` and a `windows-sys` set that already includes `Win32_System_IO` and `Win32_Storage_FileSystem` are workspace dependencies (`Cargo.toml:101`, `:325`).
+- CI has `ubuntu-24.04` and `macos-15` or the self-hosted Mac and no Windows job (`.github/workflows/ci.yml:128`, `:457`, `:654`). Embedded CPython bundles exist only for `aarch64-apple-darwin` and `x86_64`/`aarch64-unknown-linux-gnu` (`AGENTS.md:116-118`). `PHILOSOPHY.md:298` says "Multiple concurrent agents, remote execution, and Windows are design inputs, not ports." Lint runs on macOS and Linux so `cfg(target_os)` code is checked on both (`AGENTS.md:113-116`; `.github/workflows/ci.yml:645`, `:697`).
+
+**ovnfs and `pi-vfs` in omp2.**
+
+- No code, extension, script or CI file mentions ovnfs. The records are ADR 0007's amendment (`docs/adr/0007-subagent-filesystem-isolation.md:82-84`), `docs/adr/TASKS.md:217` (OPEN, "README read only") and `docs/research/durable-run-coordinator.md:53`, `:63`.
+- omp2 discovers `SKILL.md` skills from `.omp/skills`, `<config root>/agent/skills` and other roots (`crates/driver/src/discovery/skills.rs:1-12`).
+- omp2 has no vfs crate. Gap 6 decided not to adopt `pi-vfs` (`docs/research/shell-builtins.md:55-59`).
+
+## 3. Class
+
+**Part (a): c (port), narrowed.** The brief asks whether pi-iso's backends are needed for subagent isolation. They are not. But pi-iso has a second consumer that omp2 lacks, and that is where its tree-clone code earns its keep, so the port is only that slice.
+
+1. **Subagent isolation: no new backend (b for this consumer).** The per-file manifest view is the equivalent (`crates/envd/src/workspace/operations.rs:673-746`, `:2041-2128`), and it is the only shape that keeps ADR 0007's rules.
+   - The view holds tracked files and untracked files that are not ignored, and "gitignored files are not copied" is a standing decision (`docs/adr/0007-subagent-filesystem-isolation.md:89`, `:93`). A whole-tree `clonefile`, a btrfs or ZFS snapshot and an overlay mount all expose the ignored files too (`upstream:crates/pi-iso/src/apfs.rs:3-8`, `upstream:crates/pi-iso/src/btrfs.rs:1-6`, `upstream:crates/pi-iso/src/overlayfs.rs:1-6`).
+   - `Rcopy`'s `git worktree add --detach` is a tracked-only view, which ADR 0007 prohibits as isolation (`upstream:crates/pi-iso/src/rcopy.rs:1-12`; `docs/adr/0007-subagent-filesystem-isolation.md:53-54`).
+   - On the users' platforms the existing path already clones where the filesystem can (APFS) and copies where it cannot (Linux CI [INFERENCE: the runner's filesystem was not observed]). The other backends need a subvolume or dataset root, a CLI, mount privileges or Windows (`upstream:crates/pi-iso/src/btrfs.rs:117-130`, `upstream:crates/pi-iso/src/zfs.rs:118-128`, `upstream:crates/pi-iso/src/overlayfs.rs:8-11`).
+   - The cost of `create_worktree` and `merge_worktree` is mostly snapshot work, not the clone (section 2), so a faster clone would change little. Warm builds for isolated children are already routed to remote runners ("can share one warm remote runner", `docs/adr/0040-remote-build-and-test-execution.md:1098-1099`), and the standing design note treats filesystem copy-on-write as an optimisation behind the manifest interface, for the path where a writable clone is the real requirement (`docs/py/12-agents.md:2544-2552`).
+2. **Clone-first worktrees: port (c).** omp2's `/wt` and forge checkout do a full checkout and leave ignored caches behind (`crates/app/src/chat_services/workspace.rs:63-92`, `crates/envd/src/forge_worktree.rs:304-306`), and `omp-vcs` has no clone path (`crates/vcs/src/git/mutate.rs:446-496`). On APFS a directory clone makes the new worktree appear without writing its files and keeps `node_modules` and `target` (`upstream:crates/pi-shell/src/git/mod.rs:17-22`, `upstream:packages/coding-agent/src/task/settings.ts:91-92`). ADR 0040's remote runner does not help a build that runs locally in the new worktree. This is the difference a macOS user can feel. Upstream backs it with six integration tests and four unit tests (`upstream:crates/pi-vcs/tests/worktree_clone_carry.rs:103-362`, `upstream:crates/pi-vcs/src/git/mutate.rs:2943`, `:3025`, `:3056`, `:3114`).
+
+Disposition of every upstream piece:
+
+| Upstream piece | Disposition | Reason |
+|---|---|---|
+| APFS `clonefile`, whole tree and top-level entries (`upstream:crates/pi-iso/src/apfs.rs:3-8`, `:118-172`) | port | Tree clone for worktrees; macOS is the user platform. |
+| Linux `FICLONE` tree (`upstream:crates/pi-iso/src/linux_reflink.rs:1-9`) | port | Same consumer; omp2 already uses `FICLONE` per file (`crates/envd/src/workspace/operations.rs:2067-2085`). |
+| File-level `cow` and errno classes (`upstream:crates/pi-iso/src/cow.rs:54`, `:75`) | port, Unix half | Shared primitive; `upstream:crates/pi-iso/src/cow.rs:287-436` is the Windows half. |
+| `diff` (`upstream:crates/pi-iso/src/diff.rs:1-14`) | covered | omp2's content-addressed manifest diff (`crates/envd/src/workspace/operations.rs:820`, `:1426`). |
+| Windows block clone (`upstream:crates/pi-iso/src/windows_block_clone.rs:1-9`) | not needed now | No Windows job or CPython bundle (section 2). Trigger: a Windows job in CI. |
+| btrfs snapshot, ZFS clone (`upstream:crates/pi-iso/src/btrfs.rs:1-6`, `upstream:crates/pi-iso/src/zfs.rs:1-6`) | not needed | CLI plus subvolume or dataset root only, no tests upstream, copies ignored files. |
+| overlayfs (`upstream:crates/pi-iso/src/overlayfs.rs:1-15`) | not needed | Needs mount privilege or FUSE; upstream fixed a leaked mount and daemon (`upstream:packages/coding-agent/CHANGELOG.md:684`). |
+| ProjFS (`upstream:crates/pi-iso/src/projfs.rs:1-6`) | not needed | Windows only; 978 lines, 46 `unsafe`. |
+| Rcopy (`upstream:crates/pi-iso/src/rcopy.rs:1-12`) | not needed | A tracked-only view is prohibited as isolation (`docs/adr/0007-subagent-filesystem-isolation.md:53-54`); omp2 has a native `worktree_add` (`crates/vcs/src/git/mutate.rs:447`). |
+| napi shim, `auto_order`, backend setting (`upstream:crates/pi-natives/src/iso.rs:103-150`, `upstream:packages/coding-agent/src/task/settings.ts:44`) | not needed | omp2 deleted the selector convar; selection is by probing (`docs/adr/0007-subagent-filesystem-isolation.md:94`). |
+
+**Crate shape (asked for in the brief): a new leaf crate `omp-iso`. Not a port of the whole crate, and not an extension of the existing code.**
+
+- Two platform primitives need `unsafe` and `cfg` gates (`clonefile`, `FICLONE`), and omp2 already has that FFI twice (`crates/envd/src/workspace/operations.rs:2059`, `:2076`; `crates/sandbox/src/runtime/macos.rs:178-196`).
+- Reuse is blocked by dependency direction (section 2). A module inside `omp-envd` or `omp-vcs` has one consumer. `omp-core` is a dependency of every crate that would use the primitive (`crates/envd/Cargo.toml:48`, `crates/sandbox/Cargo.toml:18`, `crates/vcs/Cargo.toml:19`, `crates/shell-builtins/Cargo.toml:51`) and carries `libc` (`crates/core/Cargo.toml:37`), but everything rebuilds when it changes, which ADR 0049 D3 treats as a cost (`docs/adr/0049-tiered-integration-architecture.md:88-101`).
+- The API is narrow (an enum, three functions, an error type) and consumers are likely at least two: `omp-vcs` now; the envd view, the sandbox copy and Gap 6's `cp` later (`docs/research/shell-builtins.md:45`).
+- It is a leaf with `libc` only (`Cargo.toml:101`).
+- The name follows the brief. `omp-cow` would describe it better. Its README must say it clones files and trees and does nothing else (`AGENTS.md:160-164`).
+
+**Part (b): b (not needed).** Findings from source that differ from the brief:
+
+- `pi-vfs` is not ovnfs and is not isolation (section 1). Its capability, `scheme://` paths inside shell commands, belongs to Gap 6, which declined to adopt it (`docs/research/shell-builtins.md:55-59`).
+- ovnfs is not tied to a host filesystem. It keeps its own copy-on-write layer, so a checkout works on any host filesystem, and it uses reflinks only when capturing files over 1 MiB, streaming them into chunks otherwise (`ovnfs@c43f05a:README.md:96-97`, `ovnfs@c43f05a:docs/internals.md:143-146`). macOS gets an NFSv3 loopback mount that needs nothing installed, Linux a FUSE mount that needs `fusermount3`, Windows WinFsp or SMB (`ovnfs@c43f05a:README.md:12-14`, `:40-43`; `ovnfs@c43f05a:docs/platforms.md:5-9`). So "it only helps on a filesystem our users lack" does not hold, and (b) rests on the grounds below instead.
+- ovnfs is not a Rust crate, and adopting it would not give a virtual-filesystem crate. It is a Go daemon (`ovnfs@c43f05a:go.mod:1-3`, `:10`, `:14-15`) plus, upstream, 1,014 lines of TypeScript that ADR 0036 does not let us port as TypeScript (`docs/adr/0036-python-for-extensions.md:40-41`). A vendor tool belongs in an extension (`docs/adr/0049-tiered-integration-architecture.md:52`).
+
+When it applies upstream: only when the binary is found and `isolation.backend` is `auto`; once found there is no fallback, and a failure tells the user to set a native backend (section 1; `upstream:packages/coding-agent/src/task/ovnfs.ts:316-318`; `upstream:docs/tools/task.md:162-163`). The system-prompt guidance applies whenever the binary is found, whatever the isolation setting is (`upstream:docs/tools/task.md:163`), and `grep` goes through the daemon for paths inside a checkout (`upstream:docs/tools/grep.md:188`).
+
+Why b:
+
+1. No need is shown that the per-file view fails to meet. ovnfs's claim is a checkout "ready in about a second at any size" (`upstream:packages/coding-agent/src/task/settings.ts:175-176`). omp2 records no creation time, so there is nothing to beat (section 2).
+2. Its defaults cross ADR 0007's ignored-file rule. `cache` and `local` paths, which the README describes as "build outputs, ignored files, secrets", show the live folder until the checkout writes them (`ovnfs@c43f05a:README.md:87-92`). In a git repository the checkout also gets a private git directory (`:96-98`), where omp2's view has no `.git` (`crates/envd/src/workspace/operations.rs:1038`). The built-in rule table was not read (`docs/configuration.md` is larger than the GitHub tool returns here), so whether a `.env`-style file is `hidden` by default is unknown; `ovnfs explain PATH` answers it (`ovnfs@c43f05a:README.md:92-94`).
+3. It needs a second long-running daemon and a visible mount, `~/checkouts` by default (`ovnfs@c43f05a:docs/configuration.md:5-8`). On macOS it relies on a `mount_nfs` socket form its own docs call undocumented, with a loopback-TCP fallback (`ovnfs@c43f05a:docs/platforms.md:15-20`). On Linux it needs `fusermount3` and a mount below `$HOME`, `/mnt`, `/media` or `/tmp` (`ovnfs@c43f05a:docs/configuration.md:10-11`), and a forced stop fails in "some unprivileged containers" (`ovnfs@c43f05a:docs/platforms.md:52-54`).
+4. Network-filesystem behaviour is documented. NFSv3 locks are client-local and cache invalidation can lag up to 60 s (`ovnfs@c43f05a:docs/limitations.md:28-30`, `:40-43`). Upstream's changelog records a file watcher that looped on ovnfs checkouts and stalled every checkout (`upstream:packages/coding-agent/CHANGELOG.md:85`).
+5. It is not a sandbox: "absolute paths and symlinks can reach the host" (`ovnfs@c43f05a:docs/limitations.md:3`; `ovnfs@c43f05a:README.md:103`). Under omp-sandbox the checkout path would have to be a declared writable scope (`crates/sandbox/src/spec.rs:87-90`).
+6. Integration cost. The upstream adapter spans 25 files, speaks admin protocol version 5 and checks daemon features before use (`upstream:packages/coding-agent/src/ovnfs/client.ts:21`, `upstream:packages/coding-agent/src/task/ovnfs.ts:67-68`). omp2's core has no seam to plug into, because `CreateWorktree` carries no backend (`crates/proto/proto/omp/env/v1/env.proto:1154-1160`). The README's install example is `v0.2.3` (`ovnfs@c43f05a:README.md:33`), which suggests a pre-1.0 release [INFERENCE].
+
+What the user does instead: nothing is lost. Install `ovnfs` and copy its agent skill into the skills directory (`ovnfs@c43f05a:README.md:114`; omp2 discovers `SKILL.md` skills under `.omp/skills` and `<config root>/agent/skills`, `crates/driver/src/discovery/skills.rs:1-12`). Agents then run `ovnfs new`, `diff` and `apply` through the bash tool. Subagents keep the per-file view.
+
+ADR 0007 left five items open before any ovnfs design (`docs/adr/0007-subagent-filesystem-isolation.md:84`). From source:
+
+- Go and daemon dependency, licence: a separate binary installed by the user (`ovnfs@c43f05a:README.md:16-47`); MIT, Copyright (c) 2026 Stencil Labs, Inc. (`ovnfs@c43f05a:LICENSE:1-3`).
+- NFS loopback and FUSE under omp-sandbox: not tested; see point 5 and section 6.
+- Conflicts as data: the upstream adapter does not use `apply`. It asks for `diff` as a `git diff --binary` patch and lets OMP merge it (`upstream:packages/coding-agent/src/task/ovnfs.ts:171-181`; `ovnfs@c43f05a:docs/checkouts.md:267-273`). `ovnfs apply` reports conflicts as git-style markers and exit status 1 (`ovnfs@c43f05a:docs/checkouts.md:281-288`). omp2's merge would stay `merge_target` (`crates/envd/src/workspace/operations.rs:823`).
+- `.git` and ignored paths: point 2.
+- Windows: SMB or WinFsp (`ovnfs@c43f05a:docs/platforms.md:9`); omp2 has no Windows build (section 2).
+
+Re-entry triggers: (i) a recorded W7 or equivalent shows isolated-child creation or merge over a budget the owner sets, with the clone step as the cost; (ii) the owner decides isolated views should see ignored build caches read-only, which is ovnfs's `cache` class; (iii) isolation across machines becomes roadmap (`ovnfs@c43f05a:README.md:9-10`, `:66-68`); (iv) Linux ext4 desktops become a primary platform and copy cost is reported.
+
+## 4. Options
+
+**Part (a): clone-first worktrees and the crate shape.**
+
+| Option | Cost | Fit |
+|---|---|---|
+| A. Do nothing | None. | Keeps ADR 0007 intact. macOS users keep cold worktrees. |
+| B. Build on existing code: a private module in `omp-vcs` | About 1,000 lines written or moved, no new crate. | Only vcs can use it. envd and the sandbox keep their private copies and `cp` cannot reach it. |
+| B2. Build on existing code: primitives in `omp-core` | Same lines. | Every consumer already depends on it, but it puts `unsafe` FFI in the crate everything rebuilds on (ADR 0049 D3). |
+| **C. New leaf crate `omp-iso` with the tree-clone slice, then port vcs's clone-first worktree add (chosen)** | About 1,000 lines for `omp-iso`, about 490 for vcs, about 600 of tests, all from upstream (estimates from the file sizes in section 7). | One shared primitive, FFI in one small place, linted on both OSes. No roster change (ADR 0024: no model-facing tool is touched), no new runtime (ADR 0036), additive (a new crate, a new convar, a new method beside the old one). |
+| D. Port all of `pi-iso` | 5,094 lines plus `async-trait`, `tokio` and `pi-diff` dependencies (`upstream:crates/pi-iso/Cargo.toml:13-26`). | Eight backends behind trait objects where AGENTS asks for enums before `dyn` (`AGENTS.md:368`). Four backends have no tests upstream. It breaks ADR 0007 twice (section 3). Rejected. |
+| E. Carry only the ignored directories: keep today's checkout and, when the convar is on, clone ignored directories into the new worktree | About 150 to 250 lines, no index work (estimate). | Smaller and safer, but the checkout still writes every tracked file, and carried build outputs would be older than the freshly written sources, so mtime-based tools may rebuild [INFERENCE]. Nothing upstream to port or test against. Recorded as the fallback if the index reconciliation in S2 proves too risky. |
+
+Choice: C. The primitive must be reachable from crates that cannot depend on each other. Upstream already ships and tests the behaviour. Every slice is inert or default-off. B is cheaper but dead-ends, D breaks a locked ADR, and E is the escape hatch.
+
+**Part (b): recorded for completeness; class b needs no plan.**
+
+| Option | Cost | Fit |
+|---|---|---|
+| **A. Not adopted; opt in through the CLI and the skill (chosen)** | None. | Subagents keep the per-file view; nothing in core changes. |
+| B. Python extension over a new isolation-provider seam | A seam in `CreateWorktree` or a device family, about 1,000 lines of Python to track the admin protocol, daemon lifecycle, sandbox grants, and a macOS spike first. | Consistent with ADR 0036 and ADR 0049, but pays for a gain nobody has measured. |
+| C. Rust virtual-filesystem crate, or embedding the Go code | A reimplementation of a daemon, or a second language. | Breaks the no-new-language-runtime constraint. Rejected. |
+
+## 5. Plan
+
+Part (a), class c: three slices, in order. S1 and S2 are inert until S3 wires them, and S3 ships behind a default-off convar. Part (b) is class b and has no plan.
+
+**S1. `omp-iso`: copy-on-write file and tree cloning.** A new crate, `crates/iso` (directories are unprefixed, packages are `omp-` prefixed, `AGENTS.md:160-161`).
+
+- Content: `BackendKind` with two variants, `Apfs` and `LinuxReflink`, dispatched by `match` (no trait objects, no `async-trait`, no `tokio`); `clone_candidates()`, a host-level probe in upstream's auto order for the OS; `clone_tree(kind, lower, merged, skip)`; `cow::clone_file` and `cow::is_unsupported`; `IsoError::{Unavailable, Other}`. Ported from `upstream:crates/pi-iso/src/apfs.rs`, `linux_reflink.rs`, `tree.rs`, `upstream:crates/pi-iso/src/cow.rs:1-286` and the matching parts of `lib.rs`: about 1,000 of 5,094 lines. Dropped: btrfs, zfs, overlayfs, projfs, rcopy, diff, Windows block clone, and `clone_over` (swapping an existing destination, which only `cp` needs).
+- Housekeeping: `libc` only (`Cargo.toml:101`), `[lints] workspace = true`, a `description`, a README, a copy of upstream's `LICENSE`, one `area/*` entry (`.github/labeler.yml:51-64`, `area/tools` beside `vcs` and `walker`) and a `THIRD-PARTY-NOTICES.txt` entry (`AGENTS.md:120-122`, `:160-164`).
+- Ships behind: nothing to gate; no crate depends on it yet.
+- Acceptance:
+  1. macOS: `clone_tree` of a tree holding a directory, a regular file, a symlink and a skipped top-level entry leaves the symlink a symlink, omits the skipped entry, refuses a non-empty destination, and removes the partial destination when a clone fails.
+  2. `is_unsupported` is true for `EXDEV`, `EOPNOTSUPP`, `ENOTTY`, `EINVAL` and `ENOSYS` on Linux and for `ENOTSUP`, `EOPNOTSUPP` and `EXDEV` on macOS (`upstream:crates/pi-iso/src/cow.rs:260`, `:283`), and false for `ENOENT`, `EACCES` and `ENOSPC`.
+  3. Linux: on a filesystem without reflink, `clone_tree` returns `Unavailable` and leaves no destination; on one with reflink the files share extents.
+  4. The crate builds and lints clean on both lint jobs (`.github/workflows/ci.yml:645`, `:697`).
+- Tests: the four above. Case 2 is table-driven with `io::Error::from_raw_os_error`, so it runs on Linux CI without a reflink filesystem. The capability-dependent cases detect the filesystem first and print SKIP when it cannot clone, as upstream does (`upstream:crates/pi-vcs/tests/worktree_clone_carry.rs:88-108`). Upstream's APFS test is the model for case 1 (`upstream:crates/pi-iso/src/apfs.rs:186-240`).
+
+**S2. `omp-vcs`: clone-first worktree add.**
+
+- Content: `WorktreeClone` (`Off`, `Auto`, `Prefer`), `WorktreeAddOptions { detach, clone, keep_changes }` and `WorktreeAddResult { cloned_with, clone_error }` (`upstream:crates/pi-vcs/src/types.rs:110-137`); `GitRepo::worktree_add_with(path, ref, options)` with upstream's flow (`upstream:crates/pi-vcs/src/git/mutate.rs:620-860`) and helpers (`:1747-1960`): `register_worktree`, `seed_worktree_changes`, `worktree_add_cloned`, `index_diff_paths`, `refresh_clean_index_stats`, `collect_clone_reconciliation_paths`, `copy_worktree_path`, `prune_nonrelocatable_clone_dirs`, `cleanup_worktree_add`. The existing `worktree_add(path, ref, detach)` (`crates/vcs/src/git/mutate.rs:447`) stays and delegates with `clone: Off`.
+- Ships behind: nothing calls it with clone on until S3; `clone: Off` is today's path.
+- Acceptance:
+  1. With `clone: Off` the result matches today's `worktree_add`, and the three existing tests (`crates/vcs/src/git/mutate.rs:1609-1642`) pass unchanged.
+  2. With a working clone backend, the new worktree has the source's tracked, staged, dirty and untracked state, and `cloned_with` names the backend.
+  3. A directory holding `pyvenv.cfg` or `CMakeCache.txt` is not carried, and tracked files beneath it are still checked out (`upstream:crates/pi-vcs/src/git/mutate.rs:1839-1872`).
+  4. With `core.sparseCheckout` or `core.splitIndex` set, it falls back to the ordinary checkout with `clone_error` set (`upstream:crates/pi-vcs/src/git/mutate.rs:768-774`).
+  5. A clone failure leaves no partial directory and the ordinary checkout runs.
+  6. When the target is not the source `HEAD` (PR checkout), paths that differ from the target tree are rewritten and the target's ignore rules decide which carried files stay.
+- Tests: port `upstream:crates/pi-vcs/tests/worktree_clone_carry.rs` (six tests, 362 lines) and the four unit tests (`upstream:crates/pi-vcs/src/git/mutate.rs:2943`, `:3025`, `:3056`, `:3114`). Clone-success cases run on the macOS job (`.github/workflows/ci.yml:426-457`, `:569`) and print SKIP on filesystems without clone. The fallback case (`upstream:crates/pi-vcs/tests/worktree_clone_carry.rs:207-208`) runs everywhere, Linux included.
+
+**S3. Convar and wiring.**
+
+- Content: `sv_worktree_clone` (bool, default false) next to `SV_WORKTREE_BASE` (`crates/envd/src/host_settings.rs:138-148`), with `legacy.path: "worktree.clone"` so the importer maps the v1 key; projected through `WorktreeSettings` (`crates/envd/src/host_settings.rs:167-173`, `:228-231`; `crates/driver/src/settings.rs:188-218`). Forge checkout calls `worktree_add_with` with `clone: Auto` when it is set (`crates/envd/src/forge_worktree.rs:304-306`); `checkout` takes no settings today (`:134-139`), so it gains an argument that `DynForgeAdapter`, its only caller, fills from the convar (`crates/envd/src/forge_adapter/dyn_forge.rs:210-218`, `:410`). `/wt` calls it with `keep_changes: true` when it is set, in place of the stash, `git worktree add` and untracked copy (`crates/app/src/chat_services/workspace.rs:35-92`); `create_worktree_at` gains a parameter for the setting. The chat message names the backend that cloned, or the reason the clone was skipped.
+- Ships behind: `sv_worktree_clone`, default off.
+- Acceptance:
+  1. Off: `/wt` and forge checkout behave as today. `worktree_carries_uncommitted_changes` (`crates/app/src/chat_services/workspace.rs:160-183`) and `checkout_creates_worktree_under_forge_root` (`crates/envd/src/forge_worktree.rs:363-364`) pass unchanged.
+  2. On, macOS: a new `/wt` worktree contains an ignored `node_modules/` or `target/` that the source had, reports `cloned_with` as APFS, and has no directory holding `pyvenv.cfg`.
+  3. On, Linux without reflink: `/wt` succeeds through the ordinary checkout and shows why the clone was skipped.
+  4. The importer maps v1 `worktree.clone` to `sv_worktree_clone` (a case beside `crates/driver/src/v1_import/settings_tests.rs:120-139`).
+- Tests: the `/wt` unit test with the setting on and off (clone-success case on the macOS job, fallback case everywhere); a forge checkout test with the setting on; the importer case. Optional: a P8 workload next to W7 that records worktree-add time with and without clone (`crates/e2e/src/baseline/workloads.rs:795`; non-gating, `AGENTS.md:103-105`).
+
+**Not in this plan.** Bash `git worktree add` served through clones (upstream `PI_SMART_GIT`, `upstream:crates/pi-shell/src/git/mod.rs:3-22`; omp2's `crates/shell/src` and `crates/shell-builtins/src` have no worktree handling); the shared-checkout guard; moving the envd view or the sandbox copy onto `omp-iso`; Windows block clone; btrfs, ZFS, overlayfs, ProjFS and Rcopy; ovnfs.
+
+## 6. Open questions
+
+1. **Scope of the ignored-file rule (owner).** ADR 0007 governs subagent views, and its owner decision is "no gitignored path is safe to copy" (`docs/adr/0007-subagent-filesystem-isolation.md:24-30`, `:93`). Clone-first worktrees copy ignored files by design. Default taken: the rule covers subagent views only, and S3 ships off. If the owner means it for every copy, part (a) becomes b and S1 to S3 are not built.
+2. **Default after soak.** Upstream defaults `worktree.clone` to true (`upstream:packages/coding-agent/src/task/settings.ts:86`). Flipping omp2's default later changes `/wt` behaviour and needs its own decision (additive-only).
+3. **`/wt` through `omp-vcs`.** With the convar on, staged hunks are carried by copying the index (`upstream:crates/pi-vcs/src/git/mutate.rs:709-757`). omp2 now uses `git stash create` and `apply --index` with a plain-apply fallback (`crates/app/src/chat_services/workspace.rs:63-79`). S3 keeps the git path when the convar is off and needs a parity test for staged and unstaged edits.
+4. **Possible defect, outside this gap.** The isolated view omits symlinks and empty directories: the manifest keeps regular files only (`crates/envd/src/workspace/operations.rs:1053`) and `create_worktree` clones manifest entries only (`:709-727`), so a tracked symlink is absent from a child's view and cannot appear in its patch. Read, not exercised. A fix changes manifest content (`MANIFEST_MAGIC`, `:52`) and persisted snapshots, so it needs the owner under additive-only.
+5. **Gap 6 `cp`.** Upstream `cp` clones files through `pi_iso::cow` (`upstream:crates/pi-builtins/src/cp.rs:7`, `:2878`, `:2947`). Gap 6 plans to port `cp` and does not mention reflink (`docs/research/shell-builtins.md:45`). If `cp` keeps reflink it needs S1's `cow` module. Shell builtins can depend on a leaf crate but not on `omp-vcs` (section 2).
+6. **`scheme://` in shell commands.** That capability is `pi-vfs` upstream (`upstream:packages/coding-agent/src/internal-urls/url-filesystem.ts:1-14`). Gap 6 rejected adopting the crate (`docs/research/shell-builtins.md:59`) without saying who covers the capability. Main should confirm it has an owner.
+7. **Windows.** No Windows job and no CPython bundle (`AGENTS.md:116-118`), so Windows block clone is deferred. Trigger: a Windows job in CI.
+8. **Measurement.** The repo holds no timing for isolation creation or merge; W7 exists (`crates/e2e/src/baseline/workloads.rs:795-830`). Record W7 on APFS and on Linux before anyone changes subagent isolation, and record `/wt` time with and without clone before the default is flipped.
+9. **ovnfs: items that need a spike.** (i) A Seatbelt-sandboxed child using a checkout on the NFS loopback mount; (ii) the default class of `.env`-style files (`ovnfs explain`); (iii) admin protocol drift, `PROTOCOL_VERSION = 5` (`upstream:packages/coding-agent/src/ovnfs/client.ts:21`). None was run.
+10. **Constraints and locked ADRs.** S1 to S3 touch no existing tool, skill, convar, hook, URL scheme or CLI command: a new crate, a new convar that is off by default, a new method beside the old one. They add no vendor code, no model, no second language, no `pi` identity and no roster change (ADR 0024, `docs/adr/0024-small-permanent-roster.md:33-44`). The rejected options would conflict: a whole-crate port breaks ADR 0007 (`docs/adr/0007-subagent-filesystem-isolation.md:53-54`, `:93`), porting the ovnfs adapter as TypeScript breaks ADR 0036 (`docs/adr/0036-python-for-extensions.md:40-41`), and putting ovnfs into core breaks ADR 0049 D1 (`docs/adr/0049-tiered-integration-architecture.md:52`).
+
+## 7. Upstream origin and license
+
+Files a port would draw from:
+
+- `upstream:crates/pi-iso/src/apfs.rs` (240 lines), `linux_reflink.rs` (199), `tree.rs` (134), `upstream:crates/pi-iso/src/cow.rs:1-286` (the Unix half), and the parts of `lib.rs` that define `BackendKind`, `ProbeResult`, `IsoError`, `statfs_magic` and `clone_candidates`.
+- `upstream:crates/pi-vcs/src/git/mutate.rs:620-860` and `:1747-1960`, and `upstream:crates/pi-vcs/src/types.rs:110-137`.
+- Tests: `upstream:crates/pi-vcs/tests/worktree_clone_carry.rs` (362 lines) and `upstream:crates/pi-vcs/src/git/mutate.rs:2943-3182`.
+- Not drawn from: the btrfs, zfs, overlayfs, projfs, rcopy, diff and Windows block clone modules; `pi-vfs`; the TypeScript ovnfs adapter.
+
+License: MIT. `upstream:crates/pi-iso/LICENSE:1-4` carries "Copyright (c) 2025-2026 Can Bölük" and "Copyright (c) 2026 Stencil Labs, Inc.". `pi-vcs` has no crate-level LICENSE, so the root `upstream:LICENSE:3-5` applies: Mario Zechner 2025, Can Bölük 2025-2026, Stencil Labs 2026. There is no NOTICE file at the upstream root. omp2 is MIT, "Copyright (c) 2026 Stencil Labs, Inc." (`LICENSE:1-3`, `Cargo.toml:8-9`). A port keeps the upstream copyright lines in a crate `LICENSE` and adds an entry to `THIRD-PARTY-NOTICES.txt`, as was done for other ported MIT code, which keeps the upstream notice and adds a "(modifications)" line (`THIRD-PARTY-NOTICES.txt:1604-1611`, `:14156-14168`).
+
+ovnfs: MIT, "Copyright (c) 2026 Stencil Labs, Inc." (`ovnfs@c43f05a:LICENSE:1-3`). It is used as an external binary and no ovnfs code is drawn on.
