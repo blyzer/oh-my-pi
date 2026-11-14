@@ -1,6 +1,6 @@
 # 0071. Copy-on-write tree cloning lives in a small leaf crate and serves worktrees; subagent isolation keeps its per-file view; ovnfs is not adopted
 
-Status: Proposed 2026-11-13
+Status: proposed
 Date: 2026-11-13
 Area: runtime
 

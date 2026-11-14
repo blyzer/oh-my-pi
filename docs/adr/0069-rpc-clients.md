@@ -24,7 +24,7 @@ Research: [docs/research/rpc-clients.md](../research/rpc-clients.md) (Gap 18 of 
 
 ### Rules that bind
 
-- ADR 0048: Buf is limited to format, lint and breaking; "`buf generate`, the BSR, Bazel proto rules and BuildBuddy caching for proto generation are all rejected"; generated code is never committed (`docs/adr/0048-schema-and-serialization-boundaries.md:12`, `docs/adr/0048-schema-and-serialization-boundaries.md:27`). That text is about the Rust build; its wording would be read against Go and Python generation too.
+- ADR 0048: Buf is limited to format, lint and breaking; "`buf generate` is not incremental and duplicates `build.rs`", "BSR remote plugins and generated SDKs" are rejected, and Bazel/BuildBuddy are rejected for proto generation; generated code is never committed (`docs/adr/0048-schema-and-serialization-boundaries.md:12`, `:72-75`, `:144`). That text is about the Rust build; its wording would be read against Go and Python generation too.
 - ADR 0048's statement that CI does not run `buf breaking` is out of date: it does (`docs/adr/0048-schema-and-serialization-boundaries.md:29`, `.github/workflows/ci.yml:219-229`).
 - No new language runtimes. A Go or Python client is a separate artifact, not a runtime inside omp, but a Go toolchain in CI is new to this repository.
 - Additive only: no existing proto, service, convar or command changes.
