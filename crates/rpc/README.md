@@ -1,11 +1,11 @@
 # omp-rpc
 
-`omp-rpc` provides transport and protocol-negotiation plumbing for omp's gRPC services and the framed `omp rpc` embedding protocol. It supports owner-only local Unix-domain sockets, TCP connections secured with mutual TLS, Content-Length framed stdio, and a typed child-process client.
+`omp-rpc` provides transport and protocol-negotiation plumbing for omp's gRPC services and the framed `omp rpc` embedding protocol. It supports owner-only local Unix-domain sockets, TCP connections secured with mutual TLS, newline-delimited JSON stdio, and a typed child-process client.
 
 ## Structure
 
 - `client` drives the stdio embedding protocol, including host tools, generation-fenced host URI resources, typed authentication exchanges, cancellation, and fail-closed shutdown.
-- `framing` bounds, encodes, and incrementally reassembles v1/v2 Content-Length frames.
+- `framing` bounds, encodes, and incrementally reassembles stdio frames: one JSON object per line, with protocol-v2 chunk reassembly for payloads above the per-line cap.
 - `protocol` owns typed stdio requests, events, host-resource frames, and terminal outcomes.
 - `health` wraps gRPC liveness and per-service readiness reporting.
 - `hello` implements the initial peer handshake and schema-revision compatibility checks.
