@@ -31,7 +31,7 @@ brief.
 | 9 | Subagent tools | c (/seance), d (probe) | [subagent-tools](subagent-tools.md) | [0056](../adr/0056-subagent-consult-tools.md) | reviewed | Ready to implement | |
 | 10 | Session tools | c, d, b | [session-tools](session-tools.md) | [0057](../adr/0057-session-tools.md) | reviewed | Ready to implement | |
 | 11 | Context tools | a, b, d | [context-tools](context-tools.md) | [0058](../adr/0058-context-url-schemes.md) | reviewed | Ready to implement (`cfg://`); `out://` waits on ADR 0050 S2-S4 | |
-| 12 | TUI job widgets and charts | c (widgets), c deferred (auto-graph) | [tui-job-widgets](tui-job-widgets.md) | [0066](../adr/0066-tui-job-widgets.md) | changes required | ADR revision pending | |
+| 12 | TUI job widgets and charts | c (widgets), c deferred (auto-graph) | [tui-job-widgets](tui-job-widgets.md) | [0066](../adr/0066-tui-job-widgets.md) | machine-reviewed (EGM, 3 rounds), not owner-approved; round-3 blocker (multi-line `<pre>` in the `/hub` inspector) closed by cutting the output window to single-row entries | ADR done; S1 (newest output line of the selected async `bash` job in `/hub`) behind `cl_hub_job_output` (default off), not started; O5 (foreground coverage) should be settled before S1 merges; widgets, sparkline and auto-graph deferred | #639 (merged) |
 | 13 | Browser inspection, ABKit | c (React, a11y), b (ABKit) | [browser-inspection](browser-inspection.md) | [0067](../adr/0067-browser-inspection.md) | changes required | ADR revision pending | |
 | 14 | Memory backends | c (decision files), b (Hindsight as extension only) | [memory-backends](memory-backends.md) | [0068](../adr/0068-decision-memory.md) | changes required | ADR revision pending | |
 | 15 | Providers and sign-in | c, d | [providers-signin](providers-signin.md) | [0059](../adr/0059-provider-catalog-additions.md) | reviewed (EGM not required) | Ready to implement | |
@@ -52,3 +52,8 @@ brief.
   in-flight ADR edits live only in the gap worktrees until each driver commits.
   Subagents have no Agent tool, so gap drivers resolve round 1 only and the
   orchestrator spawns the fresh-context Goldfish reviewers for rounds 2-3.
+- 2026-11-14 12:45 UTC: gap 12 (ADR 0066) finished three EGM rounds; its
+  round-3 blocker closed by removing the multi-line output window (rule b).
+  Merged as #639. Gap 13 (ADR 0067) finished round 3 with no blocker; its PR
+  is pending. Gaps 14 and 18 wait on round 1; implementation slices for gaps
+  6, 9 and 15 are in progress on their own branches.
