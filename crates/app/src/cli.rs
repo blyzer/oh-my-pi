@@ -1124,7 +1124,7 @@ pub enum Command {
 	Print(PrintArgs),
 	/// Replay a durable session through the production transcript renderer.
 	Render(RenderArgs),
-	/// Run the stateful Content-Length framed RPC server on standard I/O.
+	/// Run the stateful newline-delimited JSON RPC server on standard I/O.
 	Rpc(RpcArgs),
 	/// Run RPC with retained UI frame support.
 	#[command(name = "rpc-ui")]
