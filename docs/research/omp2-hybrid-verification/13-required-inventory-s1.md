@@ -101,3 +101,27 @@ Local compilation and relevant tests establish this slice as a possible pinned
 parent for dependent work without waiting for CI quota. Its PR remains explicitly
 identified; actual GitHub merge status is separate. This is not an administrative
 merge authorization for code and does not convert unavailable checks into PASS.
+
+## Hosted workspace test follow-up
+
+The hosted macOS workspace run at head `3e116ac` compiled successfully, then
+reported 12,035 passing tests and four failing `omp-kb::cli` tests. Each failure
+was `repository changed while SCIP producers were running`. The CLI fixtures
+isolated Cargo's package cache but inherited the target directory. A hosted
+runner does not supply the self-hosted runner's external target path, so
+rust-analyzer created unignored `target/` metadata/lock files inside the temporary
+source repositories. The snapshot guard correctly rejected this pollution.
+
+The same four failures reproduced locally with `just test-pkg omp-kb`
+(12 passed, 4 failed, exit 100). A direct real SCIP run in a fresh fixture
+produced only untracked `target/` metadata/build locks; no Cargo.lock was added.
+The fixture helper now directs `CARGO_TARGET_DIR` into its private `.git` tree,
+and the publication test asserts no root `target/` was created. Production
+snapshot guards, source/lockfile handling, test coverage and CI gates are unchanged.
+
+After the fix, `just test-pkg omp-kb` exited 0: all 16 package tests passed,
+zero skipped. Its paired doctest command also exited 0 with zero doctests
+present. Pinned rustfmt and whitespace checks passed. The full hosted workspace
+rerun remains separate evidence; this package result does not claim every
+workspace or macOS-specific test passed. Local before/after logs are
+`/tmp/omp2-kb-repro.log` and `/tmp/omp2-kb-fixed.log`.
