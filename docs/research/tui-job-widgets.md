@@ -86,7 +86,7 @@ A widget is data, not code. A cheap model writes a declarative spec once per job
 
 **Class c, deferred** for auto-graph. It is a port, but of about 12,000 lines whose value depends on a graphics-capable terminal. A smaller local text chart is a class d proposal inside the plan.
 
-Verdict: build stages 1 and 2 of the job widgets; decide on the rest after that; defer auto-graph. Revised 2026-11-14 after ADR 0066's round-2 review: only the model-free output tail of the selected shell job in the `/hub` inspector is committed; widgets, charts and model specs are deferred.
+Verdict: build stages 1 and 2 of the job widgets; decide on the rest after that; defer auto-graph. Revised 2026-11-14 after ADR 0066's review: only the model-free newest output line of the selected running shell job in the `/hub` inspector is committed; widgets, charts and model specs are deferred.
 
 ## 4. Options
 
@@ -108,7 +108,7 @@ Choice: option 3 now. If wanted later, option 2, then image charts through a ras
 
 ## 5. Plan
 
-Superseded (2026-11-14): after two review rounds, ADR 0066 commits to one slice: the live output tail of the selected shell job in the `/hub` inspector. It reads envd's process log through one held attachment, behind `cl_job_widgets`, with a real-PTY proof. Everything else below is deferred; the ADR's "Deferred work" holds the checked facts. The ADR's `## Slices` is the plan; the list below is the original draft. Two claims in it were wrong: slice 2's "spilled output still shows the retained tail" cannot hold, because the DOM keeps only the head, and slice 1's "a constant series draws the lowest block" contradicts upstream, where a constant positive series draws the top block (`upstream:packages/tui/src/components/sparkline.ts:29-43`).
+Superseded (2026-11-14): after three review rounds, ADR 0066 commits to one slice: the newest output line of the selected running shell job in the `/hub` inspector. It reads envd's process log through one live attachment from the log end plus one capped history read, behind `cl_hub_job_output`, with a real-PTY proof. Guaranteed coverage is `bash` with `async: true`; whether foreground runs reach envd before the dispatcher's 30 s limit is unverified (ADR 0066 O5). Everything else below is deferred; the ADR's "Deferred work" holds the checked facts. The ADR's `## Slices` is the plan; the list below is the original draft. Two claims in it were wrong: slice 2's "spilled output still shows the retained tail" cannot hold, because the DOM keeps only the head, and slice 1's "a constant series draws the lowest block" contradicts upstream, where a constant positive series draws the top block (`upstream:packages/tui/src/components/sparkline.ts:29-43`).
 
 ### Slice 1: sparkline component
 
