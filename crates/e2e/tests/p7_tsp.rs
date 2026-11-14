@@ -31,7 +31,7 @@ use omp_core::Str;
 use omp_tui::tsp::{
 	doc::{Document, Rejected},
 	frame::{self, Incoming},
-	wire::{Close, Event, Frame, Hello, Kind, Mode, Open, Query, Reply},
+	wire::{Close, Event, Frame, Hello, Kind, Mode, Node, Open, Query, Reply},
 };
 use serde_json::Value;
 
@@ -769,7 +769,7 @@ fn send(text: &str) -> Event {
 
 /// Every `text` prop under `id` in the oracle document, in document order.
 fn texts_under(doc: &Document, id: &str) -> Vec<String> {
-	fn walk(node: &omp_tui::tsp::wire::Node, out: &mut Vec<String>) {
+	fn walk(node: &Node, out: &mut Vec<String>) {
 		if let Some(text) = node.p.get("text").and_then(Value::as_str) {
 			out.push(text.to_owned());
 		}

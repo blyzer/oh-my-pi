@@ -977,7 +977,7 @@ mod tests {
 	};
 	use parking_lot::Mutex;
 	use tracing::{
-		Event as TracingEvent, Subscriber,
+		Subscriber,
 		field::{Field, Visit},
 	};
 	use tracing_subscriber::{
@@ -1918,7 +1918,7 @@ mod tests {
 	}
 
 	impl<S: Subscriber> Layer<S> for FrameLog {
-		fn on_event(&self, event: &TracingEvent<'_>, _: Context<'_, S>) {
+		fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
 			let mut fields = FrameFields::default();
 			event.record(&mut fields);
 			if let Some(rows) = fields.rows {
