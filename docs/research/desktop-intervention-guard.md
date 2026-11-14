@@ -106,7 +106,7 @@ Verdict: implement Part A; Part B after owner agreement; the rest research only.
 Superseded on 2026-11-14 by ADR 0063 after EGM round 2:
 
 - Part A proceeds.
-- A release-on-abort fix (Part C) is added.
+- A release-on-abort fix (Part C) is added. After round 3 it covers macOS only.
 - Part B is deferred to its own record. Round 2 found that its omp2 call sites, pid source, tap lifecycle and CI coverage were all undesigned.
 - One correction to section 2 below: omp2's libei backend drops its event stream after discovery (`crates/desktop/src/linux/wayland/libei.rs:84-91`). So reading the keymap once is not enough; the stream has to be drained before each input.
 
@@ -130,12 +130,15 @@ Choice: option 2, behind a default-off convar, once the owner accepts the new er
 
 ## 5. Plan
 
-ADR 0063 (revised 2026-11-14 after EGM rounds 1 and 2) supersedes this first-draft plan.
+ADR 0063 supersedes this first-draft plan. It was revised 2026-11-14 after three EGM rounds; it is machine-reviewed and not owner-approved.
 
-- Slices: A1 and C1.
-  - A1 covers layout-aware Wayland typing. The libei event stream is kept and drained before each input, chords go through the layout, and it is gated by `sv_computer_xkb_layout`.
-  - C1 covers release of held input on abort, on macOS and in libei drags, gated by `sv_computer_release_on_abort`.
-- The macOS intervention guard (Part B below) is deferred to its own future record.
+- Slices: A1, A2 and C1.
+  - A1: layout-aware planning on Wayland, with the keymap read at discovery. Gated by `sv_computer_xkb_layout`.
+  - A2: the libei event stream is kept and drained before each input, and a device model follows the active group. Same convar.
+  - C1: macOS drag release on abort, plus validating every chord key before pressing. Gated by `sv_computer_release_on_abort`.
+- Two parts are deferred:
+  - The macOS intervention guard (Part B below), to its own future record.
+  - libei release on abort. Round 3 found that cancellation never reaches the Linux desktop actor thread.
 
 The plan below is kept as the original research record.
 
