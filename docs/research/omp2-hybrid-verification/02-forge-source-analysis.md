@@ -110,7 +110,7 @@ No dependency installation or paid model calls were performed for this track. Fu
 A dependency-free micro-experiment **was executed** against the actual `source.py` using Python `runpy`. It demonstrates why OMP2 must not adopt normalized diff identity as a sufficient cache key; this is an identity collision, not proof a complete Forge gate accepts stale receipts (other evidence checks may reject them).
 
 ```python
-# Run from the pinned Forge checkout: python - <<'PY' ... PY
+# Execute this snippet with Python from the pinned Forge checkout.
 import runpy
 m = runpy.run_path('src/code_forge/source.py')
 a = 'VALUE = """a \n"""\n'
