@@ -67,9 +67,11 @@ pub struct Skill {
 	pub description:   Str,
 	/// Optional Agent Skills `license` (retained; never grants authority).
 	pub license:       Option<Str>,
-	/// Optional Agent Skills `compatibility` prose (retained; not a preflight gate).
+	/// Optional Agent Skills `compatibility` prose (retained; not a preflight
+	/// gate).
 	pub compatibility: Option<Str>,
-	/// Optional Agent Skills string `metadata` map (retained; not a requirements runtime).
+	/// Optional Agent Skills string `metadata` map (retained; not a requirements
+	/// runtime).
 	pub metadata:      BTreeMap<Str, Str>,
 	/// Canonical `SKILL.md` path.
 	pub path:          PathBuf,
@@ -1954,21 +1956,25 @@ mod tests {
 		);
 		let active =
 			discover(&[source(&root, "native", SkillLevel::Project)], &SkillPolicy::default());
-		let skill = active.get("portable").expect("optional Agent Skills fields must not reject");
+		let skill = active
+			.get("portable")
+			.expect("optional Agent Skills fields must not reject");
 		assert_eq!(skill.description.as_str(), "keeps loading");
 		assert_eq!(skill.body.as_str(), "body");
 		assert!(!skill.hidden);
 		assert_eq!(skill.license.as_deref(), Some("MIT"));
 		assert_eq!(skill.compatibility.as_deref(), Some("linux"));
 		assert_eq!(
-			skill.metadata.get(&Str::new_static("omp/models")).map(Str::as_str),
+			skill
+				.metadata
+				.get(&Str::new_static("omp/models"))
+				.map(Str::as_str),
 			Some("unused")
 		);
 		// Progressive disclosure: prompt facts stay name+description only.
-		assert_eq!(
-			active.prompt_facts(),
-			vec![serde_json::json!({"name": "portable", "description": "keeps loading"})]
-		);
+		assert_eq!(active.prompt_facts(), vec![
+			serde_json::json!({"name": "portable", "description": "keeps loading"})
+		]);
 	}
 
 	#[test]
@@ -1989,11 +1995,11 @@ mod tests {
 			),
 			"plugin body",
 		);
-		let active = discover(
-			&[source(&root, "agent-plugins", SkillLevel::Project)],
-			&SkillPolicy::default(),
-		);
-		let skill = active.get("portable").expect("validated optional fields are retained, not fatal");
+		let active =
+			discover(&[source(&root, "agent-plugins", SkillLevel::Project)], &SkillPolicy::default());
+		let skill = active
+			.get("portable")
+			.expect("validated optional fields are retained, not fatal");
 		assert_eq!(skill.description.as_str(), "plugin portable");
 		assert_eq!(skill.body.as_str(), "plugin body");
 		assert_eq!(skill.provider.as_str(), "agent-plugins");
@@ -2012,10 +2018,8 @@ mod tests {
 			concat!("name: broken\n", "description: empty tools\n", "allowed-tools: \"\""),
 			"body",
 		);
-		let active = discover(
-			&[source(&root, "agent-plugins", SkillLevel::Project)],
-			&SkillPolicy::default(),
-		);
+		let active =
+			discover(&[source(&root, "agent-plugins", SkillLevel::Project)], &SkillPolicy::default());
 		assert!(active.get("broken").is_none());
 		assert!(
 			active
@@ -2041,16 +2045,13 @@ mod tests {
 			),
 			"body",
 		);
-		let active = discover(
-			&[source(&root, "agent-plugins", SkillLevel::Project)],
-			&SkillPolicy::default(),
-		);
+		let active =
+			discover(&[source(&root, "agent-plugins", SkillLevel::Project)], &SkillPolicy::default());
 		assert!(active.get("native-only").is_none());
 		assert!(
-			active
-				.warnings
-				.iter()
-				.any(|warning| warning.message.contains("failed to parse Agent Plugin skill frontmatter")),
+			active.warnings.iter().any(|warning| warning
+				.message
+				.contains("failed to parse Agent Plugin skill frontmatter")),
 			"{:?}",
 			active.warnings
 		);
