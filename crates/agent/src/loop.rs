@@ -56,6 +56,10 @@ use crate::{
 /// Maximum consecutive provider-declared non-terminal completions without a
 /// tool call.
 const PAUSED_TURN_CONTINUATION_CAP: u8 = 8;
+
+/// Re-export of the Core settle-continuation ceiling so the turn loop and the
+/// contract constant stay one number.
+const SETTLE_CONTINUATION_CAP: u32 = crate::SETTLE_CONTINUATION_CAP;
 const PAUSED_TURN_KIND: &str = "pause_turn";
 
 struct TurnActivity(Arc<AtomicBool>);
@@ -1431,6 +1435,7 @@ impl<C: Inference> Kernel<C> {
 		let mut empty_output_retries = 0_u8;
 		let mut requests_started = 0_u32;
 		let mut request_budget_notice_sent = false;
+		let mut settle_continuations = 0_u32;
 		let turn_started = Instant::now();
 		self.client.begin_turn();
 
@@ -2052,21 +2057,26 @@ impl<C: Inference> Kernel<C> {
 				LoopDecision::Yield => {
 					// An extension may block the stop and demand another turn.
 					if let Some(hooks) = &self.lifecycle_hooks {
-						let settled = hooks
-							.agent_settled(serde_json::json!({
-								"submission_id": turn.to_string(),
-								"reason": if was_steered { "stop" } else { "stop" },
-								"committed_turns": requests_started,
-								"last_stop": turn_view.stop_reason,
-								"pending_jobs": self.dispatcher.jobs().list().iter().map(|job| job.id.clone()).collect::<Vec<_>>(),
-								"continuations_used": 0,
-								"incomplete_todos": [],
-							}))
-							.await;
-						if settled.decision == crate::AgentSettled::Continue {
-							append_hook_context(session, turn, settled.context)?;
-							self.apply_live_components(session)?;
-							continue;
+						if settle_continuations >= SETTLE_CONTINUATION_CAP {
+							// Core refuses past the documented ceiling; settle.
+						} else {
+							let settled = hooks
+								.agent_settled(serde_json::json!({
+									"submission_id": turn.to_string(),
+									"reason": if was_steered { "stop" } else { "stop" },
+									"committed_turns": requests_started,
+									"last_stop": turn_view.stop_reason,
+									"pending_jobs": self.dispatcher.jobs().list().iter().map(|job| job.id.clone()).collect::<Vec<_>>(),
+									"continuations_used": settle_continuations,
+									"incomplete_todos": [],
+								}))
+								.await;
+							if settled.decision == crate::AgentSettled::Continue {
+								settle_continuations = settle_continuations.saturating_add(1);
+								append_hook_context(session, turn, settled.context)?;
+								self.apply_live_components(session)?;
+								continue;
+							}
 						}
 					}
 					let stop = if was_steered {

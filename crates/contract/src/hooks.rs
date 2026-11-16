@@ -570,6 +570,11 @@ impl NativeReply {
 /// before the process (or the session switch) goes on without them.
 pub const SESSION_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
 
+/// Maximum consecutive `agent_settled` continuations Core accepts per
+/// submission before refusing further continuation
+/// (`omp.limits.SETTLE_CONTINUATION_CAP`).
+pub const SETTLE_CONTINUATION_CAP: u32 = 8;
+
 /// [`SESSION_SHUTDOWN_BUDGET`] as the payload's `budget` field.
 const SESSION_SHUTDOWN_BUDGET_TEXT: &str = "1500ms";
 

@@ -1404,7 +1404,10 @@ later hooks observe a pending continuation in `ctx.pending_continuation` and may
 `Settle()`, and a raising or timing-out hook
 contributes `Settle()` — which is why the event is fail-open and why an extension crash can never
 spin the loop. `omp.limits.SETTLE_CONTINUATION_CAP` bounds consecutive continuations; past the cap
-the core refuses, journals the refusal, and settles.
+the core refuses, journals the refusal, and settles. Python extensions reach this seam through an
+envd in-process native host (not `gate_domain`); the first shipped slice journals `Continue.prompt`
+with `Continue.label` as the context source name, and does not yet honor `role`, `visible`,
+`collapse_prior`, or the later-hook Settle veto.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).

@@ -4,7 +4,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
 	future::Future,
 	sync::{
-		Arc,
+		Arc, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time,
@@ -28,8 +28,8 @@ use omp_ai::{
 use omp_cache::telemetry_cache::TelemetryIndex;
 use omp_catalog::ProviderId;
 use omp_contract::{
-	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate, HookPatch,
-	HookPhase, OBSERVE_HANDLER_CAP,
+	BoxFut, GateDecision, GateEvent, GateOutcome, HookContext, HookDispatch as AgentHookDispatch,
+	HookGate, HookPatch, HookPhase, NativeHookHost, NativeReply, NativeVerdict, OBSERVE_HANDLER_CAP,
 };
 use omp_core::{ExposeSecret as _, InvocationPhase, LifecyclePhase, SecretString, Str, Ulid, sf};
 use omp_proto::{prost::Message as _, toolhost::v1::HookEventId};
@@ -382,6 +382,14 @@ impl HookControlFactory {
 			tool_call_timeout,
 			admission_gate: Arc::new(admission_gate),
 		});
+		// Python `agent_settled` is domain-return: the delegated admission path
+		// never runs it, so an in-process host dispatches Continue/Settle the
+		// same way provider domain hooks reach extensions (no wire change).
+		owner
+			.admission_gate
+			.attach_native(Arc::new(AgentSettledNativeHost { owner: Arc::downgrade(&owner) }), &[
+				HookEventId::HookEventAgentSettled,
+			]);
 		let weak = Arc::downgrade(&owner);
 		tokio::spawn(async move {
 			while let Ok(dispatch) = dispatches.recv_async().await {
@@ -779,6 +787,93 @@ impl HookControlFactory {
 				})
 				.await;
 		}
+	}
+
+	/// Asks every `agent_settled` domain subscription whether to continue.
+	/// First `Continue` wins with its `prompt` (and optional `label` as the
+	/// context source); failures and `Settle` are fail-open. `role`,
+	/// `visible`, and `collapse_prior` are accepted on the wire but not
+	/// honored in this slice.
+	async fn dispatch_agent_settled(&self, payload: &JsonValue) -> NativeReply {
+		let mut rows = self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.filter(|row| row.event == "agent_settled" && row.phase == "domain")
+			.cloned()
+			.collect::<Vec<_>>();
+		rows.sort_by(|left, right| {
+			left
+				.identity
+				.layer
+				.cmp(&right.identity.layer)
+				.then_with(|| left.identity.tier.cmp(&right.identity.tier))
+				.then_with(|| left.identity.extension.cmp(&right.identity.extension))
+				.then_with(|| left.name.cmp(&right.name))
+		});
+		if rows.is_empty() {
+			return NativeReply::defer();
+		}
+		for row in rows {
+			let session = row.session.clone();
+			let context = ControlRequestContext {
+				connection: Arc::clone(&row.identity),
+				request_id: 0,
+				invocation: Some(ControlInvocationAuthority {
+					invocation: sf!("agent_settled:{}", Ulid::generate()),
+					phase: InvocationPhase::EffectsAuthorized,
+					session,
+					turn: None,
+					event: Some(sf!("agent_settled")),
+					call: None,
+					device: None,
+					effects: Box::new([]),
+					place_kind: sf!("host"),
+					lifecycle: LifecyclePhase::Active,
+					roots: Box::new([]),
+					remote: false,
+					has_ui: false,
+					headless: true,
+					settings: self.settings_for(&row.identity),
+					secret_settings: Box::new([]),
+					data: None,
+					direct_filesystem: None,
+				}),
+			};
+			let mut callback = JsonMap::new();
+			callback.insert("event".to_owned(), JsonValue::String("agent_settled".to_owned()));
+			callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
+			callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
+			callback.insert("payload".to_owned(), payload.clone());
+			let result = self
+				.callbacks
+				.dispatch(
+					Arc::clone(&row.identity),
+					&context,
+					"omp.hooks.dispatch",
+					callback,
+					row.concurrency,
+					row.timeout.unwrap_or(row.event_policy.timeout),
+					Some(sf!("agent_settled")),
+					None,
+				)
+				.await;
+			let Ok(value) = result else {
+				// Fail-open: a raising or timed-out hook contributes Settle.
+				continue;
+			};
+			if let Some(continuation) = parse_agent_settled_continue(&value) {
+				let source = continuation
+					.label
+					.unwrap_or_else(|| row.identity.extension.clone());
+				return NativeReply {
+					verdict: NativeVerdict::Continue,
+					context: vec![HookContext { source, body: continuation.prompt }],
+				};
+			}
+		}
+		NativeReply::defer()
 	}
 
 	async fn dispatch_provider_domain(
@@ -1493,6 +1588,49 @@ impl ProviderHookObserver for HookControlFactory {
 			Ok(page)
 		})
 	}
+}
+
+/// In-process host that runs Python `agent_settled` domain hooks.
+struct AgentSettledNativeHost {
+	owner: Weak<HookControlFactory>,
+}
+
+impl NativeHookHost for AgentSettledNativeHost {
+	fn decide<'a>(&'a self, event: HookEventId, payload: &'a JsonValue) -> BoxFut<'a, NativeReply> {
+		Box::pin(async move {
+			if event != HookEventId::HookEventAgentSettled {
+				return NativeReply::defer();
+			}
+			let Some(owner) = self.owner.upgrade() else {
+				return NativeReply::defer();
+			};
+			owner.dispatch_agent_settled(payload).await
+		})
+	}
+}
+
+/// First-slice Continue fields honored from a Python `omp.agents.Continue` wire
+/// object: `prompt` body and optional `label` as the context source name.
+struct AgentSettledContinue {
+	prompt: Str,
+	label:  Option<Str>,
+}
+
+/// Reads a domain `agent_settled` callback return. A Continue dataclass wires
+/// as `{prompt, visible, role, label, collapse_prior}`; Settle wires as `{}`.
+/// Only `prompt` and `label` are honored here.
+fn parse_agent_settled_continue(value: &JsonValue) -> Option<AgentSettledContinue> {
+	let object = value.as_object()?;
+	let prompt = object.get("prompt")?.as_str()?;
+	if prompt.is_empty() {
+		return None;
+	}
+	let label = object
+		.get("label")
+		.and_then(JsonValue::as_str)
+		.filter(|label| !label.is_empty())
+		.map(Str::new);
+	Some(AgentSettledContinue { prompt: Str::new(prompt), label })
 }
 
 fn provider_hook_subscribed(
@@ -2508,6 +2646,26 @@ mod tests {
 
 	fn agent_settled_event() -> String {
 		hook_event_name(AgentSettledEvent::ID).expect("agent_settled hook event name")
+	}
+
+	#[test]
+	fn agent_settled_continue_reads_prompt_and_label_only() {
+		let continuation = parse_agent_settled_continue(&json!({
+			"prompt": "keep going",
+			"visible": true,
+			"role": "user",
+			"label": "todo-loop",
+			"collapse_prior": false,
+		}))
+		.expect("Continue wires a prompt");
+		assert_eq!(continuation.prompt.as_str(), "keep going");
+		assert_eq!(continuation.label.as_deref(), Some("todo-loop"));
+		assert!(parse_agent_settled_continue(&json!({})).is_none(), "Settle is empty");
+		assert!(
+			parse_agent_settled_continue(&json!({"prompt": ""})).is_none(),
+			"empty prompt settles"
+		);
+		assert!(parse_agent_settled_continue(&JsonValue::Null).is_none());
 	}
 
 	#[test]

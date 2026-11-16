@@ -1239,3 +1239,91 @@ async fn a_refused_session_start_is_a_typed_denial() {
 		.await
 		.expect("an unsubscribed start never fails");
 }
+
+/// Always continues `agent_settled` with the same prompt until Core's cap
+/// refuses further continuation.
+struct SettledContinueHost {
+	asked: Arc<Mutex<Vec<u64>>>,
+}
+
+impl omp_agent::NativeHookHost for SettledContinueHost {
+	fn decide<'a>(
+		&'a self,
+		event: HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		assert_eq!(event, HookEventId::HookEventAgentSettled);
+		let used = payload
+			.get("continuations_used")
+			.and_then(Value::as_u64)
+			.unwrap_or(u64::MAX);
+		self.asked.lock().push(used);
+		Box::pin(std::future::ready(omp_agent::NativeReply {
+			verdict: omp_agent::NativeVerdict::Continue,
+			context: vec![omp_agent::HookContext {
+				source: sf!("todo-loop"),
+				body:   sf!("keep going"),
+			}],
+		}))
+	}
+}
+
+#[tokio::test]
+async fn agent_settled_continue_journals_context_and_core_caps_at_eight() {
+	let (gate, _receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	let asked = Arc::new(Mutex::new(Vec::new()));
+	gate.attach_native(Arc::new(SettledContinueHost { asked: Arc::clone(&asked) }), &[
+		HookEventId::HookEventAgentSettled,
+	]);
+	let temp = tempfile::tempdir().expect("tempdir");
+	let scripts = (0..9).map(|index| text_script(&format!("turn-{index}")));
+	let (inference, requests) = ScriptedInference::new(scripts);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(Registry::new()),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_hook_gate(gate);
+	let mut session = fresh_session(&temp.path().join("settled-cap.oms"));
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("start"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("cap settles cleanly");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 9, "initial sample plus eight continuations");
+	let asked = std::mem::take(&mut *asked.lock());
+	assert_eq!(asked, [0, 1, 2, 3, 4, 5, 6, 7], "Core asks eight times then refuses");
+	let hook_nodes = session
+		.dom()
+		.handles()
+		.filter_map(|handle| session.dom().get(handle))
+		.filter(|node| node.tag == omp_dom::KnownTag::Developer.into())
+		.filter(|node| {
+			node
+				.prop(&omp_dom::PropId::Kind.into())
+				.and_then(omp_dom::Value::as_str)
+				== Some("hook")
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(hook_nodes.len(), 8);
+	assert!(
+		hook_nodes
+			.iter()
+			.all(|node| node.content.as_deref() == Some("keep going"))
+	);
+	assert!(
+		hook_nodes.iter().all(|node| {
+			node
+				.prop(&omp_dom::PropId::Name.into())
+				.and_then(omp_dom::Value::as_str)
+				== Some("todo-loop")
+		}),
+		"label becomes the developer name"
+	);
+}
