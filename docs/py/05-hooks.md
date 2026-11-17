@@ -983,7 +983,7 @@ event's failure decision, with the Python traceback journaled. This is pi's rule
 Read the tables as: **Ret** = return type; **Ph** = phases a subscription may declare — `any`
 means all five `omp.HookPhase` members are legal, `OBSERVE` means the event is observation-only,
 `domain` means a domain-return family (§2.2): no `phase=` or `order=`, deterministic
-`(layer, publisher, extension_id)` ordering, resolution rule owned by the family;
+`(layer, extension, order, name)` ordering (`layer` as a string), resolution rule owned by the family;
 **Lat** = latency class; **Fail** = default `on_failure`; **Re** = reentrant; **Def** = default
 decision when every hook defers. `—` in **Ret** means observation-only (`-> None`).
 
@@ -1407,15 +1407,13 @@ and [`03-params.md`](03-params.md), and `omp.HookPhase` in §3.4.
 `DrainPoint::Idle` and would otherwise publish `AgentPhase::Idle`
 (`crates/agent/src/loop.rs:580-597`). It returns `omp.agents.Continue | omp.agents.Settle`
 ([`12-agents.md`](12-agents.md)): resolution is first-`Continue`-wins in the deterministic
-`(layer, publisher, extension_id)` order — domain-return hooks take no `phase=` or `order=` —
+`(layer, extension, order, name)` order (`layer` as a string) — domain-return hooks take no
+`phase=` or `order=` —
 later hooks observe a pending continuation in `ctx.pending_continuation` and may veto with
 `Settle()`, and a raising or timing-out hook
 contributes `Settle()` — which is why the event is fail-open and why an extension crash can never
 spin the loop. `omp.limits.SETTLE_CONTINUATION_CAP` bounds consecutive continuations; past the cap
 the core refuses and settles. The refusal is not journaled yet, and no session override of the cap is honored yet.
-
-> **Divergence:** envd currently orders `agent_settled` rows by `(layer, extension, order, name)`, comparing
-> `layer` as a string, not by `(layer, publisher, extension_id)`.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).
@@ -1959,7 +1957,8 @@ renamed to make the distinction from pi's `context` hook explicit. The amended i
 validated projection operations against stable item IDs.** Payload `ContextView`, return
 `ContextPatch | None` (`None` abstains), per turn, fail-open; resolution, patch validation,
 conflict detection and the closed op set are all specified by the owner. Handlers run in the
-deterministic `(layer, publisher, extension_id)` order, like every domain-return family.
+deterministic `(layer, extension, order, name)` order (`layer` as a string), like every
+domain-return family.
 
 ---
 
@@ -2162,7 +2161,8 @@ runs:
 namespace: `agent_settled` is first-`Continue`-wins with `Settle()` veto and `Settle()` on failure;
 `provider_error` composes to the first non-`Never` `omp.Failover` in deterministic order, with
 `Never` from any hook terminal; `thread_projection` composes validated `ContextPatch` operations
-([`08-context.md`](08-context.md)). Ordering for all three is `(layer, publisher, extension_id)`.
+([`08-context.md`](08-context.md)). Ordering for all three is `(layer, extension, order, name)`
+(`layer` as a string).
 Steps 1–3 and 10 are unchanged.
 
 **Cross-host dispatch is phase-by-phase.** Extension hosts are per-extension processes
