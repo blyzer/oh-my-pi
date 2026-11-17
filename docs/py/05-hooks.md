@@ -1398,24 +1398,22 @@ and [`03-params.md`](03-params.md), and `omp.HookPhase` in §3.4.
 > **Dispatch status:** `agent_settled` hooks are dispatched; a Python `Continue`
 > (object with non-empty string `prompt`, optional `label`; an empty prompt counts as `Settle`) appends a
 > hidden developer message (`<developer kind=hook>`, not displayed) and runs
-> one more turn, `Settle` (`{}`) settles. `role`, `visible` and `collapse_prior`
-> are **not yet honored**, nor is the `ctx.pending_continuation` veto. The core
-> cap of 8 counts continuations from every source per submission.
+> one more turn. Later hooks see `ctx.pending_continuation` and may veto with
+> `Settle` (`{}`); a raise or timeout never vetoes. `role`, `visible` and
+> `collapse_prior` are **not yet honored**. The core cap of 8 counts
+> continuations from every source per submission.
 
 **`agent_settled` is the domain-only goal-loop seam.** It fires at exactly the point the loop drains
 `DrainPoint::Idle` and would otherwise publish `AgentPhase::Idle`
 (`crates/agent/src/loop.rs:580-597`). It returns `omp.agents.Continue | omp.agents.Settle`
-([`12-agents.md`](12-agents.md)): resolution is first-`Continue`-wins in the deterministic
-`(layer, publisher, extension_id)` order — domain-return hooks take no `phase=` or `order=` —
+([`12-agents.md`](12-agents.md)): resolution is first-`Continue`-wins in envd's deterministic order:
+by `layer` (compared as a string), then extension id, then hook name — domain-return hooks take no
+`phase=` or `order=` —
 later hooks observe a pending continuation in `ctx.pending_continuation` and may veto with
 `Settle()`, and a raising or timing-out hook
 contributes `Settle()` — which is why the event is fail-open and why an extension crash can never
 spin the loop. `omp.limits.SETTLE_CONTINUATION_CAP` bounds consecutive continuations; past the cap
 the core refuses and settles. The refusal is not journaled yet, and no session override of the cap is honored yet.
-
-> **Divergence:** envd currently orders `agent_settled` rows by `(layer, extension, order, name)`, comparing
-> `layer` as a string, not by `(layer, publisher, extension_id)`. Hooks after the first `Continue` are not
-> called, and `ctx.pending_continuation` is not set, so there is no veto yet.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).
