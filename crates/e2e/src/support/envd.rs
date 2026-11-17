@@ -299,6 +299,15 @@ pub struct InProcessEnvHarness {
 	shutdown:  CancellationToken,
 	server:    Arc<EnvServer>,
 	roots:     InProcessRoots,
+	_owner:    Option<(Arc<EnvServer>, InProcessConnection, tempfile::TempDir, tempfile::TempDir)>,
+}
+
+/// Which environment-authority constructor an InProcessEnvHarness opens.
+#[derive(Clone, Copy)]
+enum InProcessOpen {
+	Local,
+	Project,
+	SessionHost,
 }
 
 /// One hello-complete client connection to an [`InProcessEnvHarness`].
@@ -363,6 +372,41 @@ impl InProcessEnvHarness {
 		Self::open(project, state, InProcessRoots::Scratch(scratch), Some(extension)).await
 	}
 
+	/// Opens the project-mode authority (EnvServer::open_project) over
+	/// `scratch` with `extension` registered behind its CONTROL host.
+	pub async fn spawn_project_with_extension(
+		scratch: Scratch,
+		extension: &PythonExtension,
+	) -> Result<Self> {
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open_as(
+			InProcessOpen::Project,
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			Some(extension),
+		)
+		.await
+	}
+
+	/// Opens the session-host authority (EnvServer::open_session_host) over
+	/// `scratch` with `extension` registered, owned by a separate local
+	/// authority.
+	pub async fn spawn_session_host_with_extension(
+		scratch: Scratch,
+		extension: &PythonExtension,
+	) -> Result<Self> {
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open_as(
+			InProcessOpen::SessionHost,
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			Some(extension),
+		)
+		.await
+	}
+
 	/// Opens a local authority rooted at an existing directory, such as an
 	/// isolated worktree, with a private state directory.
 	pub async fn spawn_at(project: &Path) -> Result<Self> {
@@ -381,6 +425,16 @@ impl InProcessEnvHarness {
 		roots: InProcessRoots,
 		extension: Option<&PythonExtension>,
 	) -> Result<Self> {
+		Self::open_as(InProcessOpen::Local, project, state, roots, extension).await
+	}
+
+	async fn open_as(
+		mode: InProcessOpen,
+		project: PathBuf,
+		state: PathBuf,
+		roots: InProcessRoots,
+		extension: Option<&PythonExtension>,
+	) -> Result<Self> {
 		let (mut ext_host_config, con, convars) = open_inputs()?;
 		let binding = match extension {
 			Some(extension) => {
@@ -390,8 +444,9 @@ impl InProcessEnvHarness {
 			},
 			None => None,
 		};
-		let server = Arc::new(
-			EnvServer::open_local(
+		let mut owner = None;
+		let server = Arc::new(match mode {
+			InProcessOpen::Local => EnvServer::open_local(
 				&project,
 				&state,
 				Registry::new(),
@@ -402,7 +457,68 @@ impl InProcessEnvHarness {
 			)
 			.await
 			.context("opening embedded environment authority")?,
-		);
+			InProcessOpen::Project => EnvServer::open_project(
+				&project,
+				&state,
+				&state.join("docserver.sock"),
+				Registry::new(),
+				ext_host_config,
+				None,
+				false,
+				None,
+				&con,
+				convars,
+				RegistryBridges {
+					content: ActiveContentInputs {
+						workspace_trust: WorkspaceTrust::Trusted,
+						..ActiveContentInputs::default()
+					},
+					..RegistryBridges::default()
+				},
+			)
+			.await
+			.context("opening project environment authority")?,
+			InProcessOpen::SessionHost => {
+				let owner_project = tempfile::Builder::new()
+					.prefix("omp-e2e-owner-project-")
+					.tempdir()
+					.context("creating owner project")?;
+				let owner_state = tempfile::Builder::new()
+					.prefix("omp-e2e-owner-state-")
+					.tempdir()
+					.context("creating owner state")?;
+				let (owner_config, owner_con, owner_convars) = open_inputs()?;
+				let owner_server = Arc::new(
+					EnvServer::open_local(
+						owner_project.path(),
+						owner_state.path(),
+						Registry::new(),
+						owner_config,
+						&owner_con,
+						owner_convars,
+						RegistryBridges::default(),
+					)
+					.await
+					.context("opening owner environment authority")?,
+				);
+				let connection = InProcessConnection::open(&owner_server, "omp-e2e-owner").await?;
+				let owner_client = connection.client().clone();
+				owner = Some((owner_server, connection, owner_project, owner_state));
+				EnvServer::open_session_host(
+					&project,
+					&state,
+					Registry::new(),
+					ext_host_config,
+					None,
+					&con,
+					convars,
+					RegistryBridges::default(),
+					owner_client,
+				)
+				.await
+				.context("opening session-host environment authority")?
+			},
+		});
 		if let Some(extension) = extension {
 			extension.verify(&server)?;
 		}
@@ -419,7 +535,7 @@ impl InProcessEnvHarness {
 		});
 		let primary = InProcessConnection::open(&server, "omp-e2e-embedded").await?;
 		cleanup.disarm();
-		Ok(Self { primary, data_task, shutdown, server, roots })
+		Ok(Self { primary, data_task, shutdown, server, roots, _owner: owner })
 	}
 
 	/// Opens another hello-complete connection to the same authority.
