@@ -186,11 +186,12 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
+	let sandbox_probe = || omp_envd::admission::probe_sandbox(&ctx, project).confines();
 	let control = NativeControlGrantOptions {
-		data_dir:          &data_dir,
-		sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
-		writable_roots:    &writable_roots,
-		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, project).confines(),
+		data_dir:       &data_dir,
+		sandbox_mode:   omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+		writable_roots: &writable_roots,
+		sandbox_probe:  &sandbox_probe,
 	};
 	let extensions = admit_native_extensions_with_control(
 		project,

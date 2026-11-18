@@ -2137,7 +2137,7 @@ fn recheck_grant_locations(
 	data_dir: &Path,
 	extension_root: &Path,
 	writable_roots: &[PathBuf],
-	allow_missing_extension_root: bool,
+	allow_missing_directories: bool,
 ) -> miette::Result<()> {
 	omp_driver::discovery::native::check_grant_locations(
 		data_dir,
@@ -2152,8 +2152,8 @@ fn recheck_grant_locations(
 		.grants
 		.parent()
 		.ok_or_else(|| miette!("grant store has no parent directory"))?;
-	check_grant_directory_permissions(store, false)?;
-	check_grant_directory_permissions(extension_root, allow_missing_extension_root)?;
+	check_grant_directory_permissions(store, allow_missing_directories)?;
+	check_grant_directory_permissions(extension_root, allow_missing_directories)?;
 	Ok(())
 }
 
@@ -4732,6 +4732,8 @@ mod grant_tests {
 			NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
 			admit_native_extensions_contained_with_control,
 		};
+		let sandbox_probe = || true;
+
 		let report = admit_native_extensions_contained_with_control(
 			&f.project,
 			&f.home,
@@ -4743,10 +4745,10 @@ mod grant_tests {
 				disabled:          &[],
 			},
 			&NativeControlGrantOptions {
-				data_dir:          &f.data,
-				sandbox_mode:      omp_envd::exec_settings::ExecSandboxMode::WorkspaceWrite,
-				writable_roots:    &[],
-				sandbox_available: true,
+				data_dir:       &f.data,
+				sandbox_mode:   omp_envd::exec_settings::ExecSandboxMode::WorkspaceWrite,
+				writable_roots: &[],
+				sandbox_probe:  &sandbox_probe,
 			},
 		);
 		report

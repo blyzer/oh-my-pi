@@ -187,12 +187,12 @@ impl OperatorHome {
 			.into_iter()
 			.map(|path| PathBuf::from(path.as_str()))
 			.collect::<Vec<_>>();
-		let sandbox = probe_sandbox(&ctx, project);
+		let sandbox_probe = || probe_sandbox(&ctx, project).confines();
 		let control = NativeControlGrantOptions {
-			data_dir:          &self.data_dir,
-			sandbox_mode:      SV_SANDBOX_MODE.get(&ctx),
-			writable_roots:    &writable_roots,
-			sandbox_available: sandbox.confines(),
+			data_dir:       &self.data_dir,
+			sandbox_mode:   SV_SANDBOX_MODE.get(&ctx),
+			writable_roots: &writable_roots,
+			sandbox_probe:  &sandbox_probe,
 		};
 		let report = admit_native_extensions_contained_with_control(
 			project,

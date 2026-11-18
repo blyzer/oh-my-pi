@@ -2493,11 +2493,16 @@ pub async fn compose_kernel(
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
+	let sandbox_probe_cache = std::cell::OnceCell::new();
+	let sandbox_probe = || {
+		*sandbox_probe_cache
+			.get_or_init(|| omp_envd::admission::probe_sandbox(&ctx, &project_root).confines())
+	};
 	let control_options = crate::discovery::native::NativeControlGrantOptions {
 		data_dir,
 		sandbox_mode: omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
 		writable_roots: &configured_writable_roots,
-		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &project_root).confines(),
+		sandbox_probe: &sandbox_probe,
 	};
 	let protected_write_paths =
 		crate::discovery::native::protected_write_paths(data_dir, &protected_home);
@@ -2648,6 +2653,10 @@ pub async fn compose_kernel(
 		.into_iter()
 		.map(|extension| extension.spec)
 		.collect();
+	let has_control_grants = native_specs
+		.iter()
+		.any(|spec| !spec.control_grants.is_empty());
+
 	let terminal = terminal_identity();
 	let journal_path = select_journal_path(
 		&sessions_dir,
@@ -2676,6 +2685,7 @@ pub async fn compose_kernel(
 		&control_options,
 		&ctx,
 		&project_root,
+		has_control_grants,
 	);
 	if !sandbox_matches {
 		tracing::warn!(

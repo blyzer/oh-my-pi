@@ -62,34 +62,39 @@ pub struct NativeAdmissionOptions<'a> {
 }
 
 /// Host facts required before an operator path grant can admit CONTROL.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct NativeControlGrantOptions<'a> {
 	/// The host data directory containing the ext/grants.toml path.
-	pub data_dir:          &'a Path,
+	pub data_dir:       &'a Path,
 	/// The effective command sandbox posture.
-	pub sandbox_mode:      ExecSandboxMode,
+	pub sandbox_mode:   ExecSandboxMode,
 	/// Additional exec-writable roots from the effective sandbox settings.
-	pub writable_roots:    &'a [PathBuf],
-	/// Whether this host can enforce a kernel-backed exec sandbox.
-	pub sandbox_available: bool,
+	pub writable_roots: &'a [PathBuf],
+	/// Probes for a kernel-enforced sandbox; called only for user extensions
+	/// that declare CONTROL.
+	pub sandbox_probe:  &'a dyn Fn() -> bool,
 }
 
-/// Rechecks the sandbox facts after journaled class convars are applied.
+/// Rechecks sandbox facts after journaled class convars are applied. If no
+/// CONTROL grant was admitted, returns true without probing the sandbox.
 pub(crate) fn control_grant_sandbox_matches(
 	admitted: &NativeControlGrantOptions<'_>,
 	ctx: &omp_con::Ctx,
 	workspace_root: &Path,
+	has_control_grants: bool,
 ) -> bool {
+	if !has_control_grants {
+		return true;
+	}
 	let writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
 		.get(ctx)
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
 	let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(ctx);
-	let sandbox_available = omp_envd::admission::probe_sandbox(ctx, workspace_root).confines();
 	admitted.sandbox_mode == mode
 		&& admitted.writable_roots == writable_roots.as_slice()
-		&& admitted.sandbox_available == sandbox_available
+		&& omp_envd::admission::probe_sandbox(ctx, workspace_root).confines()
 }
 
 /// Drops every CONTROL grant from `specs`. A grant holds only under the sandbox
@@ -780,11 +785,13 @@ fn admitted_control_grants(
 	if wanted.is_empty() {
 		return wanted;
 	}
-	if options.sandbox_mode == ExecSandboxMode::Off || !options.sandbox_available {
+	let sandbox_available =
+		options.sandbox_mode != ExecSandboxMode::Off && (options.sandbox_probe)();
+	if !sandbox_available {
 		tracing::warn!(
 			extension = %id,
 			mode = %options.sandbox_mode,
-			sandbox_available = options.sandbox_available,
+			sandbox_available,
 			"withholding extension CONTROL grants because no kernel-enforced exec sandbox is active"
 		);
 		return BTreeSet::new();
@@ -1082,6 +1089,8 @@ default = false
 		sandbox_available: bool,
 		writable_roots: &[PathBuf],
 	) -> NativeAdmissionReport {
+		let sandbox_probe = || sandbox_available;
+
 		admit_native_extensions_contained_with_control(
 			project,
 			home,
@@ -1096,7 +1105,7 @@ default = false
 				data_dir,
 				sandbox_mode: mode,
 				writable_roots,
-				sandbox_available,
+				sandbox_probe: &sandbox_probe,
 			},
 		)
 	}
@@ -1319,17 +1328,18 @@ failure = "fault"
 		fs::create_dir_all(&workspace).expect("workspace");
 		let data_dir = tree.path().join("data");
 		let writable_roots = Vec::new();
+		let sandbox_probe = || omp_envd::admission::probe_sandbox(&ctx, &workspace).confines();
 		let admitted = NativeControlGrantOptions {
-			data_dir:          &data_dir,
-			sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
-			writable_roots:    &writable_roots,
-			sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &workspace).confines(),
+			data_dir:       &data_dir,
+			sandbox_mode:   omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+			writable_roots: &writable_roots,
+			sandbox_probe:  &sandbox_probe,
 		};
-		assert!(control_grant_sandbox_matches(&admitted, &ctx, &workspace));
+		assert!(control_grant_sandbox_matches(&admitted, &ctx, &workspace, true));
 		omp_envd::exec_settings::SV_SANDBOX_MODE
 			.set(&ctx, ExecSandboxMode::Off)
 			.expect("class sandbox override");
-		assert!(!control_grant_sandbox_matches(&admitted, &ctx, &workspace));
+		assert!(!control_grant_sandbox_matches(&admitted, &ctx, &workspace, true));
 	}
 
 	#[test]
@@ -1351,6 +1361,39 @@ failure = "fault"
 			.expect("user extension admitted");
 		assert!(extension.spec.control_grants.is_empty());
 		assert!(root.exists());
+	}
+
+	#[test]
+	fn non_control_extension_skips_kernel_sandbox_probe() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		fs::write(root.join("omp.toml"), "id = \"test.user\"\nentry = \"demo\"\n")
+			.expect("remove CONTROL declaration");
+		let calls = std::cell::Cell::new(0);
+		let sandbox_probe = || {
+			calls.set(calls.get() + 1);
+			true
+		};
+		let writable_roots = Vec::new();
+		let report = admit_native_extensions_contained_with_control(
+			&project,
+			&home,
+			NativeAdmissionOptions {
+				explicit_roots:    &[],
+				mode:              NativeLoadMode::Merge,
+				include_workspace: false,
+				setting_overrides: &[],
+				disabled:          &[],
+			},
+			&NativeControlGrantOptions {
+				data_dir:       &data_dir,
+				sandbox_mode:   ExecSandboxMode::WorkspaceWrite,
+				writable_roots: &writable_roots,
+				sandbox_probe:  &sandbox_probe,
+			},
+		);
+		assert_eq!(report.extensions.len(), 1);
+		assert_eq!(calls.get(), 0);
 	}
 
 	#[test]
@@ -1571,10 +1614,10 @@ failure = "fault"
 				disabled:          &[],
 			},
 			&NativeControlGrantOptions {
-				data_dir:          &data_dir,
-				sandbox_mode:      ExecSandboxMode::WorkspaceWrite,
-				writable_roots:    &[],
-				sandbox_available: true,
+				data_dir:       &data_dir,
+				sandbox_mode:   ExecSandboxMode::WorkspaceWrite,
+				writable_roots: &[],
+				sandbox_probe:  &|| true,
 			},
 		);
 		let extension = report
