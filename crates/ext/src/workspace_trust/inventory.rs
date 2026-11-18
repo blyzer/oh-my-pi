@@ -468,6 +468,35 @@ pub fn inventory(
 	Ok(walk.finish())
 }
 
+/// Reads one extension root with the same bounded, fail-closed tree walker used
+/// for workspace extension inputs. Symlinks may resolve only within the root.
+pub fn tree_inventory(
+	root: &Path,
+	budget: &InventoryBudget,
+) -> Result<InputsInventory, WorkspaceTrustError> {
+	let root = canonical(root)?;
+	let metadata = fs::metadata(&root)
+		.map_err(|source| WorkspaceTrustError::Read { path: root.clone(), source })?;
+	if !metadata.is_dir() {
+		return Err(WorkspaceTrustError::Read {
+			path:   root,
+			source: io::Error::from(io::ErrorKind::NotADirectory),
+		});
+	}
+	let mut walk = Walk {
+		workspace: &root,
+		containment: &root,
+		budget,
+		files: 0,
+		listed: 0,
+		bytes: 0,
+		entries: Vec::new(),
+	};
+	let stack = &mut vec![root.clone()];
+	walk.directory(&root, &mut PathBuf::new(), stack, 0, Children::Content)?;
+	Ok(walk.finish())
+}
+
 /// One inventory in progress.
 struct Walk<'a> {
 	/// Canonical workspace root; entry paths are relative to it.
@@ -873,6 +902,28 @@ mod tests {
 	}
 
 	#[test]
+	fn extension_tree_inventory_binds_hidden_and_bytecode_files() {
+		let tree = tempfile::tempdir().expect("extension tree");
+		let source = tree.path().join("src/entry.py");
+		fs::create_dir_all(source.parent().expect("source parent")).expect("source dir");
+		fs::write(&source, "VALUE = 1\n").expect("entry source");
+		let first =
+			tree_inventory(tree.path(), &InventoryBudget::default()).expect("first inventory");
+		fs::write(tree.path().join(".hidden"), "hidden source input").expect("hidden file");
+		fs::create_dir_all(tree.path().join("src/__pycache__")).expect("cache dir");
+		fs::write(tree.path().join("src/__pycache__/entry.cpython-314.pyc"), b"bytecode")
+			.expect("bytecode");
+		let second =
+			tree_inventory(tree.path(), &InventoryBudget::default()).expect("second inventory");
+		assert_ne!(
+			first.digest(),
+			second.digest(),
+			"every file that can affect module loading is bound"
+		);
+	}
+
+	#[test]
+
 	fn projection_hashes_only_the_sorted_pairs() {
 		let mut overrides = BTreeMap::new();
 		overrides.insert(Str::new_static("b@m"), false);

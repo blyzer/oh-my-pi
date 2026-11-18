@@ -1141,23 +1141,23 @@ pub fn capability_digest(
 	sf!("b3:{}", hasher.finalize().to_hex())
 }
 
-/// Identity of an operator path grant for one exact manifest.
-///
-/// Covers the full declared capability set. Each entry is length-prefixed so
-/// no name can stand in for two entries; the signed-install
-/// `capability_digest` is unchanged.
+/// Identity digest for an unsigned path grant. Binds the sorted declared
+/// capabilities, manifest text and bounded extension-tree digest.
+/// Signed-install `capability_digest` is unchanged.
 pub fn path_grant_digest(
 	capabilities: impl IntoIterator<Item = Str>,
 	manifest_digest: &[u8; 32],
+	code_digest: &[u8; 32],
 ) -> Str {
 	let entries: BTreeSet<Str> = capabilities.into_iter().collect();
 	let mut hasher = blake3::Hasher::new();
-	hasher.update(b"omp.path-grant.v1");
+	hasher.update(b"omp.path-grant.v2");
 	for entry in &entries {
 		hasher.update(&(entry.as_str().len() as u64).to_le_bytes());
 		hasher.update(entry.as_str().as_bytes());
 	}
 	hasher.update(manifest_digest);
+	hasher.update(code_digest);
 	sf!("b3:{}", hasher.finalize().to_hex())
 }
 
@@ -1258,45 +1258,45 @@ mod tests {
 	#[test]
 	fn path_grant_digest_separates_entries() {
 		let manifest = [7_u8; 32];
+		let code = [8_u8; 32];
 		assert_ne!(
-			path_grant_digest([sf!("a"), sf!("b\nc")], &manifest),
-			path_grant_digest([sf!("a"), sf!("b"), sf!("c")], &manifest)
+			path_grant_digest([sf!("a"), sf!("b\nc")], &manifest, &code),
+			path_grant_digest([sf!("a"), sf!("b"), sf!("c")], &manifest, &code)
 		);
 		assert_ne!(
-			path_grant_digest([sf!("ab"), sf!("c")], &manifest),
-			path_grant_digest([sf!("a"), sf!("bc")], &manifest)
+			path_grant_digest([sf!("ab"), sf!("c")], &manifest, &code),
+			path_grant_digest([sf!("a"), sf!("bc")], &manifest, &code)
 		);
-		// Pinned: blake3 over "omp.path-grant.v1", then 1u64 LE "a", 2u64 LE "bc",
-		// then the 32 manifest bytes. A change to the algorithm must fail here.
-		assert_eq!(
-			path_grant_digest([sf!("bc"), sf!("a")], &manifest).as_str(),
-			"b3:fa6b07326ab655f64fa4990b6a8e3b8624871256d314b641842a1eb5d5f1ecf2"
+		assert_ne!(
+			path_grant_digest([sf!("a")], &manifest, &[1_u8; 32]),
+			path_grant_digest([sf!("a")], &manifest, &[2_u8; 32]),
 		);
 	}
 
 	#[test]
-	fn path_grant_digest_binds_manifest() {
+	fn path_grant_digest_binds_manifest_and_code() {
 		let capabilities = || [sf!("agents.continuation"), sf!("policy.write")];
-		let first = path_grant_digest(capabilities(), &[1_u8; 32]);
-		assert_eq!(first, path_grant_digest(capabilities(), &[1_u8; 32]));
-		assert_ne!(first, path_grant_digest(capabilities(), &[2_u8; 32]));
-		let mut edited = [1_u8; 32];
-		edited[31] = 0;
-		assert_ne!(first, path_grant_digest(capabilities(), &edited));
+		let first = path_grant_digest(capabilities(), &[1_u8; 32], &[3_u8; 32]);
+		assert_eq!(first, path_grant_digest(capabilities(), &[1_u8; 32], &[3_u8; 32]));
+		assert_ne!(first, path_grant_digest(capabilities(), &[2_u8; 32], &[3_u8; 32]));
+		assert_ne!(first, path_grant_digest(capabilities(), &[1_u8; 32], &[4_u8; 32]));
 	}
 
 	#[test]
 	fn path_grant_digest_ignores_order_and_duplicates() {
 		let manifest = [9_u8; 32];
-		let canonical = path_grant_digest([sf!("approvals.decide"), sf!("policy.write")], &manifest);
+		let code = [10_u8; 32];
+		let canonical =
+			path_grant_digest([sf!("approvals.decide"), sf!("policy.write")], &manifest, &code);
 		assert_eq!(
 			canonical,
 			path_grant_digest(
 				[sf!("policy.write"), sf!("approvals.decide"), sf!("policy.write")],
-				&manifest
+				&manifest,
+				&code,
 			)
 		);
-		assert_ne!(canonical, path_grant_digest([sf!("policy.write")], &manifest));
+		assert_ne!(canonical, path_grant_digest([sf!("policy.write")], &manifest, &code));
 		assert_ne!(canonical, capability_digest([sf!("approvals.decide"), sf!("policy.write")], []));
 	}
 

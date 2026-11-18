@@ -28,7 +28,7 @@ use omp_ext::{
 		CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
 	},
 	trust::{GrantsFile, grant_covers, grants_path, native_path_publisher, path_grant_digest},
-	workspace_trust::inventory::EXTENSIONS_DIR,
+	workspace_trust::inventory::{EXTENSIONS_DIR, InventoryBudget, tree_inventory},
 };
 use thiserror::Error;
 
@@ -230,6 +230,17 @@ pub enum NativeExtensionError {
 		#[source]
 		source: omp_ext::ExtensionError,
 	},
+	/// The extension source tree could not be inventoried within the fail-closed
+	/// bound.
+	#[error("failed to inventory extension code under {root}")]
+	CodeInventory {
+		/// Canonical extension root.
+		root:   PathBuf,
+		/// Typed bounded-inventory failure.
+		#[source]
+		source: omp_ext::workspace_trust::WorkspaceTrustError,
+	},
+
 	/// A source `pyproject.toml` was malformed.
 	#[error("invalid Python project manifest {path}")]
 	PyProject {
@@ -812,7 +823,14 @@ fn admitted_control_grants(
 			return BTreeSet::new();
 		},
 	};
-	let identity = path_grant_identity(id, canonical_root, manifest_text, declared_capabilities);
+	let identity =
+		match path_grant_identity(id, canonical_root, manifest_text, declared_capabilities) {
+			Ok(identity) => identity,
+			Err(error) => {
+				tracing::warn!(extension = %id, reason = %error, "withholding extension CONTROL grants");
+				return BTreeSet::new();
+			},
+		};
 	if grant_covers(
 		&grants,
 		id,
@@ -844,7 +862,8 @@ pub struct PathGrantIdentity {
 	pub root:              PathBuf,
 	/// Path publisher derived from the canonical root.
 	pub publisher:         Str,
-	/// Path-grant digest over the full declared set and the manifest text.
+	/// Path-grant digest over declared capabilities, manifest text and the
+	/// bounded extension tree.
 	pub capability_digest: Str,
 	/// The CONTROL subset of the declared capabilities.
 	pub control:           BTreeSet<Str>,
@@ -855,19 +874,27 @@ fn path_grant_identity(
 	canonical_root: &Path,
 	manifest_text: &str,
 	declared_capabilities: &[Str],
-) -> PathGrantIdentity {
+) -> Result<PathGrantIdentity, NativeExtensionError> {
+	let tree = tree_inventory(canonical_root, &InventoryBudget::default()).map_err(|source| {
+		NativeExtensionError::CodeInventory { root: canonical_root.to_path_buf(), source }
+	})?;
 	let manifest_digest = Hash32::sum(manifest_text.as_bytes()).into_bytes();
-	PathGrantIdentity {
+	let code_digest = tree.digest().hash().as_bytes();
+	Ok(PathGrantIdentity {
 		id:                id.clone(),
 		root:              canonical_root.to_path_buf(),
 		publisher:         native_path_publisher(canonical_root),
-		capability_digest: path_grant_digest(declared_capabilities.iter().cloned(), &manifest_digest),
+		capability_digest: path_grant_digest(
+			declared_capabilities.iter().cloned(),
+			&manifest_digest,
+			code_digest,
+		),
 		control:           declared_capabilities
 			.iter()
 			.filter(|capability| CONTROL_CAPABILITIES.contains(&capability.as_str()))
 			.cloned()
 			.collect(),
-	}
+	})
 }
 
 /// The automatic user-layer extension root, `<config>/agent/extensions`.
@@ -922,7 +949,7 @@ pub fn user_extension_grant_identity(
 				&loaded.root,
 				&loaded.text,
 				&declared,
-			)));
+			)?));
 		}
 	}
 	errors.into_iter().next().map_or(Ok(None), Err)
@@ -1025,8 +1052,10 @@ default = false
 		let manifest = fs::read_to_string(root.join("omp.toml")).expect("manifest");
 		let declared = [sf!("agents.continuation"), sf!("policy.write")];
 		let manifest_digest = Hash32::sum(manifest.as_bytes()).into_bytes();
-		let capability_digest = path_grant_digest(declared, &manifest_digest);
 		let canonical_root = fs::canonicalize(root).expect("canonical extension root");
+		let tree = tree_inventory(&canonical_root, &InventoryBudget::default()).expect("source tree");
+		let code_digest = tree.digest().hash().as_bytes();
+		let capability_digest = path_grant_digest(declared, &manifest_digest, code_digest);
 		let grant = Grant {
 			id: id.clone(),
 			publisher: native_path_publisher(&canonical_root),
@@ -1346,6 +1375,24 @@ failure = "fault"
 			extension.spec.control_grants,
 			BTreeSet::from([sf!("agents.continuation"), sf!("policy.write")])
 		);
+	}
+
+	#[test]
+	fn changed_extension_code_invalidates_path_control_grant() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		fs::write(root.join("src/demo/__init__.py"), "# changed extension code\n")
+			.expect("edit code");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		assert_no_control_grant(&report, "test.user");
 	}
 
 	#[test]
