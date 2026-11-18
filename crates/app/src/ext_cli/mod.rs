@@ -2054,21 +2054,16 @@ fn grant_with(
 	};
 	let extension_root = omp_driver::discovery::native::user_extension_root(home)
 		.map_err(|error| miette!("{error}"))?;
-	// Grant and revoke both rewrite grants.toml: refuse either on an unsafe store.
-	omp_driver::discovery::native::check_grant_locations(
-		data_dir,
-		&extension_root,
-		&state.project,
-		writable_roots,
-	)
-	.map_err(|error| miette!("refusing to change control grants for `{}`: {error}", args.id))?;
+	recheck_grant_locations(state, data_dir, &extension_root, writable_roots, true)?;
 	if args.revoke {
-		let removed = GrantsFile::update(&state.grants, |grants| {
+		let result = GrantsFile::try_update(&state.grants, |grants| {
+			recheck_grant_locations(state, data_dir, &extension_root, writable_roots, true)?;
 			let before = grants.grants.len();
 			grants.grants.retain(|grant| !is_path_grant(grant));
-			before - grants.grants.len()
+			Ok::<_, miette::Report>(before - grants.grants.len())
 		})
 		.map_err(grants_update_failure)?;
+		let removed = result?;
 		println!("{}", revoke_report(&args.id, removed));
 		return Ok(());
 	}
@@ -2113,12 +2108,77 @@ fn grant_with(
 		granted_by:        Str::new_static("explicit-grant"),
 		duration:          omp_ext::trust::GrantDuration::Persistent,
 	};
-	GrantsFile::update(&state.grants, |grants| {
+	let result = GrantsFile::try_update(&state.grants, |grants| {
+		recheck_grant_locations(state, data_dir, &extension_root, writable_roots, false)?;
+		let current =
+			omp_driver::discovery::native::user_extension_grant_identity(home, args.id.as_str())
+				.map_err(|error| miette!("{error}"))?
+				.ok_or_else(|| {
+					miette!("extension `{}` disappeared before its grant was written", args.id)
+				})?;
+		if current != identity {
+			return Err(miette!(
+				"extension `{}` changed after consent; review it and grant again",
+				args.id
+			));
+		}
 		grants.grants.retain(|grant| !is_path_grant(grant));
 		grants.grants.push(record);
+		Ok::<_, miette::Report>(())
 	})
 	.map_err(grants_update_failure)?;
+	result?;
 	println!("{}: granted {capabilities}", args.id);
+	Ok(())
+}
+
+fn recheck_grant_locations(
+	state: &StatePaths,
+	data_dir: &Path,
+	extension_root: &Path,
+	writable_roots: &[PathBuf],
+	allow_missing_extension_root: bool,
+) -> miette::Result<()> {
+	omp_driver::discovery::native::check_grant_locations(
+		data_dir,
+		extension_root,
+		&state.project,
+		writable_roots,
+	)
+	.map_err(|error| {
+		miette!("refusing to change control grants for `{}`: {error}", extension_root.display())
+	})?;
+	let store = state
+		.grants
+		.parent()
+		.ok_or_else(|| miette!("grant store has no parent directory"))?;
+	check_grant_directory_permissions(store, false)?;
+	check_grant_directory_permissions(extension_root, allow_missing_extension_root)?;
+	Ok(())
+}
+
+fn check_grant_directory_permissions(path: &Path, allow_missing: bool) -> miette::Result<()> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+		let metadata = match fs::symlink_metadata(path) {
+			Ok(metadata) => metadata,
+			Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+				return Ok(());
+			},
+			Err(error) => {
+				return Err(miette!("could not inspect grant directory {}: {error}", path.display()));
+			},
+		};
+		if metadata.file_type().is_symlink() || !metadata.is_dir() {
+			return Err(miette!("grant directory {} is not a real directory", path.display()));
+		}
+		if metadata.permissions().mode() & 0o022 != 0 {
+			return Err(miette!("grant directory {} is group- or other-writable", path.display()));
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = (path, allow_missing);
 	Ok(())
 }
 
@@ -4708,6 +4768,54 @@ mod grant_tests {
 			admitted_control(&f, "test.user"),
 			[Str::new_static("agents.continuation"), Str::new_static("policy.write")].into()
 		);
+	}
+
+	#[test]
+	fn grant_rechecks_extension_code_after_consent() {
+		let f = fixture("test.user");
+		let state = StatePaths::new(&f.data, &f.project);
+		let result = grant_with(&state, &f.data, &f.home, &[], &args("test.user", false), |_| {
+			std::fs::write(f.root.join("src/demo/__init__.py"), "# changed during consent\n")
+				.expect("change code during consent");
+			Ok(true)
+		});
+		let error = result.expect_err("stale consent is refused");
+		assert!(error.to_string().contains("changed after consent"), "{error}");
+		assert!(!state.grants.exists(), "a stale identity must not be persisted");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grant_rechecks_store_permissions_after_consent() {
+		use std::os::unix::fs::PermissionsExt as _;
+		let f = fixture("test.user");
+		let state = StatePaths::new(&f.data, &f.project);
+		let store = f.data.join("ext");
+		let result = grant_with(&state, &f.data, &f.home, &[], &args("test.user", false), |_| {
+			std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o775))
+				.expect("make store group-writable during consent");
+			Ok(true)
+		});
+		let error = result.expect_err("unsafe store is refused");
+		assert!(error.to_string().contains("group- or other-writable"), "{error}");
+		assert!(!state.grants.exists(), "an unsafe store must not receive a grant");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grant_rechecks_extension_root_permissions_after_consent() {
+		use std::os::unix::fs::PermissionsExt as _;
+		let f = fixture("test.user");
+		let state = StatePaths::new(&f.data, &f.project);
+		let extension_root = f.home.join(".o2/agent/extensions");
+		let result = grant_with(&state, &f.data, &f.home, &[], &args("test.user", false), |_| {
+			std::fs::set_permissions(&extension_root, std::fs::Permissions::from_mode(0o775))
+				.expect("make extension root group-writable during consent");
+			Ok(true)
+		});
+		let error = result.expect_err("unsafe extension root is refused");
+		assert!(error.to_string().contains("group- or other-writable"), "{error}");
+		assert!(!state.grants.exists(), "an unsafe root must not receive a grant");
 	}
 
 	#[test]
