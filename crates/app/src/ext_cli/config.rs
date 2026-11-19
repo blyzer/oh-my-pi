@@ -186,7 +186,11 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
-	let sandbox_probe = || omp_envd::admission::probe_sandbox(&ctx, project).confines();
+	let sandbox_probe_cache = std::cell::OnceCell::new();
+	let sandbox_probe = || {
+		*sandbox_probe_cache
+			.get_or_init(|| omp_envd::admission::probe_sandbox(&ctx, project).confines())
+	};
 	let control = NativeControlGrantOptions {
 		data_dir:       &data_dir,
 		sandbox_mode:   omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),

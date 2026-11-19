@@ -187,7 +187,9 @@ impl OperatorHome {
 			.into_iter()
 			.map(|path| PathBuf::from(path.as_str()))
 			.collect::<Vec<_>>();
-		let sandbox_probe = || probe_sandbox(&ctx, project).confines();
+		let sandbox_probe_cache = std::cell::OnceCell::new();
+		let sandbox_probe =
+			|| *sandbox_probe_cache.get_or_init(|| probe_sandbox(&ctx, project).confines());
 		let control = NativeControlGrantOptions {
 			data_dir:       &self.data_dir,
 			sandbox_mode:   SV_SANDBOX_MODE.get(&ctx),

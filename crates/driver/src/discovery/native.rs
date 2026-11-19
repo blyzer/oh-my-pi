@@ -830,6 +830,15 @@ fn admitted_control_grants(
 			return BTreeSet::new();
 		},
 	};
+	if !grants.grants.iter().any(|grant| {
+		grant.id == *id
+			&& grant.layer == Layer::Client
+			&& grant.workspace.is_none()
+			&& grant.ship.as_str() == PATH_GRANT_SHIP
+	}) {
+		return BTreeSet::new();
+	}
+
 	let identity =
 		match path_grant_identity(id, canonical_root, manifest_text, declared_capabilities) {
 			Ok(identity) => identity,
