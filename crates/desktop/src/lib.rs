@@ -297,8 +297,12 @@ struct Worker {
 
 impl Worker {
 	#[tracing::instrument(name = "desktop_device_initialize", level = "debug", skip_all)]
-	fn new(selector: DisplaySelector, capabilities: Arc<Mutex<DesktopCapabilities>>) -> Self {
-		let backend = create_backend(selector);
+	fn new(
+		selector: DisplaySelector,
+		capabilities: Arc<Mutex<DesktopCapabilities>>,
+		release_on_abort: bool,
+	) -> Self {
+		let backend = create_backend(selector, release_on_abort);
 		if let Err(error) = &backend {
 			tracing::warn!(
 				error_code = %error.code,
@@ -671,19 +675,24 @@ fn axnode(reference: String, props: ax::AxProps) -> AxNode {
 }
 
 #[cfg(target_os = "macos")]
-fn create_backend(selector: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
-	Ok(Box::new(macos::MacosBackend::new(selector)?))
+fn create_backend(selector: DisplaySelector, release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
+	let backend = if release_on_abort {
+		macos::MacosBackend::with_release_on_abort(selector, true)?
+	} else {
+		macos::MacosBackend::new(selector)?
+	};
+	Ok(Box::new(backend))
 }
 #[cfg(target_os = "windows")]
-fn create_backend(selector: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(selector: DisplaySelector, _release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
 	Ok(Box::new(win32::Win32Backend::new(selector)?))
 }
 #[cfg(target_os = "linux")]
-fn create_backend(selector: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(selector: DisplaySelector, _release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
 	linux::new_backend(selector)
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn create_backend(_: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(_: DisplaySelector, _release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
 	Err(DesktopError::capture_failed("desktop backend unavailable on this platform"))
 }
 
@@ -695,14 +704,16 @@ struct Lifecycle {
 }
 struct SessionCore {
 	selector:     DisplaySelector,
+	release_on_abort: bool,
 	lifecycle:    Mutex<Lifecycle>,
 	capabilities: Arc<Mutex<DesktopCapabilities>>,
 	shutdown:     Arc<AtomicBool>,
 }
 impl SessionCore {
-	fn new(selector: DisplaySelector) -> Arc<Self> {
+	fn new(selector: DisplaySelector, release_on_abort: bool) -> Arc<Self> {
 		Arc::new(Self {
 			selector,
+			release_on_abort,
 			lifecycle: Mutex::new(Lifecycle {
 				tx:     None,
 				done:   None,
@@ -725,12 +736,13 @@ impl SessionCore {
 		let (tx, rx) = flume::unbounded::<Work>();
 		let (done_tx, done_rx) = flume::bounded(1);
 		let selector = self.selector.clone();
+		let release_on_abort = self.release_on_abort;
 		let caps = Arc::clone(&self.capabilities);
 		let shutdown = Arc::clone(&self.shutdown);
 		let join = thread::Builder::new()
 			.name("omp-desktop-session".into())
 			.spawn(move || {
-				let mut worker = Worker::new(selector, caps);
+				let mut worker = Worker::new(selector, caps, release_on_abort);
 				while let Ok(work) = rx.recv() {
 					let Work { request, state } = work;
 					let close = request.is_close();
@@ -850,7 +862,21 @@ pub struct DesktopSession {
 impl DesktopSession {
 	/// Create a lazily-started session.
 	pub fn new(options: Option<DesktopSessionOptions>) -> Self {
-		Self { core: SessionCore::new(DisplaySelector::parse(options.and_then(|o| o.display))) }
+		Self::with_release_on_abort(options, false)
+	}
+
+	/// Create a session using the `sv_computer_release_on_abort` setting.
+	/// `new` keeps this setting disabled by default.
+	pub fn with_release_on_abort(
+		options: Option<DesktopSessionOptions>,
+		release_on_abort: bool,
+	) -> Self {
+		Self {
+			core: SessionCore::new(
+				DisplaySelector::parse(options.and_then(|o| o.display)),
+				release_on_abort,
+			),
+		}
 	}
 
 	/// Return the latest capability snapshot, probing the backend when needed.

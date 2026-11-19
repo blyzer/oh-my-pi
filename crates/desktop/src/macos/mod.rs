@@ -32,6 +32,17 @@ impl MacosBackend {
 		})
 	}
 
+	pub(crate) fn with_release_on_abort(
+		display: DisplaySelector,
+		release_on_abort: bool,
+	) -> CoreResult<Self> {
+		Ok(Self {
+			capture: MacCapture::new(display),
+			input:   MacInput::with_release_on_abort(release_on_abort)?,
+			ax:      MacAx::new(),
+		})
+	}
+
 	fn require_input_permission() -> CoreResult<()> {
 		if ax::is_trusted() {
 			Ok(())

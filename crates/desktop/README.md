@@ -30,4 +30,7 @@ operations for that target, so scaled and multi-display images remain aligned
 with native desktop coordinates. Window IDs and accessibility references are
 opaque, backend-owned capabilities are reported explicitly, and permission or
 backend failures are returned as typed `DesktopError` values rather than
-silently degrading an operation.
+silently degrading an operation. When `sv_computer_release_on_abort` is
+enabled, macOS drag sequences and key chords validate every input coordinate
+up front and release held buttons or modifiers at the last delivered point on
+cancellation or error.

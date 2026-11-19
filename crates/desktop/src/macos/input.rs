@@ -28,6 +28,7 @@ use super::{
 
 pub(super) struct MacInput {
 	source: CGEventSource,
+	release_on_abort: bool,
 }
 #[allow(
 	clippy::non_send_fields_in_send_ty,
@@ -40,7 +41,11 @@ unsafe impl Send for MacInput {}
 
 impl MacInput {
 	pub(super) fn new() -> CoreResult<Self> {
-		Ok(Self { source: source()? })
+		Self::with_release_on_abort(false)
+	}
+
+	pub(super) fn with_release_on_abort(release_on_abort: bool) -> CoreResult<Self> {
+		Ok(Self { source: source()?, release_on_abort })
 	}
 
 	#[allow(
@@ -55,7 +60,7 @@ impl MacInput {
 		capture: &MacCapture,
 	) -> CoreResult<()> {
 		match target {
-			Target::Desktop => global_pointer(&self.source, event),
+			Target::Desktop => global_pointer(&self.source, event, self.release_on_abort),
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
@@ -65,10 +70,10 @@ impl MacInput {
 						if !window.focused {
 							skylight::activate_without_raise(pid, wid)?;
 						}
-						background_pointer(&self.source, pid, wid, &window, event)
+						background_pointer(&self.source, pid, wid, &window, event, self.release_on_abort)
 					},
 					DeliveryMode::Foreground => {
-						skylight::with_foreground(pid, wid, || global_pointer(&self.source, event))
+						skylight::with_foreground(pid, wid, || global_pointer(&self.source, event, self.release_on_abort))
 					},
 				}
 			},
@@ -118,7 +123,7 @@ impl MacInput {
 		capture: &MacCapture,
 	) -> CoreResult<()> {
 		match target {
-			Target::Desktop => global_chord(&self.source, keys),
+			Target::Desktop => global_chord(&self.source, keys, self.release_on_abort),
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
@@ -126,12 +131,12 @@ impl MacInput {
 					DeliveryMode::Background => {
 						background_guard(&window, "keyboard", None)?;
 						prepare_background_keys(&window, pid, wid, capture)?;
-						background_chord(&self.source, pid, keys)
+						background_chord(&self.source, pid, keys, self.release_on_abort)
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, || {
-						let _ = ax::prepare_foreground_input(&window);
-						global_chord(&self.source, keys)
-					}),
+							let _ = ax::prepare_foreground_input(&window);
+							global_chord(&self.source, keys, self.release_on_abort)
+						}),
 				}
 			},
 		}
@@ -327,6 +332,7 @@ fn background_pointer(
 	wid: u32,
 	window: &DesktopWindow,
 	event: PointerEvent,
+	release_on_abort: bool,
 ) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button, count, modifiers } => {
@@ -351,7 +357,7 @@ fn background_pointer(
 			)
 		},
 		PointerEvent::Drag { path, button, modifiers } => {
-			background_drag(source, pid, wid, window, &path, button, modifiers)
+			background_drag(source, pid, wid, window, &path, button, modifiers, release_on_abort)
 		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
 			background_scroll(source, pid, wid, window, x, y, dx, dy)
@@ -475,6 +481,40 @@ fn pointer_prologue(
 	Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stroke {
+	Down,
+	Dragged,
+	Up,
+}
+
+fn stroke(
+	path: &[(f64, f64)],
+	release_on_abort: bool,
+	mut checkpoint: impl FnMut() -> CoreResult<()>,
+	mut post: impl FnMut(Stroke, (f64, f64)) -> CoreResult<()>,
+) -> CoreResult<()> {
+	if path.len() < 2 {
+		return Err(DesktopError::input_failed("drag path must contain at least two points"));
+	}
+	let first = path[0];
+	post(Stroke::Down, first)?;
+	let mut last_delivered = first;
+	for &point in &path[1..] {
+		if let Err(error) = checkpoint().and_then(|()| post(Stroke::Dragged, point)) {
+			if release_on_abort
+				&& let Err(release_error) = post(Stroke::Up, last_delivered)
+			{
+				tracing::warn!(error = %release_error, "failed to release macOS drag button after abort");
+			}
+			return Err(error);
+		}
+		last_delivered = point;
+	}
+	post(Stroke::Up, last_delivered)
+}
+
+
 fn background_drag(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -483,6 +523,7 @@ fn background_drag(
 	path: &[(f64, f64)],
 	button: MouseButton,
 	modifiers: Modifiers,
+	release_on_abort: bool,
 ) -> CoreResult<()> {
 	let Some(&(start_x, start_y)) = path.first() else {
 		return Err(DesktopError::input_failed("drag path must contain at least two points"));
@@ -494,60 +535,21 @@ fn background_drag(
 	let (cg_button, down, up, dragged, number) = button_types(button);
 	let flags = modifier_flags(modifiers);
 	pointer_prologue(pid, wid, window, source, start_x, start_y, group, flags)?;
-	post_mouse(
-		pid,
-		wid,
-		window,
-		source.clone(),
-		down,
-		cg_button,
-		start_x,
-		start_y,
-		3,
-		1,
-		number,
-		group,
-		flags,
-	)?;
-	for &(x, y) in &path[1..] {
-		crate::operation_checkpoint()?;
-		thread::sleep(Duration::from_millis(16));
+	stroke(path, release_on_abort, crate::operation_checkpoint, |phase, (x, y)| {
+		if phase == Stroke::Dragged {
+			thread::sleep(Duration::from_millis(16));
+		} else if phase == Stroke::Up {
+			thread::sleep(Duration::from_millis(50));
+		}
+		let event_type = match phase {
+			Stroke::Down => down,
+			Stroke::Dragged => dragged,
+			Stroke::Up => up,
+		};
 		post_mouse(
-			pid,
-			wid,
-			window,
-			source.clone(),
-			dragged,
-			cg_button,
-			x,
-			y,
-			3,
-			1,
-			number,
-			group,
-			flags,
-		)?;
-	}
-	thread::sleep(Duration::from_millis(50));
-	let &(end_x, end_y) = path
-		.last()
-		.ok_or_else(|| DesktopError::input_failed("drag path is empty"))?;
-	post_mouse(
-		pid,
-		wid,
-		window,
-		source.clone(),
-		up,
-		cg_button,
-		end_x,
-		end_y,
-		3,
-		1,
-		number,
-		group,
-		flags,
-	)?;
-	Ok(())
+			pid, wid, window, source.clone(), event_type, cg_button, x, y, 3, 1, number, group, flags,
+		)
+	})
 }
 
 #[allow(
@@ -664,32 +666,48 @@ fn type_text(
 	Ok(())
 }
 
-fn background_chord(source: &CGEventSource, pid: libc::pid_t, keys: &[KeyName]) -> CoreResult<()> {
-	key_chord(source, keys, |event| skylight::post_keyboard(pid, event))
+fn background_chord(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	keys: &[KeyName],
+	release_on_abort: bool,
+) -> CoreResult<()> {
+	key_chord_with_options(source, keys, release_on_abort, |event| {
+		skylight::post_keyboard(pid, event)
+	})
 }
 
-fn global_chord(source: &CGEventSource, keys: &[KeyName]) -> CoreResult<()> {
-	key_chord(source, keys, post_global)
-}
-
-fn key_chord(
+fn global_chord(
 	source: &CGEventSource,
 	keys: &[KeyName],
+	release_on_abort: bool,
+) -> CoreResult<()> {
+	key_chord_with_options(source, keys, release_on_abort, post_global)
+}
+
+
+fn key_chord_with_options(
+	source: &CGEventSource,
+	keys: &[KeyName],
+	release_on_abort: bool,
 	mut post: impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	if keys.is_empty() {
 		return Err(DesktopError::invalid_key("key chord must not be empty"));
 	}
+	let codes = release_on_abort.then(|| chord_codes(keys)).transpose()?;
 	let mut active = Modifiers::default();
-	for &key in keys {
+	for (index, &key) in keys.iter().enumerate() {
 		update_modifier(&mut active, key, true);
-		post_key(source, key, true, modifier_flags(active), &mut post)?;
+		let code = codes.as_ref().map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
+		post_key_code(source, code, true, modifier_flags(active), &mut post)?;
 		thread::sleep(Duration::from_millis(8));
 	}
 	let mut first_error = None;
-	for &key in keys.iter().rev() {
+	for (index, &key) in keys.iter().enumerate().rev() {
 		update_modifier(&mut active, key, false);
-		if let Err(error) = post_key(source, key, false, modifier_flags(active), &mut post)
+		let code = codes.as_ref().map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
+		if let Err(error) = post_key_code(source, code, false, modifier_flags(active), &mut post)
 			&& first_error.is_none()
 		{
 			first_error = Some(error);
@@ -699,19 +717,28 @@ fn key_chord(
 	first_error.map_or(Ok(()), Err)
 }
 
-fn post_key(
+
+fn chord_codes(keys: &[KeyName]) -> CoreResult<Vec<u16>> {
+	if keys.is_empty() {
+		return Err(DesktopError::invalid_key("key chord must not be empty"));
+	}
+	keys.iter().copied().map(key_code).collect()
+}
+
+
+fn post_key_code(
 	source: &CGEventSource,
-	key: KeyName,
+	code: u16,
 	down: bool,
 	flags: CGEventFlags,
 	post: &mut impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let code = key_code(key)?;
 	let event = CGEvent::new_keyboard_event(source.clone(), code, down)
 		.map_err(|()| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
 	event.set_flags(flags);
 	post(&event)
 }
+
 
 const fn update_modifier(modifiers: &mut Modifiers, key: KeyName, down: bool) {
 	match key {
@@ -835,7 +862,11 @@ fn char_key_code(character: char) -> CoreResult<u16> {
 	Ok(code)
 }
 
-fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()> {
+fn global_pointer(
+	source: &CGEventSource,
+	event: PointerEvent,
+	release_on_abort: bool,
+) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button, count, modifiers } => {
 			post_global_mouse(
@@ -899,17 +930,19 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 				0,
 				CGEventFlags::CGEventFlagNull,
 			)?;
-			post_global_mouse(source, down, cg_button, start_x, start_y, 1, number, flags)?;
-			for &(x, y) in &path[1..] {
-				crate::operation_checkpoint()?;
-				thread::sleep(Duration::from_millis(16));
-				post_global_mouse(source, dragged, cg_button, x, y, 1, number, flags)?;
-			}
-			thread::sleep(Duration::from_millis(50));
-			let &(end_x, end_y) = path
-				.last()
-				.ok_or_else(|| DesktopError::input_failed("drag path is empty"))?;
-			post_global_mouse(source, up, cg_button, end_x, end_y, 1, number, flags)
+			stroke(&path, release_on_abort, crate::operation_checkpoint, |phase, (x, y)| {
+				if phase == Stroke::Dragged {
+					thread::sleep(Duration::from_millis(16));
+				} else if phase == Stroke::Up {
+					thread::sleep(Duration::from_millis(50));
+				}
+				let event_type = match phase {
+					Stroke::Down => down,
+					Stroke::Dragged => dragged,
+					Stroke::Up => up,
+				};
+				post_global_mouse(source, event_type, cg_button, x, y, 1, number, flags)
+			})
 		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
 			post_global_mouse(
@@ -992,7 +1025,7 @@ fn finite_i32(value: f64, name: &str) -> CoreResult<i32> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
+	use crate::ErrorCode;
 	#[test]
 	fn event_source_never_suppresses_local_input() {
 		let source = source().expect("Quartz event source");
@@ -1009,4 +1042,106 @@ mod tests {
 			);
 		}
 	}
+
+	#[test]
+	fn cancel_mid_drag_posts_up_at_the_last_delivered_point() {
+		let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
+		let mut checkpoints = 0;
+		let mut posts = Vec::new();
+		let error = stroke(&path, true, || {
+			checkpoints += 1;
+			if checkpoints == 2 { Err(DesktopError::timeout("cancelled")) } else { Ok(()) }
+		}, |phase, point| { posts.push((phase, point)); Ok(()) })
+		.expect_err("injected cancellation should abort");
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0)), (Stroke::Dragged, (1.0, 1.0)), (Stroke::Up, (1.0, 1.0))]);
+	}
+
+
+	#[test]
+	fn failed_dragged_post_releases_at_the_previous_point() {
+		let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
+		let mut drags = 0;
+		let mut posts = Vec::new();
+		let error = stroke(&path, true, || Ok(()), |phase, point| {
+			if phase == Stroke::Dragged {
+				drags += 1;
+				if drags == 2 { return Err(DesktopError::input_failed("drag failed")); }
+			}
+			posts.push((phase, point));
+			Ok(())
+		})
+		.expect_err("injected dragged-post failure should abort");
+		assert_eq!(error.message, "drag failed");
+		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0)), (Stroke::Dragged, (1.0, 1.0)), (Stroke::Up, (1.0, 1.0))]);
+	}
+
+	#[test]
+	fn failed_release_keeps_the_original_error() {
+		let path = [(0.0, 0.0), (1.0, 1.0)];
+		let mut posts = Vec::new();
+		let error = stroke(&path, true, || Err(DesktopError::timeout("original cancellation")), |phase, point| {
+			if phase == Stroke::Up { return Err(DesktopError::input_failed("release failed")); }
+			posts.push((phase, point));
+			Ok(())
+		})
+		.expect_err("original cancellation should be returned");
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert_eq!(error.message, "original cancellation");
+		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0))]);
+	}
+
+
+	#[test]
+	fn convar_off_keeps_todays_early_return() {
+		let path = [(0.0, 0.0), (1.0, 1.0)];
+		let mut posts = Vec::new();
+		let error = stroke(&path, false, || Err(DesktopError::timeout("cancelled")), |phase, point| {
+			posts.push((phase, point));
+			Ok(())
+		})
+		.expect_err("injected cancellation should abort");
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0))]);
+	}
+
+	#[test]
+	fn completed_drag_sequence_is_unchanged() {
+		let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
+		let expected = vec![
+			(Stroke::Down, (0.0, 0.0)),
+			(Stroke::Dragged, (1.0, 1.0)),
+			(Stroke::Dragged, (2.0, 2.0)),
+			(Stroke::Up, (2.0, 2.0)),
+		];
+		for release_on_abort in [false, true] {
+			let mut posts = Vec::new();
+			stroke(&path, release_on_abort, || Ok(()), |phase, point| {
+				posts.push((phase, point));
+				Ok(())
+			})
+			.expect("completed drag should succeed");
+			assert_eq!(posts, expected);
+		}
+	}
+
+
+	#[test]
+	fn invalid_key_after_a_modifier_posts_nothing() {
+		let source = source().expect("Quartz event source");
+		let mut posts = 0;
+		let error = key_chord_with_options(
+			&source,
+			&[KeyName::Ctrl, KeyName::Char('é')],
+			true,
+			|_| {
+				posts += 1;
+				Ok(())
+			},
+		)
+		.expect_err("unsupported key should fail before posting");
+		assert_eq!(error.code, ErrorCode::InvalidKey);
+		assert_eq!(posts, 0);
+	}
+
 }

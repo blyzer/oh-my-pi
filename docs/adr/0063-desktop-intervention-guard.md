@@ -1,6 +1,6 @@
 # 0063. Desktop input: layout-aware XKB typing on Wayland and macOS drag release on abort; the macOS intervention guard is deferred
 
-Status: Proposed 2026-11-14; machine-reviewed (EGM, 3 rounds), not owner-approved
+Status: Proposed 2026-11-14; machine-reviewed (EGM, 3 rounds), not owner-approved; C1 desktop core and default-off session API are implemented, settings-registry and typed-convar projection pending
 Date: 2026-11-14 (first draft 2026-11-13)
 Area: tools
 

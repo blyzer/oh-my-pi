@@ -62,24 +62,37 @@ omp_con::var! {
 			"ui.tab": "tools",
 			"ui.group": "Computer",
 			"ui.label": "Computer Screenshot Height",
+			"ui.label": "Computer Screenshot Height",
 			"legacy.path": "computer.maxHeight",
+		},
+	};
+	/// Release held pointer buttons on cancellation or delivery failure.
+	pub static SV_COMPUTER_RELEASE_ON_ABORT = sv_computer_release_on_abort: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Computer",
+			"ui.label": "Computer Release Held Input On Abort",
 		},
 	};
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ComputerSettings {
-	display:    Str,
-	max_width:  u32,
-	max_height: u32,
+	display:          Str,
+	max_width:        u32,
+	max_height:       u32,
+	release_on_abort: bool,
 }
 
 impl ComputerSettings {
 	fn from_con(con: &Ctx) -> Self {
 		Self {
-			display:    SV_COMPUTER_DISPLAY.get(con),
-			max_width:  SV_COMPUTER_MAX_WIDTH.get(con),
-			max_height: SV_COMPUTER_MAX_HEIGHT.get(con),
+			display:          SV_COMPUTER_DISPLAY.get(con),
+			max_width:        SV_COMPUTER_MAX_WIDTH.get(con),
+			max_height:       SV_COMPUTER_MAX_HEIGHT.get(con),
+			release_on_abort: SV_COMPUTER_RELEASE_ON_ABORT.get(con),
 		}
 	}
 }
@@ -100,9 +113,10 @@ impl ComputerSessionHost {
 	pub(crate) fn new(blobs: BlobHost, con: &Ctx) -> Arc<Self> {
 		let settings = ComputerSettings::from_con(con);
 		Arc::new(Self {
-			session: DesktopSession::new(Some(DesktopSessionOptions {
-				display: Some(settings.display.to_string()),
-			})),
+			session: DesktopSession::with_release_on_abort(
+				Some(DesktopSessionOptions { display: Some(settings.display.to_string()) }),
+				settings.release_on_abort,
+			),
 			capture_caps: CaptureCaps {
 				max_width:  Some(settings.max_width),
 				max_height: Some(settings.max_height),
@@ -1850,12 +1864,15 @@ mod tests {
 			.set(&con, Str::new_static("display-2"))
 			.expect("set display");
 		SV_COMPUTER_MAX_WIDTH.set(&con, 1600).expect("set width");
+		SV_COMPUTER_MAX_WIDTH.set(&con, 1600).expect("set width");
 		SV_COMPUTER_MAX_HEIGHT.set(&con, 900).expect("set height");
+		SV_COMPUTER_RELEASE_ON_ABORT.set(&con, true).expect("set release on abort");
 
 		assert_eq!(ComputerSettings::from_con(&con), ComputerSettings {
-			display:    Str::new_static("display-2"),
-			max_width:  1600,
-			max_height: 900,
+			display:          Str::new_static("display-2"),
+			max_width:        1600,
+			max_height:       900,
+			release_on_abort: true,
 		});
 		assert_eq!(bounded_cap(None, Some(1600)), Some(1600));
 		assert_eq!(bounded_cap(Some(1200), Some(1600)), Some(1200));
