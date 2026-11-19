@@ -62,7 +62,6 @@ omp_con::var! {
 			"ui.tab": "tools",
 			"ui.group": "Computer",
 			"ui.label": "Computer Screenshot Height",
-			"ui.label": "Computer Screenshot Height",
 			"legacy.path": "computer.maxHeight",
 		},
 	};
@@ -1779,7 +1778,7 @@ mod tests {
 
 	use super::{
 		ComputerSessionHost, ComputerSettings, Operation, SV_COMPUTER_DISPLAY,
-		SV_COMPUTER_MAX_HEIGHT, SV_COMPUTER_MAX_WIDTH, Statement, bounded_cap, evaluate_assertion,
+		SV_COMPUTER_MAX_HEIGHT, SV_COMPUTER_MAX_WIDTH, SV_COMPUTER_RELEASE_ON_ABORT, Statement, bounded_cap, evaluate_assertion,
 		parse_program, refuse_input_in_read_only,
 	};
 	use crate::blobs::BlobHost;
@@ -1863,7 +1862,6 @@ mod tests {
 		SV_COMPUTER_DISPLAY
 			.set(&con, Str::new_static("display-2"))
 			.expect("set display");
-		SV_COMPUTER_MAX_WIDTH.set(&con, 1600).expect("set width");
 		SV_COMPUTER_MAX_WIDTH.set(&con, 1600).expect("set width");
 		SV_COMPUTER_MAX_HEIGHT.set(&con, 900).expect("set height");
 		SV_COMPUTER_RELEASE_ON_ABORT.set(&con, true).expect("set release on abort");
