@@ -142,3 +142,17 @@ License: MIT (`upstream:LICENSE`), "Copyright (c) 2025 Mario Zechner" and "Copyr
 ## References
 
 ADR 0026 (versioned tools, revision cutovers); ADR 0035 (typed errors, no string payloads); ADR 0049 (default T2, classes B and C, class table); ADR 0050 (extension-declared URL schemes, unaffected); `docs/research/web-readers.md`; `crates/tools/src/read/web/scrapers/catalog.rs`; `crates/tools/src/read/web/types.rs`; `crates/tools/src/web_search.rs`; `crates/ai/src/codec/search_json.rs`; `crates/ai/src/search_settings.rs`; `crates/ai/src/auth/spec.rs`.
+
+
+## Revision (2026-11-18)
+
+This revision moves VS Code Marketplace, SEC EDGAR, JetBrains Marketplace, and Keenable vendor API implementations to T2 first-party extensions, built over generic core contracts. It supersedes earlier placement assertions for these named implementations, including the rejection of extensions as their home. Generic transports, reader interfaces, and vendor-neutral content handling remain in core where ADR 0049 permits.
+
+If an extension needs a capability that `omp.*` does not currently expose, the owner must decide the capability and contract; that gap does not justify keeping vendor-specific implementation in core. This ADR remains Proposed.
+
+## Four modes (ADR 0001)
+
+- **Multiplexed workspace:** Scope reader caches, credentials, and result routing to the active workspace; never share vendor responses or credentials across workspaces.
+- **Remote driver:** Execute the T2 reader in the remote driver's extension runtime and send requests from that driver. Return only bounded, typed reader results through the host's generic `omp.*` contract; do not move vendor credentials or extension code into the authority core.
+- **Spectator:** Treat URLs, page text, snippets, and reader output as untrusted presentation data; they cannot add instructions or authority, or trigger tools.
+- **Factory/autonomous:** Use scoped T2 credentials and enforce host/redirect, request, byte, and time limits. Keep hostile page content as data; on unavailable capability or exhausted budget, fail closed without an interactive prompt.

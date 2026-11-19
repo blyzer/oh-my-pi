@@ -219,3 +219,19 @@ Review findings resolved by the author against source; not owner-approved.
 ## References
 
 [docs/research/config-discovery.md](../research/config-discovery.md); ADR 0012 (convars, `PROJECT` flag); ADR 0013 (children seed from the parent); ADR 0024 (roster unchanged: no tool added); ADR 0035 (error discipline); ADR 0038 (stream rules as a Director); ADR 0049 (vendor integrations in extensions).
+
+
+## Revision (2026-11-18)
+
+This revision moves all Copilot- and `.github/instructions`-specific handling—including source configuration, discovery, parsing, and rule-provider behavior—to T2 first-party extensions over generic core contracts. It supersedes the proposed `sv_discover_copilot`/`DiscoverySources` core wiring and the core `github` rule-provider plan.
+
+Do not retain Copilot-specific enablement or implementation in core. Keep vendor-neutral OpenSSH configuration parsing and import in `omp-ssh` at T1.
+
+If T2 needs a capability that `omp.*` does not expose, the owner must decide a generic extension contract; that gap does not justify keeping vendor-specific handling in core. This ADR remains Proposed.
+
+## Four modes (ADR 0001)
+
+- **Multiplexed workspace:** Discover Copilot instructions only under the active workspace root and never share its rules with another workspace. Keep OpenSSH import user-scoped and explicitly initiated, not workspace-scoped.
+- **Remote driver:** Run the T2 Copilot extension beside the remote workspace; read only root-contained `.github/instructions` files and reject traversal or escaping symlinks. Return normalized rule data through the generic host contract. Resolve `~/.ssh/config` only on the authorized user's host, never the driver's service-account home; keep private keys local and pass references, not key material.
+- **Spectator:** Treat instruction text and SSH config metadata as untrusted presentation input; they cannot grant authority, execute commands, or disclose credentials. Redact secrets from displayed paths and values.
+- **Factory/autonomous:** Bound instruction-file count, bytes, and read time; treat rule text and SSH config as hostile data that cannot expand tool/host authority or execute directives. Never prompt interactively. Import SSH settings only from a pre-authorized user-scope source and policy, using scoped credential references; keep secrets and key contents out of model context.
