@@ -1778,8 +1778,8 @@ mod tests {
 
 	use super::{
 		ComputerSessionHost, ComputerSettings, Operation, SV_COMPUTER_DISPLAY,
-		SV_COMPUTER_MAX_HEIGHT, SV_COMPUTER_MAX_WIDTH, SV_COMPUTER_RELEASE_ON_ABORT, Statement, bounded_cap, evaluate_assertion,
-		parse_program, refuse_input_in_read_only,
+		SV_COMPUTER_MAX_HEIGHT, SV_COMPUTER_MAX_WIDTH, SV_COMPUTER_RELEASE_ON_ABORT, Statement,
+		bounded_cap, evaluate_assertion, parse_program, refuse_input_in_read_only,
 	};
 	use crate::blobs::BlobHost;
 
@@ -1864,7 +1864,9 @@ mod tests {
 			.expect("set display");
 		SV_COMPUTER_MAX_WIDTH.set(&con, 1600).expect("set width");
 		SV_COMPUTER_MAX_HEIGHT.set(&con, 900).expect("set height");
-		SV_COMPUTER_RELEASE_ON_ABORT.set(&con, true).expect("set release on abort");
+		SV_COMPUTER_RELEASE_ON_ABORT
+			.set(&con, true)
+			.expect("set release on abort");
 
 		assert_eq!(ComputerSettings::from_con(&con), ComputerSettings {
 			display:          Str::new_static("display-2"),

@@ -27,7 +27,7 @@ use super::{
 };
 
 pub(super) struct MacInput {
-	source: CGEventSource,
+	source:           CGEventSource,
 	release_on_abort: bool,
 }
 #[allow(
@@ -72,9 +72,9 @@ impl MacInput {
 						}
 						background_pointer(&self.source, pid, wid, &window, event, self.release_on_abort)
 					},
-					DeliveryMode::Foreground => {
-						skylight::with_foreground(pid, wid, || global_pointer(&self.source, event, self.release_on_abort))
-					},
+					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, || {
+						global_pointer(&self.source, event, self.release_on_abort)
+					}),
 				}
 			},
 		}
@@ -134,9 +134,9 @@ impl MacInput {
 						background_chord(&self.source, pid, keys, self.release_on_abort)
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, || {
-							let _ = ax::prepare_foreground_input(&window);
-							global_chord(&self.source, keys, self.release_on_abort)
-						}),
+						let _ = ax::prepare_foreground_input(&window);
+						global_chord(&self.source, keys, self.release_on_abort)
+					}),
 				}
 			},
 		}
@@ -502,9 +502,7 @@ fn stroke(
 	let mut last_delivered = first;
 	for &point in &path[1..] {
 		if let Err(error) = checkpoint().and_then(|()| post(Stroke::Dragged, point)) {
-			if release_on_abort
-				&& let Err(release_error) = post(Stroke::Up, last_delivered)
-			{
+			if release_on_abort && let Err(release_error) = post(Stroke::Up, last_delivered) {
 				tracing::warn!(error = %release_error, "failed to release macOS drag button after abort");
 			}
 			return Err(error);
@@ -513,7 +511,6 @@ fn stroke(
 	}
 	post(Stroke::Up, last_delivered)
 }
-
 
 fn background_drag(
 	source: &CGEventSource,
@@ -547,7 +544,19 @@ fn background_drag(
 			Stroke::Up => up,
 		};
 		post_mouse(
-			pid, wid, window, source.clone(), event_type, cg_button, x, y, 3, 1, number, group, flags,
+			pid,
+			wid,
+			window,
+			source.clone(),
+			event_type,
+			cg_button,
+			x,
+			y,
+			3,
+			1,
+			number,
+			group,
+			flags,
 		)
 	})
 }
@@ -685,7 +694,6 @@ fn global_chord(
 	key_chord_with_options(source, keys, release_on_abort, post_global)
 }
 
-
 fn key_chord_with_options(
 	source: &CGEventSource,
 	keys: &[KeyName],
@@ -699,14 +707,18 @@ fn key_chord_with_options(
 	let mut active = Modifiers::default();
 	for (index, &key) in keys.iter().enumerate() {
 		update_modifier(&mut active, key, true);
-		let code = codes.as_ref().map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
+		let code = codes
+			.as_ref()
+			.map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
 		post_key_code(source, code, true, modifier_flags(active), &mut post)?;
 		thread::sleep(Duration::from_millis(8));
 	}
 	let mut first_error = None;
 	for (index, &key) in keys.iter().enumerate().rev() {
 		update_modifier(&mut active, key, false);
-		let code = codes.as_ref().map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
+		let code = codes
+			.as_ref()
+			.map_or_else(|| key_code(key), |codes| Ok(codes[index]))?;
 		if let Err(error) = post_key_code(source, code, false, modifier_flags(active), &mut post)
 			&& first_error.is_none()
 		{
@@ -717,14 +729,12 @@ fn key_chord_with_options(
 	first_error.map_or(Ok(()), Err)
 }
 
-
 fn chord_codes(keys: &[KeyName]) -> CoreResult<Vec<u16>> {
 	if keys.is_empty() {
 		return Err(DesktopError::invalid_key("key chord must not be empty"));
 	}
 	keys.iter().copied().map(key_code).collect()
 }
-
 
 fn post_key_code(
 	source: &CGEventSource,
@@ -738,7 +748,6 @@ fn post_key_code(
 	event.set_flags(flags);
 	post(&event)
 }
-
 
 const fn update_modifier(modifiers: &mut Modifiers, key: KeyName, down: bool) {
 	match key {
@@ -1048,58 +1057,95 @@ mod tests {
 		let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
 		let mut checkpoints = 0;
 		let mut posts = Vec::new();
-		let error = stroke(&path, true, || {
-			checkpoints += 1;
-			if checkpoints == 2 { Err(DesktopError::timeout("cancelled")) } else { Ok(()) }
-		}, |phase, point| { posts.push((phase, point)); Ok(()) })
+		let error = stroke(
+			&path,
+			true,
+			|| {
+				checkpoints += 1;
+				if checkpoints == 2 {
+					Err(DesktopError::timeout("cancelled"))
+				} else {
+					Ok(())
+				}
+			},
+			|phase, point| {
+				posts.push((phase, point));
+				Ok(())
+			},
+		)
 		.expect_err("injected cancellation should abort");
 		assert_eq!(error.code, ErrorCode::Timeout);
-		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0)), (Stroke::Dragged, (1.0, 1.0)), (Stroke::Up, (1.0, 1.0))]);
+		assert_eq!(posts, vec![
+			(Stroke::Down, (0.0, 0.0)),
+			(Stroke::Dragged, (1.0, 1.0)),
+			(Stroke::Up, (1.0, 1.0))
+		]);
 	}
-
 
 	#[test]
 	fn failed_dragged_post_releases_at_the_previous_point() {
 		let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
 		let mut drags = 0;
 		let mut posts = Vec::new();
-		let error = stroke(&path, true, || Ok(()), |phase, point| {
-			if phase == Stroke::Dragged {
-				drags += 1;
-				if drags == 2 { return Err(DesktopError::input_failed("drag failed")); }
-			}
-			posts.push((phase, point));
-			Ok(())
-		})
+		let error = stroke(
+			&path,
+			true,
+			|| Ok(()),
+			|phase, point| {
+				if phase == Stroke::Dragged {
+					drags += 1;
+					if drags == 2 {
+						return Err(DesktopError::input_failed("drag failed"));
+					}
+				}
+				posts.push((phase, point));
+				Ok(())
+			},
+		)
 		.expect_err("injected dragged-post failure should abort");
 		assert_eq!(error.message, "drag failed");
-		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0)), (Stroke::Dragged, (1.0, 1.0)), (Stroke::Up, (1.0, 1.0))]);
+		assert_eq!(posts, vec![
+			(Stroke::Down, (0.0, 0.0)),
+			(Stroke::Dragged, (1.0, 1.0)),
+			(Stroke::Up, (1.0, 1.0))
+		]);
 	}
 
 	#[test]
 	fn failed_release_keeps_the_original_error() {
 		let path = [(0.0, 0.0), (1.0, 1.0)];
 		let mut posts = Vec::new();
-		let error = stroke(&path, true, || Err(DesktopError::timeout("original cancellation")), |phase, point| {
-			if phase == Stroke::Up { return Err(DesktopError::input_failed("release failed")); }
-			posts.push((phase, point));
-			Ok(())
-		})
+		let error = stroke(
+			&path,
+			true,
+			|| Err(DesktopError::timeout("original cancellation")),
+			|phase, point| {
+				if phase == Stroke::Up {
+					return Err(DesktopError::input_failed("release failed"));
+				}
+				posts.push((phase, point));
+				Ok(())
+			},
+		)
 		.expect_err("original cancellation should be returned");
 		assert_eq!(error.code, ErrorCode::Timeout);
 		assert_eq!(error.message, "original cancellation");
 		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0))]);
 	}
 
-
 	#[test]
 	fn convar_off_keeps_todays_early_return() {
 		let path = [(0.0, 0.0), (1.0, 1.0)];
 		let mut posts = Vec::new();
-		let error = stroke(&path, false, || Err(DesktopError::timeout("cancelled")), |phase, point| {
-			posts.push((phase, point));
-			Ok(())
-		})
+		let error = stroke(
+			&path,
+			false,
+			|| Err(DesktopError::timeout("cancelled")),
+			|phase, point| {
+				posts.push((phase, point));
+				Ok(())
+			},
+		)
 		.expect_err("injected cancellation should abort");
 		assert_eq!(error.code, ErrorCode::Timeout);
 		assert_eq!(posts, vec![(Stroke::Down, (0.0, 0.0))]);
@@ -1116,32 +1162,31 @@ mod tests {
 		];
 		for release_on_abort in [false, true] {
 			let mut posts = Vec::new();
-			stroke(&path, release_on_abort, || Ok(()), |phase, point| {
-				posts.push((phase, point));
-				Ok(())
-			})
+			stroke(
+				&path,
+				release_on_abort,
+				|| Ok(()),
+				|phase, point| {
+					posts.push((phase, point));
+					Ok(())
+				},
+			)
 			.expect("completed drag should succeed");
 			assert_eq!(posts, expected);
 		}
 	}
 
-
 	#[test]
 	fn invalid_key_after_a_modifier_posts_nothing() {
 		let source = source().expect("Quartz event source");
 		let mut posts = 0;
-		let error = key_chord_with_options(
-			&source,
-			&[KeyName::Ctrl, KeyName::Char('é')],
-			true,
-			|_| {
+		let error =
+			key_chord_with_options(&source, &[KeyName::Ctrl, KeyName::Char('é')], true, |_| {
 				posts += 1;
 				Ok(())
-			},
-		)
-		.expect_err("unsupported key should fail before posting");
+			})
+			.expect_err("unsupported key should fail before posting");
 		assert_eq!(error.code, ErrorCode::InvalidKey);
 		assert_eq!(posts, 0);
 	}
-
 }

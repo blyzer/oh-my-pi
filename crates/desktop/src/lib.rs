@@ -675,7 +675,10 @@ fn axnode(reference: String, props: ax::AxProps) -> AxNode {
 }
 
 #[cfg(target_os = "macos")]
-fn create_backend(selector: DisplaySelector, release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(
+	selector: DisplaySelector,
+	release_on_abort: bool,
+) -> CoreResult<Box<dyn Backend>> {
 	let backend = if release_on_abort {
 		macos::MacosBackend::with_release_on_abort(selector, true)?
 	} else {
@@ -684,11 +687,17 @@ fn create_backend(selector: DisplaySelector, release_on_abort: bool) -> CoreResu
 	Ok(Box::new(backend))
 }
 #[cfg(target_os = "windows")]
-fn create_backend(selector: DisplaySelector, _release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(
+	selector: DisplaySelector,
+	_release_on_abort: bool,
+) -> CoreResult<Box<dyn Backend>> {
 	Ok(Box::new(win32::Win32Backend::new(selector)?))
 }
 #[cfg(target_os = "linux")]
-fn create_backend(selector: DisplaySelector, _release_on_abort: bool) -> CoreResult<Box<dyn Backend>> {
+fn create_backend(
+	selector: DisplaySelector,
+	_release_on_abort: bool,
+) -> CoreResult<Box<dyn Backend>> {
 	linux::new_backend(selector)
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -703,11 +712,11 @@ struct Lifecycle {
 	closed: bool,
 }
 struct SessionCore {
-	selector:     DisplaySelector,
+	selector:         DisplaySelector,
 	release_on_abort: bool,
-	lifecycle:    Mutex<Lifecycle>,
-	capabilities: Arc<Mutex<DesktopCapabilities>>,
-	shutdown:     Arc<AtomicBool>,
+	lifecycle:        Mutex<Lifecycle>,
+	capabilities:     Arc<Mutex<DesktopCapabilities>>,
+	shutdown:         Arc<AtomicBool>,
 }
 impl SessionCore {
 	fn new(selector: DisplaySelector, release_on_abort: bool) -> Arc<Self> {
