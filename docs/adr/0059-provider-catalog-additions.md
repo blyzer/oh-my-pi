@@ -138,7 +138,7 @@ Licences. The root `LICENSE` is MIT, "Copyright (c) 2025 Mario Zechner" and "Cop
 
 ## Status in omp
 
-**Status: In progress. S1 landed; S2 to S7 are not started.** The `oauth.toml` kinds, the custom OAuth modules and the Azure env-var pattern exist in part.
+**Status: In progress. S1 landed; S2 code is implemented in commit `0eb11f5929`, with BuildBuddy verification pending; S3–S7 are not started.** The `oauth.toml` kinds, custom OAuth modules and Azure env-var pattern exist in part.
 
 **S1 (D1, data rows).**
 - `fixtures/llm-oracle/catalog/providers.toml` has `sambanova`, `coralbricks`, `helmcode`, `modular` and `otari`, all `open-ai-chat` bearer routes, each unselectable until its key is set. Env names are `OMP_<ID>_API_KEY` then the vendor's own name (`SAMBANOVA_API_KEY`, `CORAL_API_KEY`, `HELMCODE_API_KEY`, `MODULAR_API_KEY`, `OTARI_API_KEY`). `CORALBRICKS_API_KEY` is not carried: upstream's own comment says the Coral pi extension introduced it.
