@@ -256,6 +256,17 @@ Consequences of this amendment:
 - **DONE (rescue wave 1):** eight D5 candidate ports restored under `extensions/` against the frozen `omp.*` API (`extensions/RESCUE.md`). Documented Gaps remain where typed journal / `omp.state` APIs were removed.
 - **DONE (ADR 0046 item 4):** chat-host slot/overlay/`dynamic_mount` arms; UI-bound ports `sidebar`, `hover-cards`, `welcome-chrome` restored. Phase 5 remainder is empty.
 
+## Amendment (2026-11-18): extension grants and the frozen API
+
+**Owner decisions (2026-11-18):**
+
+1. **DATA remains manifest-declared in trusted workspaces.** This preserves the current `spec.data_grants` projection; it does not grant CONTROL. Workspace extensions still load only when the operator’s workspace-trust decision is `Trusted`.
+2. **Signed `omp ext install` site packages remain outside native path grants.** Keep the signed publisher/artifact trust path. If a signed site package later needs CONTROL, define a separate grant bound to the verified publisher, artifact digest, scope and capability set; do not extend a path grant to cover it.
+3. **Widen `omp.*` narrowly for generic extension capabilities.** Permit only bounded, provenance-aware contracts for configuration overrides and prompt-fact contributions. T0 owns validation, authority, approval, journaling, redaction and budgets; T2 extensions own policy and product-specific behavior. No arbitrary convar writes or unbounded prompt injection.
+
+**Placement consequence:** ADRs 0057, 0058 and 0068 may propose T2 implementations over these contracts. Each contract needs its own effect, trust and four-mode design before implementation; it does not authorize vendor-specific core code or a wire-roster change.
+
+
 ## References
 - ADRs 0024, 0025, 0027, 0028, 0036, 0040 (2026-11-05 amendment), 0045, 0046, 0047 (2026-11-05 amendment), 0050 (accepted 2026-11-11; Phase 2S).
 - `docs/research/envd-responsibility-audit.md`; `docs/research/exec-out-of-core.md`; `docs/research/omp-v1-vs-omp2-architecture.md`.

@@ -56,21 +56,27 @@ The security review of the gate found that a CONTROL identity's capabilities are
 
 1. A control capability reaches an extension only if its manifest declares it **and** an operator grant record covers it.
 2. Include a way to issue that grant for native path extensions.
-3. DATA grants keep their current behaviour; record the gap as OPEN in `TASKS.md`.
+3. DATA grants keep their current behaviour for operator-trusted workspaces (owner decision 2026-11-18; resolved below).
 
+
+### Owner decisions (2026-11-18)
+
+- **DATA grants:** keep manifest-declared DATA for extensions in operator-trusted workspaces; this does not grant CONTROL.
+- **Signed site installs:** keep `omp ext install` packages on the signed publisher/artifact trust path, outside native path grants. A future CONTROL grant for a site package must use a separate signed identity (publisher, artifact digest, scope and capability set).
+- **Extension API:** authorize narrow, generic `omp.*` contracts for bounded configuration overrides and provenance-aware prompt-fact contributions. T0 remains the owner of authority, approval, journaling, redaction and budgets; T2 extensions own policy. No arbitrary convar writes or unbounded prompt injection.
 ### Design
 
 - **Control list.** `CONTROL_CAPABILITIES = ["agents.continuation", "approvals.decide", "policy.write"]` in `crates/envd/src/policy.rs`, next to the DATA `CAPABILITIES`. `CONTINUATION_CAPABILITY`, `POLICY_WRITE_CAPABILITY` and `APPROVAL_DECIDE_CAPABILITY` stay the names the checks use.
-- **One identity function, shared.** The native publisher synthesis (`unsigned:path:<blake3(root)>`, now inline at `native.rs:577`) moves to a `pub fn` in `omp-ext` next to `grant_covers`, so admission and the issuing command compute the same publisher. The capability digest is the manifest projection's existing `capability_digest` (`crates/ext/src/config.rs:1821`), which covers the whole declared set, so any change to the declared capabilities voids the grant.
-- **Admission check** (`native.rs`, next to `spec.data_grants`). Let `wanted` = declared capabilities that are in `CONTROL_CAPABILITIES`. If `wanted` is empty, do nothing. Otherwise read `GrantsFile::read(grants_path(data_dir))` (`crates/ext/src/trust.rs:38`, `:468`; a missing file means no grants) and call `grant_covers(grants, id, publisher, layer, workspace, capability_digest, TrustTier::Sandboxed, "path")` (`:341`). Layer is Client for explicit and user roots, Workspace (with the project's `WorkspaceUri`) for `.omp/extensions`. If it covers, `spec.control_grants = wanted`; otherwise empty. A grants file that cannot be read gives empty control grants and a `tracing::warn!` naming the extension and the path; never an error that stops admission.
+- **One identity function, shared.** The path publisher is derived from the canonical root. Version-2 `path_grant_digest` binds the sorted declared capability set, the manifest digest, and a bounded, fail-closed tree inventory rooted at the canonical extension directory (`workspace_trust::inventory::tree_inventory`). The walk includes dotfiles and `__pycache__`, follows links only within that root, and refuses special files or budget overruns. A code-tree change invalidates the old record; the operator must grant again.
+- **Admission check** (`native.rs`, next to `spec.data_grants`). Let `wanted` = declared capabilities in `CONTROL_CAPABILITIES`. If empty, do nothing and do not probe the sandbox. If the grant store has no candidate path-grant row for this id, Client layer and `ship = "path"`, return without walking the extension tree. Otherwise build the v2 identity (including bounded source-tree inventory), then call `grant_covers` for the exact publisher, layer, workspace, digest, tier and ship. Unsafe locations, an unreadable store, or an inventory refusal fail closed; the driver warns and withholds CONTROL. The kernel rechecks sandbox mode and writable roots after journaled class settings only if a CONTROL grant was admitted.
 - **Identity.** `ExtHostSpec` gets `control_grants` (default empty). `control_connection_identity` (`worker.rs:1118`) sets `capabilities` to `data_grants` plus `control_grants`. The DATA uses of `data_grants` (`worker.rs:1084`, `:1818`, `crates/envd/src/lib.rs:1612`) are unchanged, so DATA authority never sees control names.
-- **Issuing: `omp ext grant <DIR>`.** Loads the manifest at DIR, computes id, publisher and digest with the shared functions, picks the layer from DIR (Workspace if under the current project's `.omp/extensions`, else Client), prints the declared capabilities with the control ones marked, and asks for explicit consent (`--yes` skips the prompt). Writes `Grant { scope: Exact, duration: Persistent, tier: Sandboxed, ship: "path", granted_by: "explicit-grant", ... }` through `GrantsFile::try_update` (the locked, atomic writer, `trust.rs:510-540`), replacing any grant with the same key. `--revoke` removes it.
+- **Issuing: `omp ext grant <DIR>`.** Loads the manifest at DIR and builds the same v2 identity as admission (publisher, declared capabilities, manifest digest and bounded extension-tree digest). It prints the declared capabilities with CONTROL marked and asks for explicit consent (`--yes` skips the prompt). The locked `GrantsFile::try_update` rechecks protected paths and directory permissions under the grants lock, recomputes the extension identity and refuses if it changed after consent, then writes the persistent exact Sandbox grant. It rejects group- or other-writable grant-store and extension-root directories. `--revoke` removes the path grant under the same locked checks.
 
 ### Non-goals
 
-- DATA grants (OPEN in `TASKS.md`).
-- Grants for signed index installs (the existing `omp ext install` flow is unchanged).
-- Where `omp ext install`'d extensions in `<state>/ext/sites/` are loaded at runtime: not found during this work; recorded as an open question.
+- DATA grants keep their existing manifest declaration behavior within Trusted workspaces; see the owner decision above.
+- Signed `omp ext install` site packages remain on the signed publisher/artifact trust path and are not covered by native path grants. A separate signed-scope CONTROL grant is future work only if required.
+- `StatePaths::sites` is `<project_state>/ext/sites` (`crates/app/src/ext_cli/mod.rs`); loading a site package as a native user-path extension is not proposed.
 
 ### Tests
 
