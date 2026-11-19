@@ -5,6 +5,8 @@ use tower::util::BoxCloneSyncService;
 
 use crate::{answer::Answer, call::Call, error::Error};
 
+pub(crate) mod endpoint_template;
+
 pub mod builtin;
 pub mod copilot;
 pub(crate) mod http;

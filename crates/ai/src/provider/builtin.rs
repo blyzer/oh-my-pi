@@ -1615,6 +1615,12 @@ impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 			(Some(route), target)
 		} else if let Some((route, target)) = azure {
 			(Some(route), Some(target))
+		} else if let Some((route, target)) = super::endpoint_template::cloudflare_effective_route(
+			&self.route,
+			plan.wire_target(),
+			execution,
+		)? {
+			(Some(route), Some(target))
 		} else if let Some(route) = &self.regional_route {
 			(Some(route.clone()), mantle_effective_target(route, plan.wire_target()))
 		} else {
@@ -5114,6 +5120,21 @@ mod tests {
 	/// A route with several authentications reports its most significant
 	/// failure whatever their order: a locked store outranks a stored
 	/// credential of the wrong kind, and the first mismatch is kept.
+	#[test]
+	fn resolves_cloudflare_gateway_account_placeholder() {
+		let actual = super::super::endpoint_template::resolve_cloudflare_endpoint_template(
+			"https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/anthropic",
+			Some("account-123"),
+			Some("gateway-prod"),
+		)
+		.expect("valid Cloudflare endpoint coordinates");
+
+		assert_eq!(
+			actual.as_deref(),
+			Some("https://gateway.ai.cloudflare.com/v1/account-123/gateway-prod/anthropic")
+		);
+	}
+
 	#[tokio::test]
 	async fn a_locked_store_outranks_a_kind_mismatch_across_authentications() {
 		let catalog = Catalog::try_embedded().expect("embedded catalog");
