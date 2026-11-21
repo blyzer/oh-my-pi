@@ -8,6 +8,7 @@ use std::{
 	fs::{self, File, OpenOptions},
 	io,
 	path::{Path, PathBuf},
+	time::Duration,
 };
 
 use omp_core::{Str, Ulid};
@@ -206,6 +207,14 @@ pub const ROOT_PREFIX: &str = "omp-consult-";
 const OWNER_LOCK: &str = "owner.lock";
 const JOURNAL_FILE: &str = "session.oms";
 
+/// Roots younger than this are never swept; their creator may still be locking.
+pub const SWEEP_GRACE: Duration = Duration::from_secs(10);
+
+fn session_local_tree(journal: &Path) -> Option<PathBuf> {
+	let stem = journal.file_stem().filter(|stem| !stem.is_empty())?;
+	Some(journal.with_file_name(stem))
+}
+
 /// A private, self-contained copy of one session, removed when dropped.
 ///
 /// The root holds the journal bytes, the session-local tree and the blobs the
@@ -313,11 +322,13 @@ fn copy_into(root: &ConsultRoot, source: &ConsultSource) -> Result<(), ConsultEr
 			.copy_retained_to(&destination, &roots)
 			.map_err(GcError::from)?;
 	}
-	if let Some(stem) = source.path.file_stem()
-		&& let local = sessions.join(stem)
+	if let Some(local) = session_local_tree(&source.path)
 		&& local.is_dir()
 	{
-		copy_tree(&local, &root.path().join(stem))?;
+		// Mirrors the child's lookup: the tree sits beside the journal copy.
+		if let Some(destination) = session_local_tree(root.journal()) {
+			copy_tree(&local, &destination)?;
+		}
 	}
 	Ok(())
 }
@@ -340,12 +351,14 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
 /// Removes consult roots under `temp` whose owner is gone.
 ///
 /// A root is dead when its `owner.lock` can be taken. A root whose lock is
-/// held, or that cannot be inspected, is left alone. Returns the removed roots.
+/// held, or that cannot be inspected, is left alone. A root younger than
+/// `grace` is also left alone, because its creator may not have taken the lock
+/// yet. Returns the removed roots.
 ///
 /// # Errors
 ///
 /// Returns [`ConsultError::Io`] when `temp` cannot be listed.
-pub fn sweep(temp: &Path) -> Result<Vec<PathBuf>, ConsultError> {
+pub fn sweep(temp: &Path, grace: Duration) -> Result<Vec<PathBuf>, ConsultError> {
 	let mut removed = Vec::new();
 	for entry in fs::read_dir(temp)? {
 		let Ok(entry) = entry else { continue };
@@ -360,6 +373,15 @@ pub fn sweep(temp: &Path) -> Result<Vec<PathBuf>, ConsultError> {
 		let Ok(lock) = File::open(path.join(OWNER_LOCK)) else {
 			continue;
 		};
+		let young = entry
+			.metadata()
+			.and_then(|meta| meta.modified())
+			.ok()
+			.and_then(|modified| modified.elapsed().ok())
+			.is_none_or(|age| age < grace);
+		if young {
+			continue;
+		}
 		if lock.try_lock().is_ok() && fs::remove_dir_all(&path).is_ok() {
 			removed.push(path);
 		}
@@ -369,7 +391,7 @@ pub fn sweep(temp: &Path) -> Result<Vec<PathBuf>, ConsultError> {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, fs, os::unix::fs::symlink, path::Path};
+	use std::{collections::BTreeMap, fs, os::unix::fs::symlink, path::Path, time::Duration};
 
 	use omp_core::Str;
 	use omp_journal::{
@@ -380,7 +402,8 @@ mod tests {
 	use tempfile::tempdir;
 
 	use super::{
-		ConsultError, ConsultSource, OWNER_LOCK, ROOT_PREFIX, prepare_root, resolve_source, sweep,
+		ConsultError, ConsultSource, OWNER_LOCK, ROOT_PREFIX, SWEEP_GRACE, prepare_root,
+		resolve_source, sweep,
 	};
 
 	fn kind(name: &'static str) -> Kind {
@@ -670,7 +693,7 @@ mod tests {
 		fs::write(sessions.path().join(ID).join("nested").join("note.txt"), b"local").expect("file");
 		let temp = tempdir().expect("temp");
 		let root = prepare_root(temp.path(), &source_of(sessions.path())).expect("prepare");
-		let copied = root.path().join(ID).join("nested").join("note.txt");
+		let copied = root.path().join("session").join("nested").join("note.txt");
 		assert_eq!(fs::read(copied).expect("copied"), b"local");
 	}
 
@@ -685,10 +708,21 @@ mod tests {
 		fs::write(dead.join(OWNER_LOCK), b"").expect("dead lock");
 		let unrelated = temp.path().join("keep-me");
 		fs::create_dir(&unrelated).expect("unrelated");
-		let removed = sweep(temp.path()).expect("sweep");
+		let removed = sweep(temp.path(), Duration::ZERO).expect("sweep");
 		assert_eq!(removed, vec![dead.clone()]);
 		assert!(live.path().is_dir(), "a held root is not swept");
 		assert!(!dead.exists());
 		assert!(unrelated.is_dir(), "only consult roots are swept");
+	}
+
+	#[test]
+	fn sweep_skips_a_root_younger_than_the_grace() {
+		let temp = tempdir().expect("temp");
+		let young = temp.path().join(format!("{ROOT_PREFIX}YOUNG"));
+		fs::create_dir(&young).expect("young dir");
+		fs::write(young.join(OWNER_LOCK), b"").expect("young lock");
+		let removed = sweep(temp.path(), SWEEP_GRACE).expect("sweep");
+		assert!(removed.is_empty());
+		assert!(young.is_dir(), "a fresh root may still be mid-creation");
 	}
 }
