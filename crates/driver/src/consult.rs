@@ -290,6 +290,7 @@ fn lock_owner(root: &Path) -> Result<File, ConsultError> {
 		.create(true)
 		.read(true)
 		.write(true)
+		.truncate(false)
 		.open(root.join(OWNER_LOCK))?;
 	match file.try_lock() {
 		Ok(()) => Ok(file),
