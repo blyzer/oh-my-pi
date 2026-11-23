@@ -1,8 +1,9 @@
 """BuildBuddy Run API HTTP client.
 
-Uses standard library `urllib.request` (no third-party deps) to call
-BuildBuddy's Run API REST endpoints. The API key is read from the
-operator credential convar via `omp.credential` at call time.
+Uses `omp.env.http_get` and `omp.env.http_post` to call BuildBuddy's Run API
+REST endpoints. These functions route through the sandbox's HTTP egress broker,
+which checks each destination against `sv_sandbox_allow_domains`. The API key
+is read from the operator credential convar via `omp.credential` at call time.
 
 Run API endpoints (from `docs/research/exec-out-of-core.md`):
 - `POST /api/v1/Run` — submit a run, returns invocation ID
@@ -15,9 +16,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import urllib.error
-import urllib.request
 from typing import Any
+
+import omp
+from omp.env import HttpResponse
 
 from . import errors
 from .profile import ENDPOINT
@@ -71,32 +73,41 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _request(method: str, path: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Execute one BuildBuddy REST API call.
+async def _request(
+    method: str, path: str, *, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Execute one BuildBuddy REST API call through the sandbox egress broker.
 
-    Raises `BuildBuddyUnavailable` on HTTP errors or network failures.
+    Uses `omp.env.http_get` or `omp.env.http_post` so the request passes through
+    the sandbox's HTTP egress broker, which checks the destination against
+    `sv_sandbox_allow_domains`. Raises `BuildBuddyUnavailable` on HTTP errors
+    or network failures.
     """
     base = _base_url()
     url = base.rstrip("/") + path
     headers = _headers()
 
-    data = None
+    body_bytes = b""
     if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
+        body_bytes = json.dumps(payload).encode("utf-8")
 
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    response: HttpResponse
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read()
-    except urllib.error.HTTPError as exc:
+        if method == "GET":
+            response = await omp.env.http_get(url, headers=headers)
+        else:
+            response = await omp.env.http_post(url, body=body_bytes, headers=headers)
+    except Exception as exc:
         raise errors.BuildBuddyUnavailable(
-            path, f"BuildBuddy HTTP {exc.code}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise errors.BuildBuddyUnavailable(
-            path, "BuildBuddy host unreachable"
+            path, f"BuildBuddy host unreachable: {exc}"
         ) from exc
 
+    if response.status_code >= 400:
+        raise errors.BuildBuddyUnavailable(
+            path, f"BuildBuddy HTTP {response.status_code}"
+        )
+
+    body = response.body
     if not body:
         return {}
     return json.loads(body.decode("utf-8", errors="replace"))
@@ -123,7 +134,7 @@ def describe_capabilities() -> dict[str, Any]:
     }
 
 
-def start_run(request: dict[str, Any]) -> dict[str, Any]:
+async def start_run(request: dict[str, Any]) -> dict[str, Any]:
     """Call `start` — submit a run via `POST /api/v1/Run`.
 
     The request contains:
@@ -140,7 +151,7 @@ def start_run(request: dict[str, Any]) -> dict[str, Any]:
         "platform": request.get("platform", {}),
         "timeout": request.get("timeout", "3600s"),
     }
-    result = _request("POST", "/api/v1/Run", payload=payload)
+    result = await _request("POST", "/api/v1/Run", payload=payload)
     invocation_id = result.get("invocationId") or result.get("invocation_id") or ""
     if not invocation_id:
         raise errors.BuildBuddyUnavailable("start", "no invocation ID in response")
@@ -150,7 +161,7 @@ def start_run(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
+async def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
     """Call `poll` — get invocation status via `GET /api/v1/invocations/<id>`.
 
     Returns the execution state, output page, and next cursor.
@@ -158,7 +169,7 @@ def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
     path = f"/api/v1/invocations/{operation}"
     if cursor:
         path += f"?cursor={cursor}"
-    result = _request("GET", path)
+    result = await _request("GET", path)
 
     # Map BuildBuddy's response to the delegate contract shape
     state = result.get("state") or result.get("status") or "unknown"
@@ -172,7 +183,7 @@ def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
     }
 
 
-def cancel_run(operation: str) -> dict[str, Any]:
+async def cancel_run(operation: str) -> dict[str, Any]:
     """Call `cancel` — cancel via `POST /api/v1/invocations/<id>/cancel`.
 
     BuildBuddy's Run API supports REST cancellation. The gRPC
@@ -180,7 +191,7 @@ def cancel_run(operation: str) -> dict[str, Any]:
     a native gRPC wheel (ADR 0040 Dimension 3).
     """
     path = f"/api/v1/invocations/{operation}/cancel"
-    result = _request("POST", path)
+    result = await _request("POST", path)
     return {
         "outcome": result.get("outcome") or "requested",
     }

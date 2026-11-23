@@ -14,9 +14,10 @@ These operations follow the delegate contract from
 | cancel(operation) | CancelOutcome | Yes |
 
 Each device calls the corresponding function in ``client.py``, which uses
-``urllib.request`` to call BuildBuddy's Run API REST endpoints. The API key
-is read from the macOS Keychain (service ``buildbuddy-omp2-trial``) or the
-``BUILDBUDDY_API_KEY`` environment variable.
+``omp.env.http_get`` and ``omp.env.http_post`` to call BuildBuddy's Run API
+REST endpoints. These methods route through the sandbox's HTTP egress broker,
+so the extension respects ``sv_sandbox_allow_domains``. The API key is read
+from the operator credential convar via ``omp.credential`` at call time.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ async def start(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(request, dict):
         raise errors.BuildBuddyUnavailable("start", "args.request must be an object")
     try:
-        return client.start_run(request)
+        return await client.start_run(request)
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -67,7 +68,7 @@ async def poll(args: dict[str, Any]) -> dict[str, Any]:
         raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
     cursor = args.get("cursor")
     try:
-        return client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -80,7 +81,7 @@ async def cancel(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("cancel", "args.operation is required")
     try:
-        return client.cancel_run(str(operation))
+        return await client.cancel_run(str(operation))
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:

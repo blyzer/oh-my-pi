@@ -84,9 +84,9 @@ class ClientSourceTests(unittest.TestCase):
         self.source = CLIENT_PY.read_text(encoding="utf-8")
         self.tree = ast.parse(self.source, filename=str(CLIENT_PY))
 
-    def _find_func(self, name: str) -> ast.FunctionDef | None:
+    def _find_func(self, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         for node in ast.walk(self.tree):
-            if isinstance(node, ast.FunctionDef) and node.name == name:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
                 return node
         return None
 
@@ -102,9 +102,10 @@ class ClientSourceTests(unittest.TestCase):
     def test_cancel_run_exists(self) -> None:
         self.assertIsNotNone(self._find_func("cancel_run"))
 
-    def test_uses_urllib(self) -> None:
-        """Verify client uses urllib.request for HTTP calls."""
-        self.assertIn("urllib.request", self.source)
+    def test_uses_omp_env_http(self) -> None:
+        """Verify client uses omp.env.http_get/post for HTTP calls."""
+        self.assertIn("omp.env.http_get", self.source)
+        self.assertIn("omp.env.http_post", self.source)
 
     def test_uses_buildbuddy_api_key_header(self) -> None:
         """Verify client uses x-buildbuddy-api-key header."""

@@ -1,8 +1,8 @@
 # Test BuildBuddy Extension
 
-**Date:** 2026-11-22
+**Date:** 2026-11-23
 **Purpose:** Verify `extensions/buildbuddy/` (BuildBuddy vendor integration extension)
-loads correctly and provides profile data and delegate operations.
+loads correctly and provides profile data and Run API delegate operations.
 
 ## Background
 
@@ -11,9 +11,10 @@ provides:
 
 1. **REAPI profile data** — `omp_buildbuddy.profile` module with credential header,
    arch spelling, fixed properties, profile name, and endpoint.
-2. **Run API delegate operations** — four stub operations (describe, start, poll,
-   cancel) that raise `BuildBuddyUnavailable` until the `DelegatedBackend` adapter
-   is built.
+2. **Run API delegate operations** — four operations (describe, start, poll,
+   cancel) implemented via `omp_buildbuddy.client` using `urllib.request` to call
+   BuildBuddy's Run API REST endpoints. The `DelegatedBackend` adapter (ADR 0040
+   Dimension 3) is not yet built, so these operations are not wired to production.
 
 The extension follows Shape C1 from `docs/research/exec-out-of-core.md`.
 
@@ -45,14 +46,22 @@ Please verify the BuildBuddy extension by checking its profile data and delegate
 2. Verify the delegate operations are registered:
    - Check that omp_buildbuddy.devices exists
    - List the four operations: describe, start, poll, cancel
-   - Call each operation and verify it raises BuildBuddyUnavailable
-     (since DelegatedBackend adapter is not yet built)
+   - Call `describe({})` and verify it returns a capabilities dict
+     (does not raise, because describe returns static data)
+   - Call `start({"request": {}})` and verify it raises BuildBuddyUnavailable
+     with "BuildBuddy host unreachable" (network blocked by sandbox)
+   - Call `poll({"operation": "test"})` and verify it raises BuildBuddyUnavailable
+     with "BuildBuddy host unreachable" (network blocked by sandbox)
+   - Call `cancel({"operation": "test"})` and verify it raises BuildBuddyUnavailable
+     with "BuildBuddy host unreachable" (network blocked by sandbox)
 
 3. Report:
    - Whether the extension module imports successfully
    - Whether all profile data values are correct
    - Whether all four delegate operations are registered
-   - Whether each operation raises BuildBuddyUnavailable as expected
+   - Whether `describe` returns capabilities without raising
+   - Whether `start`, `poll`, `cancel` raise BuildBuddyUnavailable due to
+     network being blocked (expected when sandbox blocks app.buildbuddy.io)
 
 If any step fails, report the exact error message and traceback.
 ```
@@ -64,9 +73,10 @@ If any step fails, report the exact error message and traceback.
 ### Success
 
 The extension module imports successfully. Profile data values match the expected
-defaults. All four delegate operations are registered and raise
-`BuildBuddyUnavailable` with the message "DelegatedBackend adapter not yet built
-(ADR 0040 Dimension 3)".
+defaults. All four delegate operations are registered. `describe` returns a
+capabilities dict. `start`, `poll`, and `cancel` raise `BuildBuddyUnavailable`
+with "BuildBuddy host unreachable" because the sandbox blocks outbound access to
+`app.buildbuddy.io:443`.
 
 ### Known Failure Modes
 
@@ -76,13 +86,15 @@ defaults. All four delegate operations are registered and raise
 | `ImportError` on profile module | Missing dependencies | Check `pyproject.toml` dependencies |
 | Profile values don't match | Wrong extension version | Verify `extensions/buildbuddy/` is up to date |
 | Delegate operations not registered | Hook not fired | Check `extension_activate` hook in `devices.py` |
+| `describe` raises instead of returning | Client error | Check `client.py` implementation |
+| `start`/`poll`/`cancel` succeed unexpectedly | Network open to BuildBuddy | Verify sandbox allowlist |
 
 ## What This Tests
 
 - **Extension module** — `extensions/buildbuddy/` imports correctly
 - **Profile data** — `omp_buildbuddy.profile` provides correct BuildBuddy defaults
-- **Delegate operations** — Four stub operations are registered via `extension_activate` hook
-- **Error handling** — `BuildBuddyUnavailable` is raised correctly for stub operations
+- **Delegate operations** — Four operations are registered via `extension_activate` hook
+- **Error handling** — `BuildBuddyUnavailable` is raised when network is blocked
 - **Extension conformance** — The extension follows ADR 0049 D5 conformance rules
 
 ## Alternative: Direct Python Test
