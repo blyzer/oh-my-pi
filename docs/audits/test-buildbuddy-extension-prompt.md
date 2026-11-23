@@ -34,6 +34,8 @@ Copy and paste this into an OMP chat session:
 
 ```
 Please verify the BuildBuddy extension by checking its profile data and delegate operations.
+Write the full verification report to `docs/audits/buildbuddy-extension-verification-output.md`
+so it can be analyzed after this session.
 
 1. Import the extension module and verify the profile data:
    - Check that omp_buildbuddy.profile exists
@@ -55,15 +57,21 @@ Please verify the BuildBuddy extension by checking its profile data and delegate
    - Call `cancel({"operation": "test"})` and verify it raises BuildBuddyUnavailable
      with "BuildBuddy host unreachable" (network blocked by sandbox)
 
-3. Report:
-   - Whether the extension module imports successfully
-   - Whether all profile data values are correct
-   - Whether all four delegate operations are registered
-   - Whether `describe` returns capabilities without raising
-   - Whether `start`, `poll`, `cancel` raise BuildBuddyUnavailable due to
-     network being blocked (expected when sandbox blocks app.buildbuddy.io)
+3. Write the verification report to `docs/audits/buildbuddy-extension-verification-output.md`:
+   - Overall result (PASS or FAIL)
+   - Extension conformance results (unit tests, manifest validation)
+   - Profile data verification table (constant, expected, actual, status)
+   - Delegate operations verification table (operation, registered, behavior, status)
+   - Network behavior (sandbox allowlist, expected errors)
+   - Unit test breakdown (per file)
+   - Architecture diagram
+   - Known limitations
+   - Commands used
+   - Related documents
 
-If any step fails, report the exact error message and traceback.
+4. Report back in chat with a summary of the results.
+
+If any step fails, include the exact error message and traceback in the output file.
 ```
 
 ---
