@@ -5,7 +5,7 @@ sessionId: session-261121-071840-zne9
 # BuildBuddy Extension: DelegatedBackend Adapter and Live Testing
 
 **Date:** 2026-11-23
-**Status:** Complete — all stages done, PR #713 ready to merge
+**Status:** PR #713 merged, credential fix applied, live test ready
 **Area:** runtime — execution, extensions, BuildBuddy integration
 **Source:** ADR 0040 Dimension 2/3, `docs/research/exec-out-of-core.md` (shape C1), BuildBuddy extension verification
 
