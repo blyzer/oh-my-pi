@@ -70,8 +70,11 @@ async def poll(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
     cursor = args.get("cursor")
+    api_key = args.get("api_key")
     try:
-        return await client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.poll_run(
+            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+        )
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -84,8 +87,11 @@ async def get_log(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("get_log", "args.operation is required")
     cursor = args.get("cursor")
+    api_key = args.get("api_key")
     try:
-        return await client.get_log(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.get_log(
+            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+        )
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:

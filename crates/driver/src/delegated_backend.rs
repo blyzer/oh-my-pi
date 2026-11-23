@@ -18,13 +18,14 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::Str;
+use omp_core::{ExposeSecret, SecretString, Str};
 use omp_env::{ClientError, EnvClient, InvocationEvent};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult, ExecutionRun, Outcome,
 	Platform, ReattachHandle, ResumeSupport,
 };
+use omp_exec_reapi::profile::Credential;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -80,6 +81,8 @@ struct BackendInner {
 	id:           BackendId,
 	/// Capabilities for this backend.
 	capabilities: Arc<BackendCapabilities>,
+	/// API key credential for the extension.
+	credential:   Option<Credential>,
 }
 
 impl DelegatedBackend {
@@ -87,7 +90,7 @@ impl DelegatedBackend {
 	///
 	/// The `client` must have the extension loaded and admitted. The `id` is
 	/// the operator-given name used in execution handles.
-	pub fn new(client: EnvClient, id: BackendId) -> Self {
+	pub fn new(client: EnvClient, id: BackendId, credential: Option<Credential>) -> Self {
 		Self {
 			inner: Arc::new(BackendInner {
 				client,
@@ -103,6 +106,7 @@ impl DelegatedBackend {
 					warm_caches:    false,
 					enforced:       REMOTE_POSTURE,
 				}),
+				credential,
 			}),
 		}
 	}
@@ -254,9 +258,19 @@ impl DelegatedBackend {
 			.iter()
 			.map(|e| (e.name.to_string(), serde_json::json!(e.value.as_str())))
 			.collect();
+
+		// Include the API key credential so the extension can use it directly
+		// instead of calling subprocess (which is blocked by the sandbox)
+		let api_key = self
+			.inner
+			.credential
+			.as_ref()
+			.map(|c| c.expose().to_string());
+
 		let args = serde_json::json!({
 			"steps": steps,
 			"env": env_map,
+			"api_key": api_key,
 		});
 
 		let result = self
@@ -372,8 +386,18 @@ impl DelegatedBackend {
 		id: omp_exec::ExecutionId,
 		cursor: Option<Str>,
 	) -> Option<ExecutionEvent> {
+		// Include API key for poll/get_log calls
+		let api_key = self
+			.inner
+			.credential
+			.as_ref()
+			.map(|c| c.expose().to_string());
+
 		// Poll for state
-		let mut poll_args = serde_json::json!({ "operation": operation.as_str() });
+		let mut poll_args = serde_json::json!({
+			"operation": operation.as_str(),
+			"api_key": api_key,
+		});
 		if let Some(ref cur) = cursor {
 			poll_args["cursor"] = serde_json::json!(cur.as_str());
 		}
