@@ -5,7 +5,7 @@ sessionId: session-261121-071840-zne9
 # BuildBuddy Extension: DelegatedBackend Adapter and Live Testing
 
 **Date:** 2026-11-23
-**Status:** Stages 1 & 2 done, Stage 3 in progress (config done, live test pending)
+**Status:** Complete — all stages done, PR #713 ready to merge
 **Area:** runtime — execution, extensions, BuildBuddy integration
 **Source:** ADR 0040 Dimension 2/3, `docs/research/exec-out-of-core.md` (shape C1), BuildBuddy extension verification
 
@@ -203,7 +203,7 @@ Add the `Delegated` arm to the composition enum and expose the envd entry point.
 - Update `reattach_execution` to handle delegated backend handles
 - Add integration test that composes a `DelegatedBackend` and verifies it can start, poll, and cancel
 
-### * Stage 3: Live test with BuildBuddy
+### ✓ Stage 3: Live test with BuildBuddy
 
 Submit a run to BuildBuddy via the adapter, poll to completion, and verify the result.
 
