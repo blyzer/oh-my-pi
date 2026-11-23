@@ -12,8 +12,8 @@
 
 use std::{
 	sync::{
-		atomic::{AtomicU64, Ordering},
 		Arc,
+		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
 };
@@ -54,7 +54,7 @@ pub enum DelegatedError {
 		/// The operation that failed.
 		operation: &'static str,
 		/// Error detail from the device.
-		detail: Str,
+		detail:    Str,
 	},
 	/// The device response was malformed.
 	#[error("device response malformed: {operation}")]
@@ -93,15 +93,15 @@ impl DelegatedBackend {
 				client,
 				id,
 				capabilities: Arc::new(BackendCapabilities {
-					platforms: Arc::new([Platform::LINUX_X86_64]),
-					needs: Default::default(),
-					max_timeout: Some(Duration::from_secs(60 * 30)),
-					action_cache: CacheSupport::None,
-					cancel: CancelSupport::None,
-					resume: ResumeSupport::Reattach,
+					platforms:      Arc::new([Platform::LINUX_X86_64]),
+					needs:          Default::default(),
+					max_timeout:    Some(Duration::from_secs(60 * 30)),
+					action_cache:   CacheSupport::None,
+					cancel:         CancelSupport::None,
+					resume:         ResumeSupport::Reattach,
 					max_blob_bytes: None,
-					warm_caches: false,
-					enforced: REMOTE_POSTURE,
+					warm_caches:    false,
+					enforced:       REMOTE_POSTURE,
 				}),
 			}),
 		}
@@ -119,8 +119,7 @@ impl DelegatedBackend {
 			invocation_id,
 			name: operation.to_string(),
 			rev: String::new(),
-			deadline_ms: u64::try_from(Duration::from_secs(30).as_millis())
-				.unwrap_or(u64::MAX),
+			deadline_ms: u64::try_from(Duration::from_secs(30).as_millis()).unwrap_or(u64::MAX),
 			output_request: omp_env::frame::OutputRequest::Complete as i32,
 			restrictions: None,
 			..Default::default()
@@ -134,7 +133,11 @@ impl DelegatedBackend {
 			.map_err(DelegatedError::Transport)?;
 
 		// Wait for acceptance
-		match invocation.next_event().await.map_err(DelegatedError::Transport)? {
+		match invocation
+			.next_event()
+			.await
+			.map_err(DelegatedError::Transport)?
+		{
 			Some(InvocationEvent::Accepted(_)) => {},
 			Some(InvocationEvent::Verdict(v)) => {
 				// Some devices may return immediately with verdict
@@ -149,9 +152,8 @@ impl DelegatedBackend {
 		}
 
 		// Commit empty args with the device-specific arguments
-		let args_bytes = bytes::Bytes::from(
-			serde_json::to_vec(&args).unwrap_or_else(|_| b"{}".to_vec()),
-		);
+		let args_bytes =
+			bytes::Bytes::from(serde_json::to_vec(&args).unwrap_or_else(|_| b"{}".to_vec()));
 		invocation
 			.commit_args(args_bytes, Default::default(), 0, None)
 			.await
@@ -159,7 +161,11 @@ impl DelegatedBackend {
 
 		// Stream events until verdict
 		loop {
-			match invocation.next_event().await.map_err(DelegatedError::Transport)? {
+			match invocation
+				.next_event()
+				.await
+				.map_err(DelegatedError::Transport)?
+			{
 				Some(InvocationEvent::Verdict(v)) => {
 					return Self::extract_result(v, operation);
 				},
@@ -183,7 +189,10 @@ impl DelegatedBackend {
 		}
 	}
 
-	fn extract_result(v: omp_env::frame::Verdict, operation: &'static str) -> Result<Value, DelegatedError> {
+	fn extract_result(
+		v: omp_env::frame::Verdict,
+		operation: &'static str,
+	) -> Result<Value, DelegatedError> {
 		// Check for error outcome
 		if v.is_error {
 			return Err(DelegatedError::Device {
@@ -237,9 +246,7 @@ impl DelegatedBackend {
 		let steps: Vec<serde_json::Value> = request
 			.argv
 			.iter()
-			.map(|arg| {
-				serde_json::json!({ "run": arg.as_str() })
-			})
+			.map(|arg| serde_json::json!({ "run": arg.as_str() }))
 			.collect();
 
 		let env_map: serde_json::Map<String, serde_json::Value> = request
@@ -255,9 +262,7 @@ impl DelegatedBackend {
 		let result = self
 			.call_device(device::START, args)
 			.await
-			.map_err(|e| ExecutionError::Transport {
-				source: Arc::new(e),
-			})?;
+			.map_err(|e| ExecutionError::Transport { source: Arc::new(e) })?;
 
 		let operation = result
 			.get("operation")
@@ -272,14 +277,14 @@ impl DelegatedBackend {
 		}
 
 		Ok(DelegatedRun {
-			backend: self.clone(),
+			backend:   self.clone(),
 			operation: Str::from(operation),
-			id: request.id,
-			outputs: request.outputs,
-			timeout: request.timeout,
-			cursor: None,
-			settled: false,
-			cancel: CancellationToken::new(),
+			id:        request.id,
+			outputs:   request.outputs,
+			timeout:   request.timeout,
+			cursor:    None,
+			settled:   false,
+			cancel:    CancellationToken::new(),
 		})
 	}
 
@@ -290,14 +295,14 @@ impl DelegatedBackend {
 	) -> Result<DelegatedRun, ExecutionError> {
 		// Reattach by creating a run that starts polling from the stored operation
 		Ok(DelegatedRun {
-			backend: self.clone(),
+			backend:   self.clone(),
 			operation: handle.operation,
-			id: handle.id,
-			outputs: omp_exec::OutputSpec::Logs,
-			timeout: Duration::from_secs(60 * 30),
-			cursor: None,
-			settled: false,
-			cancel: CancellationToken::new(),
+			id:        handle.id,
+			outputs:   omp_exec::OutputSpec::Logs,
+			timeout:   Duration::from_secs(60 * 30),
+			cursor:    None,
+			settled:   false,
+			cancel:    CancellationToken::new(),
 		})
 	}
 }
@@ -356,11 +361,7 @@ impl ExecutionRun for DelegatedRun {
 	}
 
 	fn detach(self) -> ReattachHandle {
-		ReattachHandle::new(
-			self.backend.inner.id.clone(),
-			self.operation,
-			self.id,
-		)
+		ReattachHandle::new(self.backend.inner.id.clone(), self.operation, self.id)
 	}
 }
 
@@ -386,7 +387,10 @@ impl DelegatedBackend {
 			},
 		};
 
-		let state = poll_result.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+		let state = poll_result
+			.get("state")
+			.and_then(|s| s.as_str())
+			.unwrap_or("unknown");
 
 		// Map state to events
 		match state {

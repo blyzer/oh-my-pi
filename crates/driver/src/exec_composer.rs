@@ -26,8 +26,6 @@ use omp_exec_reapi::{
 	profile::{ArchSpelling, Credential, Profile},
 	tree::InputFile,
 };
-
-use crate::delegated_backend::{DelegatedBackend, DelegatedRun};
 use omp_observability::attrs::omp_exec as exec_attrs;
 use omp_proto::{
 	blob::v1::{GetRequest, StatRequest},
@@ -36,7 +34,12 @@ use omp_proto::{
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::{bridges::CommandCredentials, cfg::CfgFiles, workspace_trust::evaluate_workspace};
+use crate::{
+	bridges::CommandCredentials,
+	cfg::CfgFiles,
+	delegated_backend::{DelegatedBackend, DelegatedRun},
+	workspace_trust::evaluate_workspace,
+};
 
 omp_con::var! {
 	/// Remote REAPI address. Empty disables remote execution.
@@ -409,9 +412,11 @@ impl Clone for ComposedBackend {
 }
 
 impl ComposedBackend {
-	/// Returns the inner REAPI backend, or an error if this is a delegated backend.
+	/// Returns the inner REAPI backend, or an error if this is a delegated
+	/// backend.
 	///
-	/// Used by ADW remote phase which needs CAS blob downloads (REAPI-only feature).
+	/// Used by ADW remote phase which needs CAS blob downloads (REAPI-only
+	/// feature).
 	pub fn into_reapi(self) -> Result<ReapiBackend<EnvironmentInputs>, RemoteError> {
 		match self {
 			Self::Reapi(b) => Ok(b),
@@ -463,7 +468,10 @@ impl omp_exec::ExecutionBackend for ComposedBackend {
 		async move {
 			match backend {
 				ComposedBackend::Reapi(b) => b.reattach(handle, context).await.map(ComposedRun::Reapi),
-				ComposedBackend::Delegated(b) => b.reattach(handle, context).await.map(ComposedRun::Delegated),
+				ComposedBackend::Delegated(b) => b
+					.reattach(handle, context)
+					.await
+					.map(ComposedRun::Delegated),
 			}
 		}
 	}
@@ -778,9 +786,10 @@ impl ExecutionSettings {
 		environment: EnvClient,
 		config: ExecuteConfig,
 	) -> Result<ComposedBackend, RemoteError> {
-		let backend = ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
-			.await
-			.map_err(RemoteError::Execute)?;
+		let backend =
+			ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
+				.await
+				.map_err(RemoteError::Execute)?;
 		Ok(ComposedBackend::Reapi(backend))
 	}
 }
