@@ -1,0 +1,30 @@
+# Historical flat CI path list, retained for source/research compatibility.
+# Runtime selection now uses .github/ci-job-paths.json and scripts/ci_scope.py.
+# This file does not filter push/PR workflows or select their jobs.
+.cargo/**
+.config/**
+.github/actions/**
+.github/ci-paths.txt
+.github/ci-rust-paths.txt
+.github/workflows/ci.yml
+Cargo.lock
+Cargo.toml
+LICENSE*
+THIRD-PARTY-NOTICES.txt
+about.toml
+clippy.toml
+crates/**
+deny.toml
+docs/py/**
+examples/**
+extensions/**
+fixtures/**
+justfile
+rust-toolchain.toml
+rustfmt.toml
+scripts/**
+tools/lintx/**
+.github/workflows/macos-verification.yml
+.github/actions/macos-*/**
+scripts/macos_*.py
+scripts/ci-macos-objective.sh

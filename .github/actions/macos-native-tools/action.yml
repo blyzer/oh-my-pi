@@ -1,0 +1,49 @@
+name: macOS native build tools
+description: >
+  Installs (github-hosted) or checks (self-hosted) the four native build tools
+  the workspace requires: lld@22, uv, zstd, and ninja. The unversioned lld
+  formula tracks the newest major and cannot link the LLVM 22 CPython bundle,
+  so this action always symlinks /opt/homebrew/bin/ld64.lld to the lld@22
+  binary. Without HOMEBREW_NO_AUTO_UPDATE, brew install refreshes every tap,
+  taking five minutes of a fifteen-minute job.
+
+inputs:
+  min-version:
+    description: >
+      Reserved for future use. Currently unused; present so callers can
+      document the expected minimum and the action can enforce it later.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Hosted runners start empty, so they install the four tools. Without
+    # HOMEBREW_NO_AUTO_UPDATE, `brew install` first refreshes every tap: five
+    # minutes of a fifteen-minute job in run 182, attempt 2. A self-hosted
+    # runner brings its own. Its service may run as a user that does not own
+    # the Homebrew prefix, where `brew install` can fail even with nothing to
+    # install. So on self-hosted runners this step only checks the binaries.
+    - name: Install native build tools
+      if: runner.environment == 'github-hosted'
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+      shell: bash
+      run: |
+        brew install lld@22 uv zstd ninja
+        # .cargo/config.toml links through /opt/homebrew/bin/ld64.lld and the vendored CPython
+        # bitcode is LLVM 22 (crates/py/scripts/ld64.lld): the unversioned lld formula tracks
+        # the newest major (23 today) and cannot link it.
+        ln -sf "$(brew --prefix lld@22)/bin/ld64.lld" /opt/homebrew/bin/ld64.lld
+    - name: Check provisioned native build tools
+      if: runner.environment != 'github-hosted'
+      shell: bash
+      run: |
+        missing=()
+        [ -x /opt/homebrew/bin/ld64.lld ] || missing+=(lld)
+        for tool in uv zstd ninja; do
+          command -v "$tool" >/dev/null || missing+=("$tool")
+        done
+        if [ ${#missing[@]} -gt 0 ]; then
+          echo "::error::Missing on this runner: ${missing[*]}. As the owner of the Homebrew prefix, run: brew install ${missing[*]}"
+          exit 1
+        fi

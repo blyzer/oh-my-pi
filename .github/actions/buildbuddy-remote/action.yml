@@ -1,0 +1,44 @@
+name: Prepare a trusted BuildBuddy run
+description: >-
+  The self-hosted half of a Linux CI job when vars.CI_LINUX_MODE is `remote`. Fails unless this run
+  may hand the BuildBuddy key to scripts/remote-verify.sh, then installs the pinned bb client. Gate
+  every step that sets BUILDBUDDY_API_KEY on this action's `remote` output.
+
+inputs:
+  has-key:
+    description: "`secrets.BUILDBUDDY_ORG_API_KEY != ''`: whether the key is set, never its value"
+    required: true
+
+outputs:
+  remote:
+    description: "'true' when this run may use the key; otherwise the action fails"
+    value: ${{ steps.trust.outputs.remote }}
+
+runs:
+  using: composite
+  steps:
+    # The same fork test as the runs-on of every job that can reach a self-hosted runner. Unlike
+    # remote_linux's hosted path, which skips a fork and passes, this fails: ci.yml never routes a
+    # fork here, so arriving is a routing bug, and a pass would report a required check that
+    # verified nothing. An empty key fails too: scripts/remote-verify.sh would otherwise fall back
+    # to the runner user's own Keychain key.
+    - name: Decide whether this run may use the BuildBuddy key
+      id: trust
+      shell: bash
+      env:
+        FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        HAS_KEY: ${{ inputs.has-key }}
+      run: |
+        set -euo pipefail
+        if [ "$FORK" != false ]; then
+          echo "::error title=Fork pull request on a self-hosted runner::A pull request from another repository must run on GitHub-hosted runners and never gets the BuildBuddy key"
+          exit 1
+        fi
+        if [ "$HAS_KEY" != true ]; then
+          echo "::error title=BuildBuddy key missing::secrets.BUILDBUDDY_ORG_API_KEY is not set for this run"
+          exit 1
+        fi
+        echo "remote=true" >> "$GITHUB_OUTPUT"
+
+    - name: Install pinned BuildBuddy client
+      uses: ./.github/actions/buildbuddy-client
