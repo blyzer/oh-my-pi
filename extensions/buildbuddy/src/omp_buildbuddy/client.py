@@ -94,9 +94,9 @@ async def _request(
             endpoint, f"BuildBuddy host unreachable: {exc}"
         ) from exc
 
-    if response.status_code >= 400:
+    if response.status >= 400:
         raise errors.BuildBuddyUnavailable(
-            endpoint, f"BuildBuddy HTTP {response.status_code}"
+            endpoint, f"BuildBuddy HTTP {response.status}"
         )
 
     body = response.body

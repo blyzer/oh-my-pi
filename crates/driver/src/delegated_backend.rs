@@ -18,7 +18,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{CowBytes, ExposeSecret, SecretString, Str};
+use omp_core::{CowBytes, Str};
 use omp_env::{ClientError, EnvClient, InvocationEvent};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,

@@ -114,6 +114,11 @@ class ClientSourceTests(unittest.TestCase):
         """Verify client uses omp.env.http_post for HTTP calls (all endpoints are POST)."""
         self.assertIn("omp.env.http_post", self.source)
 
+    def test_reads_http_response_status_field(self) -> None:
+        """omp.env.HttpResponse exposes `status`; `status_code` does not exist and would raise."""
+        self.assertIn("response.status", self.source)
+        self.assertNotIn("status_code", self.source)
+
     def test_no_omp_env_http_get(self) -> None:
         """Verify client does not use omp.env.http_get (all endpoints are POST)."""
         self.assertNotIn("omp.env.http_get", self.source)
