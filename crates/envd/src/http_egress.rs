@@ -351,7 +351,7 @@ async fn read_bounded(response: reqwest::Response) -> Result<Bytes, HttpEgressEr
 mod tests {
 	use tokio::{
 		io::{AsyncReadExt as _, AsyncWriteExt as _},
-		net::TcpListener,
+		net::{TcpListener, TcpStream},
 		sync::oneshot,
 	};
 
@@ -359,6 +359,22 @@ mod tests {
 
 	fn header(name: &str, value: &str) -> pb::HttpHeader {
 		pb::HttpHeader { name: name.into(), value: value.into(), ..Default::default() }
+	}
+
+	const MAX_HEAD_BYTES: usize = 16 * 1024;
+
+	/// Reads one request head, through the blank line that ends it, as lowercase
+	/// text.
+	async fn read_head(stream: &mut TcpStream) -> String {
+		let mut head = Vec::new();
+		let mut chunk = [0_u8; 1024];
+		while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+			assert!(head.len() < MAX_HEAD_BYTES, "request head exceeds {MAX_HEAD_BYTES} bytes");
+			let read = stream.read(&mut chunk).await.expect("read request");
+			assert_ne!(read, 0, "connection closed before the request head ended");
+			head.extend_from_slice(&chunk[..read]);
+		}
+		String::from_utf8_lossy(&head).to_ascii_lowercase()
 	}
 
 	/// Serves one connection per entry of `responses`, in order, and returns
@@ -369,9 +385,7 @@ mod tests {
 			let mut heads = Vec::new();
 			for response in responses {
 				let (mut stream, _) = listener.accept().await.expect("accept");
-				let mut buffer = vec![0_u8; 8192];
-				let read = stream.read(&mut buffer).await.expect("read request");
-				heads.push(String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+				heads.push(read_head(&mut stream).await);
 				stream
 					.write_all(response.as_bytes())
 					.await
@@ -434,8 +448,10 @@ mod tests {
 		assert!(!head.contains("x-buildbuddy-api-key"), "{head}");
 	}
 
+	/// Same-origin redirects keep credential headers; only a method-rewriting
+	/// redirect drops `content-length` and `content-type`.
 	#[tokio::test]
-	async fn a_same_origin_redirect_keeps_every_header() {
+	async fn a_same_origin_redirect_keeps_credential_headers() {
 		let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
 		let port = listener.local_addr().expect("addr").port();
 		let heads = serve(listener, vec![
@@ -475,6 +491,7 @@ mod tests {
 			"x-auth-key",
 			"x-access-key",
 			"x-amz-signature",
+			"x-functions-key",
 		] {
 			let mut headers = HeaderMap::new();
 			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));

@@ -139,7 +139,7 @@ impl Origin {
 /// Name fragments that mark a header as carrying a credential. Compared
 /// against the lowercase name with underscores read as hyphens, so `x_api_key`
 /// and `x-api-key` are the same header here.
-const CREDENTIAL_MARKERS: [&str; 13] = [
+const CREDENTIAL_MARKERS: [&str; 14] = [
 	"authorization",
 	"cookie",
 	"secret",
@@ -153,6 +153,7 @@ const CREDENTIAL_MARKERS: [&str; 13] = [
 	"auth-key",
 	"access-key",
 	"signature",
+	"-key",
 ];
 
 /// Returns whether a header name looks like a credential. This is the one
@@ -300,6 +301,7 @@ mod tests {
 			"x-private-key",
 			"x-auth-key",
 			"x-access-key",
+			"x-functions-key",
 		] {
 			let name = HeaderName::from_bytes(name.as_bytes()).expect("header name");
 			assert!(is_credential_header(&name), "{name} must be a credential header");
