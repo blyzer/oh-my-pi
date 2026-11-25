@@ -73,6 +73,7 @@ This follows the execution precedent (ADR 0040 Part A.1 as amended: `Local | Rea
    - The resolution order (stored credential for the canonical host only → host-family env vars → git credential helper) stays in core.
    - Env-var names and canonical hosts are **adapter data**, not core constants.
    - Adapters receive only `omp.creds.mint_scoped` short-TTL, scope-limited credentials for providers listed in `credentials.allow`.
+   - A second path exists under [ADR 0075](0075-extension-credential-host-placement.md): for an extension's own HTTP request, the host attaches the credential header at egress under a host-held grant, and the extension never receives the key. It is not `mint_scoped`, and it is not enabled until that ADR's slices land.
 8. **A second adapter proves the contract** before it is declared stable. The GitLab adapter (T2) lands before the GitHub adapter replaces the in-core code.
 
 **Vendor-lock register** (reviewed whenever an adapter is added):
