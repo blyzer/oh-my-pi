@@ -30,6 +30,16 @@ if [ "$#" -eq 0 ]; then
     echo "usage: scripts/remote-verify.sh [--seed] <just recipe> [args...]" >&2
     exit 2
 fi
+# `bb remote` parses `git branch` and refuses a state it does not know: with some git versions a
+# detached HEAD (for example a `git worktree add --detach` checkout) prints `* (no branch)` and bb
+# stops with `unexpected branch state * (no branch)`. This is a bb rule, not part of the REAPI
+# standard. Fail before any side effect, and only on the exact output bb rejects, so a CI checkout
+# that prints `(HEAD detached at ...)` keeps working.
+if git branch 2>/dev/null | grep -q '^\* (no branch)'; then
+    echo "error: this git prints '* (no branch)' for the current HEAD, which \`bb remote\` rejects" >&2
+    echo "       (unexpected branch state). Check out a named branch first: git switch -c <name>" >&2
+    exit 2
+fi
 if ! command -v bb >/dev/null; then
     echo "error: the BuildBuddy CLI \`bb\` is not on PATH (https://github.com/buildbuddy-io/bazel/releases)" >&2
     exit 2
