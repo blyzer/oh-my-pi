@@ -35,6 +35,23 @@ class SelectionTests(unittest.TestCase):
             self.assertFalse(selected["rust"])
             self.assertFalse(selected["lintx_ratchet"])
 
+    def test_rust_sources_under_docs_do_not_trigger_ci(self):
+        # Research notes ship standalone probes such as docs/research/x/experiments/probe.rs.
+        # They are not part of the Cargo workspace, so they must not start any job.
+        selected = self.ci(
+            "docs/research/x/experiments/probe.rs",
+            "docs/research/x/README.md",
+        )
+        for name in scope.CI_JOBS:
+            if name == "macos_controls":
+                continue
+            self.assertFalse(selected[name], name)
+
+    def test_rust_sources_outside_docs_still_run_every_rust_job(self):
+        selected = self.ci("crates/grep/src/lib.rs", "examples/demo/main.rs")
+        for name in ("format_rust", "rust", "lint_macos", "remote_linux", "lintx_ratchet"):
+            self.assertTrue(selected[name], name)
+
     def test_agent_configs_and_scratch_do_not_trigger_ci(self):
         for path in (".agents/skills/research/SKILL.md", ".claude/skills/omp-adr/SKILL.md",
                       ".junie/plans/test.md", ".scratch/notes.md", ".omp/skills/pyo3/SKILL.md",

@@ -2030,7 +2030,11 @@ impl EnvServer {
 				server_frame::Body::Hello(pb::ServerHello {
 					schema_rev:      omp_proto::SCHEMA_REV,
 					min_schema_rev:  MIN_SCHEMA_REV,
-					capabilities:    grants.iter().map(str::to_owned).collect(),
+					capabilities:    grants
+						.iter()
+						.chain(omp_env::SERVER_FEATURES.iter().copied())
+						.map(str::to_owned)
+						.collect(),
 					server_version:  self.identity.server_version.to_string(),
 					workspace_id:    self.identity.workspace_id.clone(),
 					root_uri:        self.identity.root_uri.to_string(),

@@ -198,7 +198,8 @@ impl EditorIoError {
 				| Code::Unspecified
 				| Code::Internal
 				| Code::AlreadyExists
-				| Code::Uncommitted,
+				| Code::Uncommitted
+				| Code::PlacementUnavailable,
 			)
 			| Err(_) => Self::Refused,
 		}
