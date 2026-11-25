@@ -4686,7 +4686,7 @@ mod grant_tests {
 				data_dir:          &f.data,
 				sandbox_mode:      omp_envd::exec_settings::ExecSandboxMode::WorkspaceWrite,
 				writable_roots:    &[],
-				sandbox_available: true,
+				sandbox_available: omp_driver::discovery::native::SandboxProbe::known(true),
 			},
 		);
 		report

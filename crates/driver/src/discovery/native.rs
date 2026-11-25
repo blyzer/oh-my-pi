@@ -7,9 +7,10 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	fs, io,
+	fmt, fs, io,
 	path::{Path, PathBuf},
 	str::FromStr as _,
+	sync::OnceLock,
 };
 
 use omp_agent::HookPhase;
@@ -61,8 +62,56 @@ pub struct NativeAdmissionOptions<'a> {
 	pub disabled:          &'a [Str],
 }
 
+/// Whether this host can enforce a kernel-backed exec sandbox.
+///
+/// The kernel probe constructs a sandbox, so a [lazy](Self::lazy) probe runs
+/// only when admission has a user extension that declares CONTROL and asks for
+/// the answer, and then at most once.
+pub struct SandboxProbe<'a> {
+	/// The deferred probe; [None] for an answer supplied up front.
+	probe: Option<&'a (dyn Fn() -> bool + Sync)>,
+	/// The answer once known.
+	value: OnceLock<bool>,
+}
+
+impl<'a> SandboxProbe<'a> {
+	/// Defers `probe` until [`Self::get`] first asks.
+	#[must_use]
+	pub const fn lazy(probe: &'a (dyn Fn() -> bool + Sync)) -> Self {
+		Self { probe: Some(probe), value: OnceLock::new() }
+	}
+
+	/// An answer already in hand; no probe runs.
+	#[must_use]
+	pub fn known(available: bool) -> Self {
+		Self { probe: None, value: OnceLock::from(available) }
+	}
+
+	/// Whether the host can enforce a kernel-backed exec sandbox, probing on
+	/// the first call only.
+	pub fn get(&self) -> bool {
+		*self
+			.value
+			.get_or_init(|| self.probe.is_some_and(|probe| probe()))
+	}
+
+	/// The answer if it was ever asked for, without probing.
+	#[must_use]
+	pub fn probed(&self) -> Option<bool> {
+		self.value.get().copied()
+	}
+}
+
+impl fmt::Debug for SandboxProbe<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("SandboxProbe")
+			.field("probed", &self.value.get())
+			.finish_non_exhaustive()
+	}
+}
+
 /// Host facts required before an operator path grant can admit CONTROL.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct NativeControlGrantOptions<'a> {
 	/// The host data directory containing the ext/grants.toml path.
 	pub data_dir:          &'a Path,
@@ -70,8 +119,9 @@ pub struct NativeControlGrantOptions<'a> {
 	pub sandbox_mode:      ExecSandboxMode,
 	/// Additional exec-writable roots from the effective sandbox settings.
 	pub writable_roots:    &'a [PathBuf],
-	/// Whether this host can enforce a kernel-backed exec sandbox.
-	pub sandbox_available: bool,
+	/// Whether this host can enforce a kernel-backed exec sandbox, probed only
+	/// when a user extension declares CONTROL.
+	pub sandbox_available: SandboxProbe<'a>,
 }
 
 /// Rechecks the sandbox facts after journaled class convars are applied.
@@ -86,10 +136,13 @@ pub(crate) fn control_grant_sandbox_matches(
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
 	let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(ctx);
-	let sandbox_available = omp_envd::admission::probe_sandbox(ctx, workspace_root).confines();
+	// Admission asked for the sandbox only while deciding a CONTROL grant; when
+	// it never did, no grant depends on it and there is nothing to recheck.
 	admitted.sandbox_mode == mode
 		&& admitted.writable_roots == writable_roots.as_slice()
-		&& admitted.sandbox_available == sandbox_available
+		&& admitted.sandbox_available.probed().is_none_or(|admitted| {
+			admitted == omp_envd::admission::probe_sandbox(ctx, workspace_root).confines()
+		})
 }
 
 /// Drops every CONTROL grant from `specs`. A grant holds only under the sandbox
@@ -769,11 +822,11 @@ fn admitted_control_grants(
 	if wanted.is_empty() {
 		return wanted;
 	}
-	if options.sandbox_mode == ExecSandboxMode::Off || !options.sandbox_available {
+	if options.sandbox_mode == ExecSandboxMode::Off || !options.sandbox_available.get() {
 		tracing::warn!(
 			extension = %id,
 			mode = %options.sandbox_mode,
-			sandbox_available = options.sandbox_available,
+			sandbox_available = ?options.sandbox_available.probed(),
 			"withholding extension CONTROL grants because no kernel-enforced exec sandbox is active"
 		);
 		return BTreeSet::new();
@@ -1067,7 +1120,7 @@ default = false
 				data_dir,
 				sandbox_mode: mode,
 				writable_roots,
-				sandbox_available,
+				sandbox_available: SandboxProbe::known(sandbox_available),
 			},
 		)
 	}
@@ -1282,6 +1335,123 @@ failure = "fault"
 		}
 	}
 
+	/// Runs user-layer admission over `home` with a probe that counts its calls.
+	fn counted_admission(
+		project: &Path,
+		home: &Path,
+		data_dir: &Path,
+		mode: ExecSandboxMode,
+		calls: &std::sync::atomic::AtomicUsize,
+	) -> NativeAdmissionReport {
+		let probe = || {
+			calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			true
+		};
+		admit_native_extensions_contained_with_control(
+			project,
+			home,
+			NativeAdmissionOptions {
+				explicit_roots:    &[],
+				mode:              NativeLoadMode::Merge,
+				include_workspace: true,
+				setting_overrides: &[],
+				disabled:          &[],
+			},
+			&NativeControlGrantOptions {
+				data_dir,
+				sandbox_mode: mode,
+				writable_roots: &[],
+				sandbox_available: SandboxProbe::lazy(&probe),
+			},
+		)
+	}
+
+	#[test]
+	fn sandbox_is_not_probed_when_no_extension_declares_control() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, control_root) = user_fixture(tree.path(), "test.user");
+		// Only a user extension without CONTROL remains.
+		fs::remove_dir_all(&control_root).expect("drop the CONTROL extension");
+		extension(&home.join(".o2/agent/extensions/plain"), "test.plain", false);
+		let calls = AtomicUsize::new(0);
+
+		let report =
+			counted_admission(&project, &home, &data_dir, ExecSandboxMode::WorkspaceWrite, &calls);
+
+		assert!(
+			report
+				.extensions
+				.iter()
+				.any(|item| item.spec.key.extension().as_str() == "test.plain"),
+			"the plain extension is admitted"
+		);
+		assert_eq!(calls.load(Ordering::SeqCst), 0, "no CONTROL declared, so no sandbox probe");
+	}
+
+	#[test]
+	fn sandbox_is_not_probed_when_the_sandbox_is_off() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, _root) = user_fixture(tree.path(), "test.user");
+		let calls = AtomicUsize::new(0);
+
+		let report = counted_admission(&project, &home, &data_dir, ExecSandboxMode::Off, &calls);
+
+		assert_no_control_grant(&report, "test.user");
+		assert_eq!(calls.load(Ordering::SeqCst), 0, "an off sandbox decides before probing");
+	}
+
+	#[test]
+	fn sandbox_is_probed_once_when_user_extensions_declare_control() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		// A second CONTROL extension must reuse the first answer.
+		control_extension(&home.join(".o2/agent/extensions/second"), "test.second");
+		let calls = AtomicUsize::new(0);
+
+		let report =
+			counted_admission(&project, &home, &data_dir, ExecSandboxMode::WorkspaceWrite, &calls);
+
+		assert_eq!(calls.load(Ordering::SeqCst), 1, "one probe serves every CONTROL extension");
+		let granted = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("granted extension admitted");
+		assert!(!granted.spec.control_grants.is_empty(), "the probe answer admitted the grant");
+		assert_no_control_grant(&report, "test.second");
+	}
+
+	#[test]
+	fn unprobed_sandbox_has_nothing_to_recheck() {
+		let ctx = omp_con::Ctx::new();
+		let tree = security_test_tree();
+		let workspace = tree.path().join("workspace");
+		fs::create_dir_all(&workspace).expect("workspace");
+		let data_dir = tree.path().join("data");
+		let writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
+			.get(&ctx)
+			.into_iter()
+			.map(|path| PathBuf::from(path.as_str()))
+			.collect::<Vec<_>>();
+		let probe = || -> bool { unreachable!("admission never asked for the sandbox") };
+		let admitted = NativeControlGrantOptions {
+			data_dir:          &data_dir,
+			sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+			writable_roots:    &writable_roots,
+			sandbox_available: SandboxProbe::lazy(&probe),
+		};
+
+		assert!(control_grant_sandbox_matches(&admitted, &ctx, &workspace));
+		assert_eq!(admitted.sandbox_available.probed(), None);
+	}
+
 	#[test]
 	fn class_sandbox_off_invalidates_admission_context() {
 		let ctx = omp_con::Ctx::new();
@@ -1294,7 +1464,9 @@ failure = "fault"
 			data_dir:          &data_dir,
 			sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
 			writable_roots:    &writable_roots,
-			sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &workspace).confines(),
+			sandbox_available: SandboxProbe::known(
+				omp_envd::admission::probe_sandbox(&ctx, &workspace).confines(),
+			),
 		};
 		assert!(control_grant_sandbox_matches(&admitted, &ctx, &workspace));
 		omp_envd::exec_settings::SV_SANDBOX_MODE
@@ -1527,7 +1699,7 @@ failure = "fault"
 				data_dir:          &data_dir,
 				sandbox_mode:      ExecSandboxMode::WorkspaceWrite,
 				writable_roots:    &[],
-				sandbox_available: true,
+				sandbox_available: SandboxProbe::known(true),
 			},
 		);
 		let extension = report
