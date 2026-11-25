@@ -485,14 +485,8 @@ mod tests {
 
 	#[test]
 	fn ordinary_headers_are_kept() {
-		let names = [
-			"accept",
-			"content-type",
-			"user-agent",
-			"x-api-version",
-			"x-request-id",
-			"x-trace-id",
-		];
+		let names =
+			["accept", "content-type", "user-agent", "x-api-version", "x-request-id", "x-trace-id"];
 		let mut headers = HeaderMap::new();
 		for name in names {
 			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));

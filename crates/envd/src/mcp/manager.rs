@@ -4777,17 +4777,23 @@ mod tests {
 		}))
 		.expect("config");
 		assert_eq!(config.header_policy, None);
-		let configured =
-			HeaderMap::from_iter([(HeaderName::from_static("x-team"), HeaderValue::from_static("alpha"))]);
+		let configured = HeaderMap::from_iter([(
+			HeaderName::from_static("x-team"),
+			HeaderValue::from_static("alpha"),
+		)]);
 		let generated = HeaderMap::from_iter([(
 			HeaderName::from_static("authorization"),
 			HeaderValue::from_static("Bearer live"),
 		)]);
-		let mut policy =
-			RedirectPolicy::new(Url::parse("https://a.example/mcp").expect("url"), origin_locked(&config))
-				.expect("policy");
+		let mut policy = RedirectPolicy::new(
+			Url::parse("https://a.example/mcp").expect("url"),
+			origin_locked(&config),
+		)
+		.expect("policy");
 
-		let same_origin = policy.headers(&generated, &configured).expect("same origin");
+		let same_origin = policy
+			.headers(&generated, &configured)
+			.expect("same origin");
 		assert_eq!(same_origin["x-team"], "alpha");
 		assert_eq!(same_origin["authorization"], "Bearer live");
 
@@ -4796,7 +4802,9 @@ mod tests {
 				.redirect(&Method::GET, StatusCode::FOUND, Some("https://b.example/mcp"))
 				.expect("redirect")
 		);
-		let cross_origin = policy.headers(&generated, &configured).expect("cross origin");
+		let cross_origin = policy
+			.headers(&generated, &configured)
+			.expect("cross origin");
 		assert!(!cross_origin.contains_key("x-team"), "{cross_origin:?}");
 		assert!(!cross_origin.contains_key("authorization"), "{cross_origin:?}");
 	}

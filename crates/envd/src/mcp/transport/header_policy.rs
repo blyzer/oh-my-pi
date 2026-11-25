@@ -308,14 +308,9 @@ mod tests {
 
 	#[test]
 	fn ordinary_headers_are_not_credentials() {
-		for name in [
-			"content-type",
-			"accept",
-			"user-agent",
-			"x-request-id",
-			"x-trace-id",
-			"x-api-version",
-		] {
+		for name in
+			["content-type", "accept", "user-agent", "x-request-id", "x-trace-id", "x-api-version"]
+		{
 			let name = HeaderName::from_static(name);
 			assert!(!is_credential_header(&name), "{name} must not be a credential header");
 			assert!(!is_sensitive_header(&name), "{name} must not be a sensitive header");
