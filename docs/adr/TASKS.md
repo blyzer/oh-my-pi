@@ -428,11 +428,11 @@ Proposed, not owner-approved, not started. The owner chose option A: the host pl
 
 - **OPEN** Owner questions: O1 grant registry location and writers; O2 project-scoped extensions (proposal: never); O3 whether ADR 0040 is amended first; O4 `BUILDBUDDY_API_KEY` users (proposal: warning period, then removal); O5 whether `reveal` ships in this pass.
 - **OPEN** Prerequisite, not a slice: PR #723, cross-origin redirect hardening (draft). Proposal: PR #720 does not merge with the key in its arguments.
-- **OPEN** S0 remote Environment transport note (docs only), S1 catalog auth spec and stored credential, S3 additive wire shape (inert). Independent of each other.
+- **OPEN** S0 remote Environment transport note (docs only), S1 catalog auth spec and stored credential, S3 additive wire shape with host refusal and a handshake capability gate (inert). Independent of each other.
 - **BLOCKED** S2 grant record and enforcement: O1 and O2.
 - **BLOCKED** S4 host placement in `HttpEgressHost`: S1, S2 and S3.
-- **BLOCKED** S5 BuildBuddy extension migration: S4, the PR #720 outcome and O4.
-- **BLOCKED** S-amend ADR 0040 amendment and companion doc edits: their place in the sequence is O3.
+- **BLOCKED** S5 BuildBuddy extension migration: S4, the PR #720 outcome, O4 and acceptance of the ADR 0040 amendment.
+- **BLOCKED** S-amend ADR 0040 amendment and companion doc edits: gates S5 and any live `buildbuddy` grant; whether it precedes S0 to S4 is O3.
 
 ## Superseded task snapshots
 
