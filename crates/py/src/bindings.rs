@@ -4134,8 +4134,8 @@ fn _open_environment_scope(
 	result.set_item("server_version", info.server_version)?;
 	result.set_item("server_build", info.server_build)?;
 	result.set_item("schema_rev", info.schema_rev)?;
-	// Host features (ADR 0075 D11) ride the hello's capability list but are not manifest
-	// capabilities; `omp.env.Capability` has no member for them.
+	// Host features (ADR 0075 D11) ride the hello's capability list but are not
+	// manifest capabilities; `omp.env.Capability` has no member for them.
 	let capabilities: Vec<String> = info
 		.capabilities
 		.into_iter()
