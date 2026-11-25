@@ -16,7 +16,9 @@ use thiserror::Error;
 use tokio::time;
 use url::Url;
 
-use super::worker_pool::MAX_TUNNEL_BUFFER_BYTES;
+use super::{
+	mcp::transport::header_policy::is_credential_header, worker_pool::MAX_TUNNEL_BUFFER_BYTES,
+};
 
 // Reuse the existing retained wire-buffer ceiling rather than defining a
 // second Environment response-size policy.
@@ -97,6 +99,7 @@ impl HttpEgressHost {
 					headers.remove(COOKIE);
 					headers.remove(HOST);
 					headers.remove(PROXY_AUTHORIZATION);
+					strip_credential_headers(&mut headers);
 				}
 				if redirects_to_get(status_code, &method) {
 					method = Method::GET;
@@ -209,6 +212,21 @@ fn configured_socks_proxy() -> Option<ProxyVariable> {
 			})
 			.then_some(variable)
 	})
+}
+
+/// Removes every header whose name looks like a credential, using the same
+/// predicate as MCP redirects ([`is_credential_header`]). A custom header such
+/// as `x-buildbuddy-api-key` or `x-apikey` is then never replayed to another
+/// origin after a redirect.
+fn strip_credential_headers(headers: &mut HeaderMap) {
+	let credential_names = headers
+		.keys()
+		.filter(|name| is_credential_header(name))
+		.cloned()
+		.collect::<Vec<HeaderName>>();
+	for name in credential_names {
+		headers.remove(name);
+	}
 }
 
 fn parse_method(method: &str) -> Result<Method, HttpEgressError> {
@@ -327,4 +345,172 @@ async fn read_bounded(response: reqwest::Response) -> Result<Bytes, HttpEgressEr
 		body.extend_from_slice(&chunk);
 	}
 	Ok(body.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+	use tokio::{
+		io::{AsyncReadExt as _, AsyncWriteExt as _},
+		net::{TcpListener, TcpStream},
+		sync::oneshot,
+	};
+
+	use super::*;
+
+	fn header(name: &str, value: &str) -> pb::HttpHeader {
+		pb::HttpHeader { name: name.into(), value: value.into(), ..Default::default() }
+	}
+
+	const MAX_HEAD_BYTES: usize = 16 * 1024;
+
+	/// Reads one request head, through the blank line that ends it, as lowercase
+	/// text.
+	async fn read_head(stream: &mut TcpStream) -> String {
+		let mut head = Vec::new();
+		let mut chunk = [0_u8; 1024];
+		while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+			assert!(head.len() < MAX_HEAD_BYTES, "request head exceeds {MAX_HEAD_BYTES} bytes");
+			let read = stream.read(&mut chunk).await.expect("read request");
+			assert_ne!(read, 0, "connection closed before the request head ended");
+			head.extend_from_slice(&chunk[..read]);
+		}
+		String::from_utf8_lossy(&head).to_ascii_lowercase()
+	}
+
+	/// Serves one connection per entry of `responses`, in order, and returns
+	/// the lowercased request head each connection received.
+	fn serve(listener: TcpListener, responses: Vec<String>) -> oneshot::Receiver<Vec<String>> {
+		let (sender, receiver) = oneshot::channel();
+		tokio::spawn(async move {
+			let mut heads = Vec::new();
+			for response in responses {
+				let (mut stream, _) = listener.accept().await.expect("accept");
+				heads.push(read_head(&mut stream).await);
+				stream
+					.write_all(response.as_bytes())
+					.await
+					.expect("write response");
+				stream.shutdown().await.ok();
+			}
+			let _ = sender.send(heads);
+		});
+		receiver
+	}
+
+	fn redirect_to(location: &str) -> String {
+		format!(
+			"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: \
+			 close\r\n\r\n"
+		)
+	}
+
+	const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+	fn request_to(url: String) -> pb::HttpRequest {
+		pb::HttpRequest {
+			method: "GET".into(),
+			url,
+			headers: vec![
+				header("accept", "text/plain"),
+				header("authorization", "Bearer a"),
+				header("x-buildbuddy-api-key", "k1"),
+				header("x-request-id", "r1"),
+			],
+			timeout_ms: 5_000,
+			redirects: 3,
+			..Default::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn a_cross_origin_redirect_drops_credential_named_headers() {
+		let first = TcpListener::bind(("127.0.0.1", 0))
+			.await
+			.expect("bind first");
+		let second = TcpListener::bind(("127.0.0.1", 0))
+			.await
+			.expect("bind second");
+		let first_port = first.local_addr().expect("first addr").port();
+		let second_port = second.local_addr().expect("second addr").port();
+		let _first = serve(first, vec![redirect_to(&format!("http://127.0.0.1:{second_port}/x"))]);
+		let heads = serve(second, vec![OK.to_owned()]);
+
+		let response = HttpEgressHost::new()
+			.request(request_to(format!("http://127.0.0.1:{first_port}/start")))
+			.await
+			.expect("redirected request");
+		assert_eq!(response.status, 200);
+
+		let head = &heads.await.expect("second server head")[0];
+		assert!(head.contains("accept: text/plain"), "{head}");
+		assert!(head.contains("x-request-id: r1"), "{head}");
+		assert!(!head.contains("authorization"), "{head}");
+		assert!(!head.contains("x-buildbuddy-api-key"), "{head}");
+	}
+
+	/// Same-origin redirects keep credential headers; only a method-rewriting
+	/// redirect drops `content-length` and `content-type`.
+	#[tokio::test]
+	async fn a_same_origin_redirect_keeps_credential_headers() {
+		let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+		let port = listener.local_addr().expect("addr").port();
+		let heads = serve(listener, vec![
+			redirect_to(&format!("http://127.0.0.1:{port}/final")),
+			OK.to_owned(),
+		]);
+
+		let response = HttpEgressHost::new()
+			.request(request_to(format!("http://127.0.0.1:{port}/start")))
+			.await
+			.expect("redirected request");
+		assert_eq!(response.status, 200);
+
+		let heads = heads.await.expect("server heads");
+		assert!(heads[1].contains("authorization: bearer a"), "{}", heads[1]);
+		assert!(heads[1].contains("x-buildbuddy-api-key: k1"), "{}", heads[1]);
+	}
+
+	#[test]
+	fn credential_named_headers_are_stripped() {
+		for name in [
+			"x-api-key",
+			"x-apikey",
+			"apikey",
+			"x-mbx-apikey",
+			"x-auth-token",
+			"x-buildbuddy-api-key",
+			"x-amz-security-token",
+			"x-amz-credential",
+			"x-goog-api-key",
+			"x-csrf-token",
+			"x-rapidapi-key",
+			"dd-api-key",
+			"private-token",
+			"x-client-secret",
+			"x-credential-id",
+			"x-auth-key",
+			"x-access-key",
+			"x-amz-signature",
+			"x-functions-key",
+		] {
+			let mut headers = HeaderMap::new();
+			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));
+			strip_credential_headers(&mut headers);
+			assert!(headers.is_empty(), "{name} must be stripped");
+		}
+	}
+
+	#[test]
+	fn ordinary_headers_are_kept() {
+		let names =
+			["accept", "content-type", "user-agent", "x-api-version", "x-request-id", "x-trace-id"];
+		let mut headers = HeaderMap::new();
+		for name in names {
+			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));
+		}
+		strip_credential_headers(&mut headers);
+		let mut kept = headers.keys().map(HeaderName::as_str).collect::<Vec<_>>();
+		kept.sort_unstable();
+		assert_eq!(kept, names);
+	}
 }

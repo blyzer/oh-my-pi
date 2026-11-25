@@ -136,26 +136,40 @@ impl Origin {
 	}
 }
 
-/// Returns whether a header can carry credentials and must be redacted or
-/// removed when an origin-locked redirect crosses origins.
+/// Name fragments that mark a header as carrying a credential. Compared
+/// against the lowercase name with underscores read as hyphens, so `x_api_key`
+/// and `x-api-key` are the same header here.
+const CREDENTIAL_MARKERS: [&str; 14] = [
+	"authorization",
+	"cookie",
+	"secret",
+	"password",
+	"passwd",
+	"token",
+	"credential",
+	"api-key",
+	"apikey",
+	"private-key",
+	"auth-key",
+	"access-key",
+	"signature",
+	"-key",
+];
+
+/// Returns whether a header name looks like a credential. This is the one
+/// credential-name list for the crate: MCP redirects ([`is_sensitive_header`])
+/// and HTTP egress redirects both use it.
+pub(crate) fn is_credential_header(name: &HeaderName) -> bool {
+	let folded = name.as_str().replace('_', "-");
+	CREDENTIAL_MARKERS
+		.iter()
+		.any(|marker| folded.contains(marker))
+}
+
+/// Returns whether a header can carry credentials or MCP session state and
+/// must be redacted or removed when an origin-locked redirect crosses origins.
 pub(crate) fn is_sensitive_header(name: &HeaderName) -> bool {
-	let folded = name.as_str();
-	[
-		"authorization",
-		"cookie",
-		"secret",
-		"password",
-		"token",
-		"credential",
-		"api-key",
-		"apikey",
-		"private-key",
-		"signature",
-		"mcp-session-id",
-		"last-event-id",
-	]
-	.iter()
-	.any(|needle| folded.contains(needle))
+	is_credential_header(name) || matches!(name.as_str(), "mcp-session-id" | "last-event-id")
 }
 
 /// Returns the redirect location as UTF-8 when present.
@@ -260,5 +274,57 @@ mod tests {
 			policy.redirect(&Method::GET, StatusCode::FOUND, Some("/6")),
 			Err(HeaderPolicyError::TooManyRedirects)
 		));
+	}
+
+	#[test]
+	fn credential_marker_names_are_detected_in_any_spelling() {
+		for name in [
+			"authorization",
+			"proxy-authorization",
+			"cookie",
+			"x-api-key",
+			"x_api_key",
+			"x-apikey",
+			"apikey",
+			"x-mbx-apikey",
+			"x-goog-api-key",
+			"dd-api-key",
+			"x-rapidapi-key",
+			"x-auth-token",
+			"x-amz-security-token",
+			"x-csrf-token",
+			"private-token",
+			"x-amz-credential",
+			"x-amz-signature",
+			"x-client-secret",
+			"x-db-passwd",
+			"x-private-key",
+			"x-auth-key",
+			"x-access-key",
+			"x-functions-key",
+		] {
+			let name = HeaderName::from_bytes(name.as_bytes()).expect("header name");
+			assert!(is_credential_header(&name), "{name} must be a credential header");
+		}
+	}
+
+	#[test]
+	fn ordinary_headers_are_not_credentials() {
+		for name in
+			["content-type", "accept", "user-agent", "x-request-id", "x-trace-id", "x-api-version"]
+		{
+			let name = HeaderName::from_static(name);
+			assert!(!is_credential_header(&name), "{name} must not be a credential header");
+			assert!(!is_sensitive_header(&name), "{name} must not be a sensitive header");
+		}
+	}
+
+	#[test]
+	fn mcp_session_state_is_sensitive_but_not_a_credential() {
+		for name in ["mcp-session-id", "last-event-id"] {
+			let name = HeaderName::from_static(name);
+			assert!(is_sensitive_header(&name), "{name} must be sensitive");
+			assert!(!is_credential_header(&name), "{name} is not a credential name");
+		}
 	}
 }
