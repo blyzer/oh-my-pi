@@ -90,8 +90,8 @@ pub enum ClientError {
 	/// The worker-scoped surface excludes this operation family.
 	#[error("operation is unavailable on an invocation-scoped environment client")]
 	ScopedOperationDenied,
-	/// The receiver did not advertise [`CREDENTIAL_PLACEMENT_CAPABILITY`], so the
-	/// request was not sent (ADR 0075 D11).
+	/// The receiver did not advertise [`CREDENTIAL_PLACEMENT_CAPABILITY`], so
+	/// the request was not sent (ADR 0075 D11).
 	#[error("environment peer did not advertise credential placement; request not sent")]
 	PlacementUnsupported,
 	/// A UDS connection or framed transport could not be established.

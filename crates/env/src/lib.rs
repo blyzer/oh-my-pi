@@ -22,15 +22,15 @@ pub use bundle::{
 };
 pub use client::{
 	APPROVAL_RELAY_CAPABILITY, AcpRequest, ActiveExecControl, ApprovalQueryEvent, BlobDownload,
-	BlobDownloadEvent, BlobUpload, CLIENT_FEATURES, CREDENTIAL_PLACEMENT_CAPABILITY, ClientError, DapStream, DapStreamEvent,
-	DataScope, DataStream, DataStreamItem, DocumentEvents, DocumentLease, DocumentRead,
-	EDIT_REPAIR_CAPABILITY, EnvClient, ExecEvent, ExecRun, ExtensionEnvClient,
+	BlobDownloadEvent, BlobUpload, CLIENT_FEATURES, CREDENTIAL_PLACEMENT_CAPABILITY, ClientError,
+	DapStream, DapStreamEvent, DataScope, DataStream, DataStreamItem, DocumentEvents, DocumentLease,
+	DocumentRead, EDIT_REPAIR_CAPABILITY, EnvClient, ExecEvent, ExecRun, ExtensionEnvClient,
 	InProcessEnvTransport, Invocation, InvocationEvent, InvocationGrant, InvocationPrincipal,
 	LspEvents, LspStreamEvent, McpSubscription, McpSubscriptionEvent, ProcessAttachment,
 	ProcessAttachmentEvent, REFLECTION_RELAY_CAPABILITY, ReflectionQueryEvent, RequestStream,
-	ResourceCompletionEvent, ResourceCompletionStream, ResumableBlobTransfer, SERVER_FEATURES, SearchEvent,
-	SearchStream, StreamLost, TransactionId, TransactionOutcome, VerifiedBlobTransfer, WalkEvent,
-	WalkStream, WorkerEnvClient,
+	ResourceCompletionEvent, ResourceCompletionStream, ResumableBlobTransfer, SERVER_FEATURES,
+	SearchEvent, SearchStream, StreamLost, TransactionId, TransactionOutcome, VerifiedBlobTransfer,
+	WalkEvent, WalkStream, WorkerEnvClient,
 };
 pub use guard::{RunGuard, WorkerLease};
 /// Generated blob protocol messages accepted by scoped blob operations.
