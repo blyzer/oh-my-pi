@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "source_digest": "24c419c00e9ffeea617dc67b928c2fed46a3e6617655af508296b4936790d1d4",
+  "source_digest": "0a706a97250ee677c4a91825baa6fe28138d516156828f822c8225a47c3b5823",
   "inputs": [
     {
       "id": "catalog.models.compressed.v1",
@@ -71,7 +71,7 @@
     {
       "id": "catalog.providers.source.v1",
       "path": "fixtures/llm-oracle/catalog/providers.toml",
-      "sha256": "09db60747e829d9923b640a53aa0c9a2d674dbb11db0aebcc7923a11aeb6a4b1",
+      "sha256": "aa2584b4bede55f78671ddc0fdf2491dacb005a83a049e6163765305f5e77ded",
       "source": "oracle:catalog.providers.source.v1"
     },
     {
