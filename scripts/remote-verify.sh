@@ -33,13 +33,15 @@ fi
 # `bb remote` parses `git branch` and refuses a state it does not know: with some git versions a
 # detached HEAD (for example a `git worktree add --detach` checkout) prints `* (no branch)` and bb
 # stops with `unexpected branch state * (no branch)`. This is a bb rule, not part of the REAPI
-# standard. Fail before any side effect, and only on the exact output bb rejects, so a CI checkout
-# that prints `(HEAD detached at ...)` keeps working.
+# standard. bb 5.0.511 resolves such a HEAD itself (checked: a detached run exited 0), so this guard only
+# protects older clients such as the 5.0.492 the CI pins. Fail before any side effect, and only on the exact
+# output bb rejects, so a CI checkout that prints `(HEAD detached at ...)` keeps working. `--seed` is
+# skipped: it names its branch with --run_from_branch, and the guard must not fail a path it has not tested.
 # Read the whole list first: `git branch | grep -q` can stop git with SIGPIPE under `pipefail` once the
 # list outgrows the pipe buffer, and the guard would then miss the very state it targets. LC_ALL=C and
 # no colour or columns keep the text the same on every machine.
 branch_list=$(LC_ALL=C git -c color.branch=false -c column.ui=never branch --list 2>/dev/null || true)
-if grep -q '^\* (no branch)$' <<<"$branch_list"; then
+if [ "$seed" != true ] && grep -q '^\* (no branch)$' <<<"$branch_list"; then
     echo "error: this git prints '* (no branch)' for the current HEAD, which \`bb remote\` rejects" >&2
     echo "       (unexpected branch state). Check out a named branch first: git switch -c <name>" >&2
     exit 2
