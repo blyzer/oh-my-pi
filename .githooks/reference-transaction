@@ -9,7 +9,8 @@
 # Tags, remote-tracking refs, stash and every non-deleting update are never blocked. `git
 # pack-refs` (also run by `git gc` and `git maintenance`) deletes the loose copy of every branch it
 # packs, so a transaction whose git subcommand is pack-refs is let through.
-# Not a security control: `git -c core.hooksPath=/dev/null ...` bypasses it.
+# Not a security control: `git -c core.hooksPath=/dev/null ...` bypasses it. The installer does not
+# chain a hook it finds in place for this name; it refuses to overwrite it.
 [ "$1" = prepared ] || exit 0
 [ -n "${ALLOW_BRANCH_DELETE:-}" ] && exit 0
 # The hook's parent is the git process doing the work: find its subcommand, skipping global options.

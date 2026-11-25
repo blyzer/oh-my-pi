@@ -17,7 +17,7 @@ default:
 setup-python:
     crates/py/scripts/fetch-python.sh
 
-# Install the guard hooks from .githooks (commit subject length, no branch deletes) into this clone's hooks dir; re-run to update.
+# Install the guard hooks from .githooks (subject length, protected branches, no branch deletes) into this clone's hooks dir; re-run to update.
 [group('setup')]
 install-githooks:
     scripts/install-githooks.sh

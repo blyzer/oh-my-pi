@@ -77,9 +77,12 @@ TUI retained tree → terminal output materialized once at final renderer.
 `justfile` = source of truth; use `just`, not raw cargo. `just --list` shows
 all recipes.
 - One-time before anything linking `omp-py`: `just setup-python`.
-- Optional guard hooks: `just install-githooks` copies `.githooks/commit-msg` (subject ≤72 characters) and
-  `.githooks/reference-transaction` (refuses to delete or rename a local branch; override with
-  `ALLOW_BRANCH_DELETE=1`) into this clone's hooks directory and leaves other hooks (git-lfs) alone.
+- Optional guard hooks: `just install-githooks` copies `.githooks/*` into this clone's hooks directory: `commit-msg`
+  (subject ≤72 characters), `pre-commit` and `pre-push` (no commit on, and no push to, `main`/`master`; extend
+  the list with `git config omp.protectedBranches "main master omp2"`; override with `ALLOW_PROTECTED_BRANCH=1`),
+  `reference-transaction` (refuses to delete or rename a local branch; override `ALLOW_BRANCH_DELETE=1`). A hook
+  already in place, such as git-lfs's `pre-push`, is kept as `<name>.chained` and still runs. Git has no hook for
+  `restore`, `clean -f`, `checkout -f` or `reset --hard`; the agent safety guard covers those.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
 - ADR 0049 profiles: `just check-minimal-caps` typechecks default `omp-app` and

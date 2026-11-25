@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavioral tests for .githooks/commit-msg, .githooks/reference-transaction and the installer.
+"""Behavioral tests for the .githooks guards (commit-msg, pre-commit, pre-push, reference-transaction) and the installer.
 
 Every test runs real git in a throwaway repository, so the hooks are exercised the way git calls
 them. Standard library only.
@@ -29,7 +29,7 @@ class RepoCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = Path(self.tmp) / "repo"
         self.repo.mkdir()
-        self.git("init", "-q", "-b", "main")
+        self.git("init", "-q", "-b", "trunk")  # not a protected name
         self.git("config", "user.email", "t@example.com")
         self.git("config", "user.name", "t")
         self.git("commit", "-q", "--allow-empty", "-m", "init")
@@ -125,7 +125,7 @@ class ReferenceTransactionTests(RepoCase):
 
     def test_rename_works_with_the_override(self):
         self.git("branch", "-m", "feat", "feature", env={"ALLOW_BRANCH_DELETE": "1"})
-        self.assertEqual(sorted(self.branches()), ["feature", "main"])
+        self.assertEqual(sorted(self.branches()), ["feature", "trunk"])
 
     def test_delete_with_an_expected_old_value_is_refused_too(self):
         head = self.git("rev-parse", "feat").stdout.strip()
@@ -138,7 +138,7 @@ class ReferenceTransactionTests(RepoCase):
         self.git("gc", "-q")
         task = self.git("maintenance", "run", "--task=pack-refs", check=False)
         self.assertNotIn("refusing to delete", task.stderr)  # older git has no pack-refs task
-        self.assertEqual(sorted(self.branches()), ["feat", "main"])
+        self.assertEqual(sorted(self.branches()), ["feat", "trunk"])
 
     def test_a_branch_named_pack_refs_is_still_protected(self):
         self.git("branch", "pack-refs")
@@ -148,7 +148,7 @@ class ReferenceTransactionTests(RepoCase):
     def test_creating_switching_committing_and_fast_forwarding_are_allowed(self):
         self.git("switch", "-q", "-c", "work")
         self.git("commit", "-q", "--allow-empty", "-m", "on work")
-        self.git("switch", "-q", "main")
+        self.git("switch", "-q", "trunk")
         self.git("merge", "-q", "--ff-only", "work")
         self.assertIn("work", self.branches())
 
@@ -164,20 +164,118 @@ class ReferenceTransactionTests(RepoCase):
         self.git("branch", "-D", "feat")
 
 
-class InstallerTests(RepoCase):
-    def install(self):
-        return subprocess.run(
-            ["bash", str(INSTALLER)], cwd=self.repo, env=clean_env(), capture_output=True, text=True
+class PreCommitTests(RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.use_repo_hooks()
+
+    def commit(self, **env):
+        return self.git("commit", "-q", "--allow-empty", "-m", "work", env=env, check=False)
+
+    def test_committing_on_main_or_master_is_refused(self):
+        self.git("switch", "-q", "-c", "main")
+        result = self.commit()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("'main' is a protected branch", result.stderr)
+        self.git("switch", "-q", "-c", "master")
+        self.assertNotEqual(self.commit().returncode, 0)
+
+    def test_committing_on_another_branch_is_allowed(self):
+        self.git("switch", "-q", "-c", "work")
+        self.assertEqual(self.commit().returncode, 0)
+
+    def test_a_detached_head_is_allowed(self):
+        self.git("switch", "-q", "--detach")
+        self.assertEqual(self.commit().returncode, 0)
+
+    def test_amend_on_main_is_refused_too(self):
+        self.git("switch", "-q", "-c", "main")
+        self.assertNotEqual(
+            self.git("commit", "-q", "--amend", "--no-edit", "--allow-empty", check=False).returncode, 0
         )
+
+    def test_the_override_and_no_verify_allow_it(self):
+        self.git("switch", "-q", "-c", "main")
+        self.assertEqual(self.commit(ALLOW_PROTECTED_BRANCH="1").returncode, 0)
+        self.assertEqual(
+            self.git("commit", "-q", "--allow-empty", "--no-verify", "-m", "x", check=False).returncode, 0
+        )
+
+    def test_the_protected_list_comes_from_the_environment_or_git_config(self):
+        self.git("switch", "-q", "-c", "omp2")
+        self.assertEqual(self.commit().returncode, 0)  # not in the default list
+        self.git("config", "omp.protectedBranches", "main omp2")
+        self.assertNotEqual(self.commit().returncode, 0)
+        self.git("switch", "-q", "-c", "main")
+        self.assertNotEqual(self.commit().returncode, 0)
+        self.assertEqual(self.commit(GIT_PROTECTED_BRANCHES="other").returncode, 0)  # env wins
+
+
+class PrePushTests(RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.remote = Path(self.tmp) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], env=clean_env(), check=True)
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("branch", "-m", "trunk", "main")
+        self.git("push", "-q", "origin", "main")  # before the hooks are in place
+        self.git("switch", "-q", "-c", "feature")
+        self.git("commit", "-q", "--allow-empty", "-m", "work")
+        self.use_repo_hooks()
+
+    def push(self, *refs, **env):
+        return self.git("push", "-q", "origin", *refs, env=env, check=False)
+
+    def remote_branches(self):
+        out = subprocess.run(
+            ["git", "-C", str(self.remote), "branch", "--format=%(refname:short)"],
+            env=clean_env(), capture_output=True, text=True,
+        ).stdout
+        return out.split()
+
+    def test_pushing_a_topic_branch_is_allowed(self):
+        self.assertEqual(self.push("feature").returncode, 0)
+        self.assertIn("feature", self.remote_branches())
+
+    def test_pushing_to_main_is_refused_whatever_the_local_name(self):
+        for ref in ("feature:main", "feature:refs/heads/main"):
+            with self.subTest(ref=ref):
+                result = self.push(ref)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("protected branch: main", result.stderr)
+
+    def test_updating_main_from_main_is_refused(self):
+        self.git("switch", "-q", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "on main", env={"ALLOW_PROTECTED_BRANCH": "1"})
+        self.assertNotEqual(self.push("main").returncode, 0)
+
+    def test_deleting_main_on_the_remote_is_refused(self):
+        self.assertNotEqual(self.push("--delete", "main").returncode, 0)
+        self.assertIn("main", self.remote_branches())
+
+    def test_the_override_allows_it(self):
+        self.assertEqual(self.push("feature:main", ALLOW_PROTECTED_BRANCH="1").returncode, 0)
+
+    def test_tags_are_not_blocked(self):
+        self.git("tag", "v1")
+        self.assertEqual(self.push("v1").returncode, 0)
+
+    def test_the_protected_list_can_be_extended_with_git_config(self):
+        self.git("config", "omp.protectedBranches", "main release")
+        self.assertNotEqual(self.push("feature:release").returncode, 0)
+        self.assertEqual(self.push("feature:other").returncode, 0)
+
+
+class InstallerTests(RepoCase):
+    NAMES = ("commit-msg", "pre-commit", "pre-push", "reference-transaction")
 
     def setUp(self):
         super().setUp()
         (self.repo / ".githooks").mkdir()
-        for name in ("commit-msg", "reference-transaction"):
-            shutil.copy2(HOOKS / name, self.repo / ".githooks" / name)
-        shutil.copy2(INSTALLER, self.repo / "scripts-install.sh")
         (self.repo / "scripts").mkdir()
-        shutil.move(self.repo / "scripts-install.sh", self.repo / "scripts/install-githooks.sh")
+        for name in self.NAMES:
+            shutil.copy2(HOOKS / name, self.repo / ".githooks" / name)
+        shutil.copy2(INSTALLER, self.repo / "scripts/install-githooks.sh")
         self.hooks = self.repo / ".git/hooks"
 
     def run_installer(self):
@@ -186,22 +284,24 @@ class InstallerTests(RepoCase):
             cwd=self.repo, env=clean_env(), capture_output=True, text=True,
         )
 
-    def test_installs_both_hooks_executable_and_they_then_work(self):
+    def test_installs_every_hook_executable_and_they_then_work(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ("commit-msg", "reference-transaction"):
+        for name in self.NAMES:
             self.assertTrue(os.access(self.hooks / name, os.X_OK), name)
-        self.git("branch", "feat")
-        self.assertNotEqual(self.git("branch", "-D", "feat", check=False).returncode, 0)
+        self.git("switch", "-q", "-c", "feat")
+        self.assertNotEqual(self.git("branch", "-D", "trunk", check=False).returncode, 0)
         self.assertNotEqual(
             self.git("commit", "-q", "--allow-empty", "-m", "x" * 80, check=False).returncode, 0
         )
+        self.git("switch", "-q", "-c", "main")
+        self.assertNotEqual(self.git("commit", "-q", "--allow-empty", "-m", "ok", check=False).returncode, 0)
 
     def test_is_idempotent(self):
         self.run_installer()
         again = self.run_installer()
         self.assertEqual(again.returncode, 0)
-        self.assertEqual(again.stdout.count("up to date"), 2)
+        self.assertEqual(again.stdout.count("up to date"), len(self.NAMES))
 
     def test_updates_an_older_copy_of_its_own_hook(self):
         self.run_installer()
@@ -210,18 +310,57 @@ class InstallerTests(RepoCase):
         self.assertEqual(self.run_installer().returncode, 0)
         self.assertIn("subject", stale.read_text())
 
-    def test_refuses_to_overwrite_a_foreign_hook_and_leaves_other_hooks_alone(self):
+    def test_a_foreign_reference_transaction_is_refused_and_left_alone(self):
         self.hooks.mkdir(exist_ok=True)
-        foreign = self.hooks / "commit-msg"
+        foreign = self.hooks / "reference-transaction"
         foreign.write_text("#!/bin/sh\n# someone else's hook\nexit 0\n")
-        lfs = self.hooks / "pre-push"
-        lfs.write_text("#!/bin/sh\ngit lfs pre-push \"$@\"\n")
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing to overwrite", result.stderr)
         self.assertIn("someone else's hook", foreign.read_text())
-        self.assertIn("git lfs pre-push", lfs.read_text())
-        self.assertTrue((self.hooks / "reference-transaction").exists())
+        self.assertTrue((self.hooks / "pre-push").exists())  # the others still installed
+
+    def test_a_foreign_pre_push_is_kept_and_runs_after_ours_with_the_same_input(self):
+        self.hooks.mkdir(exist_ok=True)
+        record = Path(self.tmp) / "lfs-record"
+        lfs = self.hooks / "pre-push"
+        lfs.write_text(f'#!/bin/sh\n{{ echo "args: $*"; cat; }} > "{record}"\n')
+        lfs.chmod(0o755)
+        other = self.hooks / "post-commit"  # an unrelated hook must stay untouched
+        other.write_text("#!/bin/sh\n# git-lfs post-commit\n")
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pre-push.chained", result.stdout)
+        self.assertTrue((self.hooks / "pre-push.chained").exists())
+        self.assertIn("git-lfs", other.read_text())
+        # a push of a topic branch reaches the chained hook with git's arguments and stdin
+        remote = Path(self.tmp) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], env=clean_env(), check=True)
+        self.git("remote", "add", "origin", str(remote))
+        self.git("switch", "-q", "-c", "topic")
+        self.git("commit", "-q", "--allow-empty", "-m", "t", env={"ALLOW_PROTECTED_BRANCH": "1"})
+        self.assertEqual(self.git("push", "-q", "origin", "topic", check=False).returncode, 0)
+        recorded = record.read_text()
+        self.assertIn("args: origin ", recorded)
+        self.assertIn("refs/heads/topic", recorded)
+        # a push to main is refused by ours before the chained hook runs
+        record.unlink()
+        self.assertNotEqual(self.git("push", "-q", "origin", "topic:main", check=False).returncode, 0)
+        self.assertFalse(record.exists())
+
+    def test_a_foreign_commit_msg_is_chained_and_still_runs(self):
+        self.hooks.mkdir(exist_ok=True)
+        record = Path(self.tmp) / "cm-record"
+        foreign = self.hooks / "commit-msg"
+        foreign.write_text(f'#!/bin/sh\necho ran > "{record}"\n')
+        foreign.chmod(0o755)
+        self.assertEqual(self.run_installer().returncode, 0)
+        self.git("switch", "-q", "-c", "feat")
+        self.assertEqual(self.git("commit", "-q", "--allow-empty", "-m", "ok", check=False).returncode, 0)
+        self.assertTrue(record.exists())
+        record.unlink()
+        self.git("commit", "-q", "--allow-empty", "-m", "x" * 80, check=False)  # ours refuses first
+        self.assertFalse(record.exists())
 
     def test_installs_into_core_hooks_path_when_it_is_set(self):
         custom = Path(self.tmp) / "custom-hooks"
