@@ -2231,5 +2231,10 @@ fn buildbuddy_provider_declares_a_stored_header_credential_with_an_empty_prefix(
 	// Stored only: the key arrives through the credential store's write path, never
 	// from an environment variable the catalog names.
 	assert_eq!(auth.credential_sources.as_ref(), [CredentialSourceSpec::Stored]);
-	assert!(compiled.providers.iter().all(|provider| provider.id != "buildbuddy-unlisted"));
+	assert!(
+		compiled
+			.providers
+			.iter()
+			.all(|provider| provider.id != "buildbuddy-unlisted")
+	);
 }

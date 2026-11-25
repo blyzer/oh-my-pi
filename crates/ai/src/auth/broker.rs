@@ -1709,7 +1709,9 @@ mod tests {
 			.expect("buildbuddy provider is in the embedded catalog");
 		assert_eq!(provider.auth.len(), 1, "buildbuddy declares exactly one authentication");
 		let spec_id = &provider.auth[0];
-		let catalog_spec = catalog.auth_spec(spec_id).expect("buildbuddy authentication spec");
+		let catalog_spec = catalog
+			.auth_spec(spec_id)
+			.expect("buildbuddy authentication spec");
 		assert_eq!(catalog_spec.kind, AuthSpecKind::ApiKey);
 		assert_eq!(catalog_spec.credential_sources.as_ref(), [CredentialSourceSpec::Stored]);
 
