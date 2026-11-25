@@ -2651,6 +2651,45 @@ pub(in crate::server) async fn send_document_error(
 	send_error(responses, request_id, code, &error.to_string()).await;
 }
 
+/// Why the host refuses a request that carries `credential` (ADR 0075 D6).
+///
+/// The refusal is the host's, made before any connection is opened. There is
+/// never a fallback to the environment, the Keychain or an argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(in crate::server) enum PlacementRefusal {
+	/// No credential authority is bound to this host, so nothing can place a
+	/// credential. Later slices add the grant-dependent classes.
+	#[error("credential placement is unavailable: no credential authority is bound")]
+	NoAuthority,
+}
+
+/// Returns the refusal for a request the host must not send, or `None` for an
+/// ordinary request. The placed header name and prefix never come from the
+/// request.
+pub(in crate::server) const fn placement_refusal(
+	request: &pb::HttpRequest,
+) -> Option<PlacementRefusal> {
+	if request.credential.is_some() {
+		Some(PlacementRefusal::NoAuthority)
+	} else {
+		None
+	}
+}
+
+pub(in crate::server) async fn send_placement_refusal(
+	responses: &flume::Sender<pb::ServerFrame>,
+	request_id: u64,
+	refusal: PlacementRefusal,
+) {
+	send_error(
+		responses,
+		request_id,
+		pb::ProtocolErrorCode::PlacementUnavailable,
+		&refusal.to_string(),
+	)
+	.await;
+}
+
 pub(in crate::server) async fn send_http_error(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,

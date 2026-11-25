@@ -1241,6 +1241,7 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 				Ok(env_pb::ProtocolErrorCode::Cancelled) => "Cancelled",
 				Ok(env_pb::ProtocolErrorCode::DeadlineExceeded) => "TimedOut",
 				Ok(env_pb::ProtocolErrorCode::Uncommitted) => "EffectsNotAuthorized",
+				Ok(env_pb::ProtocolErrorCode::PlacementUnavailable) => "PlacementUnavailable",
 				_ => "Io",
 			};
 			environment_exception(py, kind, &protocol.message)
@@ -1264,6 +1265,9 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 			"invocation principal requires nonempty session_id and agent_id",
 		),
 		ClientError::ScopedOperationDenied => environment_exception(py, "Denied", &error.to_string()),
+		ClientError::PlacementUnsupported => {
+			environment_exception(py, "PlacementUnavailable", &error.to_string())
+		},
 		ClientError::StreamLost(_) => environment_exception(py, "StreamLost", &error.to_string()),
 		ClientError::IncompleteBlob => environment_exception(py, "Disconnected", &error.to_string()),
 		ClientError::ApprovalQueryClosed { .. } | ClientError::ReflectionQueryClosed { .. } => {
@@ -3727,6 +3731,11 @@ macro_rules! backend_methods {
 					.get_item("redirects")?
 					.ok_or_else(|| PyTypeError::new_err("redirects is required"))?
 					.extract::<u32>()?;
+				let credential = arguments
+					.get_item("credential")?
+					.filter(|value| !value.is_none())
+					.map(|value| value.extract::<String>())
+					.transpose()?;
 				let timeout_ms = arguments.get_item("timeout")?.map_or(Ok(0), |value| {
 					value
 						.extract::<Option<PyDuration>>()?
@@ -3746,6 +3755,7 @@ macro_rules! backend_methods {
 						body: body.into(),
 						timeout_ms,
 						redirects,
+						credential,
 						props: Default::default(),
 					}))
 					.map_err(|error| client_error(py, error))?;
@@ -4124,7 +4134,14 @@ fn _open_environment_scope(
 	result.set_item("server_version", info.server_version)?;
 	result.set_item("server_build", info.server_build)?;
 	result.set_item("schema_rev", info.schema_rev)?;
-	result.set_item("capabilities", info.capabilities)?;
+	// Host features (ADR 0075 D11) ride the hello's capability list but are not
+	// manifest capabilities; `omp.env.Capability` has no member for them.
+	let capabilities: Vec<String> = info
+		.capabilities
+		.into_iter()
+		.filter(|name| !omp_env::SERVER_FEATURES.contains(&name.as_str()))
+		.collect();
+	result.set_item("capabilities", capabilities)?;
 	result.set_item("remote", false)?;
 	Ok((
 		Py::new(py, PyEnvironmentBackend {

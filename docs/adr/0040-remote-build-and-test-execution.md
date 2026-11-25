@@ -801,6 +801,7 @@ redirect uploads (`crates/con/src/spec.rs:29-36`). They live in user cfg (`~/.o2
 
 Credential rules:
 - The credential reaches only gRPC metadata at the backend boundary, wrapped in `SecretString`.
+  *Amended 2026-11-25: the host may also place it as a request header on an extension's HTTP request; see the [Amendment (2026-11-25)](#amendment-2026-11-25-the-credential-may-also-be-placed-by-the-host-as-a-request-header).*
 - It is never put in argv, action env, logs, telemetry or committed config.
 - Tracing redacts the header.
 - Using `bb login` is discouraged for omp checkouts, because it writes the key into `.git/config`,
@@ -2030,6 +2031,22 @@ Read literally, C2 makes Gap 1 a prerequisite of the stage-2 `RemoteExecution` w
 
 My recommendation, stricter than C2 and not part of its text: start `RemoteExecution` work only after the owner accepts Gaps 1–4 (D1) and decides the owner type (D4). This PR starts none of that work.
 
+
+## Amendment (2026-11-25): the credential may also be placed by the host as a request header
+
+Status: proposed for acceptance by the owner's merge of this change. It is slice S-amend of [ADR 0075](0075-extension-credential-host-placement.md), which the owner accepted on 2026-11-25; the owner decided there (O3) that this amendment lands before any other slice.
+
+**Why.** Part F's first credential rule names one place the credential may go, gRPC metadata at the backend boundary. The BuildBuddy REST API is reached by an extension over HTTP, and the only way today is the key in the extension's arguments or environment (PR #720, rejected on review). ADR 0075 lets the host attach the key to that request without the extension ever holding it. That is a second place the credential reaches, and this ADR's rule must name it or forbid it. Until it is named, REST enablement is refused.
+
+**Change.** The first bullet of "Credential rules" in Part F (`:803`) is replaced by:
+
+> The credential reaches only two places. (a) gRPC metadata at the backend boundary, wrapped in `SecretString`. (b) A request header attached by the host's HTTP egress on behalf of an extension that holds a host-held grant for that provider and host ([ADR 0075](0075-extension-credential-host-placement.md)). No other component receives the plaintext, and an extension never receives it, whether in arguments, environment or return values. The remaining bullets (never in argv, action env, logs, telemetry or committed config; tracing redacts the header) apply to both paths. Any other hop is refused until this section names it.
+
+The other three bullets of the rule are unchanged. The first bullet keeps its original wording above, with a pointer here.
+
+**Scope.** This amendment names path (b) as permitted in principle. It enables nothing by itself: no extension may receive a placed credential until ADR 0075 slices S2 (grant record and enforcement) and S4 (placement in `HttpEgressHost`) land, and the BuildBuddy REST enablement (S5) waits for this amendment's acceptance. The `credential` keyword on `omp.env.http_post` is documented in `docs/py/11-env.md` with slice S3, when the keyword exists, not here.
+
+**Not changed.** Using `bb login` stays discouraged. The credential never crosses a remote Environment's wire (ADR 0075 D8). Project-scoped extensions never hold a grant (ADR 0075 D13).
 
 ## References
 

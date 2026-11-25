@@ -9,16 +9,17 @@ use super::{
 	forward::{
 		WorkspaceSearchOwned, authorize_data_operation, authorize_visibility_receipt,
 		connection_lease, connection_lease_id, effective_effects, frame_data_operation,
-		mcp_operation, mcp_wire_revision, parse_mounted_resource_uri, reject_duplicate_open,
-		requests_pty, resource_bound, resource_capability_wire, send_blob_error, send_body,
-		send_data_response, send_document_error, send_error, send_exec_error, send_http_error,
-		send_invocation_error, send_materialization_error, send_mcp_error,
-		send_policy_denied_verdict, send_policy_error, send_resource_capability_error,
-		send_resource_fault, send_resource_result, send_workspace_operation_error, spawn_blob_get,
-		spawn_document_events, spawn_exec, spawn_lsp_events, spawn_mcp_request,
-		spawn_mcp_subscription, spawn_native_invocation, spawn_process_attachment,
-		spawn_resource_completion, spawn_worker_invocation, spawn_workspace_search,
-		spawn_workspace_walk, verdict_delivery_provenance, workspace_walk_request,
+		mcp_operation, mcp_wire_revision, parse_mounted_resource_uri, placement_refusal,
+		reject_duplicate_open, requests_pty, resource_bound, resource_capability_wire,
+		send_blob_error, send_body, send_data_response, send_document_error, send_error,
+		send_exec_error, send_http_error, send_invocation_error, send_materialization_error,
+		send_mcp_error, send_placement_refusal, send_policy_denied_verdict, send_policy_error,
+		send_resource_capability_error, send_resource_fault, send_resource_result,
+		send_workspace_operation_error, spawn_blob_get, spawn_document_events, spawn_exec,
+		spawn_lsp_events, spawn_mcp_request, spawn_mcp_subscription, spawn_native_invocation,
+		spawn_process_attachment, spawn_resource_completion, spawn_worker_invocation,
+		spawn_workspace_search, spawn_workspace_walk, verdict_delivery_provenance,
+		workspace_walk_request,
 	},
 	identity::ConnectionPolicy,
 	prelude::*,
@@ -1050,6 +1051,12 @@ impl EnvServer {
 				}
 			},
 			client_frame::Body::HttpRequest(request) => {
+				// Placement is decided before egress is reached: a request carrying
+				// `credential` never opens a connection while no authority is bound.
+				if let Some(refusal) = placement_refusal(&request) {
+					send_placement_refusal(responses, frame.request_id, refusal).await;
+					return;
+				}
 				match self.http_egress.request(request).await {
 					Ok(response) => {
 						send_body(

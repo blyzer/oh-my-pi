@@ -45,3 +45,9 @@ __pycache__/
 .omp/config.toml.lock
 .omp/omp-*.md
 dist/
+
+# `bb remote` (scripts/remote-verify.sh) links these into the workspace; MODULE.bazel is the tracked, empty marker.
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-oh-my-pi

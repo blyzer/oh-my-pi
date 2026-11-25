@@ -1783,7 +1783,18 @@ assert (http_get.status, http_post.status, http_put.status) == (200, 200, 200)
 http_calls = [call for call in data_host.calls if call[0] == "http_request"]
 assert [call[1] for call in http_calls[-3:]] == ["GET", "POST", "PUT"]
 assert http_calls[-2][3]["body"] == b"{}"
+assert "credential" not in http_calls[-2][3] and "credential" not in http_calls[-3][3]
 assert http_calls[-1][3]["timeout"] == omp.Duration("2s")
+# `credential` is http_post only and reaches the data host as a provider id; get/put do not take it.
+asyncio.run(omp.env.http_post("https://example.test", credential="p"))
+assert [call for call in data_host.calls if call[0] == "http_request"][-1][3]["credential"] == "p"
+for bad, kind in ((7, TypeError), ("", ValueError)):
+    expect_raises(
+        kind, lambda: asyncio.run(omp.env.http_post("https://example.test", credential=bad))
+    )
+expect_raises(TypeError, lambda: asyncio.run(omp.env.http_get("https://example.test", credential="p")))
+expect_raises(TypeError, lambda: asyncio.run(omp.env.http_put("https://example.test", credential="p")))
+assert issubclass(omp.env.PlacementUnavailable, omp.env.EnvError)
 
 # Round 5 devices: child declarations, synchronous snapshots, and slot budget.
 @surface_device.subtool("inspect/detail")

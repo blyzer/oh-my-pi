@@ -674,6 +674,14 @@ auth = { type = "header", name = "X-Subscription-Token", env = ["OMP_BRAVE_SEARC
 mapping = { kind = "replacement", component = "tool-runtime", reason = "Brave Search is a standalone web-search credential" }
 facets = ["web_search"]
 
+[providers."buildbuddy"]
+name = "BuildBuddy"
+transport = "embedded"
+route_transport = "http"
+base_url = "https://remote.buildbuddy.io"
+auth = { type = "header", name = "x-buildbuddy-api-key" }
+mapping = { kind = "replacement", component = "tool-runtime", reason = "BuildBuddy remote execution is a host-placed credential, not an inference route" }
+
 [providers."jina"]
 transport = "embedded"
 codec = "search-jina"

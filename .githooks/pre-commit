@@ -1,0 +1,23 @@
+#!/bin/sh
+# omp-githooks: pre-commit
+# Refuse to commit while a protected branch is checked out. The list is, in order of precedence:
+# $GIT_PROTECTED_BRANCHES, `git config omp.protectedBranches`, then "main master" (space separated).
+# A detached HEAD is allowed. Work on a branch (git switch -c <name>), or on purpose run
+#   ALLOW_PROTECTED_BRANCH=1 git commit ...
+# `git commit --no-verify` skips this hook.
+[ -n "${ALLOW_PROTECTED_BRANCH:-}" ] || {
+	branch=$(git symbolic-ref --short -q HEAD) || branch=
+	if [ -n "$branch" ]; then
+		protected=${GIT_PROTECTED_BRANCHES:-$(git config --get omp.protectedBranches)}
+		for p in ${protected:-main master}; do
+			if [ "$branch" = "$p" ]; then
+				echo "pre-commit: '$branch' is a protected branch; commit on another branch (git switch -c <name>)." >&2
+				echo "To commit here on purpose, run again with ALLOW_PROTECTED_BRANCH=1 in the environment." >&2
+				exit 1
+			fi
+		done
+	fi
+}
+chain=$(dirname "$0")/pre-commit.chained
+[ -x "$chain" ] && exec "$chain" "$@"
+exit 0
