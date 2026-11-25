@@ -77,6 +77,9 @@ TUI retained tree → terminal output materialized once at final renderer.
 `justfile` = source of truth; use `just`, not raw cargo. `just --list` shows
 all recipes.
 - One-time before anything linking `omp-py`: `just setup-python`.
+- Optional guard hooks: `just install-githooks` copies `.githooks/commit-msg` (subject ≤72 characters) and
+  `.githooks/reference-transaction` (refuses to delete or rename a local branch; override with
+  `ALLOW_BRANCH_DELETE=1`) into this clone's hooks directory and leaves other hooks (git-lfs) alone.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
 - ADR 0049 profiles: `just check-minimal-caps` typechecks default `omp-app` and
