@@ -6,7 +6,7 @@ Area: control-plane
 
 Read against `omp2` at `4f625fabe4`.
 
-**Review status.** Proposed. Not owner-approved. A read-only cross-provider review (OpenAI family, 11 findings) was applied on 2026-11-25. Its text is `/Users/enverfrancisco/repositories/forks/ab-cache/evidence/xreview/pr725-gpt62astra.md`, outside the repo. The owner chose option A (host placement) and D1 records that choice. D2 to D12 are the design that follows from D1, the spike and that review. They are proposals until the owner accepts this record. Five questions stay open (O1 to O5).
+**Review status.** Proposed. Not owner-approved. A read-only cross-provider review (OpenAI family, 11 findings) was applied on 2026-11-25. Its text is posted as a comment on PR #725., outside the repo. The owner chose option A (host placement) and D1 records that choice. D2 to D12 are the design that follows from D1, the spike and that review. They are proposals until the owner accepts this record. Five questions stay open (O1 to O5).
 
 ## Context
 
