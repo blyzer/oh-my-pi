@@ -1,0 +1,100 @@
+[
+  {
+    "target": "https://github.com/anthropics/sandbox-runtime/blob/0bbebed0aa9a8e628dc4df8bc30293550a1988eb/src/sandbox/linux-sandbox-utils.ts#L3863-L3921",
+    "argv": [
+      "gh",
+      "api",
+      "repos/anthropics/sandbox-runtime/contents/src/sandbox/linux-sandbox-utils.ts?ref=0bbebed0aa9a8e628dc4df8bc30293550a1988eb"
+    ],
+    "exit": 0,
+    "bytes": 168997,
+    "lines": 3937,
+    "source_sha256": "e11d403acb7533c37fa23e8e6d192d145cb23a8b922c4ca5cdd4d996b51970d2",
+    "git_blob_sha": "66f9db747c548bae066891903b5622e36f2dc13a",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/anthropics/sandbox-runtime/blob/0bbebed0aa9a8e628dc4df8bc30293550a1988eb/src/sandbox/macos-sandbox-utils.ts#L1556-L1596",
+    "argv": [
+      "gh",
+      "api",
+      "repos/anthropics/sandbox-runtime/contents/src/sandbox/macos-sandbox-utils.ts?ref=0bbebed0aa9a8e628dc4df8bc30293550a1988eb"
+    ],
+    "exit": 0,
+    "bytes": 63952,
+    "lines": 1725,
+    "source_sha256": "3d28f5271a8432faaba18d15c189ed832ea7dadf5a57d702f91bc16dbeee11da",
+    "git_blob_sha": "1eb0db73ff9116bc5fab0299eb3a002bbe5ffb31",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/bytecodealliance/wasm-tools/blob/97a984fd8eb54c055b2516af16489cf4cbf05065/src/bin/wasm-tools/component.rs",
+    "argv": [
+      "gh",
+      "api",
+      "repos/bytecodealliance/wasm-tools/contents/src/bin/wasm-tools/component.rs?ref=97a984fd8eb54c055b2516af16489cf4cbf05065"
+    ],
+    "exit": 0,
+    "bytes": 64759,
+    "lines": 1735,
+    "source_sha256": "db00ed2809b8d0db5c968ebffe54b50e01f90bb621a662402ceb5a86effe271a",
+    "git_blob_sha": "476e4a929738899f28237470a66dabe1132522d6",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/ggml-org/llama.cpp/blob/4af4bb6d8ad83ec0b3ef84a3bc477ccfe179b4ff/include/llama.h#L377-L565",
+    "argv": [
+      "gh",
+      "api",
+      "repos/ggml-org/llama.cpp/contents/include/llama.h?ref=4af4bb6d8ad83ec0b3ef84a3bc477ccfe179b4ff"
+    ],
+    "exit": 0,
+    "bytes": 91980,
+    "lines": 1775,
+    "source_sha256": "c959c06ffe64453f92101420bcd152dae5874a7751232b84679bb637322580a0",
+    "git_blob_sha": "9cc17a82b529098c8849f3f023f22818bf3d64eb",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/ml-explore/mlx/blob/3fe3cbc3bbe5eb31642fff620ad213f49f58d286/CMakeLists.txt#L32-L47",
+    "argv": [
+      "gh",
+      "api",
+      "repos/ml-explore/mlx/contents/CMakeLists.txt?ref=3fe3cbc3bbe5eb31642fff620ad213f49f58d286"
+    ],
+    "exit": 0,
+    "bytes": 17553,
+    "lines": 501,
+    "source_sha256": "1ee2348bf525fe31e1bdcce78d5a219938c47b5db59e99c0c58231de340c2c7e",
+    "git_blob_sha": "ecabcb7a0b0c3389a020f8bc173e1e1d6644d4cd",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/neoeinstein/stats_alloc/blob/be31f749696faab326bf18b5dd75eaf93010693d/src/lib.rs#L48-L150",
+    "argv": [
+      "gh",
+      "api",
+      "repos/neoeinstein/stats_alloc/contents/src/lib.rs?ref=be31f749696faab326bf18b5dd75eaf93010693d"
+    ],
+    "exit": 0,
+    "bytes": 9523,
+    "lines": 283,
+    "source_sha256": "4d65ebd58edd9dcc0c5ccdfb70b9a82d76cb836f7a98e0e4f9da86651f2f78ba",
+    "git_blob_sha": "faa6225d41e0cee41f950e6d06d2842a56c4d763",
+    "status": "checked"
+  },
+  {
+    "target": "https://github.com/tokio-rs/prost/blob/894f4a7f9c41f1afb8455fb6e521c067815f608d/prost/src/message.rs#L41-L114",
+    "argv": [
+      "gh",
+      "api",
+      "repos/tokio-rs/prost/contents/prost/src/message.rs?ref=894f4a7f9c41f1afb8455fb6e521c067815f608d"
+    ],
+    "exit": 0,
+    "bytes": 5146,
+    "lines": 185,
+    "source_sha256": "466407987e2dfb94640845ac9ec722b249ee9d86e54c1918de225e5da527e27b",
+    "git_blob_sha": "2d91ede3c5dd17e22dc3cc894d41a098b5e4205f",
+    "status": "checked"
+  }
+]
