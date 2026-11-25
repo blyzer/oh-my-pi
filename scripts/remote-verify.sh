@@ -35,7 +35,11 @@ fi
 # stops with `unexpected branch state * (no branch)`. This is a bb rule, not part of the REAPI
 # standard. Fail before any side effect, and only on the exact output bb rejects, so a CI checkout
 # that prints `(HEAD detached at ...)` keeps working.
-if git branch 2>/dev/null | grep -q '^\* (no branch)'; then
+# Read the whole list first: `git branch | grep -q` can stop git with SIGPIPE under `pipefail` once the
+# list outgrows the pipe buffer, and the guard would then miss the very state it targets. LC_ALL=C and
+# no colour or columns keep the text the same on every machine.
+branch_list=$(LC_ALL=C git -c color.branch=false -c column.ui=never branch --list 2>/dev/null || true)
+if grep -q '^\* (no branch)$' <<<"$branch_list"; then
     echo "error: this git prints '* (no branch)' for the current HEAD, which \`bb remote\` rejects" >&2
     echo "       (unexpected branch state). Check out a named branch first: git switch -c <name>" >&2
     exit 2
