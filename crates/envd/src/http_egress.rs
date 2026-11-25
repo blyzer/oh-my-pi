@@ -1,6 +1,6 @@
 //! Capability-gated, bounded HTTP egress owned by the Environment.
 
-use std::{env, time::Duration};
+use std::{env, ffi::OsStr, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::time;
 use url::Url;
 
-use super::worker_pool::MAX_TUNNEL_BUFFER_BYTES;
+use super::{child_env::is_secret_name, worker_pool::MAX_TUNNEL_BUFFER_BYTES};
 
 // Reuse the existing retained wire-buffer ceiling rather than defining a
 // second Environment response-size policy.
@@ -97,6 +97,7 @@ impl HttpEgressHost {
 					headers.remove(COOKIE);
 					headers.remove(HOST);
 					headers.remove(PROXY_AUTHORIZATION);
+					strip_credential_headers(&mut headers);
 				}
 				if redirects_to_get(status_code, &method) {
 					method = Method::GET;
@@ -209,6 +210,27 @@ fn configured_socks_proxy() -> Option<ProxyVariable> {
 			})
 			.then_some(variable)
 	})
+}
+
+/// Removes every header whose name looks like a credential, using the same
+/// name markers as child environments ([`is_secret_name`]). A custom header
+/// such as `x-buildbuddy-api-key` is then never replayed to another origin
+/// after a redirect. Hyphens count as underscores, so `x-api-key` matches the
+/// `API_KEY` marker.
+fn strip_credential_headers(headers: &mut HeaderMap) {
+	let credential_names = headers
+		.keys()
+		.filter(|name| is_credential_header(name))
+		.cloned()
+		.collect::<Vec<HeaderName>>();
+	for name in credential_names {
+		headers.remove(name);
+	}
+}
+
+fn is_credential_header(name: &HeaderName) -> bool {
+	let normalized = name.as_str().replace('-', "_");
+	is_secret_name(OsStr::new(&normalized))
 }
 
 fn parse_method(method: &str) -> Result<Method, HttpEgressError> {
@@ -327,4 +349,137 @@ async fn read_bounded(response: reqwest::Response) -> Result<Bytes, HttpEgressEr
 		body.extend_from_slice(&chunk);
 	}
 	Ok(body.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+	use tokio::{
+		io::{AsyncReadExt as _, AsyncWriteExt as _},
+		net::TcpListener,
+		sync::oneshot,
+	};
+
+	use super::*;
+
+	fn header(name: &str, value: &str) -> pb::HttpHeader {
+		pb::HttpHeader { name: name.into(), value: value.into(), ..Default::default() }
+	}
+
+	/// Serves one connection per entry of `responses`, in order, and returns
+	/// the lowercased request head each connection received.
+	async fn serve(listener: TcpListener, responses: Vec<String>) -> oneshot::Receiver<Vec<String>> {
+		let (sender, receiver) = oneshot::channel();
+		tokio::spawn(async move {
+			let mut heads = Vec::new();
+			for response in responses {
+				let (mut stream, _) = listener.accept().await.expect("accept");
+				let mut buffer = vec![0_u8; 8192];
+				let read = stream.read(&mut buffer).await.expect("read request");
+				heads.push(String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+				stream
+					.write_all(response.as_bytes())
+					.await
+					.expect("write response");
+				stream.shutdown().await.ok();
+			}
+			let _ = sender.send(heads);
+		});
+		receiver
+	}
+
+	fn redirect_to(location: &str) -> String {
+		format!(
+			"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: \
+			 close\r\n\r\n"
+		)
+	}
+
+	const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+	fn request_to(url: String) -> pb::HttpRequest {
+		pb::HttpRequest {
+			method: "GET".into(),
+			url,
+			headers: vec![
+				header("accept", "text/plain"),
+				header("authorization", "Bearer a"),
+				header("x-buildbuddy-api-key", "k1"),
+				header("x-request-id", "r1"),
+			],
+			timeout_ms: 5_000,
+			redirects: 3,
+			..Default::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn a_cross_origin_redirect_drops_credential_named_headers() {
+		let first = TcpListener::bind(("127.0.0.1", 0))
+			.await
+			.expect("bind first");
+		let second = TcpListener::bind(("127.0.0.1", 0))
+			.await
+			.expect("bind second");
+		let first_port = first.local_addr().expect("first addr").port();
+		let second_port = second.local_addr().expect("second addr").port();
+		let _first =
+			serve(first, vec![redirect_to(&format!("http://127.0.0.1:{second_port}/x"))]).await;
+		let heads = serve(second, vec![OK.to_owned()]).await;
+
+		let response = HttpEgressHost::new()
+			.request(request_to(format!("http://127.0.0.1:{first_port}/start")))
+			.await
+			.expect("redirected request");
+		assert_eq!(response.status, 200);
+
+		let head = &heads.await.expect("second server head")[0];
+		assert!(head.contains("accept: text/plain"), "{head}");
+		assert!(head.contains("x-request-id: r1"), "{head}");
+		assert!(!head.contains("authorization"), "{head}");
+		assert!(!head.contains("x-buildbuddy-api-key"), "{head}");
+	}
+
+	#[tokio::test]
+	async fn a_same_origin_redirect_keeps_every_header() {
+		let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+		let port = listener.local_addr().expect("addr").port();
+		let heads = serve(listener, vec![
+			redirect_to(&format!("http://127.0.0.1:{port}/final")),
+			OK.to_owned(),
+		])
+		.await;
+
+		let response = HttpEgressHost::new()
+			.request(request_to(format!("http://127.0.0.1:{port}/start")))
+			.await
+			.expect("redirected request");
+		assert_eq!(response.status, 200);
+
+		let heads = heads.await.expect("server heads");
+		assert!(heads[1].contains("authorization: bearer a"), "{}", heads[1]);
+		assert!(heads[1].contains("x-buildbuddy-api-key: k1"), "{}", heads[1]);
+	}
+
+	#[test]
+	fn credential_named_headers_are_stripped_and_others_kept() {
+		let mut headers = HeaderMap::new();
+		for name in [
+			"x-api-key",
+			"x-auth-token",
+			"x-buildbuddy-api-key",
+			"x-amz-security-token",
+			"x-client-secret",
+			"x-credential-id",
+			"accept",
+			"content-type",
+			"x-request-id",
+			"x-api-version",
+		] {
+			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));
+		}
+		strip_credential_headers(&mut headers);
+		let mut kept = headers.keys().map(HeaderName::as_str).collect::<Vec<_>>();
+		kept.sort_unstable();
+		assert_eq!(kept, ["accept", "content-type", "x-api-version", "x-request-id"]);
+	}
 }
