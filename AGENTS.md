@@ -83,6 +83,10 @@ all recipes.
   `reference-transaction` (refuses to delete or rename a local branch; override `ALLOW_BRANCH_DELETE=1`). A hook
   already in place, such as git-lfs's `pre-push`, is kept as `<name>.chained` and still runs. Git has no hook for
   `restore`, `clean -f`, `checkout -f` or `reset --hard`; the agent safety guard covers those.
+- Deleting local branches: an agent MUST NOT run `git branch -D` or set `ALLOW_BRANCH_DELETE=1` itself. Run
+  `scripts/delete-merged-branch.sh [--dry-run] <branch>...`: it deletes a branch only when its pull request is
+  merged with the very commit the branch points at, that commit is on `origin/<base>`, and the branch is not
+  protected or checked out. Anything it refuses (an unmerged or moved branch) is left for the user to decide.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
 - ADR 0049 profiles: `just check-minimal-caps` typechecks default `omp-app` and
