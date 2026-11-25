@@ -61,9 +61,9 @@ if [ -z "${BUILDBUDDY_API_KEY-}" ]; then
 fi
 export BUILDBUDDY_API_KEY
 
-# `bb remote` refuses to start outside a Bazel workspace. The marker and the
-# workspace symlinks it creates are disposable and must not enter the mirrored
-# working tree.
+# `bb remote` refuses to start outside a Bazel workspace. The tracked, empty MODULE.bazel is that
+# marker; if a checkout lacks it (an older branch), it is created here and removed on exit. The
+# bazel-* workspace symlinks `bb` creates are disposable, ignored by git, and removed on exit.
 module_created=false
 had_bazel_bin=false
 had_bazel_out=false

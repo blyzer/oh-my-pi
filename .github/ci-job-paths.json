@@ -11,7 +11,7 @@
   "workflows": {
     "ci": {
       "global": [".github/ci-job-paths.json", ".github/workflows/ci.yml", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
-      "ignored": ["docs/**", "*.png", "*.svg", ".git-blame-ignore-revs", ".agents/**", ".claude/**", ".junie/**", ".scratch/**", ".omp/**", ".cm/**", ".remember/**", "assets/**", "elastic/**", "npm/**", "skills-lock.json", "README.md", "CONTRIBUTING.md", "PHILOSOPHY.md", "adr0045-f-report.md"],
+      "ignored": ["docs/**", "*.png", "*.svg", ".git-blame-ignore-revs", ".agents/**", ".claude/**", ".junie/**", ".scratch/**", ".omp/**", ".cm/**", ".remember/**", "assets/**", "elastic/**", "npm/**", "skills-lock.json", "README.md", "CONTRIBUTING.md", "PHILOSOPHY.md", "adr0045-f-report.md", "MODULE.bazel"],
       "jobs": {
         "format": ["@policy", "@build", "@mac_native", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "LICENSE*", "THIRD-PARTY-NOTICES*", "tools/lintx/**", "scripts/check-spec.rs", "scripts/check-extension-conformance.py", ".githooks/**", "scripts/install-githooks.sh", "scripts/test_githooks.py"],
         "format_rust": ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "rustfmt.toml", "rust-toolchain.toml", ".cargo/**", "!docs/*.rs"],
