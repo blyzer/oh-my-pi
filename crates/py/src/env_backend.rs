@@ -102,7 +102,7 @@ macro_rules! emit_backend_methods {
 				self.forward_request(
 					py,
 					operation,
-					&["url", "body", "headers", "timeout", "redirects"],
+					&["url", "body", "headers", "timeout", "redirects", "credential"],
 					&remaining,
 					kwargs,
 				)

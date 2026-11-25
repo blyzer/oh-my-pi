@@ -1241,6 +1241,7 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 				Ok(env_pb::ProtocolErrorCode::Cancelled) => "Cancelled",
 				Ok(env_pb::ProtocolErrorCode::DeadlineExceeded) => "TimedOut",
 				Ok(env_pb::ProtocolErrorCode::Uncommitted) => "EffectsNotAuthorized",
+				Ok(env_pb::ProtocolErrorCode::PlacementUnavailable) => "PlacementUnavailable",
 				_ => "Io",
 			};
 			environment_exception(py, kind, &protocol.message)
@@ -1264,6 +1265,9 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 			"invocation principal requires nonempty session_id and agent_id",
 		),
 		ClientError::ScopedOperationDenied => environment_exception(py, "Denied", &error.to_string()),
+		ClientError::PlacementUnsupported => {
+			environment_exception(py, "PlacementUnavailable", &error.to_string())
+		},
 		ClientError::StreamLost(_) => environment_exception(py, "StreamLost", &error.to_string()),
 		ClientError::IncompleteBlob => environment_exception(py, "Disconnected", &error.to_string()),
 		ClientError::ApprovalQueryClosed { .. } | ClientError::ReflectionQueryClosed { .. } => {
@@ -3727,6 +3731,11 @@ macro_rules! backend_methods {
 					.get_item("redirects")?
 					.ok_or_else(|| PyTypeError::new_err("redirects is required"))?
 					.extract::<u32>()?;
+				let credential = arguments
+					.get_item("credential")?
+					.filter(|value| !value.is_none())
+					.map(|value| value.extract::<String>())
+					.transpose()?;
 				let timeout_ms = arguments.get_item("timeout")?.map_or(Ok(0), |value| {
 					value
 						.extract::<Option<PyDuration>>()?
@@ -3746,6 +3755,7 @@ macro_rules! backend_methods {
 						body: body.into(),
 						timeout_ms,
 						redirects,
+						credential,
 						props: Default::default(),
 					}))
 					.map_err(|error| client_error(py, error))?;

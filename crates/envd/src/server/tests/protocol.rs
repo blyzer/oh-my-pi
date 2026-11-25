@@ -3047,3 +3047,170 @@ impl RelayPeer {
 		assert!(matches!(frame.body, Some(server_frame::Body::EvalReset(_))), "{frame:?}");
 	}
 }
+
+/// Counts every connection a loopback listener accepts; the egress target of
+/// the placement tests.
+async fn counting_listener() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+	let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+		.await
+		.expect("bind counting listener");
+	let port = listener.local_addr().expect("listener address").port();
+	let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+	let counter = Arc::clone(&accepted);
+	tokio::spawn(async move {
+		while let Ok((_stream, _)) = listener.accept().await {
+			counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+		}
+	});
+	(port, accepted)
+}
+
+fn placement_request(port: u16, credential: Option<&str>) -> pb::HttpRequest {
+	pb::HttpRequest {
+		method: "POST".to_owned(),
+		url: format!("http://127.0.0.1:{port}/run"),
+		timeout_ms: 500,
+		credential: credential.map(str::to_owned),
+		..Default::default()
+	}
+}
+
+#[tokio::test]
+async fn unbound_host_refuses_credential_request_with_zero_requests() {
+	let (requests, responses, _root, _state) = test_external_connection(&["env.net"], false).await;
+	let (port, accepted) = counting_listener().await;
+	requests
+		.send_async(pb::ClientFrame {
+			request_id: 1,
+			body:       Some(client_frame::Body::HttpRequest(placement_request(port, Some("p")))),
+			props:      Default::default(),
+			scope:      None,
+		})
+		.await
+		.expect("send credential request");
+	let frame = time::timeout(Duration::from_secs(5), responses.recv_async())
+		.await
+		.expect("refusal deadline")
+		.expect("refusal frame");
+	assert_eq!(frame.request_id, 1);
+	let Some(server_frame::Body::Error(error)) = frame.body else {
+		panic!("expected a typed refusal, got {frame:?}");
+	};
+	assert_eq!(error.code, pb::ProtocolErrorCode::PlacementUnavailable as i32);
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0, "a connection was opened");
+
+	// Control: the same request without `credential` does reach the listener.
+	requests
+		.send_async(pb::ClientFrame {
+			request_id: 2,
+			body:       Some(client_frame::Body::HttpRequest(placement_request(port, None))),
+			props:      Default::default(),
+			scope:      None,
+		})
+		.await
+		.expect("send ordinary request");
+	time::timeout(Duration::from_secs(5), responses.recv_async())
+		.await
+		.expect("ordinary request deadline")
+		.expect("ordinary request frame");
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1, "control reached the listener");
+}
+
+/// A UDS peer that handshakes, optionally advertising credential placement,
+/// and counts the `HttpRequest` frames it receives.
+fn placement_peer(
+	path: PathBuf,
+	advertise: bool,
+) -> (PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
+	use omp_env::prost::Message as _;
+	use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+	let listener = UnixListener::bind(&path).expect("bind peer socket");
+	let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+	let counter = Arc::clone(&received);
+	tokio::spawn(async move {
+		let (mut stream, _) = listener.accept().await.expect("accept peer");
+		loop {
+			let mut length = 0_u64;
+			for shift in (0..70).step_by(7) {
+				let Ok(byte) = stream.read_u8().await else { return };
+				length |= u64::from(byte & 0x7f) << shift;
+				if byte & 0x80 == 0 {
+					break;
+				}
+			}
+			let mut payload = vec![0; usize::try_from(length).expect("frame length")];
+			if stream.read_exact(&mut payload).await.is_err() {
+				return;
+			}
+			let frame = pb::ClientFrame::decode(&payload[..]).expect("client frame");
+			let body = match frame.body {
+				Some(client_frame::Body::Hello(_)) => server_frame::Body::Hello(pb::ServerHello {
+					server_epoch: Bytes::from_static(b"epoch"),
+					capabilities: if advertise {
+						vec![omp_env::CREDENTIAL_PLACEMENT_CAPABILITY.to_owned()]
+					} else {
+						Vec::new()
+					},
+					..Default::default()
+				}),
+				Some(client_frame::Body::HttpRequest(_)) => {
+					counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+					server_frame::Body::Error(pb::ProtocolError {
+						code:    pb::ProtocolErrorCode::PlacementUnavailable.into(),
+						message: String::new(),
+						props:   None,
+					})
+				},
+				_ => continue,
+			};
+			let mut encoded = bytes::BytesMut::new();
+			pb::ServerFrame { request_id: frame.request_id, body: Some(body), ..Default::default() }
+				.encode_length_delimited(&mut encoded)
+				.expect("encode server frame");
+			if stream.write_all(&encoded).await.is_err() {
+				return;
+			}
+		}
+	});
+	(path, received)
+}
+
+#[tokio::test]
+async fn unsupported_peer_gets_zero_requests() {
+	let dir = tempfile::tempdir().expect("socket dir");
+	let (port, accepted) = counting_listener().await;
+	let hello = pb::ClientHello {
+		client: "envd-placement-test".to_owned(),
+		schema_rev: omp_proto::SCHEMA_REV,
+		capabilities: vec!["env.net".to_owned()],
+		..Default::default()
+	};
+	let scope = || omp_env::DataScope::new(sf!("invocation-p"), Bytes::from_static(b"effect-p"), 1, 1);
+
+	// A peer that predates placement: the sender fails locally, nothing is sent.
+	let (old_path, old_frames) = placement_peer(dir.path().join("old.sock"), false);
+	let old = omp_env::ExtensionEnvClient::connect_uds(&old_path, &hello, scope())
+		.await
+		.expect("connect to the old peer");
+	let error = old
+		.http(placement_request(port, Some("p")))
+		.await
+		.expect_err("an unsupported peer must not receive the request");
+	assert!(matches!(error, omp_env::ClientError::PlacementUnsupported), "{error:?}");
+	assert_eq!(old_frames.load(std::sync::atomic::Ordering::SeqCst), 0, "the peer saw a request");
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0, "a connection was opened");
+
+	// Control: the same call to a peer that advertised the capability is sent.
+	let (new_path, new_frames) = placement_peer(dir.path().join("new.sock"), true);
+	let new = omp_env::ExtensionEnvClient::connect_uds(&new_path, &hello, scope())
+		.await
+		.expect("connect to the placement peer");
+	let error = new
+		.http(placement_request(port, Some("p")))
+		.await
+		.expect_err("the peer answers with its refusal");
+	assert!(matches!(error, omp_env::ClientError::Protocol(_)), "{error:?}");
+	assert_eq!(new_frames.load(std::sync::atomic::Ordering::SeqCst), 1);
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
