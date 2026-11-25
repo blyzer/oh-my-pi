@@ -123,6 +123,26 @@ pub fn providers(state: &ServiceState) -> ServiceResult<Vec<ProviderRow>> {
 		.collect())
 }
 
+/// Login method for `provider`: ApiKey only when one of its specs is an API key
+/// and none is OAuth, so the auth manager does not fall through to an OAuth
+/// engine that never prompts for a static key; `None` (the manager's default
+/// choice) otherwise.
+fn login_method(
+	catalog: &omp_catalog::Catalog,
+	provider: &omp_catalog::provider::ProviderDef,
+) -> Option<omp_ai::call::AuthMethod> {
+	let kind = |id| catalog.auth_spec(id).map(|spec| &spec.kind);
+	let has_oauth = provider
+		.auth
+		.iter()
+		.any(|id| matches!(kind(id), Some(AuthSpecKind::Oauth)));
+	let has_api_key = provider
+		.auth
+		.iter()
+		.any(|id| matches!(kind(id), Some(AuthSpecKind::ApiKey)));
+	(!has_oauth && has_api_key).then_some(omp_ai::call::AuthMethod::ApiKey)
+}
+
 /// Starts an interactive login and drives it on the runtime.
 pub fn login(state: &ServiceState, provider: &str) -> ServiceResult<LoginFlow> {
 	let auth = stack(state)?.auth.clone();
@@ -135,18 +155,7 @@ pub fn login(state: &ServiceState, provider: &str) -> ServiceResult<LoginFlow> {
 	let provider_def = catalog_load
 		.provider(&provider_id)
 		.ok_or_else(|| ServiceError::Failed(sf!("Unknown provider: {provider}")))?;
-	// When the provider has no OAuth auth spec, prefer API key so the login
-	// driver does not fall through to an OAuth engine that never prompts for
-	// a static key. The auth manager's select_auth_spec prefers OAuth when
-	// method is None, so we must be explicit for API-key-only providers.
-	let has_oauth = provider_def.auth.iter().any(|id| {
-		catalog_load
-			.auth_spec(id)
-			.is_some_and(|spec| matches!(spec.kind, AuthSpecKind::Oauth))
-	});
-	let method = has_oauth
-		.then_some(None)
-		.unwrap_or(Some(omp_ai::call::AuthMethod::ApiKey));
+	let method = login_method(&catalog_load, provider_def);
 	let name = provider_name(state, &provider_id);
 	let (events_tx, events) = flume::unbounded();
 	let (input, input_rx) = flume::unbounded();
@@ -419,6 +428,45 @@ fn auth_input(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static st
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn login_forces_api_key_only_for_providers_whose_specs_are_api_key_and_never_oauth() {
+		let catalog = omp_catalog::Catalog::embedded();
+		let mut forced = 0;
+		for provider in catalog.providers() {
+			let kinds = provider
+				.auth
+				.iter()
+				.filter_map(|id| {
+					catalog
+						.auth_spec(id)
+						.map(|spec| matches!(spec.kind, AuthSpecKind::ApiKey))
+				})
+				.collect::<Vec<_>>();
+			let has_oauth = provider.auth.iter().any(|id| {
+				catalog
+					.auth_spec(id)
+					.is_some_and(|s| matches!(s.kind, AuthSpecKind::Oauth))
+			});
+			let method = login_method(&catalog, provider);
+			if method.is_some() {
+				forced += 1;
+				assert!(!has_oauth, "{:?} has OAuth and must keep method None", provider.id);
+				assert!(
+					kinds.iter().any(|k| *k),
+					"{:?} forced ApiKey without an ApiKey spec",
+					provider.id
+				);
+			} else if !has_oauth {
+				assert!(
+					!kinds.iter().any(|k| *k),
+					"{:?} has an ApiKey spec but is not forced",
+					provider.id
+				);
+			}
+		}
+		assert!(forced > 0, "the embedded catalog has API-key-only providers");
+	}
 
 	fn prompt(input: AuthPromptKind) -> AuthPrompt {
 		AuthPrompt { id: sf!("p"), message: sf!("Paste"), input }
