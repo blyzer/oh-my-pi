@@ -1,0 +1,958 @@
+{
+  "schema": 1,
+  "pin": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+  "status": "research, not implementation commitments",
+  "opportunities": [
+    {
+      "id": "R01",
+      "problem_statement": "Unmeasured active resource costs prevent credible architecture prioritization",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/e2e/src/baseline/workloads.rs",
+      "source_symbol": "existing baseline workloads/census",
+      "omp2_equivalent_path": "crates/e2e/src/baseline/workloads.rs",
+      "omp2_equivalent_symbol": "existing baseline workloads/census",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/e2e/src/baseline/{workloads,census,recorder}.rs",
+        "crates/agent/src/directors/stream_rules.rs:1529-1598",
+        "06-benchmarks-and-memory.md"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0006",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Extend existing tracing/P8 with scenario-scoped allocation and process-tree evidence; freeze independent OMP2 baselines",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "existing capability reuse",
+        "configuration optimization",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "No reduction promised from measurement itself",
+      "expected_allocation_impact": "No reduction promised from measurement itself",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small instrumentation; medium representative platform campaign",
+      "regression_risk": "Instrumentation overhead and nonrepresentative workload bias",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "No normal-mode instrumentation overhead beyond existing telemetry",
+        "Record parent/child memory, activation and long-session growth",
+        "Separate synthetic/native/whole-harness results"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-core",
+        "just test-pkg omp-journal",
+        "existing P8 baseline schema tests",
+        "recorded provider stream fixtures"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P0",
+      "dependencies": []
+    },
+    {
+      "id": "R02",
+      "problem_statement": "A small artifact slice loads and retains the complete blob allocation",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/envd/src/tool_url/artifact.rs",
+      "source_symbol": "BlobStoreAuthority::read_range",
+      "omp2_equivalent_path": "crates/envd/src/tool_url/artifact.rs",
+      "omp2_equivalent_symbol": "BlobStoreAuthority::read_range",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/envd/src/tool_url/artifact.rs:143-161",
+        "crates/journal/src/blob.rs:608-651",
+        "experiments/baseline-results-final.json"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0006",
+        "0009",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Reuse BlobStore::open_range plus bounded owned bytes behind the existing authority; explicitly preserve strict range and empty-slice rules",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "existing capability reuse",
+        "data representation optimization"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Measured API mechanism: 50 MiB blob view retains 52,428,824 requested bytes versus 4,096 bounded-read bytes; adapter/end-to-end result still unimplemented",
+      "expected_allocation_impact": "Measured API requested bytes 52,429,401 versus 4,673 for the bounded 4 KiB experiment; not a production forecast",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small",
+      "regression_risk": "Existing open_range clamps lengths and treats zero as remainder; careless substitution changes behavior",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Identical bytes/errors for empty, reversed, overflow, exact-end, missing and corrupt-length cases",
+        "No full blob allocation retained for a 4 KiB view",
+        "Preserve cancellation, source identity and existing integrity obligations"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-journal",
+        "just test-pkg omp-envd",
+        "existing artifact URL/session E2E tests",
+        "paired range probe and strict adapter fixtures"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P0",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R03",
+      "problem_statement": "Per-attempt diagnostic bounds do not bound total retained HTTP capture records",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/ai/src/transport/http.rs",
+      "source_symbol": "HttpTransport.captures / response capture insertion",
+      "omp2_equivalent_path": "crates/ai/src/transport/http.rs",
+      "omp2_equivalent_symbol": "HttpTransport.captures / response capture insertion",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/ai/src/transport/http.rs:355-379,807-816",
+        "04-providers-context-and-allocation.md"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0006",
+        "0009",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Measure record lifetime, then bound or retire settled diagnostics through the existing evidence owner without losing mandatory failure/audit evidence",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "resource eviction",
+        "native implementation optimization"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Retain live attempts; retire only settled diagnostic ownership after required evidence handling",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small/medium after ownership trace",
+      "regression_risk": "Dropping diagnostic references can lose required evidence; count growth is source-proven, heap magnitude unmeasured",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Capture count/live bytes plateau under a declared long-session workload",
+        "Pending attempts and mandatory evidence remain available",
+        "Sanitization, retries, failure attribution and credential redaction unchanged"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-ai",
+        "deterministic 10k-attempt fake transport with failures/cancellation",
+        "existing capture/redaction replay tests"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P0",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R04",
+      "problem_statement": "The production prompt source renders the same bands separately for system and volatile projection",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/agent/src/prompt/mod.rs",
+      "source_symbol": "CanonicalPromptSource::{system_items,volatile_items}",
+      "omp2_equivalent_path": "crates/agent/src/prompt/mod.rs",
+      "omp2_equivalent_symbol": "CanonicalPromptSource::{system_items,volatile_items}",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/agent/src/prompt/mod.rs:39-71",
+        "crates/agent/src/loop.rs:2517-2551",
+        "crates/driver/src/headless/kernel.rs:2981"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0024",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Compute canonical bands once for the same immutable request DOM; retain stable order and per-request lifetime",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "native implementation optimization",
+        "buffer reuse"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small/medium",
+      "regression_risk": "Hook/provider/session generation changes must not be hidden by caching",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Byte/token/proof/tool ordering identical across rewind, compaction, hooks and provider changes",
+        "No persistent cache or stale prompt reuse",
+        "One render per request verified with an instrumented source"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-agent",
+        "just test-pkg omp-driver",
+        "prompt golden/determinism and fragmented stream fixtures"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P1",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R05",
+      "problem_statement": "SigV4 collection rematerializes an already contiguous pre-encoded body",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/ai/src/transport/http.rs",
+      "source_symbol": "body reader collection / signing",
+      "omp2_equivalent_path": "crates/ai/src/transport/http.rs",
+      "omp2_equivalent_symbol": "body reader collection / signing",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/ai/src/transport/http.rs:677-698,1138-1165",
+        "crates/ai/src/codec/bedrock.rs:163-180,656-658"
+      ],
+      "applicable_adrs": [
+        "0006",
+        "0011",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Transfer contiguous Bytes ownership through the existing body abstraction where consumption/evidence rules permit; keep streaming fallback",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "native implementation optimization",
+        "serialization optimization"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Directly relevant to AWS signing; no assumption that Bedrock uses SSE or exposes model KV state",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium",
+      "regression_risk": "Incorrect move/reader handling can invalidate signatures or retry evidence",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Fixed-clock signed requests and wire bytes identical",
+        "Empty/single/multiple chunk, read limits, retries and one-shot body consumption correct",
+        "Cancellation and credential behavior unchanged"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-ai",
+        "SigV4 fixed-time golden tests",
+        "Bedrock ConverseStream/Invoke replay and CRC/truncation tests"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P1",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R06",
+      "problem_statement": "Public Python remote framing can allocate very large declared frames; queues can retain work behind slow consumers",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/py/python/omp_remote.py",
+      "source_symbol": "_recv_exact / frame bounds",
+      "omp2_equivalent_path": "crates/py/python/omp_remote.py",
+      "omp2_equivalent_symbol": "_recv_exact / frame bounds",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/py/python/omp_remote.py:77-149",
+        "crates/envd/src/worker_pool.rs:35-44",
+        "crates/agent/src/loop.rs:502",
+        "crates/agent/src/dispatch.rs:1570-1595"
+      ],
+      "applicable_adrs": [
+        "0006",
+        "0008",
+        "0009",
+        "0011",
+        "0036"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "First map actual reachable routes and queue bytes; apply owner-scoped aggregate admission/buffer reuse only with explicit compatible policy",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "policy optimization",
+        "resource budgets",
+        "buffer reuse"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None for measurement/buffer reuse; negotiated/versioned limits only if a contract extension is justified",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium/high",
+      "regression_risk": "Different direct-Python and native tunnel limits must not be conflated; changing accepted limits needs owner-approved policy",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Reject oversized declared lengths before allocation, without silently truncating valid protocol data",
+        "Cumulative buffers/connections and slow consumers bounded",
+        "Cancellation/approval/commit ordering cannot deadlock or lose durable outcomes"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-envd",
+        "existing Python remote framing tests",
+        "malformed/oversized socket fixtures and slow-consumer model tests"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P1 conditional",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R07",
+      "problem_statement": "Some environment resources open eagerly; idle reaper implementation is not equivalent to proven production eviction",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/envd/src/server/session.rs",
+      "source_symbol": "environment assembly / LspPool / MemoryRuntime startup",
+      "omp2_equivalent_path": "crates/envd/src/server/session.rs",
+      "omp2_equivalent_symbol": "environment assembly / LspPool / MemoryRuntime startup",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/envd/src/server/session.rs:287-318",
+        "crates/envd/src/docserver/lsp_pool.rs:39-120",
+        "crates/memory/src/runtime.rs:265-328",
+        "01-native-baseline-and-lifecycle.md"
+      ],
+      "applicable_adrs": [
+        "0002",
+        "0004",
+        "0006",
+        "0011",
+        "0024",
+        "0036"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Use existing lazy-LSP settings first; measure memory/MCP/index constructors and extend their current owners with single-flight activation or safe idle release only when material",
+      "decision_category": "C defer",
+      "implementation_methods": [
+        "configuration optimization",
+        "deferred resource activation",
+        "resource eviction"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "Retain cheap mandatory owners; defer only proven expensive optional acquisition",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "Evaluate existing lazy/Off settings first; additive budgets/idle policy only after measurements",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium/high; configuration-only probes small",
+      "regression_risk": "Idle registry removal may not reclaim an Arc-owned child; eager work may be required for prompt correctness",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Concurrent first-use initializes once; cancellation/failure recovery deterministic",
+        "No eviction during active requests, subscriptions, documents or dependent leases",
+        "Persistent state and mandatory tools/gates remain intact; measure reactivation and thrashing"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-envd",
+        "just test-pkg omp-memory",
+        "process census and empty/first-use/warm/crash/reload lifecycle scenarios"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P1 conditional",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R08",
+      "problem_statement": "Embedded-only ADR0036 and the configured external-interpreter Eval path need a conformance decision",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/envd/src/eval/process.rs",
+      "source_symbol": "EvalChild::spawn",
+      "omp2_equivalent_path": "crates/envd/src/eval/process.rs",
+      "omp2_equivalent_symbol": "EvalChild::spawn",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "docs/adr/0036-python-for-extensions.md:35-65",
+        "crates/envd/src/eval/process.rs:569-629",
+        "03-abi-python-and-data-boundaries.md"
+      ],
+      "applicable_adrs": [
+        "0011",
+        "0035",
+        "0036"
+      ],
+      "adr_compliance": "Potential existing conflict recorded; no superseding ADR or production contract change authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Trace default and configured paths, add contract proof and explicitly resolve the intended exception with the owner before altering behavior",
+      "decision_category": "A retain while investigating",
+      "implementation_methods": [
+        "existing capability reuse",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small investigation; any resolution estimated separately",
+      "regression_risk": "A genuine current implementation/ADR tension, not permission for research to change an accepted decision",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "No-host-Python default path proven",
+        "Configured override, credentials, cancellation, state preservation and child termination traced",
+        "No accepted ADR silently rewritten or existing functionality silently removed"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-py",
+        "just test-pkg omp-envd",
+        "extension/Eval default/configured/reset/crash E2E scenarios"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P0 conformance",
+      "dependencies": []
+    },
+    {
+      "id": "R09",
+      "problem_statement": "Whole graph loading, repeated metadata and derived indexes may require selective representation at larger scales",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/kb/src/store.rs",
+      "source_symbol": "Store load/query representation",
+      "omp2_equivalent_path": "crates/kb/src/store.rs",
+      "omp2_equivalent_symbol": "Store load/query representation",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/kb/src/store.rs:110-165",
+        "crates/app/src/kb_cmd.rs:62-73",
+        "03-abi-python-and-data-boundaries.md"
+      ],
+      "applicable_adrs": [
+        "0002",
+        "0003",
+        "0035",
+        "0036"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Profile real graph/query selectivity, then intern/partition/shared immutable views behind current Store; trial a checked rebuildable mmap snapshot only if simpler paths fail",
+      "decision_category": "D partition",
+      "implementation_methods": [
+        "data representation optimization",
+        "selective materialization",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "No fictional named IR; selective views over actual graph/query structures first",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None first; any optional data format needs explicit version/integrity/lifetime design",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "No format dependency approved; rkyv/FlatBuffers/Arrow only after current advisory/license/version review and full-pipeline benchmark",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium/high",
+      "regression_risk": "Schema/migration/ownership complexity; no measured need for a new format established",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Identical symbol relationships/query results and freshness/source fences",
+        "Corrupt/version-mismatched derived snapshot rebuilds safely",
+        "Include encode/build/validate/page-fault/materialization costs, not field access alone"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-kb",
+        "SCIP/graph golden queries at 10k/100k and provisioned larger scales",
+        "malformed/version/mmap lifetime tests"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P2 conditional",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R10",
+      "problem_statement": "Optional model resource costs must fit concurrent workloads, not the machine's nominal16GiB",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/ai/src/local/runtime.rs",
+      "source_symbol": "LocalRuntime / RuntimeLease / unload_if_idle",
+      "omp2_equivalent_path": "crates/ai/src/local/runtime.rs",
+      "omp2_equivalent_symbol": "LocalRuntime / RuntimeLease / unload_if_idle",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/ai/src/local/runtime.rs:245-358",
+        "crates/memory/src/embedding/supervisor.rs",
+        "02-saetta-and-native-inference.md"
+      ],
+      "applicable_adrs": [
+        "0006",
+        "0011",
+        "0035",
+        "0036",
+        "0049"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Reuse existing native optional runtime; Saetta/Frink/llama.cpp are separately pinned references in chapter02, not compatibility requirements",
+      "proposed_improvement": "Reuse existing optional inference admission/leases for a quality-tested specialized embedding/reranking candidate; keep remote generation first-class",
+      "decision_category": "A retain existing architecture; E selective backend research",
+      "implementation_methods": [
+        "optional inference backend",
+        "policy optimization",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Prefer existing Linux-supported backend; Metal-only techniques not called portable",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Optional local specialized tasks only; Bedrock generation and provider-specific contracts retained",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium/high; no backend port committed",
+      "regression_risk": "Model quality, Metal memory, platform support and unload semantics unknown until tested",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "No ordinary operation depends on local inference",
+        "Cold/warm/idle/reload/concurrent-use fits measured residual budget and quality thresholds",
+        "No active lease eviction, unsafe model-fit bypass or arbitrary plugin loading"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "existing local-runtime admission/lease tests",
+        "memory embedding worker fault/cancellation tests",
+        "authorized small-model held-out quality plus physical-footprint campaign"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P2 optional",
+      "dependencies": [
+        "R01",
+        "R07"
+      ]
+    },
+    {
+      "id": "R11",
+      "problem_statement": "Binary/dependency counts alone do not identify active-memory costs or safe feature removals",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "Cargo.toml",
+      "source_symbol": "workspace dependency/features/profile configuration",
+      "omp2_equivalent_path": "Cargo.toml",
+      "omp2_equivalent_symbol": "workspace dependency/features/profile configuration",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "experiments/baseline-results-final.json",
+        "05-technology-and-meta-harness.md"
+      ],
+      "applicable_adrs": [
+        "0035",
+        "0036",
+        "0049"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Audit reachable feature unions, duplicate versions and link maps; evaluate existing optional features/profile variants without removing required capabilities",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "optional build feature",
+        "native modularization",
+        "configuration optimization"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Unknown: reducing file size may not reduce resident active pages",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "No new dependencies; reject dependency removals justified only by duplicate counts",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "small audit; potentially large feature-unification changes",
+      "regression_risk": "Disabling an apparently unused dependency can change feature unification or backend availability",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "AMD64/ARM64/Linux/macOS feature matrix preserves shipped contracts",
+        "Compare active pages/startup/runtime and build/link cost, not executable size alone",
+        "No panic strategy/observability/security reduction solely for size"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "cargo metadata --offline --locked --no-deps --format-version 1",
+        "cargo tree --locked -e features -p omp-app",
+        "cargo tree --locked -d",
+        "affected native recipes and linker inspection"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P2 conditional",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R12",
+      "problem_statement": "Harness strategy tuning needs controlled evaluation, not live source self-modification or factual-IR mutation",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/adw/src/workflow.rs",
+      "source_symbol": "typed workflow phases / driver verification evidence",
+      "omp2_equivalent_path": "crates/adw/src/workflow.rs",
+      "omp2_equivalent_symbol": "typed workflow phases / driver verification evidence",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/adw/src/workflow.rs:23-78",
+        "crates/driver/src/adw/definition.rs:23-60",
+        "crates/driver/src/verification/evidence.rs:1-98",
+        "05-technology-and-meta-harness.md"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0006",
+        "0011",
+        "0035",
+        "0036"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Run an opt-in offline policy-candidate loop using existing convars, ADW, snapshots/CAS and verifiers; separate legal fast policy changes from reviewed slow native changes",
+      "decision_category": "B optimize existing policies",
+      "implementation_methods": [
+        "policy optimization",
+        "IR optimization where actual types permit",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "Reuse actual typed workflows/configuration; extend expressiveness only after a demonstrated legal-plan gap",
+      "required_configuration_changes": "Versioned allowlisted policy candidates; no mutable evidence or security override knobs",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium research; promotion is a separate reviewed slice",
+      "regression_risk": "Overfitting, optimizer gaming, prompt injection and evaluator leakage",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Immutable training/held-out baselines and versioned evaluator/candidate inputs",
+        "Hard ADR/security/required-check constraints outside objective weights",
+        "Deterministic legality checks, Pareto evidence, approved promotion and rollback"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-adw",
+        "existing driver verification snapshot/policy/evidence tests",
+        "deterministic mock-provider replay plus independently held-out tasks"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P2 research",
+      "dependencies": [
+        "R01"
+      ]
+    },
+    {
+      "id": "R13",
+      "problem_statement": "Several proposed migrations add complexity without a demonstrated OMP2 requirement",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "docs/adr/0036-python-for-extensions.md",
+      "source_symbol": "accepted embedded-runtime and child-boundary decisions",
+      "omp2_equivalent_path": "docs/adr/0036-python-for-extensions.md",
+      "omp2_equivalent_symbol": "accepted embedded-runtime and child-boundary decisions",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "01-native-baseline-and-lifecycle.md",
+        "02-saetta-and-native-inference.md",
+        "03-abi-python-and-data-boundaries.md",
+        "05-technology-and-meta-harness.md"
+      ],
+      "applicable_adrs": [
+        "0002",
+        "0006",
+        "0011",
+        "0035",
+        "0036",
+        "0049"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Retain native typed calls/Prost/PyO3; reject arbitrary Rust DLL plugins, wholesale serializers, mandatory WASM/microVM/local inference and unmeasured global allocator changes",
+      "decision_category": "G reject default migration",
+      "implementation_methods": [
+        "existing capability reuse",
+        "research only"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "No assumed gain from dynamic loading or allocator substitution",
+      "expected_allocation_impact": "No assumed gain from ABI/serialization branding",
+      "expected_latency_impact": "Unknown; no migration approved",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "none to retain; high speculative migration avoided",
+      "regression_risk": "Adoption without evidence would create maintenance and isolation risks",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Every reconsidered boundary names a measured unmet requirement and simpler alternatives",
+        "ABI compatibility is not used as a security claim",
+        "Current licenses/advisories and supported architecture versions checked before any dependency adoption"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "No implementation committed; a future proposal requires a pinned end-to-end benchmark and independent contract suite"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "retain/reject",
+      "dependencies": []
+    },
+    {
+      "id": "R14",
+      "problem_statement": "Secondary request/frame/cache/render allocations need attribution before lifetime complexity is added",
+      "source_repository": "https://github.com/blyzer/oh-my-pi",
+      "pinned_revision": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+      "source_path": "crates/agent/src/context.rs",
+      "source_symbol": "ContextPatch / request-owned content and scratch buffers",
+      "omp2_equivalent_path": "crates/agent/src/context.rs",
+      "omp2_equivalent_symbol": "ContextPatch / request-owned content and scratch buffers",
+      "existing_implementation_status": "SRC for cited current behavior; proposed optimization is PLAN, not shipped",
+      "repository_evidence": [
+        "crates/agent/src/context.rs:117,229-234",
+        "crates/ai/src/transport/capture.rs:16-26,125-159",
+        "crates/tui/src/renderer.rs:321-342",
+        "01-native-baseline-and-lifecycle.md",
+        "04-providers-context-and-allocation.md"
+      ],
+      "applicable_adrs": [
+        "0003",
+        "0008",
+        "0009",
+        "0011",
+        "0035"
+      ],
+      "adr_compliance": "Preserve accepted decisions and owner constraints; no accepted ADR amendment authorized",
+      "architectural_difference": "Improve behavior inside the existing owner rather than externalize trusted native functionality",
+      "proposed_improvement": "Profile existing bounded caches, per-connection frame buffers, request projection and renderer scratch; move/borrow/share immutable data only where equivalence and benefit are proven",
+      "decision_category": "B optimize internally",
+      "implementation_methods": [
+        "native implementation optimization",
+        "buffer reuse",
+        "resource eviction"
+      ],
+      "native_versus_external_placement": "Existing native Rust owners; preserve current required process boundaries",
+      "initialization_strategy": "No new eager subsystem; reuse existing construction and activation paths",
+      "resource_lifecycle": "Preserve active leases, cancellation, durable state and result authority",
+      "required_ir_changes": "None for the first slice; factual representations/evidence remain unchanged",
+      "required_configuration_changes": "None required for first measurement; opt-in policy only where stated",
+      "required_protocol_changes": "None; preserve current typed/versioned contracts and exact observable errors",
+      "expected_memory_impact": "Hypothesis: reduce attributable temporary/retained memory; magnitude requires representative measurement",
+      "expected_allocation_impact": "Hypothesis: avoid the cited work; allocator telemetry must establish actual benefit",
+      "expected_latency_impact": "Unknown end-to-end; benchmark harness stages separately from provider/network",
+      "cold_start_tradeoffs": "Measure independently; reject unacceptable first-use/reconstruction regressions",
+      "linux_compatibility": "Validate AMD64 and ARM64 with the same contracts; no mandatory container",
+      "macos_compatibility": "Validate ARM64 on shared M1 Pro 16 GiB; physical footprint/pressure, not RSS alone",
+      "bedrock_applicability": "Provider-independent harness efficiency; preserve Claude/Bedrock-specific semantics",
+      "dependency_impact": "Prefer existing workspace dependencies; no new production dependency approved by research",
+      "security_impact": "Hard constraints: authorization, sandbox posture, cancellation, provenance and required gates cannot weaken",
+      "license_implications": "No upstream implementation copied; review exact pinned license before any future code reuse",
+      "maintenance_burden": "Keep the existing owner/API; avoid a parallel runtime, registry, scheduler, store or observability framework",
+      "implementation_complexity_estimate": "medium; small measured moves first",
+      "regression_risk": "Unsafe lifetime or overaggressive trim can corrupt output or regress warm latency",
+      "confidence_level": "High in cited source mechanism; expected system-level gain remains conditional",
+      "benchmark_methodology": "Paired immutable baseline/candidate, held-out workloads, cold/warm separation, raw samples, overhead and uncertainty",
+      "acceptance_criteria": [
+        "Distinguish cheap Str/Arc clones from deep collection copies",
+        "Preserve patch failure atomicity, Unicode/delta ordering, redaction and borrowed-buffer lifetimes",
+        "Any cache/render idle trim demonstrates actual memory release without repaint/recall thrashing"
+      ],
+      "performance_acceptance": "Measured improvement beyond repeat noise on relevant held-out cases; all hard correctness/security gates pass",
+      "executable_verification": [
+        "just test-pkg omp-agent",
+        "just test-pkg omp-ai",
+        "just test-pkg omp-tui",
+        "fragmented stream and real-PTY resize/Unicode/large-output fixtures"
+      ],
+      "rollback_strategy": "Revert the bounded implementation/policy while retaining original source, format and journal/evidence identities",
+      "priority": "P2 conditional",
+      "dependencies": [
+        "R01"
+      ]
+    }
+  ]
+}
