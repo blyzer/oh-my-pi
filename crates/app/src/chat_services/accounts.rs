@@ -127,20 +127,33 @@ pub fn providers(state: &ServiceState) -> ServiceResult<Vec<ProviderRow>> {
 pub fn login(state: &ServiceState, provider: &str) -> ServiceResult<LoginFlow> {
 	let auth = stack(state)?.auth.clone();
 	let provider_id = ProviderId::new(provider);
-	if state
+	let catalog = state
 		.catalog
 		.as_ref()
-		.is_some_and(|catalog| catalog.load().provider(&provider_id).is_none())
-	{
-		return Err(ServiceError::Failed(sf!("Unknown OAuth provider: {provider}")));
-	}
+		.ok_or(ServiceError::Unavailable { feed: "provider catalog (remote gateway)" })?;
+	let catalog_load = catalog.load();
+	let provider_def = catalog_load
+		.provider(&provider_id)
+		.ok_or_else(|| ServiceError::Failed(sf!("Unknown provider: {provider}")))?;
+	// When the provider has no OAuth auth spec, prefer API key so the login
+	// driver does not fall through to an OAuth engine that never prompts for
+	// a static key. The auth manager's select_auth_spec prefers OAuth when
+	// method is None, so we must be explicit for API-key-only providers.
+	let has_oauth = provider_def.auth.iter().any(|id| {
+		catalog_load
+			.auth_spec(id)
+			.is_some_and(|spec| matches!(spec.kind, AuthSpecKind::Oauth))
+	});
+	let method = has_oauth
+		.then_some(None)
+		.unwrap_or(Some(omp_ai::call::AuthMethod::ApiKey));
 	let name = provider_name(state, &provider_id);
 	let (events_tx, events) = flume::unbounded();
 	let (input, input_rx) = flume::unbounded();
 	let (done_tx, done) = flume::bounded(1);
 	let (cancel, cancel_rx) = flume::bounded(1);
 	let database = state.data_dir.join("credentials.db");
-	let request = LoginRequest { provider: provider_id.clone(), method: None };
+	let request = LoginRequest { provider: provider_id.clone(), method };
 	let title = name.clone();
 	let discovery = state.discovery.clone();
 	let refreshed = provider_id.clone();
