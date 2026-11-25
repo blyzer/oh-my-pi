@@ -4134,7 +4134,14 @@ fn _open_environment_scope(
 	result.set_item("server_version", info.server_version)?;
 	result.set_item("server_build", info.server_build)?;
 	result.set_item("schema_rev", info.schema_rev)?;
-	result.set_item("capabilities", info.capabilities)?;
+	// Host features (ADR 0075 D11) ride the hello's capability list but are not manifest
+	// capabilities; `omp.env.Capability` has no member for them.
+	let capabilities: Vec<String> = info
+		.capabilities
+		.into_iter()
+		.filter(|name| !omp_env::SERVER_FEATURES.contains(&name.as_str()))
+		.collect();
+	result.set_item("capabilities", capabilities)?;
 	result.set_item("remote", false)?;
 	Ok((
 		Py::new(py, PyEnvironmentBackend {
