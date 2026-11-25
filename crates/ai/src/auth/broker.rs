@@ -1695,4 +1695,68 @@ mod tests {
 		};
 		assert_eq!(unknown.into_inner().map(|_| ()), Err(CredentialError::InvalidSource));
 	}
+
+	#[tokio::test]
+	async fn buildbuddy_header_credential_resolves_for_a_need_with_an_empty_sensitive_prefix() {
+		use http::HeaderMap;
+
+		use crate::auth::KeyPlacement;
+
+		let catalog = Catalog::embedded();
+		let provider_id = ProviderId::from("buildbuddy");
+		let provider = catalog
+			.provider(&provider_id)
+			.expect("buildbuddy provider is in the embedded catalog");
+		assert_eq!(provider.auth.len(), 1, "buildbuddy declares exactly one authentication");
+		let spec_id = &provider.auth[0];
+		let catalog_spec = catalog.auth_spec(spec_id).expect("buildbuddy authentication spec");
+		assert_eq!(catalog_spec.kind, AuthSpecKind::ApiKey);
+		assert_eq!(catalog_spec.credential_sources.as_ref(), [CredentialSourceSpec::Stored]);
+
+		// The runtime spec carries the placement the egress layer applies.
+		let AuthSpec::ApiKey { placement: KeyPlacement::Header(placement), .. } =
+			AuthSpec::from_catalog(catalog_spec, None, None).expect("runtime authentication spec")
+		else {
+			panic!("buildbuddy resolves to an API key in a header");
+		};
+		assert_eq!(placement.name, "x-buildbuddy-api-key");
+		assert!(placement.prefix.is_empty(), "the key is sent bare, with no scheme prefix");
+
+		// A `CredentialNeed` for that spec resolves to a scalar key lease.
+		let broker = CredentialBroker::from_catalog(
+			catalog,
+			Arc::new(EmptyEnvironment),
+			CredentialBrokerEngines::default(),
+		)
+		.expect("credential plans")
+		.with_api_key_override(catalog, &provider_id, SecretString::from("bb-key-1".to_owned()))
+		.expect("buildbuddy accepts an invocation key");
+		let lease = broker
+			.lease(CredentialNeed {
+				spec:        spec_id.clone(),
+				account:     None,
+				principal:   None,
+				valid_after: SystemTime::UNIX_EPOCH,
+			})
+			.await
+			.expect("buildbuddy need resolves");
+		assert_eq!(lease.kind(), CredentialKind::ApiKey);
+
+		let mut headers = HeaderMap::new();
+		lease
+			.apply_header(&placement, &mut headers)
+			.expect("header placement applies");
+		assert_eq!(headers.len(), 1);
+		assert_eq!(headers["x-buildbuddy-api-key"], "bb-key-1");
+		assert!(headers["x-buildbuddy-api-key"].is_sensitive());
+		assert!(!format!("{headers:?} {lease:?}").contains("bb-key-1"));
+
+		// A name the catalog does not declare never resolves to this provider.
+		let unknown = ProviderId::from("buildbuddy-unlisted");
+		assert!(catalog.provider(&unknown).is_none());
+		assert!(matches!(
+			broker.with_api_key_override(catalog, &unknown, SecretString::from("x".to_owned())),
+			Err(CredentialBrokerError::UnknownProvider(_))
+		));
+	}
 }

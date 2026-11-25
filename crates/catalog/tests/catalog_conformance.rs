@@ -2209,3 +2209,27 @@ fn adr_0059_provider_policy_carries_the_dialect_for_discovered_rows() {
 	assert_eq!(coral.role.supports_developer_role, Some(false));
 	assert_eq!(coral.context.supports_store, Some(false));
 }
+
+#[test]
+fn buildbuddy_provider_declares_a_stored_header_credential_with_an_empty_prefix() {
+	let compiled = compile_frozen_oracle();
+	let provider = compiled
+		.providers
+		.iter()
+		.find(|provider| provider.id == "buildbuddy")
+		.expect("buildbuddy provider is declared");
+	assert_eq!(provider.auth.len(), 1, "one authentication");
+	let auth = compiled
+		.auth_specs
+		.iter()
+		.find(|auth| auth.id == provider.auth[0])
+		.expect("buildbuddy authentication");
+	assert_eq!(auth.kind, AuthSpecKind::ApiKey);
+	assert_eq!(auth.header_name.as_deref(), Some("x-buildbuddy-api-key"));
+	assert!(auth.prefix.as_deref().unwrap_or_default().is_empty(), "empty prefix");
+	assert!(auth.query_parameter.is_none() && auth.sealed_body.is_none());
+	// Stored only: the key arrives through the credential store's write path, never
+	// from an environment variable the catalog names.
+	assert_eq!(auth.credential_sources.as_ref(), [CredentialSourceSpec::Stored]);
+	assert!(compiled.providers.iter().all(|provider| provider.id != "buildbuddy-unlisted"));
+}
