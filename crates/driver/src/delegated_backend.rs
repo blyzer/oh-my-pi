@@ -311,7 +311,9 @@ impl DelegatedBackend {
 			.to_string();
 
 		if operation.is_empty() {
-			tracing::error!(?result, "delegated backend start returned no operation ID");
+			// Never log the device reply: it is untrusted, unbounded and may echo request
+			// data.
+			tracing::error!("delegated backend start returned no operation ID");
 			return Err(ExecutionError::Transport {
 				source: Arc::new(DelegatedError::Malformed { operation: device::START }),
 			});

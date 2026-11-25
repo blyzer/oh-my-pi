@@ -178,21 +178,21 @@ pub enum ExecutionError {
 		remote: RemoteCancel,
 	},
 	/// The connection to the backend failed.
-	#[error("backend transport failed: {source}")]
+	#[error("backend transport failed")]
 	Transport {
 		/// The transport cause.
 		#[source]
 		source: ForeignError,
 	},
 	/// The backend failed internally (`INTERNAL`, a lost worker).
-	#[error("backend infrastructure failed: {source}")]
+	#[error("backend infrastructure failed")]
 	Infrastructure {
 		/// The infrastructure cause.
 		#[source]
 		source: ForeignError,
 	},
 	/// Capturing the working tree failed.
-	#[error("input capture failed: {source}")]
+	#[error("input capture failed")]
 	InputCapture {
 		/// The capture cause.
 		#[source]
@@ -208,14 +208,14 @@ pub enum ExecutionError {
 		rule: Str,
 	},
 	/// Fetching outputs after the command ran failed.
-	#[error("output retrieval failed: {source}")]
+	#[error("output retrieval failed")]
 	OutputRetrieval {
 		/// The retrieval cause.
 		#[source]
 		source: ForeignError,
 	},
 	/// The execution configuration is invalid.
-	#[error("execution configuration is invalid: {source}")]
+	#[error("execution configuration is invalid")]
 	Config {
 		/// The configuration cause.
 		#[source]
@@ -241,7 +241,7 @@ pub enum ExecutionError {
 	NotSubmitted,
 	/// The stored reattach handle could not be decoded, so the accepted
 	/// operation cannot be named.
-	#[error("stored reattach handle is invalid: {source}")]
+	#[error("stored reattach handle is invalid")]
 	InvalidHandle {
 		/// The decode failure.
 		#[source]
