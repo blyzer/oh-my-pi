@@ -21,7 +21,7 @@ use omp_core::{Str, sf};
 use omp_driver::discovery::{
 	CL_DISABLED_EXTENSIONS,
 	native::{
-		NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
+		NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode, SandboxProbe,
 		admit_native_extensions_with_control,
 	},
 	skills::{ActiveSkills, SKILL_ID_PREFIX},
@@ -186,11 +186,12 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
+	let probe = || omp_envd::admission::probe_sandbox(&ctx, project).confines();
 	let control = NativeControlGrantOptions {
 		data_dir:          &data_dir,
 		sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
 		writable_roots:    &writable_roots,
-		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, project).confines(),
+		sandbox_available: SandboxProbe::lazy(&probe),
 	};
 	let extensions = admit_native_extensions_with_control(
 		project,

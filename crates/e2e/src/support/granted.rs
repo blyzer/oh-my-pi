@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use omp_core::Str;
 use omp_driver::discovery::native::{
 	AdmittedNativeExtension, NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
-	admit_native_extensions_contained_with_control, user_extension_root,
+	SandboxProbe, admit_native_extensions_contained_with_control, user_extension_root,
 };
 use omp_envd::{
 	EnvServer, ExtensionDataBinding,
@@ -192,7 +192,7 @@ impl OperatorHome {
 			data_dir:          &self.data_dir,
 			sandbox_mode:      SV_SANDBOX_MODE.get(&ctx),
 			writable_roots:    &writable_roots,
-			sandbox_available: sandbox.confines(),
+			sandbox_available: SandboxProbe::known(sandbox.confines()),
 		};
 		let report = admit_native_extensions_contained_with_control(
 			project,
