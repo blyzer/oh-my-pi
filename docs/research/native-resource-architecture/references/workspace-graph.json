@@ -1,0 +1,7332 @@
+{
+  "pin": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+  "argv": [
+    "cargo",
+    "metadata",
+    "--offline",
+    "--locked",
+    "--no-deps",
+    "--format-version",
+    "1"
+  ],
+  "scope": "Declared internal dependency edges, including optional/target/test edges; not runtime residency or a resolved active-feature graph",
+  "packages": [
+    {
+      "name": "omp-adw",
+      "version": "2.0.0",
+      "manifest": "crates/adw/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_adw",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-agent",
+      "version": "2.0.0",
+      "manifest": "crates/agent/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_agent",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "advisor",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "approval_desk",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "approvals",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "cancel",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "compaction",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "delegated",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "detached_external",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "directors",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "dispatch",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "empty_output",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "extensions",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "failure",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "jobs",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "lifecycle_hooks",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "local",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "model_watch",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "output_stream",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "prompt_golden",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "roster_restrictions",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "runtime_flags",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "stream_coalescing",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "stream_rules_director",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "stream_watch",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "thread_projection",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "turn",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ai",
+      "version": "2.0.0",
+      "manifest": "crates/ai/Cargo.toml",
+      "declared_features": {
+        "apple-aux-memory": [
+          "local-applefm"
+        ],
+        "default": [],
+        "device-attestation": [
+          "dep:block2",
+          "dep:objc2",
+          "dep:objc2-foundation"
+        ],
+        "local": [],
+        "local-applefm": [
+          "local"
+        ],
+        "local-embedding": [
+          "local",
+          "dep:fastembed"
+        ],
+        "local-stt": [
+          "local",
+          "dep:candle-core",
+          "dep:candle-nn",
+          "dep:candle-transformers",
+          "dep:tokenizers"
+        ],
+        "local-tts": [
+          "local",
+          "dep:candle-core",
+          "dep:candle-nn",
+          "dep:voice-g2p"
+        ],
+        "realtime": [
+          "speech",
+          "dep:audiopus_sys",
+          "dep:opus",
+          "dep:webrtc",
+          "device-attestation"
+        ],
+        "speech": [
+          "dep:omp-audio"
+        ],
+        "test-support": []
+      },
+      "targets": [
+        {
+          "name": "omp_ai",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "applefm_smoke",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "account",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "conformance",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "kokoro_stft_roundtrip",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "local_runtime",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "transport_framing",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "vendor_schema_drift",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-app",
+      "version": "2.0.0",
+      "manifest": "crates/app/Cargo.toml",
+      "declared_features": {
+        "cap-browser": [
+          "omp-envd/cap-browser",
+          "omp-driver/cap-browser"
+        ],
+        "cap-ci": [
+          "omp-envd/cap-ci",
+          "omp-chat/cap-ci",
+          "omp-tools/cap-ci"
+        ],
+        "cap-computer": [
+          "omp-envd/cap-computer"
+        ],
+        "cap-forge": [
+          "omp-envd/cap-forge",
+          "omp-chat/cap-forge",
+          "omp-tools/cap-forge"
+        ],
+        "cap-media": [
+          "omp-envd/cap-media"
+        ],
+        "cap-ssh": [
+          "omp-envd/cap-ssh"
+        ],
+        "claude-trace": [],
+        "default": [
+          "local",
+          "cap-ssh",
+          "cap-computer",
+          "cap-browser",
+          "cap-media",
+          "cap-forge",
+          "cap-ci"
+        ],
+        "gui": [
+          "dep:omp-gui"
+        ],
+        "local": [
+          "omp-driver/local",
+          "omp-ai/local"
+        ],
+        "local-all": [
+          "local-applefm",
+          "local-embedding",
+          "local-stt",
+          "local-tts"
+        ],
+        "local-applefm": [
+          "local",
+          "omp-driver/local-applefm",
+          "omp-ai/local-applefm"
+        ],
+        "local-embedding": [
+          "local",
+          "omp-driver/local-embedding",
+          "omp-ai/local-embedding",
+          "omp-memory/local-embedding"
+        ],
+        "local-stt": [
+          "local",
+          "omp-driver/local-stt",
+          "omp-ai/local-stt"
+        ],
+        "local-tts": [
+          "local",
+          "omp-driver/local-tts",
+          "omp-ai/local-tts"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_app",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "claude-trace",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "omp",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "acp_spine",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "adw_cfg",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "attach_client",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "config",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_process_protocol",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "export_cwd",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "it",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "keybindings",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "rpc_spine",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "session_import",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "worker_child",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "worktree_query",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ar",
+      "version": "2.0.0",
+      "manifest": "crates/ar/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ar",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "roundtrip",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "asar",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "cab",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "codecs",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "cpio",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "filesystem",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "iso",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "legacy_dos",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "rar",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "registry",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "rejection",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "round_trip",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sevenzip",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "tar",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "unix_ar",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "xz",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ast",
+      "version": "2.0.0",
+      "manifest": "crates/ast/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ast",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-audio",
+      "version": "2.0.0",
+      "manifest": "crates/audio/Cargo.toml",
+      "declared_features": {
+        "default": [
+          "native-audio"
+        ],
+        "native-audio": [
+          "dep:libc",
+          "dep:windows-sys",
+          "dep:block2",
+          "dep:objc2"
+        ],
+        "virtual-output": []
+      },
+      "targets": [
+        {
+          "name": "omp_audio",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-cache",
+      "version": "2.0.0",
+      "manifest": "crates/cache/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_cache",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-catalog",
+      "version": "2.0.0",
+      "manifest": "crates/catalog/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_catalog",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "generate_snapshot",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "catalog_conformance",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "compat_cascade",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "policy_pricing_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-chat",
+      "version": "2.0.0",
+      "manifest": "crates/chat/Cargo.toml",
+      "declared_features": {
+        "cap-ci": [
+          "omp-tools/cap-ci"
+        ],
+        "cap-forge": [
+          "omp-tools/cap-forge"
+        ],
+        "default": [
+          "cap-forge",
+          "cap-ci"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_chat",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "card_parity",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "card_types",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "chrome",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "host",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "keys",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "pi_commands",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ci",
+      "version": "2.0.0",
+      "manifest": "crates/ci/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ci",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "neutrality",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ci-delegated",
+      "version": "2.0.0",
+      "manifest": "crates/ci-delegated/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ci_delegated",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "neutrality",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "route",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-collab",
+      "version": "2.0.0",
+      "manifest": "crates/collab/Cargo.toml",
+      "declared_features": {
+        "test-relay": [
+          "dep:parking_lot"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_collab",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-con",
+      "version": "2.0.0",
+      "manifest": "crates/con/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_con",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "cfg",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "console",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "derive",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "layers",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "project",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-contract",
+      "version": "2.0.0",
+      "manifest": "crates/contract/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_contract",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "hook_catalog",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-core",
+      "version": "2.0.0",
+      "manifest": "crates/core/Cargo.toml",
+      "declared_features": {
+        "open": [
+          "dep:url"
+        ],
+        "schemars": [
+          "dep:schemars"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_core",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "base_n",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "encoding",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hex",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "principal",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "slopjson_incoming",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "slopjson_slop",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sparse",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sparse_container",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-desktop",
+      "version": "2.0.0",
+      "manifest": "crates/desktop/Cargo.toml",
+      "declared_features": {
+        "default": [],
+        "wayland-pipewire": [
+          "dep:pipewire"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_desktop",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-dom",
+      "version": "2.0.0",
+      "manifest": "crates/dom/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_dom",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "dom",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-driver",
+      "version": "2.0.0",
+      "manifest": "crates/driver/Cargo.toml",
+      "declared_features": {
+        "cap-browser": [
+          "omp-envd/cap-browser"
+        ],
+        "default": [],
+        "local": [
+          "omp-ai/local"
+        ],
+        "local-all": [
+          "local-applefm",
+          "local-embedding",
+          "local-stt",
+          "local-tts"
+        ],
+        "local-applefm": [
+          "local",
+          "omp-ai/local-applefm"
+        ],
+        "local-embedding": [
+          "local",
+          "omp-ai/local-embedding",
+          "omp-memory/local-embedding"
+        ],
+        "local-stt": [
+          "local",
+          "omp-ai/local-stt"
+        ],
+        "local-tts": [
+          "local",
+          "omp-envd/local-tts",
+          "omp-ai/local-tts"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_driver",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "approval_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "configured_models",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "delegated_prompt",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "delegated_resolver",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "detached_terminal",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "discovered_models",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "discovery_refresh",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "first_run_discovery",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "gateway_credential_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hub_sessions",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "memory_reflect",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "plugin_commands",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "plugin_hooks",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "project_cfg_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "provider_rejection_surfaces",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "remote_build",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "session_attach_uds",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "session_submit",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "subagent_cfg",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "v1_import_system_prompts",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "vendor_env_credentials",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "verification_evidence",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "verification_native",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "verification_policy",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "verification_snapshot",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "workpool_producer",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "workpool_scheduler",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "workspace_trust_gates",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-e2e",
+      "version": "2.0.0",
+      "manifest": "crates/e2e/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_e2e",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "baseline",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "omp_e2e_host",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "pooling-bench",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p10_lift_idempotence",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p11_collab_spectator",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p12_daemon_approvals",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p13_remote_exec",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p14_session_attach",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p1_doc_race",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p1_editor_buffer",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p2_cancel_matrix",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p3_detached_jobs",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p4_schema_isolation",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p5_prefix_stability",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p6_crash_resume",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p7_tsp",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p7_tui",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p8_baselines",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p9_agent_settled",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p9_continuation_grants",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p9_extension_control",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "p9_isolation",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "tool_sources",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-edit",
+      "version": "2.0.0",
+      "manifest": "crates/edit/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_edit",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "apply_patch",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "apply_patch_parity",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hashline_apply",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hashline_parity",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hashline_parse",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "hashline_patcher",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "patch",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "replace",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "replace_parity",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "session",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sloppy",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sloppy_parse",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-env",
+      "version": "2.0.0",
+      "manifest": "crates/env/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_env",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "client",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "extension_client",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-envd",
+      "version": "2.0.0",
+      "manifest": "crates/envd/Cargo.toml",
+      "declared_features": {
+        "cap-browser": [
+          "dep:omp-webview",
+          "dep:tokio-tungstenite",
+          "omp-tools/cap-browser"
+        ],
+        "cap-ci": [
+          "dep:omp-ci",
+          "dep:omp-ci-delegated",
+          "omp-tools/cap-ci"
+        ],
+        "cap-computer": [
+          "dep:omp-desktop",
+          "omp-tools/cap-computer"
+        ],
+        "cap-forge": [
+          "dep:omp-forge",
+          "dep:omp-forge-delegated",
+          "omp-tools/cap-forge"
+        ],
+        "cap-media": [
+          "dep:omp-audio",
+          "omp-tools/cap-media"
+        ],
+        "cap-ssh": [
+          "dep:omp-ssh"
+        ],
+        "default": [],
+        "local-tts": [
+          "omp-ai/local-tts"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_envd",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "browser_relay_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "control_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "credential_secret_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "declared_scheme_fold",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "declared_scheme_s3",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "declared_scheme_s4",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "declared_scheme_s5",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "device_hook_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "docserver_authority_client",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "docserver_lsp_supervisor",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "docserver_terminal_stream",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "document_config_root",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "domain_control_router",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "durable_schedules",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "exec_local_backend",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "host_owner_backends",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "manifest_control_declarations",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "mcp_control_resolver",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "policy_placement_params_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "production_control_factory",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "provider_regime_service_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "ui_telemetry_jobs_authority",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "workspace_capture",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "workspace_snapshot_protocol",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-exec",
+      "version": "2.0.0",
+      "manifest": "crates/exec/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_exec",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-exec-local",
+      "version": "2.0.0",
+      "manifest": "crates/exec-local/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_exec_local",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-exec-reapi",
+      "version": "2.0.0",
+      "manifest": "crates/exec-reapi/Cargo.toml",
+      "declared_features": {
+        "default": [
+          "test-server"
+        ],
+        "test-server": []
+      },
+      "targets": [
+        {
+          "name": "omp_exec_reapi",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "live_buildbuddy",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-exec-ssh",
+      "version": "2.0.0",
+      "manifest": "crates/exec-ssh/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_exec_ssh",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "loopback",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ext",
+      "version": "2.0.0",
+      "manifest": "crates/ext/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ext",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "workspace_trust_inventory",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-forge",
+      "version": "2.0.0",
+      "manifest": "crates/forge/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_forge",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "neutrality",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-forge-delegated",
+      "version": "2.0.0",
+      "manifest": "crates/forge-delegated/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_forge_delegated",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "neutrality",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "route",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-grep",
+      "version": "2.0.0",
+      "manifest": "crates/grep/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_grep",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-gui",
+      "version": "2.0.0",
+      "manifest": "crates/gui/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_gui",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "browser",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "chat",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-http",
+      "version": "2.0.0",
+      "manifest": "crates/http/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_http",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-journal",
+      "version": "2.0.0",
+      "manifest": "crates/journal/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_journal",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "data",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "gc",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "journal",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "runlog",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "sse",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "vocabulary",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-kb",
+      "version": "2.0.0",
+      "manifest": "crates/kb/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_kb",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "omp-kb",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "cli",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "languages",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-macros",
+      "version": "2.0.0",
+      "manifest": "crates/macros/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_macros",
+          "kind": [
+            "proc-macro"
+          ],
+          "crate_types": [
+            "proc-macro"
+          ]
+        },
+        {
+          "name": "cached",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-memory",
+      "version": "2.0.0",
+      "manifest": "crates/memory/Cargo.toml",
+      "declared_features": {
+        "apple-aux-memory": [
+          "dep:omp-ai",
+          "omp-ai/apple-aux-memory"
+        ],
+        "default": [],
+        "local-embedding": [
+          "dep:fastembed"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_memory",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "omp-memory-embedding-worker",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-minimizer",
+      "version": "2.0.0",
+      "manifest": "crates/minimizer/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_minimizer",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "savings",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "minimizer_fixtures",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-oauth",
+      "version": "2.0.0",
+      "manifest": "crates/oauth/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_oauth",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-observability",
+      "version": "2.0.0",
+      "manifest": "crates/observability/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_observability",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "fail_open_hooks",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-proto",
+      "version": "2.0.0",
+      "manifest": "crates/proto/Cargo.toml",
+      "declared_features": {
+        "default": [],
+        "tonic": [
+          "dep:tonic",
+          "dep:tonic-prost"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_proto",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "auth_gateway",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "bytes_text",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_acp_wire",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_approval_wire",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_reflection_wire",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_wave1",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "frame_bounds",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-py",
+      "version": "2.0.0",
+      "manifest": "crates/py/Cargo.toml",
+      "declared_features": {
+        "default": [],
+        "inspect": [
+          "pyo3/experimental-inspect",
+          "dep:pyo3-introspection"
+        ]
+      },
+      "targets": [
+        {
+          "name": "omp_py",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "omp-demo",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "stubgen",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "agents_runtime_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "control_auxiliary_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "convars_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "devices_hooks_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_data_async_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "env_data_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "extension_registrar_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "frozen_surface",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "policy_placement_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "prelude_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "provider_regime_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "registry_worker_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "remote_rpc_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "schemes_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "scribe_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "site_initialization_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "state_persistence_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "ui_telemetry_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-py-link",
+      "version": "2.0.0",
+      "manifest": "crates/py-link/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_py_link",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-roster-probe",
+      "version": "2.0.0",
+      "manifest": "crates/roster-probe/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_roster_probe",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "presence",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-rpc",
+      "version": "2.0.0",
+      "manifest": "crates/rpc/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_rpc",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-sandbox",
+      "version": "2.0.0",
+      "manifest": "crates/sandbox/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_sandbox",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "appcontainer",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "bubblewrap",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "core",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "docker",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "gvisor",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "landlock",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "seatbelt",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-scribe",
+      "version": "2.0.0",
+      "manifest": "crates/scribe/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_scribe",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-sdk",
+      "version": "2.0.0",
+      "manifest": "crates/sdk/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_sdk",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-secrets",
+      "version": "2.0.0",
+      "manifest": "crates/secrets/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_secrets",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "key_persistence",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-serve",
+      "version": "2.0.0",
+      "manifest": "crates/serve/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_serve",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-session",
+      "version": "2.0.0",
+      "manifest": "crates/session/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_session",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "appendix_a",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "golden_journals",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "idempotency",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "newer_journal",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "projection",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "replay_law",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "rewind",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-shell",
+      "version": "2.0.0",
+      "manifest": "crates/shell/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_shell",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-shell-builtins",
+      "version": "2.0.0",
+      "manifest": "crates/shell-builtins/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_shell_builtins",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "omp-sh",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "dyn",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "exec",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "factory",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "nonutf8_env",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "streaming",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-snapcompact",
+      "version": "2.0.0",
+      "manifest": "crates/snapcompact/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_snapcompact",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-ssh",
+      "version": "2.0.0",
+      "manifest": "crates/ssh/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_ssh",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-tool",
+      "version": "2.0.0",
+      "manifest": "crates/tool/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_tool",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "contracts",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "schema",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-tools",
+      "version": "2.0.0",
+      "manifest": "crates/tools/Cargo.toml",
+      "declared_features": {
+        "cap-browser": [],
+        "cap-ci": [
+          "dep:omp-ci"
+        ],
+        "cap-computer": [],
+        "cap-forge": [
+          "dep:omp-forge"
+        ],
+        "cap-media": []
+      },
+      "targets": [
+        {
+          "name": "omp_tools",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "it",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-tui",
+      "version": "2.0.0",
+      "manifest": "crates/tui/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_tui",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "companies",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "diff",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "footers",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "gallery",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "tml",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "tools",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "elastic_props",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "seal_rebuild",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-vcs",
+      "version": "2.0.0",
+      "manifest": "crates/vcs/Cargo.toml",
+      "declared_features": {
+        "test-support": []
+      },
+      "targets": [
+        {
+          "name": "omp_vcs",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-vocab",
+      "version": "2.0.0",
+      "manifest": "crates/vocab/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_vocab",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-walker",
+      "version": "2.0.0",
+      "manifest": "crates/walker/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_walker",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "parallel",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "perf",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "omp-webview",
+      "version": "2.0.0",
+      "manifest": "crates/webview/Cargo.toml",
+      "declared_features": {},
+      "targets": [
+        {
+          "name": "omp_webview",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ]
+        },
+        {
+          "name": "child",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "frames",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "ipc",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        },
+        {
+          "name": "window",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "omp-adw",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-contract",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-scribe",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-snapcompact",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-agent",
+      "to": "omp-vocab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-audio",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-oauth",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ai",
+      "to": "omp-secrets",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support",
+        "realtime"
+      ]
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-audio",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-cache",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-chat",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-collab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-contract",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "open"
+      ]
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-driver",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-edit",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-envd",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-gui",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-http",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-kb",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-memory",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-py",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-rpc",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-sandbox",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-scribe",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-sdk",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-serve",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-shell-builtins",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-ssh",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-tui",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-app",
+      "to": "omp-py-link",
+      "alias": null,
+      "kind": "build",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ar",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ast",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ast",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-audio",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-cache",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-catalog",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-catalog",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-audio",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "open"
+      ]
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-tui",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-audio",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "virtual-output"
+      ]
+    },
+    {
+      "from": "omp-chat",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-ci",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-ci-delegated",
+      "to": "omp-ci",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ci-delegated",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-collab",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-collab",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-con",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-con",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-contract",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-dom",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-dom",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-dom",
+      "to": "omp-vocab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-cache",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-collab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-contract",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-envd",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-exec-local",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-exec-reapi",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-http",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-memory",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-rpc",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-scribe",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-secrets",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-serve",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-ssh",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-tui",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-driver",
+      "to": "omp-sandbox",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": "cfg(target_os = \"linux\")",
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-app",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-collab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-relay"
+      ]
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-driver",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-edit",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-envd",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-exec-reapi",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": [
+        "test-server"
+      ]
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-rpc",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-sandbox",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-scribe",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-serve",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-shell-builtins",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-tui",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-e2e",
+      "to": "omp-py-link",
+      "alias": null,
+      "kind": "build",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-edit",
+      "to": "omp-ast",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-edit",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-edit",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-env",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-env",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-env",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ast",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-audio",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-cache",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ci",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ci-delegated",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-contract",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "open",
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-desktop",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-edit",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-forge",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-forge-delegated",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-grep",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-http",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-memory",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-minimizer",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-oauth",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-py",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-sandbox",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-secrets",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-shell-builtins",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-ssh",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-webview",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-exec-local",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-envd",
+      "to": "omp-vcs",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-exec",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec",
+      "to": "omp-sandbox",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-local",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-local",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-local",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-local",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-reapi",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-reapi",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-reapi",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-reapi",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-ssh",
+      "to": "omp-adw",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-ssh",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-ssh",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-exec-ssh",
+      "to": "omp-ssh",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ext",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-forge",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-forge-delegated",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-forge-delegated",
+      "to": "omp-forge",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-grep",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-grep",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-gui",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-gui",
+      "to": "omp-tui",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-gui",
+      "to": "omp-webview",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-journal",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-journal",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-kb",
+      "to": "omp-ast",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-kb",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-macros",
+      "to": "omp-vocab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-macros",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-memory",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-memory",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-minimizer",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-minimizer",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-minimizer",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-oauth",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-observability",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-observability",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-observability",
+      "to": "omp-secrets",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-observability",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-proto",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-py",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-py",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-py",
+      "to": "omp-scribe",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-py",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-py",
+      "to": "omp-py-link",
+      "alias": null,
+      "kind": "build",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-envd",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-roster-probe",
+      "to": "omp-tools",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-rpc",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-rpc",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-sandbox",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-scribe",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-scribe",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-sdk",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-secrets",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-secrets",
+      "to": "omp-cache",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-agent",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "tonic"
+      ]
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-session",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-serve",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-dom",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-exec",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-journal",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-observability",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-session",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell",
+      "to": "omp-macros",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell-builtins",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell-builtins",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell-builtins",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-shell-builtins",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ssh",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-ssh",
+      "to": "omp-ext",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tool",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-tool",
+      "to": "omp-catalog",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tool",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-tool",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-ar",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-ast",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-ci",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-con",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "schemars"
+      ]
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-edit",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-env",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-forge",
+      "alias": null,
+      "kind": "normal",
+      "optional": true,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-macros",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-memory",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": false,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-proto",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-py",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-shell",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-shell-builtins",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-tool",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-walker",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-ai",
+      "alias": null,
+      "kind": "dev",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": [
+        "test-support"
+      ]
+    },
+    {
+      "from": "omp-tools",
+      "to": "omp-py-link",
+      "alias": null,
+      "kind": "build",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tui",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tui",
+      "to": "omp-macros",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tui",
+      "to": "omp-snapcompact",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-tui",
+      "to": "omp-vocab",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-vcs",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-vocab",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    },
+    {
+      "from": "omp-webview",
+      "to": "omp-core",
+      "alias": null,
+      "kind": "normal",
+      "optional": false,
+      "target": null,
+      "uses_default_features": true,
+      "declared_features": []
+    }
+  ]
+}

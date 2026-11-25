@@ -1,0 +1,4607 @@
+{
+  "actual_blob_api_summary": [],
+  "commands": [
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--no-deps",
+        "--format-version",
+        "1"
+      ],
+      "elapsed_ns": 87357770,
+      "exit": 0,
+      "stderr": "",
+      "stdout_note": "Parsed package/target/features recorded in inventory; no dependency resolution implied."
+    },
+    {
+      "argv": [
+        "rustc",
+        "-Vv"
+      ],
+      "elapsed_ns": 28147581,
+      "exit": 0,
+      "stderr": "",
+      "stdout": "rustc 1.99.0-nightly (1a98b1e13 2026-08-07)\nbinary: rustc\ncommit-hash: 1a98b1e135b254f209c67d447b6d8bcd56a859e0\ncommit-date: 2026-08-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0-nightly\nLLVM version: 23.1.0\n"
+    },
+    {
+      "argv": [
+        "cargo",
+        "-V"
+      ],
+      "elapsed_ns": 62230530,
+      "exit": 0,
+      "stderr": "",
+      "stdout": "cargo 1.99.0-nightly (c79e8f894 2026-08-04)\n"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "-d"
+      ],
+      "elapsed_ns": 1071271730,
+      "exit": 0,
+      "stderr": "",
+      "stdout": "aead v0.5.2\n\u251c\u2500\u2500 aes-gcm v0.10.3\n\u2502   \u251c\u2500\u2500 dtls v0.17.2\n\u2502   \u2502   \u2514\u2500\u2500 webrtc v0.17.2\n\u2502   \u2502       \u2514\u2500\u2500 omp-ai v2.0.0 (/workspace/omp-native-research/crates/ai)\n\u2502   \u2502           \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app)\n\u2502   \u2502           \u2502   \u2502   \u2514\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat)\n\u2502   \u2502           \u2502   \u2502   \u2514\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver)\n\u2502   \u2502           \u2502   \u2502   \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502   \u2502   \u2514\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-sdk v2.0.0 (/workspace/omp-native-research/crates/sdk)\n\u2502   \u2502           \u2502   \u2502   \u2514\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502   \u2514\u2500\u2500 omp-serve v2.0.0 (/workspace/omp-native-research/crates/serve)\n\u2502   \u2502           \u2502       \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502       \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502           \u2502       \u2514\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat) (*)\n\u2502   \u2502           \u251c\u2500\u2500 omp-contract v2.0.0 (/workspace/omp-native-research/crates/contract)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent) (*)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502   \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502           \u2502   \u2514\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd)\n\u2502   \u2502           \u2502       \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502           \u2502       \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502           \u2502       \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u2502       \u2514\u2500\u2500 omp-roster-probe v2.0.0 (/workspace/omp-native-research/crates/roster-probe)\n\u2502   \u2502           \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502           \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502           \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502           \u251c\u2500\u2500 omp-serve v2.0.0 (/workspace/omp-native-research/crates/serve) (*)\n\u2502   \u2502           \u2514\u2500\u2500 omp-tool v2.0.0 (/workspace/omp-native-research/crates/tool)\n\u2502   \u2502               \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-contract v2.0.0 (/workspace/omp-native-research/crates/contract) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u251c\u2500\u2500 omp-observability v2.0.0 (/workspace/omp-native-research/crates/observability)\n\u2502   \u2502               \u2502   \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u2502   \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502   \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u2502   \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u2502   \u251c\u2500\u2500 omp-exec-reapi v2.0.0 (/workspace/omp-native-research/crates/exec-reapi)\n\u2502   \u2502               \u2502   \u2502   \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502   \u2502   \u2514\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u2502   \u2514\u2500\u2500 omp-session v2.0.0 (/workspace/omp-native-research/crates/session)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-contract v2.0.0 (/workspace/omp-native-research/crates/contract) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u2502       \u251c\u2500\u2500 omp-sdk v2.0.0 (/workspace/omp-native-research/crates/sdk) (*)\n\u2502   \u2502               \u2502       \u2514\u2500\u2500 omp-serve v2.0.0 (/workspace/omp-native-research/crates/serve) (*)\n\u2502   \u2502               \u2502       [dev-dependencies]\n\u2502   \u2502               \u2502       \u2514\u2500\u2500 omp-con v2.0.0 (/workspace/omp-native-research/crates/con)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-ai v2.0.0 (/workspace/omp-native-research/crates/ai) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-catalog v2.0.0 (/workspace/omp-native-research/crates/catalog)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-agent v2.0.0 (/workspace/omp-native-research/crates/agent) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-ai v2.0.0 (/workspace/omp-native-research/crates/ai) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-contract v2.0.0 (/workspace/omp-native-research/crates/contract) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u2502           \u2502   \u251c\u2500\u2500 omp-serve v2.0.0 (/workspace/omp-native-research/crates/serve) (*)\n\u2502   \u2502               \u2502           \u2502   \u2514\u2500\u2500 omp-tool v2.0.0 (/workspace/omp-native-research/crates/tool) (*)\n\u2502   \u2502               \u2502           \u2502   [dev-dependencies]\n\u2502   \u2502               \u2502           \u2502   \u2514\u2500\u2500 omp-sdk v2.0.0 (/workspace/omp-native-research/crates/sdk) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-contract v2.0.0 (/workspace/omp-native-research/crates/contract) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-e2e v2.0.0 (/workspace/omp-native-research/crates/e2e)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-minimizer v2.0.0 (/workspace/omp-native-research/crates/minimizer)\n\u2502   \u2502               \u2502           \u2502   \u2514\u2500\u2500 omp-envd v2.0.0 (/workspace/omp-native-research/crates/envd) (*)\n\u2502   \u2502               \u2502           \u251c\u2500\u2500 omp-roster-probe v2.0.0 (/workspace/omp-native-research/crates/roster-probe)\n\u2502   \u2502               \u2502           \u2514\u2500\u2500 omp-tools v2.0.0 (/workspace/omp-native-research/crates/tools)\n\u2502   \u2502               \u2502               \u251c\u2500\u2500 omp-app v2.0.0 (/workspace/omp-native-research/crates/app) (*)\n\u2502   \u2502               \u2502               \u251c\u2500\u2500 omp-chat v2.0.0 (/workspace/omp-native-research/crates/chat) (*)\n\u2502   \u2502               \u2502               \u251c\u2500\u2500 omp-driver v2.0.0 (/workspace/omp-native-research/crates/driver) (*)\n\u2502   \u2502               \u2502               \u251c\u2500\u2500 omp-",
+      "stdout_lines": 3908,
+      "stdout_note": "Excerpt only; command can regenerate full tree. Lock duplicate inventory is complete.",
+      "stdout_sha256": "38a0aff398c63cd80c1bca3d46c08bf5ec27ff034de99821208d0482eb1f9428"
+    },
+    {
+      "argv": [
+        "env",
+        "CARGO_TARGET_DIR=/tmp/omp-native-core-target",
+        "just",
+        "test-pkg",
+        "omp-core"
+      ],
+      "elapsed_ns": 5177900095,
+      "exit": 0,
+      "stderr": "rmat\n        PASS [   0.004s] (581/655) omp-core::sparse_container sparse_map_extend\n        PASS [   0.004s] (582/655) omp-core::sparse_container sparse_map_extend_with_duplicates\n        PASS [   0.004s] (583/655) omp-core::sparse_container sparse_map_first_last_empty\n        PASS [   0.004s] (584/655) omp-core::sparse_container sparse_map_first_last\n        PASS [   0.004s] (585/655) omp-core::sparse_container sparse_map_from_iter_duplicate_keys\n        PASS [   0.004s] (586/655) omp-core::sparse_container sparse_map_from_iter_ordered\n        PASS [   0.004s] (587/655) omp-core::sparse_container sparse_map_from_parts_mismatched\n        PASS [   0.004s] (588/655) omp-core::sparse_container sparse_map_from_iter_unordered\n        PASS [   0.004s] (589/655) omp-core::sparse_container sparse_map_from_sequence\n        PASS [   0.004s] (590/655) omp-core::sparse_container sparse_map_get_or_insert_existing\n        PASS [   0.004s] (591/655) omp-core::sparse_container sparse_map_get_or_insert_with_existing\n        PASS [   0.004s] (592/655) omp-core::sparse_container sparse_map_get_or_insert_new\n        PASS [   0.004s] (593/655) omp-core::sparse_container sparse_map_index_mut_trait\n        PASS [   0.004s] (594/655) omp-core::sparse_container sparse_map_get_or_insert_with_new\n        PASS [   0.003s] (595/655) omp-core::sparse_container sparse_map_index_trait_panic\n        PASS [   0.004s] (596/655) omp-core::sparse_container sparse_map_index_trait\n        PASS [   0.004s] (597/655) omp-core::sparse_container sparse_map_into_parts_from_parts\n        PASS [   0.004s] (598/655) omp-core::sparse_container sparse_map_is_sparse_consecutive\n        PASS [   0.004s] (599/655) omp-core::sparse_container sparse_map_is_sparse_empty\n        PASS [   0.004s] (600/655) omp-core::sparse_container sparse_map_is_sparse_single\n        PASS [   0.003s] (601/655) omp-core::sparse_container sparse_map_is_sparse_with_gaps\n        PASS [   0.005s] (602/655) omp-core::sparse_container sparse_map_iter_double_ended\n        PASS [   0.004s] (603/655) omp-core::sparse_container sparse_map_key_set\n        PASS [   0.003s] (604/655) omp-core::sparse_container sparse_map_keys\n        PASS [   0.004s] (605/655) omp-core::sparse_container sparse_map_rank\n        PASS [   0.003s] (606/655) omp-core::sparse_container sparse_map_reserve\n        PASS [   0.003s] (607/655) omp-core::sparse_container sparse_map_retain_all_removed\n        PASS [   0.003s] (608/655) omp-core::sparse_container sparse_map_retain_with_mutation\n        PASS [   0.003s] (609/655) omp-core::sparse_container sparse_map_serde_binary\n        PASS [   0.003s] (610/655) omp-core::sparse_container sparse_map_serde_json\n        PASS [   0.003s] (611/655) omp-core::sparse_container sparse_map_shrink_to_fit\n        PASS [   0.003s] (612/655) omp-core::sparse_container sparse_map_values_values_mut\n        PASS [   0.003s] (613/655) omp-core::sparse_container sparse_map_with_capacity\n        PASS [   0.003s] (614/655) omp-core::sparse_container sparse_set_clone\n        PASS [   0.004s] (615/655) omp-core::sparse_container sparse_set_debug_format\n        PASS [   0.003s] (616/655) omp-core::sparse_container sparse_set_default\n        PASS [   0.003s] (617/655) omp-core::sparse_container sparse_set_difference\n        PASS [   0.003s] (618/655) omp-core::sparse_container sparse_set_first_last\n        PASS [   0.003s] (619/655) omp-core::sparse_container sparse_set_first_last_empty\n        PASS [   0.003s] (620/655) omp-core::sparse_container sparse_set_intersection\n        PASS [   0.003s] (621/655) omp-core::sparse_container sparse_set_into_parts_from_parts\n        PASS [   0.003s] (622/655) omp-core::sparse_container sparse_set_is_disjoint\n        PASS [   0.003s] (623/655) omp-core::sparse_container sparse_set_is_sparse_consecutive\n        PASS [   0.003s] (624/655) omp-core::sparse_container sparse_set_is_sparse_single\n        PASS [   0.003s] (625/655) omp-core::sparse_container sparse_set_is_sparse_empty\n        PASS [   0.004s] (626/655) omp-core::sparse_container sparse_set_is_subset\n        PASS [   0.004s] (627/655) omp-core::sparse_container sparse_set_is_sparse_with_gaps\n        PASS [   0.003s] (628/655) omp-core::sparse_container sparse_set_is_superset\n        PASS [   0.003s] (629/655) omp-core::sparse_container sparse_set_iter_exact_size\n        PASS [   0.008s] (630/655) omp-core::sparse_container sparse_set_iter_double_ended\n        PASS [   0.004s] (631/655) omp-core::sparse_container sparse_set_reserve\n        PASS [   0.003s] (632/655) omp-core::sparse_container sparse_set_retain\n        PASS [   0.004s] (633/655) omp-core::sparse_container sparse_set_retain_all_removed\n        PASS [   0.003s] (634/655) omp-core::sparse_container sparse_set_serde_binary\n        PASS [   0.004s] (635/655) omp-core::sparse_container sparse_set_serde_json\n        PASS [   0.004s] (636/655) omp-core::sparse_container sparse_set_serde_json_validates_ordering\n        PASS [   0.004s] (637/655) omp-core::sparse_container sparse_set_shrink_to_fit\n        PASS [   0.004s] (638/655) omp-core::sparse_container sparse_set_symmetric_difference\n        PASS [   0.003s] (639/655) omp-core::sparse_container sparse_set_union\n        PASS [   0.003s] (640/655) omp-core::sparse_container sparse_set_with_capacity\n        PASS [   0.004s] (641/655) omp-core::sparse_container test_nonzero_i8_from_index_truncation_panics\n        PASS [   0.004s] (642/655) omp-core::sparse_container test_nonzero_i8_from_index_upper_boundary\n        PASS [   0.004s] (643/655) omp-core::sparse_container test_nonzero_u8_from_index_upper_boundary\n        PASS [   0.004s] (644/655) omp-core::sparse_container test_nonzero_u8_from_index_wrap_panics\n        PASS [   0.004s] (645/655) omp-core::sparse_container test_nonzero_usize_from_index_overflow_panics\n        PASS [   0.004s] (646/655) omp-core::sparse_container test_nonzero_usize_from_index_upper_boundary\n        PASS [   0.004s] (647/655) omp-core::sparse_container test_sparse_map_binary_rejects_bitmap_value_count_mismatch\n        PASS [   0.004s] (648/655) omp-core::sparse_container test_sparse_map_binary_rejects_gapped_key_payload\n        PASS [   0.003s] (649/655) omp-core::sparse_container test_sparse_set_binary_rejects_gapped_key_payload\n        PASS [   0.003s] (650/655) omp-core::sparse_container try_sparse_index_i8_bounds\n        PASS [   0.004s] (651/655) omp-core::sparse_container try_sparse_index_nonzero_u8\n        PASS [   0.004s] (652/655) omp-core::sparse_container try_sparse_index_u16_bounds\n        PASS [   0.003s] (653/655) omp-core::sparse_container try_sparse_index_u8_bounds\n        PASS [   0.003s] (654/655) omp-core::sparse_container try_sparse_index_validate_sorted\n        PASS [   0.003s] (655/655) omp-core::sparse_container try_sparse_index_validate_sorted_empty\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n     Summary [   1.801s] 655 tests run: 655 passed, 0 skipped\ncargo test --doc -p omp-core --locked\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:821:29\n    |\n821 |             .find(|saved| saved.path.as_slice() == path)\n    |                                      ^^^^^^^^\n    |\n    = note: `#[warn(deprecated)]` on by default\n\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:829:30\n    |\n829 |                 .find(|saved| saved.path.as_slice() == path)\n    |                                          ^^^^^^^^\n\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:985:40\n    |\n985 |         checkpoint.filter(|saved| saved.path.as_slice() == path && saved.offset <= src.len());\n    |                                              ^^^^^^^^\n\nwarning: `omp-core` (lib) generated 3 warnings\n    Finished `test` profile [unoptimized] target(s) in 0.66s\n   Doc-tests omp_core\n",
+      "stdout": "\nrunning 145 tests\ntest crates/core/src/append_vec.rs - append_vec::AppendVec<T>::slice (line 732) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes (line 29) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::as_slice (line 538) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::borrow (line 298) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::borrowed (line 60) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::clear (line 402) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::copy_from_slice (line 144) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::from_static (line 129) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::into_bytes (line 315) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::into_bytes_mut (line 335) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::is_borrowed (line 193) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::into_owned (line 274) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::is_owned (line 211) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::is_empty (line 178) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::is_owned_mut (line 229) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::is_unique (line 516) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::new (line 110) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::len (line 159) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::owned (line 76) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::owned_mut (line 93) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::slice (line 362) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::split_off (line 452) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::split_to (line 484) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::to_owned (line 250) ... ok\ntest crates/core/src/cow_bytes.rs - cow_bytes::CowBytes<'a>::truncate (line 426) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::Decoder (line 403) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::DecodeWriter (line 1065) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::EncodeWriter (line 936) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::Encoder (line 638) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::Encoding<N>::decode_writer (line 241) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::Encoding<N>::encode_writer (line 219) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_len (line 1539) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode (line 1317) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_mut (line 1460) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_n (line 1352) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_raw (line 1387) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_raw_mut (line 1497) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_raw_len (line 1584) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::decode_raw_n (line 1422) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode (line 1301) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_mut (line 1442) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_len (line 1517) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_raw (line 1371) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_n (line 1335) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_raw_len (line 1562) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_raw_mut (line 1479) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32::encode_raw_n (line 1405) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode (line 1317) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_len (line 1539) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_mut (line 1460) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_n (line 1352) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_raw (line 1387) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_raw_len (line 1584) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_raw_mut (line 1497) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::decode_raw_n (line 1422) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode (line 1301) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_len (line 1517) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_mut (line 1442) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_n (line 1335) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_raw (line 1371) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_raw_len (line 1562) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_raw_mut (line 1479) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_dns::encode_raw_n (line 1405) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode (line 1317) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_len (line 1539) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_mut (line 1460) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_n (line 1352) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_raw (line 1387) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_raw_len (line 1584) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_raw_mut (line 1497) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::decode_raw_n (line 1422) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_len (line 1517) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode (line 1301) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_mut (line 1442) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_n (line 1335) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_raw (line 1371) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_raw_len (line 1562) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_raw_n (line 1405) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base32_hex::encode_raw_mut (line 1479) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode (line 1317) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_len (line 1539) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_mut (line 1460) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_n (line 1352) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_raw_len (line 1584) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_raw (line 1387) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_raw_n (line 1422) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::decode_raw_mut (line 1497) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode (line 1301) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_len (line 1517) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_mut (line 1442) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_n (line 1335) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_raw (line 1371) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_raw_len (line 1562) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_raw_mut (line 1479) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64::encode_raw_n (line 1405) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode (line 1317) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_len (line 1539) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_mut (line 1460) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_n (line 1352) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_raw_len (line 1584) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_raw (line 1387) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_raw_mut (line 1497) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::decode_raw_n (line 1422) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode (line 1301) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_len (line 1517) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_mut (line 1442) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_n (line 1335) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_raw (line 1371) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_raw_len (line 1562) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_raw_mut (line 1479) ... ok\ntest crates/core/src/encoding/base_n.rs - encoding::base_n::base64_url::encode_raw_n (line 1405) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Decoder (line 29) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Decoder<'a>::skip_0x (line 61) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Decoder<'a>::skip_leading_zeros (line 81) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Encoder (line 666) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Encoding::encode_byte (line 635) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Encoding::encode_mut (line 601) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::Encoding::encode_nibble (line 584) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::decode (line 401) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::decode_n (line 1058) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::decode_len (line 1105) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::encode_len (line 1089) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::encode (line 1024) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::encode_mut (line 1039) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::encode_n (line 1074) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::parse_nibble (line 487) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::parse_byte (line 508) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::skip_0x (line 418) ... ok\ntest crates/core/src/encoding/hex.rs - encoding::hex::skip_leading_zeros (line 439) ... ok\ntest crates/core/src/encoding/mod.rs - encoding (line 26) ... ok\ntest crates/core/src/lib.rs - dirs (line 26) - compile ... ok\ntest crates/core/src/exclusive_sync.rs - exclusive_sync::ExclusiveSync (line 37) ... ok\ntest crates/core/src/path.rs - path (line 9) ... ok\ntest crates/core/src/lib.rs - slopjson (line 68) ... ok\ntest crates/core/src/secret.rs - secret::ct_eq (line 18) ... ok\ntest crates/core/src/semver.rs - semver::semver (line 68) ... ok\ntest crates/core/src/slopjson/macros.rs - slopjson::macros::json (line 11) ... ok\ntest crates/core/src/slopjson/raw.rs - slopjson::raw::RawValue (line 38) ... ok\ntest crates/core/src/sparse_index.rs - sparse_index::SparseIndex (line 112) ... ok\ntest crates/core/src/sparse_map.rs - sparse_map::SparseMap (line 34) ... ok\ntest crates/core/src/sparse_index.rs - sparse_index::TrySparseIndex (line 17) ... ok\ntest crates/core/src/str.rs - str::StrExt::to_ascii_lowercase_str (line 382) ... ok\ntest crates/core/src/sparse_set.rs - sparse_set::SparseSet (line 27) ... ok\ntest crates/core/src/string_id.rs - string_id::string_id (line 14) ... ok\ntest crates/core/src/str.rs - str::StrExt::to_ascii_uppercase_str (line 398) ... ok\n\ntest result: ok. 145 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s\n\n\nrunning 2 tests\ntest crates/core/src/semver.rs - semver::semver (line 77) - compile fail ... ok\ntest crates/core/src/string_id.rs - string_id::string_id (line 24) - compile fail ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s\n\nall doctests ran in 0.88s; merged doctests compilation took 0.73s\n"
+    },
+    {
+      "argv": [
+        "env",
+        "CARGO_TARGET_DIR=/tmp/omp-native-core-target",
+        "just",
+        "test-pkg",
+        "omp-journal"
+      ],
+      "elapsed_ns": 4598695282,
+      "exit": 0,
+      "stderr": "   0.004s] (11/74) omp-journal data::tests::patch_preserves_its_idempotency_key_and_request\n        PASS [   0.005s] (12/74) omp-journal data::tests::launch_completion_round_trips_typed_terminal_facts\n        PASS [   0.005s] (13/74) omp-journal data::tests::receipt_identity_is_optional_and_round_trips_advisor_billing\n        PASS [   0.005s] (14/74) omp-journal data::tests::recovery_evidence_is_typed_and_legacy_receipts_default_empty\n        PASS [   0.004s] (15/74) omp-journal data::tests::user_idempotency_key_rides_in_the_message_entry\n        PASS [   0.005s] (16/74) omp-journal data::tests::user_attachment_serializes_flat_beside_its_blob_reference\n        PASS [   0.005s] (17/74) omp-journal idempotency::tests::key_serializes_as_its_bare_text\n        PASS [   0.005s] (18/74) omp-journal idempotency::tests::parse_accepts_one_byte_through_the_bound\n        PASS [   0.004s] (19/74) omp-journal idempotency::tests::parse_refuses_empty_and_oversized_keys\n        PASS [   0.004s] (20/74) omp-journal idempotency::tests::validate_rechecks_a_key_built_without_parse\n        PASS [   0.010s] (21/74) omp-journal sse::tests::a_maximal_legal_frame_is_complete_and_a_torn_one_is_torn\n        PASS [   0.009s] (22/74) omp-journal sse::tests::endless_unterminated_line_stops_at_the_frame_cap\n        PASS [   0.004s] (23/74) omp-journal ulid::tests::ten_thousand_ids_are_strictly_increasing_within_one_millisecond\n        PASS [   0.003s] (24/74) omp-journal::data closed_kind_vocabulary_round_trips_through_text\n        PASS [   0.003s] (25/74) omp-journal::data stream_payload_omits_fields_not_used_by_the_operation\n        PASS [   0.003s] (26/74) omp-journal::data tool_result_tolerates_unknown_fields_but_stays_exactly_one_of_outcome_or_fault\n        PASS [   0.003s] (27/74) omp-journal::data tool_result_uses_outcome_or_fault_key_without_wrapper_tags\n        PASS [   0.036s] (28/74) omp-journal sse::tests::endless_lines_without_a_blank_line_stop_at_the_frame_cap\n        PASS [   0.009s] (29/74) omp-journal::gc blob_gc_cleans_abandoned_stages_without_crossing_project_namespaces\n        PASS [   0.007s] (30/74) omp-journal::gc collection_in_another_process_refuses_a_live_namespace_writer\n        PASS [   0.006s] (31/74) omp-journal::gc collection_refuses_an_active_put_before_journal_stage\n        PASS [   0.020s] (32/74) omp-journal::gc blob_gc_preserves_rewindable_media_until_branch_pruning\n        PASS [   0.008s] (33/74) omp-journal::gc collection_refuses_live_writers_and_honors_cancellation_and_bounds\n        PASS [   0.011s] (34/74) omp-journal::gc dry_run_and_apply_select_the_same_unreferenced_content\n        PASS [   0.009s] (35/74) omp-journal::gc hypothetical_branch_pruning_releases_only_abandoned_roots_in_dry_run\n        PASS [   0.022s] (36/74) omp-journal::gc journal_relocation_copies_all_rewindable_roots_but_no_other_session_data\n        PASS [   0.020s] (37/74) omp-journal::gc namespace_inventory_roots_jobs_checkpoints_and_in_progress_imports\n        PASS [   0.008s] (38/74) omp-journal::gc prune_in_another_process_refuses_a_live_writer\n        PASS [   0.006s] (39/74) omp-journal::gc prune_of_branched_journal_preserves_live_snapshot_and_shrinks_bytes\n        PASS [   0.010s] (40/74) omp-journal::gc prune_refuses_a_journal_with_a_live_writer\n        PASS [   0.011s] (41/74) omp-journal::gc shared_session_root_survives_switch_and_one_session_deletion\n        PASS [   0.021s] (42/74) omp-journal::gc snapcompact_frames_remain_rooted_and_copy_with_their_session\n        PASS [   0.005s] (43/74) omp-journal::journal every_non_genesis_entry_requires_by\n        PASS [   0.004s] (44/74) omp-journal::journal genesis_version_newer_than_supported_is_a_typed_error\n        PASS [   0.004s] (45/74) omp-journal::journal is_live_ignores_a_stale_lock_file_and_leaves_it_untouched\n        PASS [   0.004s] (46/74) omp-journal::journal is_live_is_true_while_a_writer_holds_the_journal\n        PASS [   0.007s] (47/74) omp-journal::journal is_live_sees_other_processes_and_ignores_a_crashed_writer\n        PASS [   0.045s] (48/74) omp-journal::journal append_refuses_a_frame_the_reader_would_reject\n        PASS [   0.004s] (49/74) omp-journal::journal is_live_without_a_lock_file_is_false_and_creates_nothing\n        PASS [   0.020s] (50/74) omp-journal::journal oversized_unterminated_frame_is_rejected_without_truncation\n        PASS [   0.007s] (51/74) omp-journal::journal prior_walk_selects_live_chain_and_retains_abandoned\n        PASS [   0.006s] (52/74) omp-journal::journal scan_prefix_returns_the_committed_entries_inside_the_limit\n        PASS [   0.008s] (53/74) omp-journal::journal scan_reads_the_committed_prefix_without_locking_or_truncating\n        PASS [   0.006s] (54/74) omp-journal::journal second_process_is_refused_while_the_writer_is_open\n        PASS [   0.004s] (55/74) omp-journal::journal second_writer_is_refused_while_the_first_is_open\n        PASS [   0.063s] (56/74) omp-journal::journal maximal_payload_round_trips_and_a_short_torn_tail_still_recovers\n        PASS [   0.004s] (57/74) omp-journal::journal unknown_kind_or_revision_is_a_typed_newer_revision_error\n        PASS [   0.005s] (58/74) omp-journal::runlog a_finished_run_accepts_no_more_records\n        PASS [   0.006s] (59/74) omp-journal::runlog a_halted_run_can_be_resumed\n        PASS [   0.005s] (60/74) omp-journal::runlog a_journal_that_does_not_begin_with_a_start_record_is_refused\n        PASS [   0.005s] (61/74) omp-journal::runlog a_session_reader_refuses_a_run_journal\n        PASS [   0.006s] (62/74) omp-journal::runlog records_round_trip_in_order_and_chain_through_by\n        PASS [   0.005s] (63/74) omp-journal::runlog resume_refuses_a_different_workflow_definition\n        PASS [   0.005s] (64/74) omp-journal::runlog resume_returns_the_records_and_appends_after_them\n        PASS [   0.004s] (65/74) omp-journal::sse scanner_ignores_unknown_field_lines\n        PASS [   0.123s] (66/74) omp-journal::sse sse_round_trip_preserves_entry_identity\n        PASS [   0.005s] (67/74) omp-journal::sse uppercase_event_kind_is_rejected\n        PASS [   0.004s] (68/74) omp-journal::sse writer_uses_canonical_field_order\n        PASS [   0.005s] (69/74) omp-journal::vocabulary a_run_journal_accepts_its_registered_kind_and_reads_it_back\n        PASS [   0.005s] (70/74) omp-journal::vocabulary a_run_journal_accepts_only_what_it_registered\n        PASS [   0.004s] (71/74) omp-journal::vocabulary a_session_journal_still_rejects_an_unregistered_kind\n        PASS [   0.005s] (72/74) omp-journal::vocabulary a_session_reader_refuses_a_run_journal_instead_of_misreading_it\n        PASS [   0.004s] (73/74) omp-journal::vocabulary the_builtin_kinds_cannot_be_registered_again\n        PASS [   2.189s] (74/74) omp-journal::journal torn_tail_recovers_at_every_byte_offset_without_losing_a_complete_frame\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n     Summary [   2.454s] 74 tests run: 74 passed, 5 skipped\ncargo test --doc -p omp-journal --locked\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:821:29\n    |\n821 |             .find(|saved| saved.path.as_slice() == path)\n    |                                      ^^^^^^^^\n    |\n    = note: `#[warn(deprecated)]` on by default\n\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:829:30\n    |\n829 |                 .find(|saved| saved.path.as_slice() == path)\n    |                                          ^^^^^^^^\n\nwarning: use of deprecated method `smallvec::SmallVec::<Item, INLINE, Heap>::as_slice`: use `<SmallVec<Item, INLINE, Heap> as AsRef<[Item]>>::as_ref` instead\n   --> crates/core/src/slopjson/incoming.rs:985:40\n    |\n985 |         checkpoint.filter(|saved| saved.path.as_slice() == path && saved.offset <= src.len());\n    |                                              ^^^^^^^^\n\nwarning: `omp-core` (lib) generated 3 warnings\n    Finished `test` profile [unoptimized] target(s) in 0.48s\n   Doc-tests omp_journal\n",
+      "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+    },
+    {
+      "argv": [
+        "rustc",
+        "-O",
+        "--edition=2024",
+        "/workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs",
+        "-o",
+        "/tmp/omp-ownership-probe"
+      ],
+      "elapsed_ns": 375537881,
+      "exit": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "/tmp/omp-ownership-probe",
+        "10000"
+      ],
+      "elapsed_ns": 65955957,
+      "exit": 0,
+      "stderr": "",
+      "stdout": "{\"kind\":\"baseline\",\"nodes\":10000,\"memory\":{\"rss_bytes\":5197824,\"pss_bytes\":4596736,\"uss_bytes\":4538368,\"requested_live_bytes\":3341612,\"requested_peak_bytes\":3341612}}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":0,\"elapsed_ns\":2003136,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":1,\"elapsed_ns\":1816499,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":2,\"elapsed_ns\":1903939,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":3,\"elapsed_ns\":1926141,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":4,\"elapsed_ns\":2203642,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":5,\"elapsed_ns\":1959972,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":6,\"elapsed_ns\":1881956,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":7,\"elapsed_ns\":1903368,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":8,\"elapsed_ns\":2050115,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":9,\"elapsed_ns\":1994834,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":10,\"elapsed_ns\":1910248,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":11,\"elapsed_ns\":2142792,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":12,\"elapsed_ns\":1912572,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":13,\"elapsed_ns\":2021042,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":14,\"elapsed_ns\":1906372,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":15,\"elapsed_ns\":1906742,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":16,\"elapsed_ns\":1880694,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":17,\"elapsed_ns\":2348166,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":18,\"elapsed_ns\":1981153,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":19,\"elapsed_ns\":2231563,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":20,\"elapsed_ns\":2051367,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":21,\"elapsed_ns\":2087791,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":22,\"elapsed_ns\":2003656,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":23,\"elapsed_ns\":2973902,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":24,\"elapsed_ns\":2061742,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":25,\"elapsed_ns\":1927243,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":26,\"elapsed_ns\":2026019,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":27,\"elapsed_ns\":2139137,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":28,\"elapsed_ns\":1895356,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"deep_clone\",\"sample\":29,\"elapsed_ns\":1986572,\"allocation_calls\":40001,\"requested_bytes\":3020000}\n{\"kind\":\"settled\",\"nodes\":10000,\"method\":\"deep_clone\",\"memory\":{\"rss_bytes\":5337088,\"pss_bytes\":4731904,\"uss_bytes\":4673536,\"requested_live_bytes\":3342636,\"requested_peak_bytes\":6361612}}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":0,\"elapsed_ns\":100,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":1,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":2,\"elapsed_ns\":21,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":3,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":4,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":5,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":6,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":7,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":8,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":9,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":10,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":11,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":12,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":13,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":14,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":15,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":16,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":17,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":18,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":19,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":20,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":21,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":22,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":23,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":24,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":25,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":26,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":27,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":28,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":10000,\"method\":\"arc_clone\",\"sample\":29,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"settled\",\"nodes\":10000,\"method\":\"arc_clone\",\"memory\":{\"rss_bytes\":5337088,\"pss_bytes\":4731904,\"uss_bytes\":4673536,\"requested_live_bytes\":3342636,\"requested_peak_bytes\":6361612}}\n"
+    },
+    {
+      "argv": [
+        "/tmp/omp-ownership-probe",
+        "100000"
+      ],
+      "elapsed_ns": 827223292,
+      "exit": 0,
+      "stderr": "",
+      "stdout": "{\"kind\":\"baseline\",\"nodes\":100000,\"memory\":{\"rss_bytes\":41918464,\"pss_bytes\":41317376,\"uss_bytes\":41259008,\"requested_live_bytes\":33401612,\"requested_peak_bytes\":33401612}}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":0,\"elapsed_ns\":25282228,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":1,\"elapsed_ns\":24509765,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":2,\"elapsed_ns\":24986642,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":3,\"elapsed_ns\":26901746,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":4,\"elapsed_ns\":28131215,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":5,\"elapsed_ns\":27931341,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":6,\"elapsed_ns\":27061543,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":7,\"elapsed_ns\":28958391,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":8,\"elapsed_ns\":28272605,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":9,\"elapsed_ns\":26821858,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":10,\"elapsed_ns\":25888115,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":11,\"elapsed_ns\":26181129,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":12,\"elapsed_ns\":27302359,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":13,\"elapsed_ns\":25508794,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":14,\"elapsed_ns\":27768039,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":15,\"elapsed_ns\":25449386,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":16,\"elapsed_ns\":26155601,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":17,\"elapsed_ns\":24458979,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":18,\"elapsed_ns\":26214198,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":19,\"elapsed_ns\":26654450,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":20,\"elapsed_ns\":26795919,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":21,\"elapsed_ns\":25513450,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":22,\"elapsed_ns\":25267116,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":23,\"elapsed_ns\":27453112,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":24,\"elapsed_ns\":25938110,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":25,\"elapsed_ns\":26894415,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":26,\"elapsed_ns\":27067411,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":27,\"elapsed_ns\":26611566,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":28,\"elapsed_ns\":25544246,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"deep_clone\",\"sample\":29,\"elapsed_ns\":25437298,\"allocation_calls\":400001,\"requested_bytes\":30200000}\n{\"kind\":\"settled\",\"nodes\":100000,\"method\":\"deep_clone\",\"memory\":{\"rss_bytes\":42057728,\"pss_bytes\":41452544,\"uss_bytes\":41394176,\"requested_live_bytes\":33402636,\"requested_peak_bytes\":63601612}}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":0,\"elapsed_ns\":451,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":1,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":2,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":3,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":4,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":5,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":6,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":7,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":8,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":9,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":10,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":11,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":12,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":13,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":14,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":15,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":16,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":17,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":18,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":19,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":20,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":21,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":22,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":23,\"elapsed_ns\":20,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":24,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":25,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":26,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":27,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":28,\"elapsed_ns\":30,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"sample\",\"nodes\":100000,\"method\":\"arc_clone\",\"sample\":29,\"elapsed_ns\":21,\"allocation_calls\":0,\"requested_bytes\":0}\n{\"kind\":\"settled\",\"nodes\":100000,\"method\":\"arc_clone\",\"memory\":{\"rss_bytes\":42057728,\"pss_bytes\":41452544,\"uss_bytes\":41394176,\"requested_live_bytes\":33402636,\"requested_peak_bytes\":63601612}}\n"
+    },
+    {
+      "argv": [
+        "rustc",
+        "-O",
+        "--edition=2024",
+        "/workspace/omp-native-research/docs/research/native-resource-architecture/experiments/core_str_probe.rs",
+        "--extern",
+        "omp_core=/tmp/omp-native-core-target/debug/build/omp-core/2330fae0aa6814d2/out/libomp_core-2330fae0aa6814d2.rmeta",
+        "-o",
+        "/tmp/omp-core-str-probe",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/adler2/ac9c24859b6e98e4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/allocator-api2/197bd286d5073d24/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ambient-authority/a5c6ba47366c43a8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/autocfg/4613bee038464726/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bit-set/23bda1eb7008bc6e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bit-vec/55b4680fb37d738a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bitflags/74498762e228ca94/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-buffer/2bcc0a654d0c32ae/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-buffer/2fbed2e1dd67230f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-padding/abd2a3cfe634630b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/byteorder/f2bf71867ac13fdf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bytes/65e3d6f0b80ea878/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bytes-utils/ed3c5d50dcfbac2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/0ce72ae78fa79378/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/4ee0a7c70aa2f0fd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/a8737e7bcc439b07/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/608b3b1c98a46f1e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/afbbf54bb795315c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/e8f83ff65acb1e1f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cc/a52af4197903bb84/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cfg-if/bff3586207f23ae0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/chacha20/3bb91801262b8907/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cipher/115785bdde8d705c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cmov/0349a53ab54add26/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cobs/3a401f73ce3f9d09/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/const-oid/25104c68969c369d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/core_detect/75f1e0801d6b01d3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cpufeatures/6b1e3d1c4c9a5169/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cpufeatures/9dda69c4d1aafd39/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/0179b9966a462d71/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/25a877924f8d22c4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/2edef0f4ba59df2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crypto-common/0e7fa275cd5b8558/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crypto-common/e0da7a9587bc9fb3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ctutils/29c085bb0d2c4c5c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/data-encoding/c29a4741a4adc8e5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/digest/380da9dbcbc0e5fc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/displaydoc/6e5ece206528ac15/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/dyn-clone/5c4d89a9f9cd3a7e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/either/f24c006e1e60f64f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/equivalent/f1a59e77de08db95/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fastrand/e1c12117b0042575/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/find-msvc-tools/590539947f8af323/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/flate2/8f5035e64b9cf0d3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fnv/3bab3df4e500abe5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/foldhash/e3b7c0e8eca698b4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/form_urlencoded/316e44a804af5aeb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fs-set-times/e125de2780b9fe48/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures/999392adec0f192d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-channel/4786f53ffe2bc140/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-core/1d443e4a1300ad8b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-executor/527c021deca62e89/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-io/b2713991a7d3625b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-macro/5fa42c9da7101801/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-sink/704f2a08c965fb43/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-task/575b84f732093536/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-util/4057e753d829625a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/038beafefdbac4fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/2cd93266c8108a4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/5bd72fcd4ce6f55f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/74ece58022e7bc03/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/7c3e3a73859927be/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/8124288617c774f6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/c8b26accc7eb07de/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hash32/2d39957f977c3e4a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hash32/eabc800a0ebc52c3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hashbrown/222c8caecdf7bc10/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/0f9c77bd9383f85c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/2ed92d6675522cd3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/7990c5be5db840fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/bed584a18fd96f1f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/f2f94f6ec80b85df/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/f896aab3dd62bc14/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heck/cbdaa1b68f775b56/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hybrid-array/65a38eb7725b092f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_collections/1e07582b90ccf087/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_locale_core/a96e0d40a1c320bf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer/7c3ddd15d8412167/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/19800f8080abec83/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/b231fe3fb8c41a4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/b6c7bc22dd2c64c0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties/08a3570da1e41b3a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/5a5e4f70217e779b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/725e7b216ac10cbf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/bfb4a2e5f051db5e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_provider/0b4b8ce9b3349048/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/idna/f0a32cb38d210f8c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/idna_adapter/642aaf90ed7a9f05/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/indexmap/a96410649e4b04e4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/inout/4ffd0ab57559faf8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/b1f5f0d6583af709/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/cc02a6df79ebdfea/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/fd58b2b425fb5f84/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/22dc0d538c68303d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/4db0903ea8aa2aab/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/ba83314dc9d95cf8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/ddc3b8df999d565f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/e241b37fc6b402b1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/f3bdf605624514a1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ipnet/598f30e0d4ec84ed/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/itoa/9ec531993b8d2480/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jiff/19bd166260062479/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jiff-core/00a028e797a10feb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jobserver/da891250e41710d7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/052409189809823f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/056535cf944ace2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/93aac9ba5dadd911/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/a1fdbb421921e1e9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/cd08c3fba3de842e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/dbecfa1b16e7c9a2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/26e5b63ede817f7f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/9ba22ee710f06ea9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/accc515512de9a23/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/linux-raw-sys/1fbdd82009d56b00/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/litemap/52691d83336d0092/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/lock_api/7807f5ddcdd4126b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/maybe-owned/a5497bd927a8adb5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/memchr/a0b13ea0ec0c027c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/miniz_oxide/52acac74e51c58cc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/1db470f93adc9109/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/24ddfde15d492635/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/b880c064a7123183/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-ar/60680d8ffd058bee/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/2330fae0aa6814d2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/3cede7a1ddefc143/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/3f90fcf4c71f458f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/6567f956a897fab2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/6f6fa41f24368c95/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/a23abf9809c43840/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/aef8471566ff9288/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/be71087d85053802/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/d72ba607ed70e5d1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/db9ffddad32c7af5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/f6991534da1cd4d7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/0a80237f27a2d434/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/220e9042a8546acb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/403d857b420927a5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/424f623333cb7995/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/5667827253e9a792/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/65b7495110af2b25/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/7c418d9e8905369d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/e1ce16fbcf98a25d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/fddf05618c1b9e3e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/once_cell/da9d9355ff2d1ad1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot/ab5bf6a5de1092bc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/5f203ee347ef8ab6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/cac75a8ff2453e88/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/dffe537954808ebe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/percent-encoding/484d63408db2df06/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/pin-project-lite/4f68dfb1254ff913/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/pkg-config/45536af24bf7c40f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/postcard/d17572a5c9f3f09d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/potential_utf/fb1001ee2d6c9ede/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/118d50f20c35dcbc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/5239fa8bde0f7157/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/d71e09bb5492a67f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proptest/addba6fc1e6a4ac9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quick-error/5e994d6761cc6407/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/0d4e70a7743da9a7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/899c4bf209f9b249/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/a95615fb16568e6b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand/f65c33726b300acf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_core/342ed53ea8b56248/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_core/cb62201d5b2dae69/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_xorshift/f7b4584c60f910a4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/4e2ca0c964fc09df/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/691dd6336d376807/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/ed1fb77c93e8b115/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast-impl/6384218fa2f1c9f8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/regex-syntax/58d60dcc91584ab0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustc_version/c4afe6847adda17b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/1030e390dc783506/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/5a12fe9a64628912/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/836216242e58c712/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix-linux-procfs/7e0d3663e3d6483a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rusty-fork/34f6f39411cedc65/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/schemars/966d89c9c94dc8c7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/schemars_derive/06a4c4658789f2b7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/scopeguard/0354930d8ac0e435/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/semver/b46dcc758a0898c4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/0964aae7ec7d42ac/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/37add63f579c9607/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/dc21562d57cb3929/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/00f5cdbb75793266/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/3530e9d2f404ce8a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/81a10b161bb98c93/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_derive/39cc8adf6a44e70f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_derive_internals/a3d528fe0dece20a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/7b8b6c7a56620142/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/eca117670cbb6586/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/f29d84cee92dacef/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2/a0ead3b505c96732/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/6564039b51a61237/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/8f23b02f5d51d266/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/93d476c72089f7ff/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/shlex/bf1f40c4ebf6635d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/simd-adler32/beb0e76883e565c6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/slab/177b6dc34f2ed5e7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smallvec/1c3aee4f0d2f4fd7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smallvec/a3664b1510314747/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smol_bitmap/04a035bc619f6946/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/spin/b279512562ea4171/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/stable_deref_trait/0c006bfc647e5c4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/strum/ca36a41ccee005cd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/strum_macros/8b76ff18ee05431e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/subtle/d1dcc0fe352e72a6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/syn/94d222cff1cd7745/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/syn/fffd1fc9bc56a71e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/synstructure/20c0051f9af23102/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tempfile/4ea1dc97c65a293a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/1db79129d209c267/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/21ef81dd577634b0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/ee69b14f3f5024a1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror-impl/891fdbf4157093ae/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tinystr/a0f98aa8d88db687/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing/390edf98bc9d77b8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing-attributes/49f49ac5e508411e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing-core/b05aa1dd0a3cf0fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/typenum/11ef51f977aadb47/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/unarray/600e195aafd7b252/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/unicode-ident/86f7ac1a86ccb20a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/url/b10f79b56dd4a17d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/utf8_iter/fedf7009ca63300d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/version_check/d18c93347ba2f5af/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/wait-timeout/b83072bbb9184e1d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/writeable/8afde48bc33af83c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/xutf/5d839fb124662e21/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/yoke/ad7a34942c8b00e7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/yoke-derive/003806e0a5df6bee/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/197519784ed5e7a4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/1b8dbc801de6706c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/ee5e297427de75d9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy-derive/5b8cf827a25430bb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerofrom/7931bc8b6b0412f4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerofrom-derive/132a2b2e6d3a0330/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zeroize/39a1d4619b1da227/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zeroize_derive/4ed7e174084ac01a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerotrie/a9d8e2ba66b88066/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerovec/a11f6d2e032be10f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerovec-derive/d619c91f61f1f1d4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zlib-rs/93fa037181126fdd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/67504ca14c909714/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/a2b869ecd43bb532/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/d3fc2d76ffd63112/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd/a88f9b27264e0563/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/0098da1af58e73f7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/3fd63a1680d210d1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/fd8b58c711349227/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/72d0070d2272303f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/b434b3f736292059/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/bd33988efa52cb15/out"
+      ],
+      "elapsed_ns": 119723720,
+      "exit": 1,
+      "stderr": "warning: function `live` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:11:8\n   |\n11 | pub fn live() -> u64 { LIVE.load(Ordering::Relaxed) }\n   |        ^^^^\n   |\n   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: struct `Symbol` is never constructed\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:51:8\n   |\n51 | struct Symbol { id: u32, name: String, path: String, docs: String, callers: Vec<u32> }\n   |        ^^^^^^\n\nwarning: function `graph` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:52:4\n   |\n52 | fn graph(nodes: usize) -> Vec<Symbol> {\n   |    ^^^^^\n\nwarning: function `check` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:58:4\n   |\n58 | fn check(graph: &[Symbol]) -> usize { let s = &graph[graph.len()/2]; graph.len() + s.id as usize + s.name.len() + s.path.len() + s.d...\n   |    ^^^^^\n\nwarning: function `memory` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:59:4\n   |\n59 | fn memory() -> String {\n   |    ^^^^^^\n\nwarning: function `main` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:64:4\n   |\n64 | fn main() {\n   |    ^^^^\n\nerror: crate `omp_core` required to be available in rlib format, but was not found in this form\n\nerror: aborting due to 1 previous error; 6 warnings emitted\n\n",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "rustc",
+        "-O",
+        "--edition=2024",
+        "/workspace/omp-native-research/docs/research/native-resource-architecture/experiments/blob_range_probe.rs",
+        "--extern",
+        "omp_journal=/tmp/omp-native-core-target/debug/build/omp-journal/fddf05618c1b9e3e/out/libomp_journal-fddf05618c1b9e3e.rmeta",
+        "-o",
+        "/tmp/omp-blob-range-probe",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/adler2/ac9c24859b6e98e4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/allocator-api2/197bd286d5073d24/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ambient-authority/a5c6ba47366c43a8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/autocfg/4613bee038464726/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bit-set/23bda1eb7008bc6e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bit-vec/55b4680fb37d738a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bitflags/74498762e228ca94/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-buffer/2bcc0a654d0c32ae/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-buffer/2fbed2e1dd67230f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/block-padding/abd2a3cfe634630b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/byteorder/f2bf71867ac13fdf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bytes/65e3d6f0b80ea878/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/bytes-utils/ed3c5d50dcfbac2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/0ce72ae78fa79378/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/4ee0a7c70aa2f0fd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-primitives/a8737e7bcc439b07/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/608b3b1c98a46f1e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/afbbf54bb795315c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cap-std/e8f83ff65acb1e1f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cc/a52af4197903bb84/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cfg-if/bff3586207f23ae0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/chacha20/3bb91801262b8907/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cipher/115785bdde8d705c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cmov/0349a53ab54add26/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cobs/3a401f73ce3f9d09/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/const-oid/25104c68969c369d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/core_detect/75f1e0801d6b01d3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cpufeatures/6b1e3d1c4c9a5169/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/cpufeatures/9dda69c4d1aafd39/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/0179b9966a462d71/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/25a877924f8d22c4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crc32fast/2edef0f4ba59df2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crypto-common/0e7fa275cd5b8558/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/crypto-common/e0da7a9587bc9fb3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ctutils/29c085bb0d2c4c5c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/data-encoding/c29a4741a4adc8e5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/digest/380da9dbcbc0e5fc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/displaydoc/6e5ece206528ac15/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/dyn-clone/5c4d89a9f9cd3a7e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/either/f24c006e1e60f64f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/equivalent/f1a59e77de08db95/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fastrand/e1c12117b0042575/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/find-msvc-tools/590539947f8af323/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/flate2/8f5035e64b9cf0d3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fnv/3bab3df4e500abe5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/foldhash/e3b7c0e8eca698b4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/form_urlencoded/316e44a804af5aeb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/fs-set-times/e125de2780b9fe48/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures/999392adec0f192d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-channel/4786f53ffe2bc140/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-core/1d443e4a1300ad8b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-executor/527c021deca62e89/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-io/b2713991a7d3625b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-macro/5fa42c9da7101801/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-sink/704f2a08c965fb43/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-task/575b84f732093536/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/futures-util/4057e753d829625a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/038beafefdbac4fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/2cd93266c8108a4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/generic-array/5bd72fcd4ce6f55f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/74ece58022e7bc03/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/7c3e3a73859927be/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/8124288617c774f6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/getrandom/c8b26accc7eb07de/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hash32/2d39957f977c3e4a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hash32/eabc800a0ebc52c3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hashbrown/222c8caecdf7bc10/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/0f9c77bd9383f85c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/2ed92d6675522cd3/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/7990c5be5db840fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/bed584a18fd96f1f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/f2f94f6ec80b85df/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heapless/f896aab3dd62bc14/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/heck/cbdaa1b68f775b56/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/hybrid-array/65a38eb7725b092f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_collections/1e07582b90ccf087/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_locale_core/a96e0d40a1c320bf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer/7c3ddd15d8412167/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/19800f8080abec83/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/b231fe3fb8c41a4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_normalizer_data/b6c7bc22dd2c64c0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties/08a3570da1e41b3a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/5a5e4f70217e779b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/725e7b216ac10cbf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_properties_data/bfb4a2e5f051db5e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/icu_provider/0b4b8ce9b3349048/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/idna/f0a32cb38d210f8c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/idna_adapter/642aaf90ed7a9f05/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/indexmap/a96410649e4b04e4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/inout/4ffd0ab57559faf8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/b1f5f0d6583af709/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/cc02a6df79ebdfea/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-extras/fd58b2b425fb5f84/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/22dc0d538c68303d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/4db0903ea8aa2aab/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/ba83314dc9d95cf8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/ddc3b8df999d565f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/e241b37fc6b402b1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/io-lifetimes/f3bdf605624514a1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ipnet/598f30e0d4ec84ed/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/itoa/9ec531993b8d2480/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jiff/19bd166260062479/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jiff-core/00a028e797a10feb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/jobserver/da891250e41710d7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/052409189809823f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/056535cf944ace2b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/93aac9ba5dadd911/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/a1fdbb421921e1e9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/cd08c3fba3de842e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libc/dbecfa1b16e7c9a2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/26e5b63ede817f7f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/9ba22ee710f06ea9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/libm/accc515512de9a23/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/linux-raw-sys/1fbdd82009d56b00/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/litemap/52691d83336d0092/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/lock_api/7807f5ddcdd4126b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/maybe-owned/a5497bd927a8adb5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/memchr/a0b13ea0ec0c027c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/miniz_oxide/52acac74e51c58cc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/1db470f93adc9109/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/24ddfde15d492635/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/num-traits/b880c064a7123183/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-ar/60680d8ffd058bee/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/2330fae0aa6814d2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/3cede7a1ddefc143/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/3f90fcf4c71f458f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/6567f956a897fab2/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/6f6fa41f24368c95/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/a23abf9809c43840/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/aef8471566ff9288/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/be71087d85053802/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/d72ba607ed70e5d1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/db9ffddad32c7af5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-core/f6991534da1cd4d7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/0a80237f27a2d434/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/220e9042a8546acb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/403d857b420927a5/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/424f623333cb7995/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/5667827253e9a792/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/65b7495110af2b25/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/7c418d9e8905369d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/e1ce16fbcf98a25d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/omp-journal/fddf05618c1b9e3e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/once_cell/da9d9355ff2d1ad1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot/ab5bf6a5de1092bc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/5f203ee347ef8ab6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/cac75a8ff2453e88/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/parking_lot_core/dffe537954808ebe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/percent-encoding/484d63408db2df06/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/pin-project-lite/4f68dfb1254ff913/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/pkg-config/45536af24bf7c40f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/postcard/d17572a5c9f3f09d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/potential_utf/fb1001ee2d6c9ede/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/118d50f20c35dcbc/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/5239fa8bde0f7157/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proc-macro2/d71e09bb5492a67f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/proptest/addba6fc1e6a4ac9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quick-error/5e994d6761cc6407/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/0d4e70a7743da9a7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/899c4bf209f9b249/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/quote/a95615fb16568e6b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand/f65c33726b300acf/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_core/342ed53ea8b56248/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_core/cb62201d5b2dae69/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rand_xorshift/f7b4584c60f910a4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/4e2ca0c964fc09df/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/691dd6336d376807/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast/ed1fb77c93e8b115/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/ref-cast-impl/6384218fa2f1c9f8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/regex-syntax/58d60dcc91584ab0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustc_version/c4afe6847adda17b/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/1030e390dc783506/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/5a12fe9a64628912/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix/836216242e58c712/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rustix-linux-procfs/7e0d3663e3d6483a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/rusty-fork/34f6f39411cedc65/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/schemars/966d89c9c94dc8c7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/schemars_derive/06a4c4658789f2b7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/scopeguard/0354930d8ac0e435/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/semver/b46dcc758a0898c4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/0964aae7ec7d42ac/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/37add63f579c9607/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde/dc21562d57cb3929/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/00f5cdbb75793266/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/3530e9d2f404ce8a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_core/81a10b161bb98c93/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_derive/39cc8adf6a44e70f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_derive_internals/a3d528fe0dece20a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/7b8b6c7a56620142/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/eca117670cbb6586/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/serde_json/f29d84cee92dacef/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2/a0ead3b505c96732/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/6564039b51a61237/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/8f23b02f5d51d266/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/sha2-asm/93d476c72089f7ff/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/shlex/bf1f40c4ebf6635d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/simd-adler32/beb0e76883e565c6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/slab/177b6dc34f2ed5e7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smallvec/1c3aee4f0d2f4fd7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smallvec/a3664b1510314747/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/smol_bitmap/04a035bc619f6946/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/spin/b279512562ea4171/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/stable_deref_trait/0c006bfc647e5c4f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/strum/ca36a41ccee005cd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/strum_macros/8b76ff18ee05431e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/subtle/d1dcc0fe352e72a6/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/syn/94d222cff1cd7745/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/syn/fffd1fc9bc56a71e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/synstructure/20c0051f9af23102/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tempfile/4ea1dc97c65a293a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/1db79129d209c267/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/21ef81dd577634b0/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror/ee69b14f3f5024a1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/thiserror-impl/891fdbf4157093ae/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tinystr/a0f98aa8d88db687/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing/390edf98bc9d77b8/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing-attributes/49f49ac5e508411e/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/tracing-core/b05aa1dd0a3cf0fe/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/typenum/11ef51f977aadb47/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/unarray/600e195aafd7b252/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/unicode-ident/86f7ac1a86ccb20a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/url/b10f79b56dd4a17d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/utf8_iter/fedf7009ca63300d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/version_check/d18c93347ba2f5af/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/wait-timeout/b83072bbb9184e1d/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/writeable/8afde48bc33af83c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/xutf/5d839fb124662e21/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/yoke/ad7a34942c8b00e7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/yoke-derive/003806e0a5df6bee/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/197519784ed5e7a4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/1b8dbc801de6706c/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy/ee5e297427de75d9/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerocopy-derive/5b8cf827a25430bb/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerofrom/7931bc8b6b0412f4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerofrom-derive/132a2b2e6d3a0330/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zeroize/39a1d4619b1da227/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zeroize_derive/4ed7e174084ac01a/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerotrie/a9d8e2ba66b88066/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerovec/a11f6d2e032be10f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zerovec-derive/d619c91f61f1f1d4/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zlib-rs/93fa037181126fdd/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/67504ca14c909714/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/a2b869ecd43bb532/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zmij/d3fc2d76ffd63112/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd/a88f9b27264e0563/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/0098da1af58e73f7/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/3fd63a1680d210d1/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-safe/fd8b58c711349227/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/72d0070d2272303f/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/b434b3f736292059/out",
+        "-L",
+        "dependency=/tmp/omp-native-core-target/debug/build/zstd-sys/bd33988efa52cb15/out"
+      ],
+      "elapsed_ns": 135645721,
+      "exit": 1,
+      "stderr": "warning: struct `Symbol` is never constructed\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:51:8\n   |\n51 | struct Symbol { id: u32, name: String, path: String, docs: String, callers: Vec<u32> }\n   |        ^^^^^^\n   |\n   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `graph` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:52:4\n   |\n52 | fn graph(nodes: usize) -> Vec<Symbol> {\n   |    ^^^^^\n\nwarning: function `check` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:58:4\n   |\n58 | fn check(graph: &[Symbol]) -> usize { let s = &graph[graph.len()/2]; graph.len() + s.id as usize + s.name.len() + s.path.len() + s.d...\n   |    ^^^^^\n\nwarning: function `memory` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:59:4\n   |\n59 | fn memory() -> String {\n   |    ^^^^^^\n\nwarning: function `main` is never used\n  --> /workspace/omp-native-research/docs/research/native-resource-architecture/experiments/ownership_probe.rs:64:4\n   |\n64 | fn main() {\n   |    ^^^^\n\nerror: crate `omp_journal` required to be available in rlib format, but was not found in this form\n\nerror: aborting due to 1 previous error; 5 warnings emitted\n\n",
+      "stdout": ""
+    }
+  ],
+  "environment": {
+    "cgroup_cpu_max": "200000 100000",
+    "cgroup_memory_max": "8589934592",
+    "cpu_count_visible": 3,
+    "machine": "x86_64",
+    "meminfo": "MemTotal:       10207480 kB\nMemFree:         7969612 kB\nMemAvailable:    9422392 kB\nBuffers:          112836 kB\nCached:          1422344 kB\nSwapCached:            0 kB\nActive:           829796 kB\nInactive:         746688 kB\nActive(anon):        192 kB\nInactive(anon):    71108 kB\nActive(file):     829604 kB\nInactive(file):   675580 kB\nUnevictable:       29944 kB\nMlocked:               0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nDirty:            101412 kB\nWriteback:             0 kB\nAnonPages:         71256 kB\nMapped:           103832 kB\nShmem:               108 kB\nKReclaimable:     261272 kB\nSlab:             312488 kB\nSReclaimable:     261272 kB\nSUnreclaim:        51216 kB\nKernelStack:        2240 kB\nPageTables:         3068 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     5103740 kB\nCommitted_AS:     569736 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:        3420 kB\nVmallocChunk:          0 kB\nPercpu:              896 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:       92160 kB\nDirectMap2M:     5705728 kB\nDirectMap1G:    22020096 kB\n",
+    "pin": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "tools": {
+      "cargo": "/workspace/omp-toolchain/cargo/bin/cargo",
+      "cargo-bloat": null,
+      "cargo-llvm-lines": null,
+      "cargo-nextest": "/workspace/omp-toolchain/bin/cargo-nextest",
+      "footprint": null,
+      "heaptrack": null,
+      "just": "/workspace/omp-toolchain/bin/just",
+      "perf": null,
+      "rustc": "/workspace/omp-toolchain/cargo/bin/rustc",
+      "sample": null,
+      "valgrind": null,
+      "vmmap": null
+    }
+  },
+  "inventory": {
+    "duplicate_name_versions": {
+      "aead": [
+        "0.5.2",
+        "0.6.1"
+      ],
+      "aes": [
+        "0.8.4",
+        "0.9.3"
+      ],
+      "aes-gcm": [
+        "0.10.3",
+        "0.11.1"
+      ],
+      "base16ct": [
+        "0.2.0",
+        "1.0.0"
+      ],
+      "base64": [
+        "0.13.1",
+        "0.22.1",
+        "0.23.1"
+      ],
+      "bit-set": [
+        "0.8.0",
+        "0.10.0",
+        "0.11.1"
+      ],
+      "bit-vec": [
+        "0.8.0",
+        "0.9.1",
+        "0.10.1"
+      ],
+      "bitflags": [
+        "1.3.2",
+        "2.13.2"
+      ],
+      "blake2": [
+        "0.10.6",
+        "0.11.0"
+      ],
+      "block-buffer": [
+        "0.10.4",
+        "0.12.1"
+      ],
+      "block-padding": [
+        "0.3.3",
+        "0.4.2"
+      ],
+      "block2": [
+        "0.5.1",
+        "0.6.2"
+      ],
+      "cbc": [
+        "0.1.2",
+        "0.2.1"
+      ],
+      "chacha20": [
+        "0.9.1",
+        "0.10.2"
+      ],
+      "cipher": [
+        "0.4.4",
+        "0.5.2"
+      ],
+      "const-oid": [
+        "0.9.6",
+        "0.10.2"
+      ],
+      "core-foundation": [
+        "0.9.4",
+        "0.10.1"
+      ],
+      "core-graphics": [
+        "0.23.2",
+        "0.25.0"
+      ],
+      "core-graphics-types": [
+        "0.1.3",
+        "0.2.0"
+      ],
+      "cpufeatures": [
+        "0.2.17",
+        "0.3.1"
+      ],
+      "crypto-bigint": [
+        "0.5.5",
+        "0.7.5"
+      ],
+      "crypto-common": [
+        "0.1.7",
+        "0.2.2"
+      ],
+      "ctr": [
+        "0.9.2",
+        "0.10.1"
+      ],
+      "curve25519-dalek": [
+        "4.1.3",
+        "5.0.0"
+      ],
+      "darling": [
+        "0.20.11",
+        "0.24.1"
+      ],
+      "darling_core": [
+        "0.20.11",
+        "0.24.1"
+      ],
+      "darling_macro": [
+        "0.20.11",
+        "0.24.1"
+      ],
+      "defmt": [
+        "0.3.101",
+        "1.2.0"
+      ],
+      "der": [
+        "0.7.10",
+        "0.8.2"
+      ],
+      "digest": [
+        "0.10.7",
+        "0.11.3"
+      ],
+      "drm": [
+        "0.14.1",
+        "0.15.0"
+      ],
+      "ecdsa": [
+        "0.16.9",
+        "0.17.0"
+      ],
+      "elliptic-curve": [
+        "0.13.8",
+        "0.14.1"
+      ],
+      "embedded-io": [
+        "0.4.0",
+        "0.6.1"
+      ],
+      "fancy-regex": [
+        "0.14.0",
+        "0.16.2",
+        "0.17.0",
+        "0.18.0"
+      ],
+      "fearless_simd": [
+        "0.4.1",
+        "1.1.0"
+      ],
+      "ff": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "fiat-crypto": [
+        "0.2.9",
+        "0.3.0"
+      ],
+      "foldhash": [
+        "0.1.5",
+        "0.2.0"
+      ],
+      "font-types": [
+        "0.11.3",
+        "0.12.7"
+      ],
+      "fontdb": [
+        "0.23.0",
+        "0.24.0"
+      ],
+      "gemm": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-c32": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-c64": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-common": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-f16": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-f32": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "gemm-f64": [
+        "0.18.2",
+        "0.19.0"
+      ],
+      "generic-array": [
+        "0.14.7",
+        "1.4.5"
+      ],
+      "getrandom": [
+        "0.2.17",
+        "0.3.4",
+        "0.4.3"
+      ],
+      "ghash": [
+        "0.5.1",
+        "0.6.0"
+      ],
+      "gif": [
+        "0.13.3",
+        "0.14.2"
+      ],
+      "group": [
+        "0.13.0",
+        "0.14.0"
+      ],
+      "hash32": [
+        "0.2.1",
+        "0.3.1"
+      ],
+      "hashbrown": [
+        "0.14.5",
+        "0.15.5",
+        "0.16.1",
+        "0.17.1"
+      ],
+      "hayro-ccitt": [
+        "0.3.0",
+        "0.4.0"
+      ],
+      "heapless": [
+        "0.7.17",
+        "0.8.0",
+        "0.9.3"
+      ],
+      "hkdf": [
+        "0.12.4",
+        "0.13.0"
+      ],
+      "hmac": [
+        "0.12.1",
+        "0.13.0"
+      ],
+      "inout": [
+        "0.1.4",
+        "0.2.5"
+      ],
+      "io-lifetimes": [
+        "2.0.4",
+        "3.0.1"
+      ],
+      "itertools": [
+        "0.13.0",
+        "0.14.0",
+        "0.15.0"
+      ],
+      "jni-sys": [
+        "0.3.1",
+        "0.4.1"
+      ],
+      "keccak": [
+        "0.1.6",
+        "0.2.2"
+      ],
+      "kurbo": [
+        "0.11.3",
+        "0.13.1"
+      ],
+      "linux-raw-sys": [
+        "0.4.15",
+        "0.9.4",
+        "0.12.1"
+      ],
+      "logos": [
+        "0.15.1",
+        "0.16.1"
+      ],
+      "logos-codegen": [
+        "0.15.1",
+        "0.16.1"
+      ],
+      "logos-derive": [
+        "0.15.1",
+        "0.16.1"
+      ],
+      "md-5": [
+        "0.10.6",
+        "0.11.0"
+      ],
+      "memoffset": [
+        "0.7.1",
+        "0.9.1"
+      ],
+      "miniz_oxide": [
+        "0.8.9",
+        "0.9.1"
+      ],
+      "nix": [
+        "0.24.3",
+        "0.26.4",
+        "0.30.1",
+        "0.31.3"
+      ],
+      "nom": [
+        "7.1.3",
+        "8.0.0"
+      ],
+      "num-bigint": [
+        "0.4.8",
+        "0.5.1"
+      ],
+      "objc2": [
+        "0.5.3",
+        "0.6.5"
+      ],
+      "objc2-app-kit": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-cloud-kit": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-core-data": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-core-image": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-foundation": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-metal": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-quartz-core": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "objc2-uniform-type-identifiers": [
+        "0.2.2",
+        "0.3.2"
+      ],
+      "p256": [
+        "0.13.2",
+        "0.14.0"
+      ],
+      "p384": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "pem-rfc7468": [
+        "0.7.0",
+        "1.0.0"
+      ],
+      "phf": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "phf_generator": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "phf_macros": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "phf_shared": [
+        "0.13.1",
+        "0.14.0"
+      ],
+      "pkcs8": [
+        "0.10.2",
+        "0.11.0"
+      ],
+      "png": [
+        "0.17.16",
+        "0.18.1"
+      ],
+      "poly1305": [
+        "0.8.0",
+        "0.9.1"
+      ],
+      "polyval": [
+        "0.6.2",
+        "0.7.3"
+      ],
+      "prettyplease": [
+        "0.2.37",
+        "0.3.0"
+      ],
+      "primeorder": [
+        "0.13.6",
+        "0.14.0"
+      ],
+      "pulp": [
+        "0.21.5",
+        "0.22.3"
+      ],
+      "quick-error": [
+        "1.2.3",
+        "2.0.1"
+      ],
+      "r-efi": [
+        "5.3.0",
+        "6.0.0"
+      ],
+      "rand": [
+        "0.9.5",
+        "0.10.3"
+      ],
+      "rand_chacha": [
+        "0.9.0",
+        "0.10.0"
+      ],
+      "rand_core": [
+        "0.6.4",
+        "0.9.5",
+        "0.10.1"
+      ],
+      "read-fonts": [
+        "0.39.2",
+        "0.41.0"
+      ],
+      "redox_syscall": [
+        "0.4.1",
+        "0.5.18",
+        "0.9.5"
+      ],
+      "reqwest": [
+        "0.12.28",
+        "0.13.5"
+      ],
+      "rfc6979": [
+        "0.4.0",
+        "0.6.0"
+      ],
+      "rustc-hash": [
+        "1.1.0",
+        "2.1.3"
+      ],
+      "rustix": [
+        "0.38.44",
+        "1.1.5"
+      ],
+      "safetensors": [
+        "0.4.5",
+        "0.8.0"
+      ],
+      "sec1": [
+        "0.7.3",
+        "0.8.1"
+      ],
+      "sha1": [
+        "0.10.7",
+        "0.11.0"
+      ],
+      "sha2": [
+        "0.10.9",
+        "0.11.1"
+      ],
+      "sha3": [
+        "0.10.9",
+        "0.12.0"
+      ],
+      "shlex": [
+        "1.3.0",
+        "2.0.1"
+      ],
+      "signature": [
+        "2.2.0",
+        "3.0.0"
+      ],
+      "similar": [
+        "2.7.0",
+        "3.2.0"
+      ],
+      "skrifa": [
+        "0.42.1",
+        "0.44.0"
+      ],
+      "smallvec": [
+        "1.16.3",
+        "2.0.0-beta.3"
+      ],
+      "socket2": [
+        "0.5.10",
+        "0.6.5"
+      ],
+      "spki": [
+        "0.7.3",
+        "0.8.1"
+      ],
+      "syn": [
+        "2.0.119",
+        "3.0.9"
+      ],
+      "synstructure": [
+        "0.13.2",
+        "0.14.0"
+      ],
+      "thiserror": [
+        "1.0.69",
+        "2.0.21"
+      ],
+      "thiserror-impl": [
+        "1.0.69",
+        "2.0.21"
+      ],
+      "unicode-width": [
+        "0.1.14",
+        "0.2.2"
+      ],
+      "universal-hash": [
+        "0.5.1",
+        "0.6.1"
+      ],
+      "vello_common": [
+        "0.0.8",
+        "0.0.9"
+      ],
+      "wasm-streams": [
+        "0.4.2",
+        "0.5.0"
+      ],
+      "webpki-roots": [
+        "0.26.11",
+        "1.0.9"
+      ],
+      "weezl": [
+        "0.1.12",
+        "0.2.1"
+      ],
+      "windows": [
+        "0.61.3",
+        "0.62.2"
+      ],
+      "windows-collections": [
+        "0.2.0",
+        "0.3.2"
+      ],
+      "windows-core": [
+        "0.61.2",
+        "0.62.2"
+      ],
+      "windows-future": [
+        "0.2.1",
+        "0.3.2"
+      ],
+      "windows-link": [
+        "0.1.3",
+        "0.2.1"
+      ],
+      "windows-numerics": [
+        "0.2.0",
+        "0.3.1"
+      ],
+      "windows-result": [
+        "0.3.4",
+        "0.4.1"
+      ],
+      "windows-strings": [
+        "0.4.2",
+        "0.5.1"
+      ],
+      "windows-sys": [
+        "0.52.0",
+        "0.59.0",
+        "0.60.2",
+        "0.61.2"
+      ],
+      "windows-targets": [
+        "0.52.6",
+        "0.53.5"
+      ],
+      "windows-threading": [
+        "0.1.0",
+        "0.2.1"
+      ],
+      "windows_aarch64_gnullvm": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_aarch64_msvc": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_i686_gnu": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_i686_gnullvm": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_i686_msvc": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_x86_64_gnu": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_x86_64_gnullvm": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "windows_x86_64_msvc": [
+        "0.52.6",
+        "0.53.1"
+      ],
+      "winnow": [
+        "0.7.15",
+        "1.0.4"
+      ],
+      "yoke": [
+        "0.7.5",
+        "0.8.3"
+      ],
+      "yoke-derive": [
+        "0.7.5",
+        "0.8.4"
+      ],
+      "zune-core": [
+        "0.4.12",
+        "0.5.3"
+      ],
+      "zune-jpeg": [
+        "0.4.21",
+        "0.5.15"
+      ]
+    },
+    "lock_packages": 1397,
+    "packages": [
+      {
+        "dependencies": 5,
+        "features": {},
+        "name": "omp-adw",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_adw"
+          }
+        ]
+      },
+      {
+        "dependencies": 26,
+        "features": {
+          "open": [
+            "dep:url"
+          ],
+          "schemars": [
+            "dep:schemars"
+          ]
+        },
+        "name": "omp-core",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_core"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "base_n"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "encoding"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hex"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "principal"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "slopjson_incoming"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "slopjson_slop"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sparse"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sparse_container"
+          }
+        ]
+      },
+      {
+        "dependencies": 36,
+        "features": {},
+        "name": "omp-agent",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_agent"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "advisor"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "approval_desk"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "approvals"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cancel"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "compaction"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "delegated"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "detached_external"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "directors"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "dispatch"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "empty_output"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "extensions"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "failure"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "jobs"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "lifecycle_hooks"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "local"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "model_watch"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "output_stream"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "prompt_golden"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "roster_restrictions"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "runtime_flags"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "stream_coalescing"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "stream_rules_director"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "stream_watch"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "thread_projection"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "turn"
+          }
+        ]
+      },
+      {
+        "dependencies": 73,
+        "features": {
+          "apple-aux-memory": [
+            "local-applefm"
+          ],
+          "default": [],
+          "device-attestation": [
+            "dep:block2",
+            "dep:objc2",
+            "dep:objc2-foundation"
+          ],
+          "local": [],
+          "local-applefm": [
+            "local"
+          ],
+          "local-embedding": [
+            "local",
+            "dep:fastembed"
+          ],
+          "local-stt": [
+            "local",
+            "dep:candle-core",
+            "dep:candle-nn",
+            "dep:candle-transformers",
+            "dep:tokenizers"
+          ],
+          "local-tts": [
+            "local",
+            "dep:candle-core",
+            "dep:candle-nn",
+            "dep:voice-g2p"
+          ],
+          "realtime": [
+            "speech",
+            "dep:audiopus_sys",
+            "dep:opus",
+            "dep:webrtc",
+            "device-attestation"
+          ],
+          "speech": [
+            "dep:omp-audio"
+          ],
+          "test-support": []
+        },
+        "name": "omp-ai",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ai"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "applefm_smoke"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "account"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "conformance"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "kokoro_stft_roundtrip"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "local_runtime"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "transport_framing"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "vendor_schema_drift"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 12,
+        "features": {
+          "default": [
+            "native-audio"
+          ],
+          "native-audio": [
+            "dep:libc",
+            "dep:windows-sys",
+            "dep:block2",
+            "dep:objc2"
+          ],
+          "virtual-output": []
+        },
+        "name": "omp-audio",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_audio"
+          }
+        ]
+      },
+      {
+        "dependencies": 20,
+        "features": {},
+        "name": "omp-catalog",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_catalog"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "generate_snapshot"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "catalog_conformance"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "compat_cascade"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "policy_pricing_contract"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 10,
+        "features": {},
+        "name": "omp-con",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_con"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cfg"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "console"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "derive"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "layers"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "project"
+          }
+        ]
+      },
+      {
+        "dependencies": 15,
+        "features": {},
+        "name": "omp-session",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_session"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "appendix_a"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "golden_journals"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "idempotency"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "newer_journal"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "projection"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "replay_law"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "rewind"
+          }
+        ]
+      },
+      {
+        "dependencies": 11,
+        "features": {},
+        "name": "omp-dom",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_dom"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "dom"
+          }
+        ]
+      },
+      {
+        "dependencies": 11,
+        "features": {},
+        "name": "omp-journal",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_journal"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "data"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "gc"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "journal"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "runlog"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sse"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "vocabulary"
+          }
+        ]
+      },
+      {
+        "dependencies": 14,
+        "features": {},
+        "name": "omp-ar",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ar"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "roundtrip"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "asar"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cab"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "codecs"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "compatibility"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cpio"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "filesystem"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "iso"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "legacy_dos"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "rar"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "registry"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "rejection"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "round_trip"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sevenzip"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "tar"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "unix_ar"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "xz"
+          }
+        ]
+      },
+      {
+        "dependencies": 3,
+        "features": {},
+        "name": "omp-vocab",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_vocab"
+          }
+        ]
+      },
+      {
+        "dependencies": 12,
+        "features": {},
+        "name": "omp-exec",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_exec"
+          }
+        ]
+      },
+      {
+        "dependencies": 12,
+        "features": {
+          "default": [],
+          "tonic": [
+            "dep:tonic",
+            "dep:tonic-prost"
+          ]
+        },
+        "name": "omp-proto",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_proto"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "auth_gateway"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "bytes_text"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_acp_wire"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_approval_wire"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_reflection_wire"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_wave1"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "frame_bounds"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 16,
+        "features": {},
+        "name": "omp-sandbox",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_sandbox"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "appcontainer"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "bubblewrap"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "core"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "docker"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "gvisor"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "landlock"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "seatbelt"
+          }
+        ]
+      },
+      {
+        "dependencies": 21,
+        "features": {},
+        "name": "omp-observability",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_observability"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "fail_open_hooks"
+          }
+        ]
+      },
+      {
+        "dependencies": 12,
+        "features": {},
+        "name": "omp-secrets",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_secrets"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "key_persistence"
+          }
+        ]
+      },
+      {
+        "dependencies": 14,
+        "features": {},
+        "name": "omp-cache",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_cache"
+          }
+        ]
+      },
+      {
+        "dependencies": 17,
+        "features": {},
+        "name": "omp-tool",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_tool"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "contracts"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "schema"
+          }
+        ]
+      },
+      {
+        "dependencies": 21,
+        "features": {},
+        "name": "omp-oauth",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_oauth"
+          }
+        ]
+      },
+      {
+        "dependencies": 24,
+        "features": {},
+        "name": "omp-contract",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hook_catalog"
+          }
+        ]
+      },
+      {
+        "dependencies": 17,
+        "features": {},
+        "name": "omp-ext",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ext"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workspace_trust_inventory"
+          }
+        ]
+      },
+      {
+        "dependencies": 7,
+        "features": {},
+        "name": "omp-scribe",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_scribe"
+          }
+        ]
+      },
+      {
+        "dependencies": 5,
+        "features": {},
+        "name": "omp-snapcompact",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_snapcompact"
+          }
+        ]
+      },
+      {
+        "dependencies": 92,
+        "features": {
+          "cap-browser": [
+            "omp-envd/cap-browser",
+            "omp-driver/cap-browser"
+          ],
+          "cap-ci": [
+            "omp-envd/cap-ci",
+            "omp-chat/cap-ci",
+            "omp-tools/cap-ci"
+          ],
+          "cap-computer": [
+            "omp-envd/cap-computer"
+          ],
+          "cap-forge": [
+            "omp-envd/cap-forge",
+            "omp-chat/cap-forge",
+            "omp-tools/cap-forge"
+          ],
+          "cap-media": [
+            "omp-envd/cap-media"
+          ],
+          "cap-ssh": [
+            "omp-envd/cap-ssh"
+          ],
+          "claude-trace": [],
+          "default": [
+            "local",
+            "cap-ssh",
+            "cap-computer",
+            "cap-browser",
+            "cap-media",
+            "cap-forge",
+            "cap-ci"
+          ],
+          "gui": [
+            "dep:omp-gui"
+          ],
+          "local": [
+            "omp-driver/local",
+            "omp-ai/local"
+          ],
+          "local-all": [
+            "local-applefm",
+            "local-embedding",
+            "local-stt",
+            "local-tts"
+          ],
+          "local-applefm": [
+            "local",
+            "omp-driver/local-applefm",
+            "omp-ai/local-applefm"
+          ],
+          "local-embedding": [
+            "local",
+            "omp-driver/local-embedding",
+            "omp-ai/local-embedding",
+            "omp-memory/local-embedding"
+          ],
+          "local-stt": [
+            "local",
+            "omp-driver/local-stt",
+            "omp-ai/local-stt"
+          ],
+          "local-tts": [
+            "local",
+            "omp-driver/local-tts",
+            "omp-ai/local-tts"
+          ]
+        },
+        "name": "omp-app",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_app"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "claude-trace"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "acp_spine"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "adw_cfg"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "attach_client"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "config"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_process_protocol"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "export_cwd"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "it"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "keybindings"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "rpc_spine"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "session_import"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "worker_child"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "worktree_query"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 37,
+        "features": {
+          "cap-ci": [
+            "omp-tools/cap-ci"
+          ],
+          "cap-forge": [
+            "omp-tools/cap-forge"
+          ],
+          "default": [
+            "cap-forge",
+            "cap-ci"
+          ]
+        },
+        "name": "omp-chat",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_chat"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "card_parity"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "card_types"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "chrome"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "host"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "keys"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "pi_commands"
+          }
+        ]
+      },
+      {
+        "dependencies": 55,
+        "features": {
+          "cap-browser": [],
+          "cap-ci": [
+            "dep:omp-ci"
+          ],
+          "cap-computer": [],
+          "cap-forge": [
+            "dep:omp-forge"
+          ],
+          "cap-media": []
+        },
+        "name": "omp-tools",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_tools"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "it"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 66,
+        "features": {},
+        "name": "omp-ast",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ast"
+          }
+        ]
+      },
+      {
+        "dependencies": 9,
+        "features": {},
+        "name": "omp-walker",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_walker"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "parallel"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "perf"
+          }
+        ]
+      },
+      {
+        "dependencies": 6,
+        "features": {},
+        "name": "omp-ci",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ci"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "neutrality"
+          }
+        ]
+      },
+      {
+        "dependencies": 14,
+        "features": {},
+        "name": "omp-edit",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_edit"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "apply_patch"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "apply_patch_parity"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hashline_apply"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hashline_parity"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hashline_parse"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hashline_patcher"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "patch"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "replace"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "replace_parity"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "session"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sloppy"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "sloppy_parse"
+          }
+        ]
+      },
+      {
+        "dependencies": 17,
+        "features": {},
+        "name": "omp-env",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_env"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "client"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "extension_client"
+          }
+        ]
+      },
+      {
+        "dependencies": 8,
+        "features": {},
+        "name": "omp-forge",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_forge"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "neutrality"
+          }
+        ]
+      },
+      {
+        "dependencies": 6,
+        "features": {},
+        "name": "omp-macros",
+        "targets": [
+          {
+            "kind": [
+              "proc-macro"
+            ],
+            "name": "omp_macros"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cached"
+          }
+        ]
+      },
+      {
+        "dependencies": 14,
+        "features": {
+          "apple-aux-memory": [
+            "dep:omp-ai",
+            "omp-ai/apple-aux-memory"
+          ],
+          "default": [],
+          "local-embedding": [
+            "dep:fastembed"
+          ]
+        },
+        "name": "omp-memory",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_memory"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp-memory-embedding-worker"
+          }
+        ]
+      },
+      {
+        "dependencies": 13,
+        "features": {
+          "default": [],
+          "inspect": [
+            "pyo3/experimental-inspect",
+            "dep:pyo3-introspection"
+          ]
+        },
+        "name": "omp-py",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_py"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp-demo"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "stubgen"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "agents_runtime_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "control_auxiliary_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "convars_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "devices_hooks_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_data_async_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "env_data_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "extension_registrar_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "frozen_surface"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "policy_placement_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "prelude_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "provider_regime_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "registry_worker_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "remote_rpc_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "schemes_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "scribe_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "site_initialization_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "state_persistence_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "ui_telemetry_contract"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 0,
+        "features": {},
+        "name": "omp-py-link",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_py_link"
+          }
+        ]
+      },
+      {
+        "dependencies": 32,
+        "features": {},
+        "name": "omp-shell",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_shell"
+          }
+        ]
+      },
+      {
+        "dependencies": 68,
+        "features": {},
+        "name": "omp-shell-builtins",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_shell_builtins"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp-sh"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "dyn"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "exec"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "factory"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "nonutf8_env"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "streaming"
+          }
+        ]
+      },
+      {
+        "dependencies": 33,
+        "features": {},
+        "name": "omp-tui",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_tui"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "companies"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "diff"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "footers"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "gallery"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "tml"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "tools"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "elastic_props"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "seal_rebuild"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 11,
+        "features": {
+          "test-support": []
+        },
+        "name": "omp-vcs",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_vcs"
+          }
+        ]
+      },
+      {
+        "dependencies": 20,
+        "features": {
+          "test-relay": [
+            "dep:parking_lot"
+          ]
+        },
+        "name": "omp-collab",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_collab"
+          }
+        ]
+      },
+      {
+        "dependencies": 80,
+        "features": {
+          "cap-browser": [
+            "omp-envd/cap-browser"
+          ],
+          "default": [],
+          "local": [
+            "omp-ai/local"
+          ],
+          "local-all": [
+            "local-applefm",
+            "local-embedding",
+            "local-stt",
+            "local-tts"
+          ],
+          "local-applefm": [
+            "local",
+            "omp-ai/local-applefm"
+          ],
+          "local-embedding": [
+            "local",
+            "omp-ai/local-embedding",
+            "omp-memory/local-embedding"
+          ],
+          "local-stt": [
+            "local",
+            "omp-ai/local-stt"
+          ],
+          "local-tts": [
+            "local",
+            "omp-envd/local-tts",
+            "omp-ai/local-tts"
+          ]
+        },
+        "name": "omp-driver",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_driver"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "approval_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "configured_models"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "delegated_prompt"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "delegated_resolver"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "detached_terminal"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "discovered_models"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "discovery_refresh"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "first_run_discovery"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "gateway_credential_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "hub_sessions"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "memory_reflect"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "plugin_commands"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "plugin_hooks"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "project_cfg_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "provider_rejection_surfaces"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "remote_build"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "session_attach_uds"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "session_submit"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "subagent_cfg"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "v1_import_system_prompts"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "vendor_env_credentials"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "verification_evidence"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "verification_native"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "verification_policy"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "verification_snapshot"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workpool_producer"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workpool_scheduler"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workspace_trust_gates"
+          }
+        ]
+      },
+      {
+        "dependencies": 95,
+        "features": {
+          "cap-browser": [
+            "dep:omp-webview",
+            "dep:tokio-tungstenite",
+            "omp-tools/cap-browser"
+          ],
+          "cap-ci": [
+            "dep:omp-ci",
+            "dep:omp-ci-delegated",
+            "omp-tools/cap-ci"
+          ],
+          "cap-computer": [
+            "dep:omp-desktop",
+            "omp-tools/cap-computer"
+          ],
+          "cap-forge": [
+            "dep:omp-forge",
+            "dep:omp-forge-delegated",
+            "omp-tools/cap-forge"
+          ],
+          "cap-media": [
+            "dep:omp-audio",
+            "omp-tools/cap-media"
+          ],
+          "cap-ssh": [
+            "dep:omp-ssh"
+          ],
+          "default": [],
+          "local-tts": [
+            "omp-ai/local-tts"
+          ]
+        },
+        "name": "omp-envd",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_envd"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "browser_relay_contract"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "control_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "credential_secret_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "declared_scheme_fold"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "declared_scheme_s3"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "declared_scheme_s4"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "declared_scheme_s5"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "device_hook_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "docserver_authority_client"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "docserver_lsp_supervisor"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "docserver_terminal_stream"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "document_config_root"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "domain_control_router"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "durable_schedules"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "exec_local_backend"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "host_owner_backends"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "manifest_control_declarations"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "mcp_control_resolver"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "policy_placement_params_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "production_control_factory"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "provider_regime_service_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "ui_telemetry_jobs_authority"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workspace_capture"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "workspace_snapshot_protocol"
+          }
+        ]
+      },
+      {
+        "dependencies": 5,
+        "features": {},
+        "name": "omp-ci-delegated",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ci_delegated"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "neutrality"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "route"
+          }
+        ]
+      },
+      {
+        "dependencies": 28,
+        "features": {
+          "default": [],
+          "wayland-pipewire": [
+            "dep:pipewire"
+          ]
+        },
+        "name": "omp-desktop",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_desktop"
+          }
+        ]
+      },
+      {
+        "dependencies": 6,
+        "features": {},
+        "name": "omp-forge-delegated",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_forge_delegated"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "neutrality"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "route"
+          }
+        ]
+      },
+      {
+        "dependencies": 10,
+        "features": {},
+        "name": "omp-grep",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_grep"
+          }
+        ]
+      },
+      {
+        "dependencies": 3,
+        "features": {},
+        "name": "omp-http",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_http"
+          }
+        ]
+      },
+      {
+        "dependencies": 11,
+        "features": {},
+        "name": "omp-minimizer",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_minimizer"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "savings"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "minimizer_fixtures"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 13,
+        "features": {},
+        "name": "omp-ssh",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_ssh"
+          }
+        ]
+      },
+      {
+        "dependencies": 33,
+        "features": {},
+        "name": "omp-webview",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_webview"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "child"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "frames"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "ipc"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "window"
+          }
+        ]
+      },
+      {
+        "dependencies": 7,
+        "features": {},
+        "name": "omp-exec-local",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_exec_local"
+          }
+        ]
+      },
+      {
+        "dependencies": 23,
+        "features": {
+          "default": [
+            "test-server"
+          ],
+          "test-server": []
+        },
+        "name": "omp-exec-reapi",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_exec_reapi"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "live_buildbuddy"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 17,
+        "features": {},
+        "name": "omp-rpc",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_rpc"
+          }
+        ]
+      },
+      {
+        "dependencies": 22,
+        "features": {},
+        "name": "omp-serve",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_serve"
+          }
+        ]
+      },
+      {
+        "dependencies": 22,
+        "features": {},
+        "name": "omp-gui",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_gui"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "browser"
+          },
+          {
+            "kind": [
+              "example"
+            ],
+            "name": "chat"
+          }
+        ]
+      },
+      {
+        "dependencies": 12,
+        "features": {},
+        "name": "omp-kb",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_kb"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp-kb"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "cli"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "languages"
+          }
+        ]
+      },
+      {
+        "dependencies": 13,
+        "features": {},
+        "name": "omp-sdk",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_sdk"
+          }
+        ]
+      },
+      {
+        "dependencies": 51,
+        "features": {},
+        "name": "omp-e2e",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_e2e"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "baseline"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "omp_e2e_host"
+          },
+          {
+            "kind": [
+              "bin"
+            ],
+            "name": "pooling-bench"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p10_lift_idempotence"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p11_collab_spectator"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p12_daemon_approvals"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p13_remote_exec"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p14_session_attach"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p1_doc_race"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p1_editor_buffer"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p2_cancel_matrix"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p3_detached_jobs"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p4_schema_isolation"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p5_prefix_stability"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p6_crash_resume"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p7_tsp"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p7_tui"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p8_baselines"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p9_agent_settled"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p9_continuation_grants"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p9_extension_control"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "p9_isolation"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "tool_sources"
+          },
+          {
+            "kind": [
+              "custom-build"
+            ],
+            "name": "build-script-build"
+          }
+        ]
+      },
+      {
+        "dependencies": 10,
+        "features": {},
+        "name": "omp-exec-ssh",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_exec_ssh"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "loopback"
+          }
+        ]
+      },
+      {
+        "dependencies": 11,
+        "features": {},
+        "name": "omp-roster-probe",
+        "targets": [
+          {
+            "kind": [
+              "lib"
+            ],
+            "name": "omp_roster_probe"
+          },
+          {
+            "kind": [
+              "test"
+            ],
+            "name": "presence"
+          }
+        ]
+      }
+    ],
+    "workspace_members": 62
+  },
+  "limitations": [
+    "Synthetic graph, not an implemented OMP2 IR or runtime baseline.",
+    "System allocation counters instrument every allocation; timing overhead is included.",
+    "Arc aliases immutable state; not a substitute for an independent mutable deep clone.",
+    "No OS cache purge; no production allocation profile, macOS measurement or paid inference."
+  ],
+  "ownership_probe_summary": [
+    {
+      "allocation_calls": [
+        40001
+      ],
+      "max_elapsed_ns": 2973902,
+      "median_elapsed_ns": 1990703.0,
+      "method": "deep_clone",
+      "min_elapsed_ns": 1816499,
+      "n": 30,
+      "nodes": 10000,
+      "requested_bytes": [
+        3020000
+      ]
+    },
+    {
+      "allocation_calls": [
+        0
+      ],
+      "max_elapsed_ns": 100,
+      "median_elapsed_ns": 30.0,
+      "method": "arc_clone",
+      "min_elapsed_ns": 20,
+      "n": 30,
+      "nodes": 10000,
+      "requested_bytes": [
+        0
+      ]
+    },
+    {
+      "allocation_calls": [
+        400001
+      ],
+      "max_elapsed_ns": 28958391,
+      "median_elapsed_ns": 26412882.0,
+      "method": "deep_clone",
+      "min_elapsed_ns": 24458979,
+      "n": 30,
+      "nodes": 100000,
+      "requested_bytes": [
+        30200000
+      ]
+    },
+    {
+      "allocation_calls": [
+        0
+      ],
+      "max_elapsed_ns": 451,
+      "median_elapsed_ns": 30.0,
+      "method": "arc_clone",
+      "min_elapsed_ns": 20,
+      "n": 30,
+      "nodes": 100000,
+      "requested_bytes": [
+        0
+      ]
+    }
+  ]
+}

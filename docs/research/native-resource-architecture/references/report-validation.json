@@ -1,0 +1,17 @@
+{
+  "relative_links_checked": 44,
+  "pinned_source_targets_checked": 92,
+  "inline_source_paths_checked": 88,
+  "external_targets_not_verified_by_this_local_checker": [
+    "https://github.com/anthropics/sandbox-runtime/blob/0bbebed0aa9a8e628dc4df8bc30293550a1988eb/src/sandbox/linux-sandbox-utils.ts#L3863-L3921",
+    "https://github.com/anthropics/sandbox-runtime/blob/0bbebed0aa9a8e628dc4df8bc30293550a1988eb/src/sandbox/macos-sandbox-utils.ts#L1556-L1596",
+    "https://github.com/bytecodealliance/wasm-tools/blob/97a984fd8eb54c055b2516af16489cf4cbf05065/src/bin/wasm-tools/component.rs",
+    "https://github.com/ggml-org/llama.cpp/blob/4af4bb6d8ad83ec0b3ef84a3bc477ccfe179b4ff/include/llama.h#L377-L565",
+    "https://github.com/ml-explore/mlx/blob/3fe3cbc3bbe5eb31642fff620ad213f49f58d286/CMakeLists.txt#L32-L47",
+    "https://github.com/neoeinstein/stats_alloc/blob/be31f749696faab326bf18b5dd75eaf93010693d/src/lib.rs#L48-L150",
+    "https://github.com/tokio-rs/prost/blob/894f4a7f9c41f1afb8455fb6e521c067815f608d/prost/src/message.rs#L41-L114"
+  ],
+  "decision_records": 14,
+  "fields_per_record": 43,
+  "errors": []
+}
