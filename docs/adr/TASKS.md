@@ -427,7 +427,7 @@ Found while building units 2 and 4, and not part of R1:
 Accepted by the owner on 2026-11-25 with the answers to O1 to O5 (see the ADR). Not started. The owner chose option A: the host places the credential header and the key never reaches the extension. Slices are one PR each, in this order.
 
 - **DONE** Owner questions O1 to O5 answered: same file as `omp ext grant`; project-scoped extensions never hold credentials (D13); ADR 0040 is amended first; no migration period; option A only, `reveal` on a concrete need.
-- **OPEN** S-amend ADR 0040 amendment (`## Amendment` replacing the first credential rule, plus a pointer from ADR 0049). Lands first (O3). The `docs/py/11-env.md` `credential` keyword is documented with S3, when the keyword exists.
+- **DONE** S-amend ADR 0040 amendment (`## Amendment (2026-11-25)` replacing the first credential rule) and a pointer from ADR 0049 rule 7. Landed first (O3). The `docs/py/11-env.md` `credential` keyword is documented with S3, when the keyword exists.
 - **OPEN** Prerequisite, not a slice: PR #723, cross-origin redirect hardening (merged by the owner). Proposal: PR #720 does not merge with the key in its arguments.
 - **OPEN** S0 remote Environment transport note (docs only), S1 catalog auth spec and stored credential, S3 additive wire shape with host refusal and a handshake capability gate (inert). Independent of each other, after S-amend.
 - **OPEN** S2 grant record and enforcement (unblocked by O1 and O2).
