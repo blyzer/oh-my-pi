@@ -580,7 +580,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	symbol!(
 		"docs/py/11-env.md",
 		"omp.env.http_post",
-		"(url, *, body=b\"\", headers=..., timeout=None) -> HttpResponse",
+		"(url, *, body=b\"\", headers=..., timeout=None, credential=None) -> HttpResponse",
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_post(\"https://example.test\", body=b\"{}\")",

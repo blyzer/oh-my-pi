@@ -1,0 +1,29 @@
+#!/bin/sh
+# omp-githooks: pre-push
+# Refuse a push that updates or deletes a protected branch on the remote, whatever the local branch is
+# called (git push origin feature:main is caught too). The list is, in order of precedence:
+# $GIT_PROTECTED_BRANCHES, `git config omp.protectedBranches`, then "main master" (space separated).
+# On purpose:  ALLOW_PROTECTED_BRANCH=1 git push ...    `git push --no-verify` skips this hook.
+# Any hook this installer found in place is kept as pre-push.chained and runs after this check, with
+# the same arguments and input (git-lfs installs one).
+input=$(cat)
+if [ -z "${ALLOW_PROTECTED_BRANCH:-}" ]; then
+	protected=${GIT_PROTECTED_BRANCHES:-$(git config --get omp.protectedBranches)}
+	hit=$(printf '%s\n' "$input" | while read -r _lref _lsha rref _rsha; do
+		for p in ${protected:-main master}; do
+			[ "$rref" = "refs/heads/$p" ] && echo "$p"
+		done
+	done)
+	if [ -n "$hit" ]; then
+		echo "pre-push: refusing to push to protected branch: $(printf '%s' "$hit" | tr '\n' ' ')" >&2
+		echo "Push a topic branch and open a pull request. To push here on purpose, run again with" >&2
+		echo "ALLOW_PROTECTED_BRANCH=1 in the environment." >&2
+		exit 1
+	fi
+fi
+chain=$(dirname "$0")/pre-push.chained
+if [ -x "$chain" ]; then
+	printf '%s\n' "$input" | "$chain" "$@"
+	exit $?
+fi
+exit 0

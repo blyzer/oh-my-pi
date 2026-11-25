@@ -1377,13 +1377,26 @@ the whole file), `text: str`, `before: tuple[str, ...]`, `after: tuple[str, ...]
 ### Scoped HTTP egress
 
 `await omp.env.http_get(url, *, timeout=None, headers={}, redirects=10) -> HttpResponse`,
-`await omp.env.http_post(url, *, body=b"", headers={}, timeout=None, redirects=10) -> HttpResponse`,
+`await omp.env.http_post(url, *, body=b"", headers={}, timeout=None, redirects=10, credential=None) -> HttpResponse`,
 and `await omp.env.http_put(url, *, body=b"", headers={}, timeout=None, redirects=10) -> HttpResponse`
 send one bounded request through the Environment-owned client. `redirects` is the maximum number of
 redirect hops and must be an integer from 0 through 10. Use `redirects=0` for no-follow inspection
 of the first response and `redirects=1` for at most one hop. Hitting the bound returns that redirect
 response rather than following it again. The overall `timeout` covers the whole redirect chain,
 and the existing response-size cap applies to the returned body.
+
+`credential` (`http_post` only; `http_get` and `http_put` are unchanged) names a provider whose
+credential the host places on the request (ADR 0075). The extension passes the provider id and
+nothing else: the header name and prefix come from the host's provider catalog, never from the
+request, and the key is never returned to Python, passed as an argument or written to the
+environment. The default `None` sends an ordinary request. `credential` is a nonempty `str`
+(`TypeError` / `ValueError` otherwise). `class omp.env.PlacementUnavailable(EnvError)` is raised,
+with nothing sent and no connection opened, when the receiver did not advertise the
+`credential-placement` handshake capability (an older host, which would otherwise ignore the field
+and send the request unplaced), or when the host has no credential authority bound. The host
+makes the second refusal with `PROTOCOL_ERROR_CODE_PLACEMENT_UNAVAILABLE`; there is never a fallback
+to the environment, the Keychain or an argument. This surface is inert until the grant and
+placement slices of ADR 0075 land: every `credential` request is refused today.
 
 `class omp.env.HttpResponse` — `status: int`, immutable `headers: Mapping[str, str]`, `body: bytes`,
 and `final_url: str`. `final_url` is the URL that produced the returned response. In particular,

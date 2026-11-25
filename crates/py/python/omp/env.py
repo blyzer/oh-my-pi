@@ -138,6 +138,10 @@ class PreconditionFailed(EnvError):
     """A non-revision precondition failed."""
 
 
+class PlacementUnavailable(EnvError):
+    """The Environment cannot place a credential on this request; nothing was sent."""
+
+
 class Unsupported(EnvError):
     """The Environment cannot implement this operation."""
 
@@ -1770,6 +1774,7 @@ async def _http_request(
     headers: Mapping[str, str],
     timeout: Duration | None,
     redirects: int,
+    credential: str | None = None,
 ) -> HttpResponse:
     if type(redirects) is not int:
         raise TypeError("redirects must be an int")
@@ -1777,6 +1782,11 @@ async def _http_request(
         raise ValueError("redirects must be between 0 and 10")
     if type(body) is not bytes:
         raise TypeError("HTTP request body must be bytes")
+    if credential is not None:
+        if type(credential) is not str:
+            raise TypeError("credential must be a str provider id")
+        if not credential:
+            raise ValueError("credential must be a nonempty provider id")
     result = await _call(
         "http_request",
         method,
@@ -1785,6 +1795,7 @@ async def _http_request(
         headers=headers,
         timeout=timeout,
         redirects=redirects,
+        **({} if credential is None else {"credential": credential}),
     )
     return result if isinstance(result, HttpResponse) else HttpResponse(**result)
 
@@ -1820,11 +1831,18 @@ async def http_post(
     headers: Mapping[str, str] = MappingProxyType({}),
     timeout: Duration | None = None,
     redirects: int = 10,
+    credential: str | None = None,
 ) -> HttpResponse:
     """Request one URL with POST through scoped Environment HTTP egress.
 
     ``redirects`` is the maximum number of redirect hops, from 0 through 10.
     Zero returns the first redirect response without following it.
+
+    ``credential`` names a provider whose credential the host places on the
+    request; the key is never visible to the caller and the header name comes
+    from the host, never from the request. A host with no credential authority,
+    or a peer that cannot place, raises ``PlacementUnavailable`` and sends
+    nothing.
     """
     return await _http_request(
         "omp.env.http_post",
@@ -1835,6 +1853,7 @@ async def http_post(
         headers=headers,
         timeout=timeout,
         redirects=redirects,
+        credential=credential,
     )
 
 
@@ -2282,6 +2301,7 @@ __all__ = (
     "ProcessOutput",
     "ProcState",
     "Pty",
+    "PlacementUnavailable",
     "PreconditionFailed",
     "QuotaExceeded",
     "Rank",

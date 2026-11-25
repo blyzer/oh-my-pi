@@ -1,0 +1,35 @@
+#!/bin/sh
+# omp-githooks: reference-transaction
+# Refuse to delete a local branch (git branch -d/-D/-M onto an existing name, git update-ref -d,
+# and a rename, which git performs as delete-then-create). Git has no branch-delete hook, but it
+# runs this one for every ref update and a non-zero exit in the `prepared` state aborts the whole
+# operation. It cannot tell who ran the command, so a person deleting a merged branch or renaming
+# one sets the override:
+#   ALLOW_BRANCH_DELETE=1 git branch -D <branch>
+# Tags, remote-tracking refs, stash and every non-deleting update are never blocked. `git
+# pack-refs` (also run by `git gc` and `git maintenance`) deletes the loose copy of every branch it
+# packs, so a transaction whose git subcommand is pack-refs is let through.
+# Not a security control: `git -c core.hooksPath=/dev/null ...` bypasses it. The installer does not
+# chain a hook it finds in place for this name; it refuses to overwrite it.
+[ "$1" = prepared ] || exit 0
+[ -n "${ALLOW_BRANCH_DELETE:-}" ] && exit 0
+# The hook's parent is the git process doing the work: find its subcommand, skipping global options.
+sub=$(ps -o command= -p "$PPID" 2>/dev/null | awk '{
+	for (i = 2; i <= NF; i++) {
+		if ($i ~ /^(-c|-C|--git-dir|--work-tree|--namespace)$/) { i++; continue }
+		if ($i ~ /^-/) continue
+		print $i; exit
+	}
+}')
+[ "$sub" = pack-refs ] && exit 0
+deleted=
+while read -r _old new ref; do
+	case "$ref" in refs/heads/*) ;; *) continue ;; esac
+	case "$new" in *[!0]*) continue ;; esac # not all zeros: not a delete
+	deleted="$deleted ${ref#refs/heads/}"
+done
+if [ -n "$deleted" ]; then
+	echo "reference-transaction: refusing to delete local branch:$deleted" >&2
+	echo "To delete or rename on purpose, run again with ALLOW_BRANCH_DELETE=1 in the environment." >&2
+	exit 1
+fi

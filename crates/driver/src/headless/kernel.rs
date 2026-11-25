@@ -2493,11 +2493,13 @@ pub async fn compose_kernel(
 		.into_iter()
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
+	// Probed only if a user extension declares CONTROL; see `SandboxProbe`.
+	let sandbox_probe = || omp_envd::admission::probe_sandbox(&ctx, &project_root).confines();
 	let control_options = crate::discovery::native::NativeControlGrantOptions {
 		data_dir,
 		sandbox_mode: omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
 		writable_roots: &configured_writable_roots,
-		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &project_root).confines(),
+		sandbox_available: crate::discovery::native::SandboxProbe::lazy(&sandbox_probe),
 	};
 	let protected_write_paths =
 		crate::discovery::native::protected_write_paths(data_dir, &protected_home);
