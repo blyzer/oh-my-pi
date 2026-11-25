@@ -3,8 +3,8 @@
 Uses `omp.env.http_post` to call BuildBuddy's Run API REST endpoints. All
 endpoints are POST-based JSON calls routed through the sandbox's HTTP egress
 broker, which checks each destination against `sv_sandbox_allow_domains`. The
-API key is read from the operator credential convar via `omp.credential` at
-call time.
+API key is passed from the DelegatedBackend adapter via the request args,
+so no subprocess calls are needed (subprocess is blocked by the sandbox).
 
 Run API endpoints (from BuildBuddy Enterprise API docs):
 - `POST /api/v1/Run` — submit a run, returns invocation ID
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from typing import Any
 
 import omp
@@ -29,29 +28,21 @@ from . import errors
 from .profile import ENDPOINT
 
 
-def _api_key() -> str:
-    """Read the BuildBuddy API key from the macOS Keychain.
+def _api_key(api_key_from_args: str | None = None) -> str:
+    """Return the BuildBuddy API key.
 
-    Uses the same command as `sv_exec_remote_credential` in
-    `~/.o2/config.cfg`: `security find-generic-password -s buildbuddy-omp2-trial -w`.
+    Prefers the key passed from the DelegatedBackend adapter (via request args).
     Falls back to `BUILDBUDDY_API_KEY` env var for testing.
+    The subprocess Keychain lookup is not used because subprocess is blocked
+    by the sandbox.
     """
+    if api_key_from_args:
+        return api_key_from_args
     key = os.environ.get("BUILDBUDDY_API_KEY", "")
     if key:
         return key
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "buildbuddy-omp2-trial", "-w"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
     raise errors.BuildBuddyUnavailable(
-        "auth", "no BuildBuddy API key found (Keychain or BUILDBUDDY_API_KEY)"
+        "auth", "no BuildBuddy API key found (must be provided by DelegatedBackend or BUILDBUDDY_API_KEY env var)"
     )
 
 
@@ -68,17 +59,17 @@ def _base_url() -> str:
     return endpoint
 
 
-def _headers() -> dict[str, str]:
+def _headers(api_key: str | None = None) -> dict[str, str]:
     """Build the authorization headers for BuildBuddy REST API."""
     return {
-        "x-buildbuddy-api-key": _api_key(),
+        "x-buildbuddy-api-key": _api_key(api_key),
         "Content-Type": "application/json",
         "User-Agent": "omp-buildbuddy/0.1",
     }
 
 
 async def _request(
-    endpoint: str, *, payload: dict[str, Any] | None = None
+    endpoint: str, *, payload: dict[str, Any] | None = None, api_key: str | None = None
 ) -> dict[str, Any]:
     """Execute one BuildBuddy REST API call through the sandbox egress broker.
 
@@ -89,7 +80,7 @@ async def _request(
     """
     base = _base_url()
     url = base.rstrip("/") + f"/api/v1/{endpoint}"
-    headers = _headers()
+    headers = _headers(api_key)
 
     body_bytes = b""
     if payload is not None:
@@ -103,9 +94,9 @@ async def _request(
             endpoint, f"BuildBuddy host unreachable: {exc}"
         ) from exc
 
-    if response.status_code >= 400:
+    if response.status >= 400:
         raise errors.BuildBuddyUnavailable(
-            endpoint, f"BuildBuddy HTTP {response.status_code}"
+            endpoint, f"BuildBuddy HTTP {response.status}"
         )
 
     body = response.body
@@ -147,10 +138,13 @@ async def start_run(request: dict[str, Any]) -> dict[str, Any]:
     - `commit_sha`: optional commit SHA
     - `patches`: optional Base64-encoded git patches
     - `env`: optional environment variables map
+    - `api_key`: optional API key (passed from DelegatedBackend)
     - `wait_until`: optional, defaults to returning after dispatch
 
     Returns the invocation ID assigned by BuildBuddy.
     """
+    api_key = request.get("api_key")
+
     steps = request.get("steps", [])
     if not steps:
         command = request.get("command", "")
@@ -176,7 +170,7 @@ async def start_run(request: dict[str, Any]) -> dict[str, Any]:
     if env:
         payload["env"] = env
 
-    result = await _request("Run", payload=payload)
+    result = await _request("Run", payload=payload, api_key=api_key)
     invocation_id = result.get("invocationId") or result.get("invocation_id") or ""
     if not invocation_id:
         raise errors.BuildBuddyUnavailable("Run", "no invocation ID in response")
@@ -186,7 +180,9 @@ async def start_run(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
+async def poll_run(
+    operation: str, cursor: str | None = None, api_key: str | None = None
+) -> dict[str, Any]:
     """Call `poll` — get invocation status via `POST /api/v1/GetInvocation`.
 
     BuildBuddy's GetInvocation endpoint returns invocation metadata including
@@ -199,7 +195,7 @@ async def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
     if cursor:
         payload["page_token"] = cursor
 
-    result = await _request("GetInvocation", payload=payload)
+    result = await _request("GetInvocation", payload=payload, api_key=api_key)
 
     # BuildBuddy returns `invocation` as a list; take the first item
     invocations = result.get("invocation", [])
@@ -234,7 +230,9 @@ async def poll_run(operation: str, cursor: str | None = None) -> dict[str, Any]:
     }
 
 
-async def get_log(operation: str, cursor: str | None = None) -> dict[str, Any]:
+async def get_log(
+    operation: str, cursor: str | None = None, api_key: str | None = None
+) -> dict[str, Any]:
     """Call `get_log` — fetch invocation logs via `POST /api/v1/GetLog`.
 
     BuildBuddy's GetLog endpoint returns log chunks for an invocation.
@@ -246,7 +244,7 @@ async def get_log(operation: str, cursor: str | None = None) -> dict[str, Any]:
     if cursor:
         payload["page_token"] = cursor
 
-    result = await _request("GetLog", payload=payload)
+    result = await _request("GetLog", payload=payload, api_key=api_key)
 
     # BuildBuddy returns log chunks in the response
     chunks = result.get("chunks", [])
