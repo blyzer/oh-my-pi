@@ -90,6 +90,10 @@ pub enum ClientError {
 	/// The worker-scoped surface excludes this operation family.
 	#[error("operation is unavailable on an invocation-scoped environment client")]
 	ScopedOperationDenied,
+	/// The receiver did not advertise [`CREDENTIAL_PLACEMENT_CAPABILITY`], so the
+	/// request was not sent (ADR 0075 D11).
+	#[error("environment peer did not advertise credential placement; request not sent")]
+	PlacementUnsupported,
 	/// A UDS connection or framed transport could not be established.
 	#[error("environment transport error: {0}")]
 	Transport(#[from] io::Error),
@@ -212,6 +216,20 @@ pub const REFLECTION_RELAY_CAPABILITY: &str = "reflection-relay";
 /// connection that advertises only client features keeps its default grants.
 pub const CLIENT_FEATURES: &[&str] =
 	&[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY, REFLECTION_RELAY_CAPABILITY];
+
+/// `ServerHello` capability that says the host understands
+/// `HttpRequest.credential` (ADR 0075 D11).
+///
+/// A sender sends that field only to a receiver that advertised this name: an
+/// older receiver ignores the unknown field and would send the request
+/// unplaced. Advertising it says the host enforces the field, not that an
+/// authority is bound; an unbound host refuses with
+/// `PROTOCOL_ERROR_CODE_PLACEMENT_UNAVAILABLE`. It is one of the
+/// [`SERVER_FEATURES`], not a DATA grant.
+pub const CREDENTIAL_PLACEMENT_CAPABILITY: &str = "credential-placement";
+
+/// `ServerHello` capabilities that name host features rather than DATA grants.
+pub const SERVER_FEATURES: &[&str] = &[CREDENTIAL_PLACEMENT_CAPABILITY];
 
 /// A terminal loss of event-stream continuity.
 #[derive(Clone, Debug)]
@@ -2956,8 +2974,25 @@ impl ExtensionEnvClient {
 		}
 	}
 
+	/// Returns whether the receiver advertised `capability` in its handshake.
+	fn peer_advertises(&self, capability: &str) -> bool {
+		self.info().is_some_and(|info| {
+			info
+				.capabilities
+				.iter()
+				.any(|advertised| advertised == capability)
+		})
+	}
+
 	/// Performs one scoped HTTP request through the environment authority.
+	///
+	/// A request carrying `credential` fails locally with
+	/// [`ClientError::PlacementUnsupported`] unless the receiver advertised
+	/// [`CREDENTIAL_PLACEMENT_CAPABILITY`]; nothing is sent in that case.
 	pub async fn http(&self, request: HttpRequest) -> Result<HttpResponse, ClientError> {
+		if request.credential.is_some() && !self.peer_advertises(CREDENTIAL_PLACEMENT_CAPABILITY) {
+			return Err(ClientError::PlacementUnsupported);
+		}
 		match self
 			.worker
 			.client
