@@ -52,10 +52,20 @@ async def describe(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start(args: dict[str, Any]) -> dict[str, Any]:
-    """Start a remote execution run on BuildBuddy."""
-    request = args.get("request", {})
-    if not isinstance(request, dict):
+    """Start a remote execution run on BuildBuddy.
+    
+    Accepts args in two formats:
+    - DelegatedBackend format: {"steps": [...], "env": {...}, "api_key": "..."}
+    - Legacy format: {"request": {"steps": [...], "env": {...}, "api_key": "..."}}
+    """
+    # DelegatedBackend passes args directly; legacy format wraps under "request"
+    request = args.get("request")
+    if request is None:
+        # No "request" key — use args directly (DelegatedBackend format)
+        request = args
+    elif not isinstance(request, dict):
         raise errors.BuildBuddyUnavailable("start", "args.request must be an object")
+    
     try:
         return await client.start_run(request)
     except errors.BuildBuddyUnavailable:
@@ -70,8 +80,11 @@ async def poll(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
     cursor = args.get("cursor")
+    api_key = args.get("api_key")
     try:
-        return await client.poll_run(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.poll_run(
+            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+        )
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:
@@ -84,8 +97,11 @@ async def get_log(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("get_log", "args.operation is required")
     cursor = args.get("cursor")
+    api_key = args.get("api_key")
     try:
-        return await client.get_log(str(operation), cursor=str(cursor) if cursor else None)
+        return await client.get_log(
+            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+        )
     except errors.BuildBuddyUnavailable:
         raise
     except Exception as exc:

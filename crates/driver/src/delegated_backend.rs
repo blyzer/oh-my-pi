@@ -18,13 +18,14 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::Str;
+use omp_core::{CowBytes, Str};
 use omp_env::{ClientError, EnvClient, InvocationEvent};
 use omp_exec::{
 	BackendCapabilities, BackendId, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult, ExecutionRun, Outcome,
-	Platform, ReattachHandle, ResumeSupport,
+	OutputFrame, Platform, ReattachHandle, ResumeSupport, Stream,
 };
+use omp_exec_reapi::profile::Credential;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -40,6 +41,18 @@ mod device {
 	pub const POLL: &str = "exec/poll";
 	pub const GET_LOG: &str = "exec/get_log";
 	pub const CANCEL: &str = "exec/cancel";
+	pub const REVISION: &str = "buildbuddy.1";
+}
+
+fn shell_quote(value: &str) -> String {
+	format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn credential_value(inner: &BackendInner) -> Option<String> {
+	inner
+		.credential
+		.as_ref()
+		.map(|credential| credential.expose().to_string())
 }
 
 /// Error from a delegated extension device call.
@@ -80,6 +93,8 @@ struct BackendInner {
 	id:           BackendId,
 	/// Capabilities for this backend.
 	capabilities: Arc<BackendCapabilities>,
+	/// API key credential for the extension.
+	credential:   Option<Credential>,
 }
 
 impl DelegatedBackend {
@@ -87,7 +102,7 @@ impl DelegatedBackend {
 	///
 	/// The `client` must have the extension loaded and admitted. The `id` is
 	/// the operator-given name used in execution handles.
-	pub fn new(client: EnvClient, id: BackendId) -> Self {
+	pub fn new(client: EnvClient, id: BackendId, credential: Option<Credential>) -> Self {
 		Self {
 			inner: Arc::new(BackendInner {
 				client,
@@ -103,6 +118,7 @@ impl DelegatedBackend {
 					warm_caches:    false,
 					enforced:       REMOTE_POSTURE,
 				}),
+				credential,
 			}),
 		}
 	}
@@ -115,35 +131,38 @@ impl DelegatedBackend {
 	) -> Result<Value, DelegatedError> {
 		let seq = INVOCATION_COUNTER.fetch_add(1, Ordering::Relaxed);
 		let invocation_id = format!("delegated-{}-{}", operation, seq);
+
+		tracing::debug!(operation, invocation_id, "delegated backend invoking device");
+
 		let invoke = omp_env::frame::InvokeTool {
 			invocation_id,
 			name: operation.to_string(),
-			rev: String::new(),
+			rev: device::REVISION.to_owned(),
 			deadline_ms: u64::try_from(Duration::from_secs(30).as_millis()).unwrap_or(u64::MAX),
 			output_request: omp_env::frame::OutputRequest::Complete as i32,
 			restrictions: None,
 			..Default::default()
 		};
 
-		let mut invocation = self
-			.inner
-			.client
-			.invoke(invoke)
-			.await
-			.map_err(DelegatedError::Transport)?;
+		let mut invocation = self.inner.client.invoke(invoke).await.map_err(|e| {
+			tracing::error!(operation, error = %e, "delegated backend invoke failed");
+			DelegatedError::Transport(e)
+		})?;
 
 		// Wait for acceptance
-		match invocation
-			.next_event()
-			.await
-			.map_err(DelegatedError::Transport)?
-		{
-			Some(InvocationEvent::Accepted(_)) => {},
+		match invocation.next_event().await.map_err(|e| {
+			tracing::error!(operation, error = %e, "delegated backend next_event failed");
+			DelegatedError::Transport(e)
+		})? {
+			Some(InvocationEvent::Accepted(_)) => {
+				tracing::debug!(operation, "delegated backend device accepted");
+			},
 			Some(InvocationEvent::Verdict(v)) => {
 				// Some devices may return immediately with verdict
 				return Self::extract_result(v, operation);
 			},
 			_ => {
+				tracing::error!(operation, "delegated backend device did not accept");
 				return Err(DelegatedError::Device {
 					operation,
 					detail: Str::new_static("device did not accept"),
@@ -157,22 +176,28 @@ impl DelegatedBackend {
 		invocation
 			.commit_args(args_bytes, Default::default(), 0, None)
 			.await
-			.map_err(DelegatedError::Transport)?;
+			.map_err(|e| {
+				tracing::error!(operation, error = %e, "delegated backend commit_args failed");
+				DelegatedError::Transport(e)
+			})?;
+
+		tracing::debug!(operation, "delegated backend args committed, waiting for verdict");
 
 		// Stream events until verdict
 		loop {
-			match invocation
-				.next_event()
-				.await
-				.map_err(DelegatedError::Transport)?
-			{
+			match invocation.next_event().await.map_err(|e| {
+				tracing::error!(operation, error = %e, "delegated backend verdict stream failed");
+				DelegatedError::Transport(e)
+			})? {
 				Some(InvocationEvent::Verdict(v)) => {
+					tracing::debug!(operation, "delegated backend received verdict");
 					return Self::extract_result(v, operation);
 				},
 				Some(InvocationEvent::Accepted(_)) | Some(InvocationEvent::Update(_)) => {
 					// Continue streaming
 				},
 				Some(InvocationEvent::Admission(_)) => {
+					tracing::error!(operation, "delegated backend unexpected admission query");
 					// Should not happen for backend operations
 					return Err(DelegatedError::Device {
 						operation,
@@ -180,6 +205,7 @@ impl DelegatedBackend {
 					});
 				},
 				None => {
+					tracing::error!(operation, "delegated backend stream closed without verdict");
 					return Err(DelegatedError::Device {
 						operation,
 						detail: Str::new_static("device stream closed without verdict"),
@@ -242,27 +268,41 @@ impl DelegatedBackend {
 		&self,
 		request: ExecutionRequest,
 	) -> Result<DelegatedRun, ExecutionError> {
-		// Map ExecutionRequest to the device's start payload
-		let steps: Vec<serde_json::Value> = request
+		// The Run API accepts executable steps, not one step per argv token.
+		let command = request
 			.argv
 			.iter()
-			.map(|arg| serde_json::json!({ "run": arg.as_str() }))
-			.collect();
+			.map(|arg| shell_quote(arg.as_str()))
+			.collect::<Vec<_>>()
+			.join(" ");
+		let steps = [serde_json::json!({ "run": command })];
 
 		let env_map: serde_json::Map<String, serde_json::Value> = request
 			.env
 			.iter()
 			.map(|e| (e.name.to_string(), serde_json::json!(e.value.as_str())))
 			.collect();
+
+		// Include the API key credential so the extension can use it directly
+		// instead of calling subprocess (which is blocked by the sandbox)
+		let api_key = self
+			.inner
+			.credential
+			.as_ref()
+			.map(|c| c.expose().to_string());
+
 		let args = serde_json::json!({
 			"steps": steps,
 			"env": env_map,
+			"api_key": api_key,
 		});
 
-		let result = self
-			.call_device(device::START, args)
-			.await
-			.map_err(|e| ExecutionError::Transport { source: Arc::new(e) })?;
+		tracing::info!(step_count = steps.len(), "delegated backend calling start device");
+
+		let result = self.call_device(device::START, args).await.map_err(|e| {
+			tracing::error!(error = %e, "delegated backend start device failed");
+			ExecutionError::Transport { source: Arc::new(e) }
+		})?;
 
 		let operation = result
 			.get("operation")
@@ -271,20 +311,27 @@ impl DelegatedBackend {
 			.to_string();
 
 		if operation.is_empty() {
+			// Never log the device reply: it is untrusted, unbounded and may echo request
+			// data.
+			tracing::error!("delegated backend start returned no operation ID");
 			return Err(ExecutionError::Transport {
 				source: Arc::new(DelegatedError::Malformed { operation: device::START }),
 			});
 		}
 
+		tracing::info!(operation, "delegated backend start succeeded");
+
 		Ok(DelegatedRun {
-			backend:   self.clone(),
-			operation: Str::from(operation),
-			id:        request.id,
-			outputs:   request.outputs,
-			timeout:   request.timeout,
-			cursor:    None,
-			settled:   false,
-			cancel:    CancellationToken::new(),
+			backend:       self.clone(),
+			operation:     Str::from(operation),
+			id:            request.id,
+			outputs:       request.outputs,
+			timeout:       request.timeout,
+			poll_cursor:   None,
+			log_cursor:    None,
+			pending_event: None,
+			settled:       false,
+			cancel:        CancellationToken::new(),
 		})
 	}
 
@@ -295,42 +342,61 @@ impl DelegatedBackend {
 	) -> Result<DelegatedRun, ExecutionError> {
 		// Reattach by creating a run that starts polling from the stored operation
 		Ok(DelegatedRun {
-			backend:   self.clone(),
-			operation: handle.operation,
-			id:        handle.id,
-			outputs:   omp_exec::OutputSpec::Logs,
-			timeout:   Duration::from_secs(60 * 30),
-			cursor:    None,
-			settled:   false,
-			cancel:    CancellationToken::new(),
+			backend:       self.clone(),
+			operation:     handle.operation,
+			id:            handle.id,
+			outputs:       omp_exec::OutputSpec::Logs,
+			timeout:       Duration::from_secs(60 * 30),
+			poll_cursor:   None,
+			log_cursor:    None,
+			pending_event: None,
+			settled:       false,
+			cancel:        CancellationToken::new(),
 		})
 	}
 }
 
 /// One delegated run in progress.
 pub struct DelegatedRun {
-	backend:   DelegatedBackend,
-	operation: Str,
-	id:        omp_exec::ExecutionId,
-	outputs:   omp_exec::OutputSpec,
-	timeout:   Duration,
-	cursor:    Option<Str>,
-	settled:   bool,
-	cancel:    CancellationToken,
+	backend:       DelegatedBackend,
+	operation:     Str,
+	id:            omp_exec::ExecutionId,
+	outputs:       omp_exec::OutputSpec,
+	timeout:       Duration,
+	poll_cursor:   Option<Str>,
+	log_cursor:    Option<Str>,
+	pending_event: Option<ExecutionEvent>,
+	settled:       bool,
+	cancel:        CancellationToken,
 }
 
 impl ExecutionRun for DelegatedRun {
 	fn next_event(&mut self) -> impl Future<Output = Option<ExecutionEvent>> + Send + '_ {
-		let backend = self.backend.clone();
-		let operation = self.operation.clone();
-		let id = self.id.clone();
-		let cursor = self.cursor.clone();
-		let settled = self.settled;
 		async move {
-			if settled {
+			if let Some(event) = self.pending_event.take() {
+				self.settled = matches!(event, ExecutionEvent::Settled(_));
+				return Some(event);
+			}
+			if self.settled {
 				return None;
 			}
-			backend.next_event_for(operation, id, cursor).await
+			let next = self
+				.backend
+				.next_event_for(
+					self.operation.clone(),
+					self.id.clone(),
+					self.poll_cursor.clone(),
+					self.log_cursor.clone(),
+				)
+				.await;
+			self.poll_cursor = next.poll_cursor;
+			self.log_cursor = next.log_cursor;
+			if let Some(output) = next.output {
+				self.pending_event = Some(next.event);
+				return Some(ExecutionEvent::Output(output));
+			}
+			self.settled = matches!(next.event, ExecutionEvent::Settled(_));
+			Some(next.event)
 		}
 	}
 
@@ -365,43 +431,87 @@ impl ExecutionRun for DelegatedRun {
 	}
 }
 
+struct DelegatedNext {
+	event:       ExecutionEvent,
+	output:      Option<OutputFrame>,
+	poll_cursor: Option<Str>,
+	log_cursor:  Option<Str>,
+}
+
 impl DelegatedBackend {
 	async fn next_event_for(
 		&self,
 		operation: Str,
 		id: omp_exec::ExecutionId,
-		cursor: Option<Str>,
-	) -> Option<ExecutionEvent> {
-		// Poll for state
-		let mut poll_args = serde_json::json!({ "operation": operation.as_str() });
-		if let Some(ref cur) = cursor {
-			poll_args["cursor"] = serde_json::json!(cur.as_str());
+		poll_cursor: Option<Str>,
+		log_cursor: Option<Str>,
+	) -> DelegatedNext {
+		let inner = &self.inner;
+		let auth = credential_value(inner);
+		let mut poll_args = serde_json::json!({
+			"operation": operation.as_str(),
+			"api_key": auth,
+		});
+		if let Some(cursor) = poll_cursor.as_ref() {
+			poll_args["cursor"] = serde_json::json!(cursor.as_str());
 		}
-
 		let poll_result = match self.call_device(device::POLL, poll_args).await {
-			Ok(v) => v,
-			Err(e) => {
-				return Some(ExecutionEvent::Settled(Err(ExecutionError::Transport {
-					source: Arc::new(e),
-				})));
+			Ok(result) => result,
+			Err(error) => {
+				return DelegatedNext {
+					event: ExecutionEvent::Settled(Err(ExecutionError::Transport {
+						source: Arc::new(error),
+					})),
+					output: None,
+					poll_cursor,
+					log_cursor,
+				};
 			},
 		};
-
+		let next_poll_cursor = next_cursor(&poll_result).or(poll_cursor);
+		let auth = credential_value(inner);
+		let mut log_args = serde_json::json!({
+			"operation": operation.as_str(),
+			"api_key": auth,
+		});
+		if let Some(cursor) = log_cursor.as_ref() {
+			log_args["cursor"] = serde_json::json!(cursor.as_str());
+		}
+		let (output, next_log_cursor) = match self.call_device(device::GET_LOG, log_args).await {
+			Ok(result) => {
+				let output = result
+					.get("output")
+					.and_then(Value::as_str)
+					.filter(|output| !output.is_empty())
+					.map(|output| OutputFrame {
+						stream: Stream::Combined,
+						bytes:  CowBytes::from(output.as_bytes().to_vec()),
+					});
+				(output, next_cursor(&result).or(log_cursor))
+			},
+			Err(error) => {
+				return DelegatedNext {
+					event: ExecutionEvent::Settled(Err(ExecutionError::OutputRetrieval {
+						source: Arc::new(error),
+					})),
+					output: None,
+					poll_cursor: next_poll_cursor,
+					log_cursor,
+				};
+			},
+		};
 		let state = poll_result
 			.get("state")
-			.and_then(|s| s.as_str())
+			.and_then(Value::as_str)
 			.unwrap_or("unknown");
-
-		// Map state to events
-		match state {
-			"running" => Some(ExecutionEvent::Executing),
+		let event = match state {
+			"running" => ExecutionEvent::Executing,
 			"succeeded" | "failed" => {
 				let exit_code = poll_result
 					.get("exitCode")
-					.and_then(|c| c.as_i64())
+					.and_then(Value::as_i64)
 					.unwrap_or(if state == "succeeded" { 0 } else { 1 }) as i32;
-
-				Some(ExecutionEvent::Settled(Ok(ExecutionResult {
+				ExecutionEvent::Settled(Ok(ExecutionResult {
 					id,
 					backend: self.inner.id.clone(),
 					outcome: Outcome::Exited { code: exit_code },
@@ -412,11 +522,20 @@ impl DelegatedBackend {
 					transfer: Default::default(),
 					cache_hit: false,
 					fallback: None,
-				})))
+				}))
 			},
-			_ => Some(ExecutionEvent::Queued),
-		}
+			_ => ExecutionEvent::Queued,
+		};
+		DelegatedNext { event, output, poll_cursor: next_poll_cursor, log_cursor: next_log_cursor }
 	}
+}
+
+fn next_cursor(result: &Value) -> Option<Str> {
+	result
+		.get("nextCursor")
+		.and_then(Value::as_str)
+		.filter(|cursor| !cursor.is_empty())
+		.map(Str::new)
 }
 
 #[cfg(test)]
@@ -438,5 +557,17 @@ mod tests {
 		assert_eq!(device::POLL, "exec/poll");
 		assert_eq!(device::GET_LOG, "exec/get_log");
 		assert_eq!(device::CANCEL, "exec/cancel");
+		assert_eq!(device::REVISION, "buildbuddy.1");
+	}
+
+	#[test]
+	fn command_step_preserves_argv_boundaries() {
+		let argv = ["just", "check", "a'b"];
+		let command = argv
+			.into_iter()
+			.map(shell_quote)
+			.collect::<Vec<_>>()
+			.join(" ");
+		assert_eq!(command, "'just' 'check' 'a'\\''b'");
 	}
 }
