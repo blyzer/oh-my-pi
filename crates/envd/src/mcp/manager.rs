@@ -646,7 +646,7 @@ impl McpConnector for ProductionConnector {
 						StreamableHttpConfig {
 							url,
 							headers,
-							origin_locked: spec.config.header_policy.is_some(),
+							origin_locked: origin_locked(&spec.config),
 							timeout,
 							request_id_format,
 							auth: spec.auth_headers.clone(),
@@ -662,7 +662,7 @@ impl McpConnector for ProductionConnector {
 							LegacySseConfig {
 								url,
 								headers,
-								origin_locked: spec.config.header_policy.is_some(),
+								origin_locked: origin_locked(&spec.config),
 								timeout,
 								request_id_format,
 								auth: spec.auth_headers.clone(),
@@ -678,6 +678,16 @@ impl McpConnector for ProductionConnector {
 			let initialized = client.initialize(cancel).await?;
 			Ok(ConnectedClient { client, initialized })
 		})
+	}
+}
+
+/// Whether cross-origin redirects must drop configured and auth headers.
+/// Every server is origin-locked: `OriginLocked` is the only policy and there
+/// is no opt-out, so a server that never declared one (config files,
+/// extensions) is locked too. A new policy variant must decide here.
+fn origin_locked(config: &McpServerConfig) -> bool {
+	match config.header_policy {
+		None | Some(HeaderPolicy::OriginLocked) => true,
 	}
 }
 
@@ -4752,5 +4762,42 @@ mod tests {
 			super::mcp_tier_effects("fetch").fetch,
 			Some(omp_tool::FetchEffects { credentials: true })
 		);
+	}
+
+	#[test]
+	fn a_server_without_a_header_policy_never_replays_headers_across_origins() {
+		use http::{Method, StatusCode};
+
+		use crate::mcp::transport::header_policy::RedirectPolicy;
+
+		let config = serde_json::from_value::<McpServerConfig>(json!({
+			"type": "http",
+			"url": "https://a.example/mcp",
+			"headers": { "x-team": "alpha" }
+		}))
+		.expect("config");
+		assert_eq!(config.header_policy, None);
+		let configured =
+			HeaderMap::from_iter([(HeaderName::from_static("x-team"), HeaderValue::from_static("alpha"))]);
+		let generated = HeaderMap::from_iter([(
+			HeaderName::from_static("authorization"),
+			HeaderValue::from_static("Bearer live"),
+		)]);
+		let mut policy =
+			RedirectPolicy::new(Url::parse("https://a.example/mcp").expect("url"), origin_locked(&config))
+				.expect("policy");
+
+		let same_origin = policy.headers(&generated, &configured).expect("same origin");
+		assert_eq!(same_origin["x-team"], "alpha");
+		assert_eq!(same_origin["authorization"], "Bearer live");
+
+		assert!(
+			policy
+				.redirect(&Method::GET, StatusCode::FOUND, Some("https://b.example/mcp"))
+				.expect("redirect")
+		);
+		let cross_origin = policy.headers(&generated, &configured).expect("cross origin");
+		assert!(!cross_origin.contains_key("x-team"), "{cross_origin:?}");
+		assert!(!cross_origin.contains_key("authorization"), "{cross_origin:?}");
 	}
 }

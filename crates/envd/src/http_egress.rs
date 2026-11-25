@@ -1,6 +1,6 @@
 //! Capability-gated, bounded HTTP egress owned by the Environment.
 
-use std::{env, ffi::OsStr, time::Duration};
+use std::{env, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
@@ -16,7 +16,9 @@ use thiserror::Error;
 use tokio::time;
 use url::Url;
 
-use super::{child_env::is_secret_name, worker_pool::MAX_TUNNEL_BUFFER_BYTES};
+use super::{
+	mcp::transport::header_policy::is_credential_header, worker_pool::MAX_TUNNEL_BUFFER_BYTES,
+};
 
 // Reuse the existing retained wire-buffer ceiling rather than defining a
 // second Environment response-size policy.
@@ -213,10 +215,9 @@ fn configured_socks_proxy() -> Option<ProxyVariable> {
 }
 
 /// Removes every header whose name looks like a credential, using the same
-/// name markers as child environments ([`is_secret_name`]). A custom header
-/// such as `x-buildbuddy-api-key` is then never replayed to another origin
-/// after a redirect. Hyphens count as underscores, so `x-api-key` matches the
-/// `API_KEY` marker.
+/// predicate as MCP redirects ([`is_credential_header`]). A custom header such
+/// as `x-buildbuddy-api-key` or `x-apikey` is then never replayed to another
+/// origin after a redirect.
 fn strip_credential_headers(headers: &mut HeaderMap) {
 	let credential_names = headers
 		.keys()
@@ -226,11 +227,6 @@ fn strip_credential_headers(headers: &mut HeaderMap) {
 	for name in credential_names {
 		headers.remove(name);
 	}
-}
-
-fn is_credential_header(name: &HeaderName) -> bool {
-	let normalized = name.as_str().replace('-', "_");
-	is_secret_name(OsStr::new(&normalized))
 }
 
 fn parse_method(method: &str) -> Result<Method, HttpEgressError> {
@@ -367,7 +363,7 @@ mod tests {
 
 	/// Serves one connection per entry of `responses`, in order, and returns
 	/// the lowercased request head each connection received.
-	async fn serve(listener: TcpListener, responses: Vec<String>) -> oneshot::Receiver<Vec<String>> {
+	fn serve(listener: TcpListener, responses: Vec<String>) -> oneshot::Receiver<Vec<String>> {
 		let (sender, receiver) = oneshot::channel();
 		tokio::spawn(async move {
 			let mut heads = Vec::new();
@@ -422,9 +418,8 @@ mod tests {
 			.expect("bind second");
 		let first_port = first.local_addr().expect("first addr").port();
 		let second_port = second.local_addr().expect("second addr").port();
-		let _first =
-			serve(first, vec![redirect_to(&format!("http://127.0.0.1:{second_port}/x"))]).await;
-		let heads = serve(second, vec![OK.to_owned()]).await;
+		let _first = serve(first, vec![redirect_to(&format!("http://127.0.0.1:{second_port}/x"))]);
+		let heads = serve(second, vec![OK.to_owned()]);
 
 		let response = HttpEgressHost::new()
 			.request(request_to(format!("http://127.0.0.1:{first_port}/start")))
@@ -446,8 +441,7 @@ mod tests {
 		let heads = serve(listener, vec![
 			redirect_to(&format!("http://127.0.0.1:{port}/final")),
 			OK.to_owned(),
-		])
-		.await;
+		]);
 
 		let response = HttpEgressHost::new()
 			.request(request_to(format!("http://127.0.0.1:{port}/start")))
@@ -461,25 +455,51 @@ mod tests {
 	}
 
 	#[test]
-	fn credential_named_headers_are_stripped_and_others_kept() {
-		let mut headers = HeaderMap::new();
+	fn credential_named_headers_are_stripped() {
 		for name in [
 			"x-api-key",
+			"x-apikey",
+			"apikey",
+			"x-mbx-apikey",
 			"x-auth-token",
 			"x-buildbuddy-api-key",
 			"x-amz-security-token",
+			"x-amz-credential",
+			"x-goog-api-key",
+			"x-csrf-token",
+			"x-rapidapi-key",
+			"dd-api-key",
+			"private-token",
 			"x-client-secret",
 			"x-credential-id",
+			"x-auth-key",
+			"x-access-key",
+			"x-amz-signature",
+		] {
+			let mut headers = HeaderMap::new();
+			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));
+			strip_credential_headers(&mut headers);
+			assert!(headers.is_empty(), "{name} must be stripped");
+		}
+	}
+
+	#[test]
+	fn ordinary_headers_are_kept() {
+		let names = [
 			"accept",
 			"content-type",
-			"x-request-id",
+			"user-agent",
 			"x-api-version",
-		] {
+			"x-request-id",
+			"x-trace-id",
+		];
+		let mut headers = HeaderMap::new();
+		for name in names {
 			headers.insert(HeaderName::from_static(name), HeaderValue::from_static("v"));
 		}
 		strip_credential_headers(&mut headers);
 		let mut kept = headers.keys().map(HeaderName::as_str).collect::<Vec<_>>();
 		kept.sort_unstable();
-		assert_eq!(kept, ["accept", "content-type", "x-api-version", "x-request-id"]);
+		assert_eq!(kept, names);
 	}
 }
