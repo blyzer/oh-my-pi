@@ -1,0 +1,157 @@
+# 0075. Extension HTTP credentials are placed by the host; the key never reaches the extension
+
+Status: proposed
+Date: 2026-11-25
+Area: control-plane
+
+Read against `omp2` at `4f625fabe4`.
+
+**Review status.** Proposed. Not owner-approved. Not machine-reviewed. The owner chose option A (host placement) and D1 records that choice. D2 to D9 are the design that follows from D1 and the read-only spike. They are proposals until the owner accepts this record. Five questions stay open (O1 to O5).
+
+## Context
+
+An extension that calls an authenticated REST API needs a credential header on its HTTP request. The first case is the BuildBuddy extension (`extensions/buildbuddy`). It calls the BuildBuddy Run API through `omp.env.http_post` with the header `x-buildbuddy-api-key`.
+
+### How the extension gets the key today
+
+- On `omp2` the extension reads the key itself: the `BUILDBUDDY_API_KEY` environment variable, else `security find-generic-password -s buildbuddy-omp2-trial -w` run in the extension process (`extensions/buildbuddy/src/omp_buildbuddy/client.py:32-55`). It writes the key into the request headers (`client.py:74`).
+- PR #720 (open) puts the key into the delegated-run JSON as a plain `api_key` argument. Its review rejects it (P0, confirmed). The key bypasses the credential contract, and the extension manifest declares no credentials grant.
+- ADR 0040 lets the credential reach "only gRPC metadata at the backend boundary, wrapped in `SecretString`" (`0040:802-807`). `crates/exec-reapi/src/profile.rs:15-20` types it as "destined for one gRPC metadata header and nowhere else". The REST Run API path is not named. One operator credential source, `sv_exec_remote_credential` (`crates/driver/src/exec_composer.rs:79`), feeds the gRPC path and, in PR #720, the delegated Run API path.
+
+### The credential channel is not live (verified in code at `4f625fabe4`)
+
+1. The credentials CONTROL domain is not wired in production. `crates/app/src/chat_cmd.rs:1396` and `crates/app/src/session_runner.rs:190` bind `ExternalDomainControlFactories` with `ui` only. `crates/envd/src/server/control_factories.rs:192` denies every other domain with "no active credentials CONTROL lease authorizes this session".
+2. `credential_control_grants()` (`crates/driver/src/secrets/mod.rs:25`) has no caller. It reads `credentials.allow|import|reveal` from the extension's own manifest (`:46-49`), so wiring it as written would let an extension grant itself.
+3. Discovery gives native extensions `capabilities` as `{"data": [...]}` (`crates/driver/src/discovery/native.rs:669`). `capability_grants` (`crates/ext/src/config.rs:2092`) never holds `credentials.*`, so `credentials.allow` never reaches grants. `credentials.*` is also in neither the DATA list nor `CONTROL_CAPABILITIES` (`crates/envd/src/policy.rs:57`). No extension can hold a credential grant today.
+4. The operator grant record is `<data>/ext/grants.toml` (`crates/ext/src/trust.rs:39`). `Grant` (`trust.rs:83`) binds extension id, publisher, layer, workspace, scope and a digest of the declared capability set. CONTROL grants are honoured only for user-layer extensions under a kernel-enforced exec sandbox (`crates/driver/src/discovery/native.rs:751-790`).
+
+### What the host already has (read-only spike)
+
+- `CredentialLease::apply_header(&HeaderPlacement{name, prefix}, ..)` writes the secret into a named header, marks it sensitive and zeroizes its buffers. The caller never sees plaintext (`crates/ai/src/auth/lease.rs:352`, `spec.rs:508-520`). `name = "x-buildbuddy-api-key"` with an empty prefix is expressible.
+- `CredentialAuthority::provider_lease` sits behind `ForgeCredentialBridge` (`crates/envd/src/forge_url.rs:153,181`). Production binds it (`crates/driver/src/headless/kernel.rs:2843`, `crates/app/src/chat_services/misc.rs:293`). Forge URL egress already does lease then `apply_header` (`forge_url.rs:549`).
+- Precedent: `SEARCH_HTTP`. "Core performs transport and credential placement ... the key is never revealed to Python" (`docs/py/13-inference.md:532`).
+- Environment data operations know the caller. The connection identity is `extension:{layer}:{tier}:{extension}` (`crates/envd/src/server/connection.rs:326`). DATA capabilities are exact strings checked at `crates/envd/src/server/forward.rs:2741`.
+
+### Missing, and limits
+
+- `HttpEgressHost::new()` takes no dependencies and knows neither the caller nor credentials (`crates/envd/src/http_egress.rs:31`). `HttpRequest` has no credential field (`crates/proto/proto/omp/env/v1/env.proto:1250`). `omp.env.http_post` has no such parameter (`crates/py/python/omp/env.py:1816`). There is no catalog auth spec for BuildBuddy, and the REAPI key comes from a convar source (`sv_exec_remote_credential`), not the store. Option A is therefore not one extra parameter.
+- On a cross-origin redirect, egress removes only `Authorization`, `Cookie`, `Host` and `Proxy-Authorization` (`http_egress.rs:95-100`). A custom header such as `x-buildbuddy-api-key` is forwarded, for up to 10 hops. PR #723 (draft) generalizes the removal.
+- **Spike limit.** The spike holds only for an embedded Environment. The bridge is a trait object bound in the host process, and no secret transport to a remote Environment was found. Lead, not a finding: the search facade has a remote variant (`crates/envd/src/search_backend.rs:36,52`).
+- ADR 0047 C1 requires a credential-containment record before a remote backend is composed by default. This record covers extension HTTP egress only. Whether it counts toward C1 is not decided here.
+
+## Decision
+
+- **D1 (owner decision).** The API key never leaves the host credential store. The host holds a per-extension, per-provider grant, and the HTTP egress host attaches the credential header on the extension's behalf. For a placed request the extension MUST NEVER receive the key, as an argument, environment variable or return value.
+- **D2. Request shape.** The extension asks for placement by provider id only: an additive `credential` field on `HttpRequest` and a keyword on `omp.env.http_post`. The header name and prefix come from the provider's catalog auth spec (`HeaderPlacement`), never from the request. A request that sets the placed header itself MUST be refused.
+- **D3. Grant.** Placement requires a host-held grant that names the extension identity, one exact provider id and the exact https host or hosts the key may reach. Globs and a default provider are NEVER allowed. The extension manifest MAY request a grant and MUST NEVER create or widen one. Where the grant record lives and who may write it is O1. Whether a project-scoped extension may hold one is O2.
+- **D4. Placement point.** `HttpEgressHost` receives an optional credential authority at composition, as the forge resources do. For each request it checks the grant, takes a lease and applies the header just before send. Plaintext stays in the lease buffers. It MUST NEVER appear in a log, error, trace or journal.
+- **D5. Per hop.** Placement is decided on every hop. It applies only to https and only to a host in the grant. On a hop to any other origin the placed header is removed, whatever its name. This does not depend on PR #723, which still lands for headers an extension sets itself.
+- **D6. Refusal.** No grant, unknown provider, host not in the grant, non-https URL, no stored credential, or no authority bound: the request is not sent. The typed error names which class applied. There is NEVER a fallback to the environment, the Keychain or an argument.
+- **D7. Audit (proposal).** Each placed request writes a secret-free audit row: extension identity, provider, host, request id. The sink is chosen in S4. If the write fails, the request is not sent.
+- **D8. Embedded only.** A request with `credential` in a remote Environment fails with a typed "placement unavailable" error. The key MUST NEVER cross the Environment wire to make it work. A later record designs the remote transport. S0 gathers the facts.
+- **D9. Scope.** This record covers HTTP egress placement. It does not change `omp.creds.reveal` or `mint_scoped`, the existing `reveal` call in `extensions/search-provider/src/omp_search_provider/device.py:121`, or the Keychain import. The import stays a separate host-side step.
+
+## Alternatives considered
+
+| Alternative | Why not |
+| --- | --- |
+| **B. The extension asks for the secret over the control channel** (`omp.creds.reveal`, separate `credentials.reveal` grant, per-call audit). | Plaintext enters Python and can leak through arguments, logs, tracebacks and redirects. It needs the whole credentials CONTROL domain bound in every adapter (chat, session runner, print, RPC, ACP, headless, subagents), a new `ExtHostSpec` field filled from a host-held grant, and an envd CONTROL identity filter that admits `credentials.*`. Documentation limits reveal to "the import path only" (`docs/py/13-inference.md:1790`) and ADR 0049:75 says adapters get only `mint_scoped` tokens. A revealed value is not registered for masking (`crates/driver/src/auth_backend.rs:471-494`). It also breaches "nowhere else" in ADR 0040 for the REST path unless amended. The spike found A needs the per-extension provider scope but not the credentials CONTROL domain. |
+| **Plain argument, as in PR #720.** | The review confirmed it as a P0. It bypasses the credential contract and the manifest declares no grant. `.expose().to_string()` copies the secret into plain `String`s; whether they are wiped was not traced. The ambient `BUILDBUDDY_API_KEY` fallback stays. |
+| **Status quo: the extension reads env or Keychain itself.** | The host has no grant, no scope and no audit. The key sits in extension memory. A custom header is forwarded on redirects. |
+| **A Rust Run API client in core, key never leaves Rust.** | The 2026-11-05 amendment to ADR 0040 moves vendor integration out of core, and the orphan `omp-exec-buildbuddy` crate has left the workspace (`0040:1180-1181`). |
+
+## Consequences
+
+**Easier.**
+- The key never enters Python for this path. Args, logs, tracebacks and extension memory cannot leak it.
+- One placement path serves any extension that needs a REST credential: provider plus host plus catalog spec.
+- Redirect safety holds by construction, not by header name.
+- A grant is per extension and provider, so it can be revoked without touching other extensions.
+
+**Prohibited.**
+- Passing the key to an extension as an argument, environment variable or return value for this path.
+- Globs, default providers, plaintext http, and any host outside the grant.
+- Placement for a remote Environment until a later record designs the transport.
+
+**Costs accepted.**
+- Embedded Environment only (D8).
+- A new proto field, Python keyword and generated operation spec (additive).
+- A catalog entry and a stored credential for BuildBuddy. A user whose key lives only in the Keychain item the extension reads today needs the store import first. That import is a separate step.
+- A grant must exist before an extension can use placement. S2 is blocked on O1 and O2.
+- The same key can sit in two places, the convar source for gRPC and the store for REST, until a later record unifies them.
+- Residual risk: a granted host that reflects request headers in its response would hand the key to the extension. The host binding limits this and does not remove it.
+
+## Proposed amendment to ADR 0040
+
+Proposed text only. ADR 0040 is not edited by this record. Whether the amendment lands before the slices is O3. When it lands it is an `## Amendment (YYYY-MM-DD)` section in ADR 0040, which keeps its number. It replaces the first bullet of "Credential rules" (`0040:803`) with:
+
+> The credential reaches only two places. (a) gRPC metadata at the backend boundary, wrapped in `SecretString`. (b) A request header attached by the host's HTTP egress on behalf of an extension that holds a host-held grant for that provider and host (ADR 0075). No other component receives the plaintext, and an extension never receives it, whether in arguments, environment or return values. The remaining bullets (never in argv, action env, logs, telemetry or committed config; tracing redacts the header) apply to both paths. Any other hop is refused until this section names it.
+
+Companion edits proposed for the same change, not made here: a `credential` row on the `http_post` signature in `docs/py/13-inference.md`, and a pointer from ADR 0049:75.
+
+## Implementation sequence
+
+Slices are one PR each. No slice is authorized until the owner accepts this record. PR #723 (cross-origin redirect hardening, draft) is a prerequisite and not a slice here. Proposal: PR #720 does not merge with the key in its arguments.
+
+**S0. Remote Environment transport note.** Docs only, independent.
+- Owns: a note under `docs/research/`. Question: can a remote Environment get placement without the key crossing its wire, by a host-side proxy or by the remote-facade pattern?
+- Acceptance: per Environment kind, a named transport or "none", with `path:line`. No code changes. Tests: none (read-only).
+
+**S1. Catalog auth spec and stored credential.** Independent.
+- Owns: provider catalog data (`crates/catalog/data`), `crates/ai/src/auth`.
+- Acceptance: a `buildbuddy` provider whose spec resolves for `CredentialNeed` and yields `x-buildbuddy-api-key` with an empty prefix, value marked sensitive. The credential reaches the store only through the existing store write path. Non-goals: Keychain import, any extension change.
+- Tests: unit (`just test-pkg omp-ai`, `omp-catalog`).
+
+**S2. Grant record and enforcement.** BLOCKED on O1 and O2.
+- Owns: `crates/ext/src/trust.rs`, `crates/driver/src/discovery/native.rs`, `crates/envd/src/server/connection.rs` and `forward.rs`.
+- Acceptance, named tests: `manifest_request_without_host_grant_is_denied` (fails if scopes are read from the manifest), `credential_grant_refuses_glob_and_empty_provider`, `changed_credential_request_invalidates_grant`, `grant_binds_extension_identity`. The project-layer outcome is pinned by a test once O2 is answered. Non-goal: any placement.
+- Tests: unit (`just test-pkg omp-ext`, `omp-driver`, `omp-envd`).
+
+**S3. Wire shape, inert.** Independent of S1 and S2.
+- Owns: `env.proto`, `crates/py` (`env.py`, `env_backend.rs`, bindings), `crates/tool/src/spec_generated.rs`, `docs/py/`.
+- Acceptance: `omp.env.http_post(url, credential="p")` encodes the new field. Old requests decode unchanged. With no authority bound the call fails with the typed "placement unavailable" error. `credential` is documented and `scripts/check-docs-surface.py` passes.
+- Tests: contract/py (`just test-pkg omp-py`), proto round-trip unit.
+
+**S4. Host placement in `HttpEgressHost`.** Depends on S1, S2, S3.
+- Owns: `crates/envd/src/http_egress.rs`, `server/forward.rs`, composition in `omp-driver` and `omp-app`.
+- Acceptance, named tests: `placed_header_reaches_only_the_granted_host`, `placed_header_dropped_on_cross_origin_redirect` (custom header name, no reliance on PR #723), `plaintext_absent_from_logs_errors_and_traces`, `no_grant_means_no_send`, `non_https_refused`, `placed_header_set_by_request_refused`, `remote_environment_refuses_placement`, `audit_failure_blocks_send`.
+- E2E: one `crates/e2e` proof with a loopback fake server. The header arrives and nothing the extension can read holds the key. The loopback and TLS seam is chosen in the PR, with the e2e recipe that covers extension grants.
+- Gate (proposal): unreachable without a grant record, so no convar.
+- Tests: unit (`just test-pkg omp-envd`), e2e.
+
+**S5. Migrate the BuildBuddy extension.** Depends on S4 and the PR #720 outcome.
+- Owns: `extensions/buildbuddy`, and `crates/driver/src/delegated_backend.rs` if PR #720 lands first.
+- Acceptance: the extension calls `http_post(..., credential="buildbuddy")`. No `api_key` in any argument JSON. `client.py` no longer runs `security`. The end state reads no key from `os.environ`. Whether the env fallback survives a warning period is O4. A test pins whichever is chosen. A not-granted error maps to a typed extension error with no key text.
+- Tests: extension unit tests with a fake `omp.env` (`just check-extensions`).
+
+**S-amend. ADR 0040 amendment and companion doc edits.** Docs only. Its place in the sequence is O3.
+
+## Open questions
+
+All five are for the owner. This record answers none of them. Proposals are marked and are not adopted.
+
+- **O1. Where does the operator grant registry live, and who may write it?** Is it the same file as `omp ext grant`? Facts: that file is `<data>/ext/grants.toml`, written by `omp ext grant <id> [--yes]` (`crates/app/src/ext_cli/mod.rs:2004`) or by `OMP_EXT_GRANT` (`trust.rs:404`). `ext grant --yes` is reachable by any local process, and so is `omp token`, which prints a provider credential (`crates/app/src/token_cmd.rs:20`). That is outside the extension threat model and needs a documented boundary. D3 fixes only that an extension cannot write its own grant.
+- **O2. Can a project-scoped extension ever hold `credentials.*`?** Proposal (not adopted): never. Facts: the `.omp/extensions/buildbuddy` project link is rejected by discovery (`crates/driver/src/discovery/native.rs:520-533`) and is local and untracked, so nothing in the repo reaches the user layer today. To hold a grant the operator must install a real copy under `<config>/agent/extensions`. Whether a supported install path exists is unverified.
+- **O3. Is ADR 0040 amended first?** Facts: its credential rule names gRPC metadata only (`0040:802-807`). The proposed text is above. ADR 0049:75 and `docs/py/13-inference.md:1790` carry related wording that the companion edits would touch.
+- **O4. What happens to existing `BUILDBUDDY_API_KEY` users?** Proposal (not adopted): a warning period, then removal. Facts: only the extension's fallback (`client.py:39`) is in scope. CI, `scripts/remote-verify.sh` and `crates/exec-reapi/tests/live_buildbuddy.rs` also use the variable and are not touched. The daemon already withholds secret-looking env names from children (`crates/envd/src/child_env.rs`). Keychain-only users also need the store import.
+- **O5. Does `reveal` ship in this pass, or only A?** Facts: A does not need reveal. Shipping reveal needs four things: the driver composes the credential control factory, every adapter binds `credentials`, `ExtHostSpec` carries provider scopes from a host-held grant, and the envd CONTROL identity filter admits `credentials.*`. `search-provider` already calls reveal (`extensions/search-provider/src/omp_search_provider/device.py:121`). Review input, not adopted: ship reveal only if a concrete need remains.
+
+## Implementation gate
+
+Proposed. This record does not authorize production change. After the owner accepts D1 to D9, S0, S1 and S3 are independent and inert. S2 is blocked on O1 and O2. S4 needs S1 to S3. S5 needs S4, the PR #720 outcome and O4. The place of S-amend is O3.
+
+## Status in omp
+
+Status: Not started.
+
+- `HttpRequest` has no credential field (`env.proto:1250-1259`); `omp.env.http_post` has no credential keyword (`env.py:1816-1823`).
+- `HttpEgressHost::new()` takes no authority (`http_egress.rs:31`).
+- The credentials CONTROL domain is unbound in production and `credential_control_grants()` has no caller (Context 1 and 2).
+- `crates/catalog` and `crates/ai` hold no BuildBuddy provider entry (case-insensitive grep at `4f625fabe4`).
+
+## References
+
+- ADR 0040 (credential rules `:802-807`; amendment 2026-11-05, vendor integration leaves core), ADR 0047 (C1, G3), ADR 0049 (`:75`), ADR 0036 (Python-only extensions).
+- `crates/exec-reapi/src/profile.rs`, `crates/envd/src/http_egress.rs`, `crates/envd/src/forge_url.rs`, `crates/ai/src/auth/lease.rs`, `crates/driver/src/secrets/mod.rs`, `crates/ext/src/trust.rs`, `docs/py/13-inference.md`.
+- PRs #720 (key in arguments, review REJECT) and #723 (redirect header hardening, draft).
+- Session evidence, not committed: the credential decision record, the final decisions, the option B design review, the option A spike and the PR #720 review.

@@ -422,6 +422,18 @@ Found while building units 2 and 4, and not part of R1:
 - **DONE** S2 write seam: `Host::open_write` over `PathPolicy::open`; a new `DirFd::open_walk` walks each component with no-follow (only the final component follows `symlink_behavior`); `DirFd::open` and `open_subdir` are unchanged because `rm` uses them. No builtin registered. Device writes other than `/dev/null` stay denied by the default workspace policy. O3 (migrate existing writers) remains open.
 
 
+## ADR 0075 — extension credential host placement (proposed 2026-11-25)
+
+Proposed, not owner-approved, not started. The owner chose option A: the host places the credential header and the key never reaches the extension. No slice is authorized until the owner accepts the record.
+
+- **OPEN** Owner questions: O1 grant registry location and writers; O2 project-scoped extensions (proposal: never); O3 whether ADR 0040 is amended first; O4 `BUILDBUDDY_API_KEY` users (proposal: warning period, then removal); O5 whether `reveal` ships in this pass.
+- **OPEN** Prerequisite, not a slice: PR #723, cross-origin redirect hardening (draft). Proposal: PR #720 does not merge with the key in its arguments.
+- **OPEN** S0 remote Environment transport note (docs only), S1 catalog auth spec and stored credential, S3 additive wire shape (inert). Independent of each other.
+- **BLOCKED** S2 grant record and enforcement: O1 and O2.
+- **BLOCKED** S4 host placement in `HttpEgressHost`: S1, S2 and S3.
+- **BLOCKED** S5 BuildBuddy extension migration: S4, the PR #720 outcome and O4.
+- **BLOCKED** S-amend ADR 0040 amendment and companion doc edits: their place in the sequence is O3.
+
 ## Superseded task snapshots
 
 - `adr-task-list` is **HISTORICAL**. It is a session snapshot, predates ADR
