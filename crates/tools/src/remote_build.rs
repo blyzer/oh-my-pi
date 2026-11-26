@@ -78,6 +78,13 @@ pub enum Fault {
 	/// The operator has not configured a usable remote endpoint and image.
 	#[error("remote execution is not configured")]
 	Unconfigured,
+	/// ADR 0047 condition C1 (credential containment) is not recorded as
+	/// accepted, so no remote backend is composed.
+	#[error(
+		"remote builds are refused: ADR 0047 condition C1 (credential containment, gate G3) is not \
+		 recorded as accepted"
+	)]
+	NotAccepted,
 	/// The user did not approve the upload to the endpoint host.
 	#[error("the user did not approve a remote build on {host}")]
 	NotApproved {

@@ -195,6 +195,12 @@ impl<H: RemoteBuildHost> RemoteBuildTool<H> {
 				return Ok(Err(Fault::Unconfigured));
 			},
 		};
+		// ADR 0047 C1: refuse before capture, before the approval prompt and
+		// before any credential is resolved or backend composed.
+		if let Err(error) = settings.require_accepted() {
+			tracing::warn!(%error, "remote build refused");
+			return Ok(Err(Fault::NotAccepted));
+		}
 		// This one snapshot fixes the destination: the prompt names it, the job
 		// records it, and the connection reaches it, whatever cfg says meanwhile.
 		let host = Str::new(settings.endpoint_host());

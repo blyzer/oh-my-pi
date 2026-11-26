@@ -118,6 +118,8 @@ with the separate backends named above. ADR 0040 now measures memory relief, not
 superseded client-memory ratio; its numeric thresholds, repetition rule, and role-inclusive
 measurement remain open. Warm wall-time acceptance requires a warm-state product backend.
 
+**Gate enforcement (added 2026-11-26, branch `feat/0047-refuse-remote-without-c1`).** The driver refuses to compose a remote backend while the operator marker `sv_exec_accepted` is false, the default (`crates/driver/src/exec_composer.rs:99,620`; call sites `:685,:807,:828,:915`, `crates/driver/src/adw/remote.rs:131`, `crates/driver/src/remote_build.rs:200`). This covers the ADW policy and `--exec-policy`, the `remote_build` tool and `omp jobs attach`. An ADW-only form of this check existed earlier (`1d13504b56`). The marker is operator self-attestation: code cannot check A0 or G8, and cannot verify that a C1 record exists. What counts as accepted remains an owner decision. LocalOnly behaviour is unchanged.
+
 ## Amendment (2026-11-05): vendor clients leave core
 
 ADR 0040's [2026-11-05 amendment](0040-remote-build-and-test-execution.md#amendment-2026-11-05-vendor-integration-leaves-core)
