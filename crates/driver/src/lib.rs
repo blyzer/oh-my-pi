@@ -20,6 +20,7 @@ pub mod ext_updates;
 pub mod headless;
 pub mod keybindings;
 pub mod legacy_settings;
+pub mod placement_credentials;
 pub mod plugin_commands;
 pub mod plugin_hooks;
 pub mod prompt_input;

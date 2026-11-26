@@ -2844,6 +2844,14 @@ pub async fn compose_kernel(
 			if let Some(bridge) = &inference_bridge {
 				bridge.bind(stack.rpc.clone())?;
 			}
+			// Extension HTTP placement (ADR 0075): the host holds the key, leases it
+			// from the store this stack owns, and only an operator grant reaches it.
+			crate::placement_credentials::bind_placement(
+				&environment.placement_authority(),
+				data_dir,
+				Arc::new(stack.auth_control.clone()),
+				Arc::clone(&stack.credential_authority),
+			);
 			let target = match options.provider {
 				Some(provider) => Target::Provider { provider, model: model_key },
 				None => Target::Model(model_key),
