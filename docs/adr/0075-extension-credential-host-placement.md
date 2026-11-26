@@ -150,7 +150,7 @@ need appears (O5). Production changes are authorized only through these slices, 
 
 ## Status in omp
 
-Status: Partially implemented. S-amend, S0, S1, S2, S3, S4 and S5 are in the tree. The BuildBuddy extension no longer reads or receives the key: it names `credential="buildbuddy"` and the host places the header. D12 is unverified, and for the delegated profile the host still resolves the old `sv_exec_remote_credential` value in `exec_composer.rs` and drops it unused.
+Status: Partially implemented. S-amend, S0, S1, S2, S3, S4 and S5 are in the tree. The BuildBuddy extension no longer reads or receives the key: it names `credential="buildbuddy"` and the host places the header. D12 is unverified. For the delegated profile the host no longer resolves the old `sv_exec_remote_credential` value (`ExecutionSettings::needs_operator_credential`).
 
 - **S-amend, S0, S1, S3** landed in PR #734. S-amend is the ADR 0040 amendment (`0040:2035`) and the ADR 0049 rule 7 pointer (`0049:76`). S0 is `docs/research/adr-0075-s0-remote-env-placement-transports.md`. S1 is the `buildbuddy` provider with a stored header credential and an empty prefix (`crates/catalog/tests/catalog_conformance.rs:2214`). S3 is `HttpRequest.credential` (`crates/proto/proto/omp/env/v1/env.proto:1268`) and the `credential-placement` handshake capability with the sender gate (`crates/env/src/client.rs:229,2993`).
 - **S2, grant record and enforcement** (this slice; scopes come from the host record, never from the manifest):
