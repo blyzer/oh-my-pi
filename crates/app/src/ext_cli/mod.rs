@@ -1,5 +1,6 @@
 //! `omp ext` command parsing and extension-backend dispatch.
 pub(crate) mod config;
+mod credential;
 pub(crate) mod service;
 
 use std::{
@@ -335,7 +336,8 @@ pub enum ExtCommand {
 	Doctor(ExtDoctorArgs),
 	/// Inspect or change an extension trust grant.
 	Trust(ExtTrustArgs),
-	/// Issue or revoke the operator control grant of a user-layer extension.
+	/// Issue or revoke the operator control grant, or with `--credential` the
+	/// credential placement grant, of a user-layer extension.
 	Grant(ExtGrantArgs),
 	/// Recheck artifact integrity, signatures, and revocations.
 	Verify(ExtVerifyArgs),
@@ -602,13 +604,36 @@ pub struct ExtDoctorArgs {
 #[derive(Clone, Debug, Args)]
 pub struct ExtGrantArgs {
 	/// Extension id installed under `<config>/agent/extensions`.
-	pub id:     Str,
-	/// Remove the extension's operator control grant.
+	pub id:         Str,
+	/// Remove the grant instead: the control grant, or with `--credential` the
+	/// credential grant for that provider.
 	#[arg(long)]
-	pub revoke: bool,
+	pub revoke:     bool,
 	/// Consent without an interactive prompt.
 	#[arg(long)]
-	pub yes:    bool,
+	pub yes:        bool,
+	/// Grant (or with `--revoke`, withdraw) the host-placed credential of this
+	/// provider instead of a control grant (ADR 0075). The extension never sees
+	/// the key; the host adds it at egress.
+	#[arg(long, value_name = "PROVIDER")]
+	pub credential: Option<Str>,
+	/// Origin the credential may reach, `https://host[:port]`. Repeat for more.
+	#[arg(
+		long = "origin",
+		value_name = "ORIGIN",
+		requires = "credential",
+		conflicts_with = "revoke"
+	)]
+	pub origins:    Vec<Str>,
+	/// Operation that may carry the credential, `"METHOD /path/prefix"`. Repeat
+	/// for more.
+	#[arg(
+		long = "operation",
+		value_name = "OPERATION",
+		requires = "credential",
+		conflicts_with = "revoke"
+	)]
+	pub operations: Vec<Str>,
 }
 
 /// Options for `omp ext trust`.
@@ -2050,7 +2075,7 @@ fn ext_grant(state: &StatePaths, data_dir: &Path, args: ExtGrantArgs) -> miette:
 		.map(|path| PathBuf::from(path.as_str()))
 		.collect::<Vec<_>>();
 	let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
-	grant_with(state, data_dir, &home, &writable_roots, &args, |prompt| {
+	let consent = |prompt: &str| {
 		// The answer is read only when it can matter: `--yes` and a stdin that is not a
 		// terminal decide without a prompt.
 		let answer = if args.yes || !interactive {
@@ -2062,7 +2087,12 @@ fn ext_grant(state: &StatePaths, data_dir: &Path, args: ExtGrantArgs) -> miette:
 			Some(answer)
 		};
 		Ok(grant_consent(args.yes, interactive, answer.as_deref()))
-	})
+	};
+	if args.credential.is_some() {
+		credential::grant_with(state, data_dir, &home, &writable_roots, &args, consent)
+	} else {
+		grant_with(state, data_dir, &home, &writable_roots, &args, consent)
+	}
 }
 
 /// Whether the operator consented to a control grant. `--yes` always does, a
@@ -4700,8 +4730,8 @@ mod grant_tests {
 	use omp_core::Str;
 
 	use super::{
-		ExtGrantArgs, Grant, GrantRefusal, GrantsFile, StatePaths, grant_consent, grant_with,
-		revoke_report,
+		ExtGrantArgs, Grant, GrantRefusal, GrantsFile, StatePaths, credential, grant_consent,
+		grant_with, revoke_report,
 	};
 
 	struct Fixture {
@@ -4748,7 +4778,14 @@ mod grant_tests {
 	}
 
 	fn args(id: &str, revoke: bool) -> ExtGrantArgs {
-		ExtGrantArgs { id: Str::new(id), revoke, yes: true }
+		ExtGrantArgs {
+			id: Str::new(id),
+			revoke,
+			yes: true,
+			credential: None,
+			origins: Vec::new(),
+			operations: Vec::new(),
+		}
 	}
 
 	fn run(f: &Fixture, args: &ExtGrantArgs, consent: bool) -> miette::Result<()> {
@@ -4763,12 +4800,12 @@ mod grant_tests {
 			.len()
 	}
 
-	fn admitted_control(f: &Fixture, id: &str) -> std::collections::BTreeSet<Str> {
+	fn admission(f: &Fixture) -> omp_driver::discovery::native::NativeAdmissionReport {
 		use omp_driver::discovery::native::{
 			NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
 			admit_native_extensions_contained_with_control,
 		};
-		let report = admit_native_extensions_contained_with_control(
+		admit_native_extensions_contained_with_control(
 			&f.project,
 			&f.home,
 			NativeAdmissionOptions {
@@ -4784,14 +4821,28 @@ mod grant_tests {
 				writable_roots:    &[],
 				sandbox_available: omp_driver::discovery::native::SandboxProbe::known(true),
 			},
-		);
-		report
+		)
+	}
+
+	fn admitted_control(f: &Fixture, id: &str) -> std::collections::BTreeSet<Str> {
+		admission(f)
 			.extensions
 			.into_iter()
 			.find(|extension| extension.spec.key.extension().as_str() == id)
 			.expect("user extension admitted")
 			.spec
 			.control_grants
+	}
+
+	fn admitted_credential_providers(f: &Fixture, id: &str) -> Vec<Str> {
+		admission(f)
+			.extensions
+			.into_iter()
+			.find(|extension| extension.spec.key.extension().as_str() == id)
+			.expect("user extension admitted")
+			.spec
+			.credential_grants
+			.providers()
 	}
 
 	#[test]
@@ -5131,5 +5182,289 @@ mod grant_tests {
 		assert!(report.contains("test.user: removed 1 control grant(s)"), "{report}");
 		assert!(report.contains("running sessions"), "{report}");
 		assert!(report.contains("restart"), "{report}");
+	}
+
+	const BB_ORIGIN: &str = "https://remote.buildbuddy.io";
+	const BB_OPERATION: &str = "POST /api/v1/";
+
+	fn credential_args(id: &str, origins: &[&str], operations: &[&str]) -> ExtGrantArgs {
+		ExtGrantArgs {
+			credential: Some(Str::new("buildbuddy")),
+			origins: origins.iter().map(|origin| Str::new(origin)).collect(),
+			operations: operations
+				.iter()
+				.map(|operation| Str::new(operation))
+				.collect(),
+			..args(id, false)
+		}
+	}
+
+	fn run_credential(f: &Fixture, args: &ExtGrantArgs, consent: bool) -> miette::Result<()> {
+		let state = StatePaths::new(&f.data, &f.project);
+		credential::grant_with(&state, &f.data, &f.home, &[], args, |_| Ok(consent))
+	}
+
+	fn stored_credentials(f: &Fixture) -> Vec<omp_ext::credential_grant::CredentialGrant> {
+		GrantsFile::read(&omp_ext::trust::grants_path(&f.data))
+			.expect("grants")
+			.credential_grants
+	}
+
+	#[test]
+	fn credential_grant_writes_a_record_admission_accepts() {
+		let f = fixture("test.user");
+		assert!(admitted_credential_providers(&f, "test.user").is_empty());
+		run_credential(&f, &credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]), true)
+			.expect("grant");
+		let rows = stored_credentials(&f);
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].provider.as_str(), "buildbuddy");
+		assert_eq!(rows[0].origins[0].host.as_str(), "remote.buildbuddy.io");
+		assert_eq!(rows[0].origins[0].port, 443);
+		assert_eq!(rows[0].operations[0].path_prefix.as_str(), "/api/v1/");
+		assert_eq!(admitted_credential_providers(&f, "test.user"), [Str::new_static("buildbuddy")]);
+		assert_eq!(stored(&f), 0, "a credential grant is not a control grant");
+		assert!(admitted_control(&f, "test.user").is_empty());
+	}
+
+	#[test]
+	fn credential_grant_without_consent_writes_nothing() {
+		let f = fixture("test.user");
+		let error =
+			run_credential(&f, &credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]), false)
+				.expect_err("refused");
+		assert!(error.to_string().contains("needs consent"), "{error}");
+		assert!(stored_credentials(&f).is_empty());
+	}
+
+	#[test]
+	fn credential_grant_names_where_the_key_may_go() {
+		let f = fixture("test.user");
+		for (origins, operations) in [(&[][..], &[BB_OPERATION][..]), (&[BB_ORIGIN][..], &[][..])] {
+			let error = run_credential(&f, &credential_args("test.user", origins, operations), true)
+				.expect_err("a grant without a scope is refused");
+			assert!(error.to_string().contains("--origin"), "{error}");
+		}
+		assert!(stored_credentials(&f).is_empty());
+	}
+
+	#[test]
+	fn credential_grant_is_replaced_per_provider_and_revoked() {
+		let f = fixture("test.user");
+		run_credential(&f, &credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]), true)
+			.expect("grant");
+		run_credential(
+			&f,
+			&credential_args("test.user", &["https://other.example.test"], &[BB_OPERATION]),
+			true,
+		)
+		.expect("replace");
+		let rows = stored_credentials(&f);
+		assert_eq!(rows.len(), 1, "the same provider is replaced, not added");
+		assert_eq!(rows[0].origins[0].host.as_str(), "other.example.test");
+		let mut other = credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]);
+		other.credential = Some(Str::new("other"));
+		run_credential(&f, &other, true).expect("second provider");
+		assert_eq!(stored_credentials(&f).len(), 2);
+		let revoke = ExtGrantArgs { revoke: true, ..credential_args("test.user", &[], &[]) };
+		run_credential(&f, &revoke, true).expect("revoke");
+		let left = stored_credentials(&f);
+		assert_eq!(left.len(), 1, "only the named provider is revoked");
+		assert_eq!(left[0].provider.as_str(), "other");
+		assert!(
+			admitted_credential_providers(&f, "test.user")
+				.iter()
+				.all(|name| name != "buildbuddy")
+		);
+	}
+
+	#[test]
+	fn a_changed_manifest_voids_the_credential_grant() {
+		let f = fixture("test.user");
+		run_credential(&f, &credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]), true)
+			.expect("grant");
+		assert_eq!(admitted_credential_providers(&f, "test.user"), [Str::new_static("buildbuddy")]);
+		let manifest = f.root.join("omp.toml");
+		let text = std::fs::read_to_string(&manifest).expect("manifest");
+		std::fs::write(&manifest, format!("{text}# edited after the operator granted\n"))
+			.expect("edit manifest");
+		assert!(
+			admitted_credential_providers(&f, "test.user").is_empty(),
+			"a manifest that changed after the grant holds nothing"
+		);
+	}
+
+	#[test]
+	fn credential_grant_refuses_non_user_layer() {
+		let f = fixture("test.user");
+		workspace_copy(&f, "test.workspace");
+		let error = run_credential(
+			&f,
+			&credential_args("test.workspace", &[BB_ORIGIN], &[BB_OPERATION]),
+			true,
+		)
+		.expect_err("refused");
+		assert!(error.to_string().contains("user-layer only"), "{error}");
+		assert!(stored_credentials(&f).is_empty());
+	}
+
+	#[test]
+	fn an_invalid_provider_is_refused_before_consent() {
+		let f = fixture("test.user");
+		let mut bad = credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]);
+		bad.credential = Some(Str::new("*"));
+		let state = StatePaths::new(&f.data, &f.project);
+		let error = credential::grant_with(&state, &f.data, &f.home, &[], &bad, |_| {
+			panic!("the operator is not asked about a grant that cannot be written")
+		})
+		.expect_err("a glob provider is refused");
+		assert!(error.to_string().contains("exact provider"), "{error}");
+		assert!(stored_credentials(&f).is_empty());
+	}
+
+	#[test]
+	fn origins_parse_to_canonical_https() {
+		let origin = credential::parse_origin("https://Remote.BuildBuddy.IO").expect("origin");
+		assert_eq!((origin.host.as_str(), origin.port), ("remote.buildbuddy.io", 443));
+		assert_eq!(
+			credential::parse_origin("https://example.test:8443")
+				.expect("origin")
+				.port,
+			8443
+		);
+		for bad in [
+			"http://example.test",
+			"example.test",
+			"https://",
+			"https://example.test/run",
+			"https://example.test:0",
+			"https://example.test:x",
+			"https://*.example.test",
+			"https://user@example.test",
+		] {
+			assert!(credential::parse_origin(bad).is_err(), "{bad} must be refused");
+		}
+	}
+
+	#[test]
+	fn operations_parse_a_method_and_a_path_prefix() {
+		let operation = credential::parse_operation("POST /api/v1/Run").expect("operation");
+		assert_eq!(
+			(operation.method.as_str(), operation.path_prefix.as_str()),
+			("POST", "/api/v1/Run")
+		);
+		for bad in ["POST", "post /x", "POST api", "POST /a/../b", "POST /a?x", "POST /a*"] {
+			assert!(credential::parse_operation(bad).is_err(), "{bad} must be refused");
+		}
+	}
+
+	#[test]
+	fn scope_flags_need_a_credential() {
+		use clap::Parser as _;
+
+		#[derive(clap::Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			grant: ExtGrantArgs,
+		}
+		assert!(Wrapper::try_parse_from(["t", "id", "--origin", "https://x.test"]).is_err());
+		let parsed = Wrapper::try_parse_from([
+			"t",
+			"id",
+			"--credential",
+			"buildbuddy",
+			"--origin",
+			"https://x.test",
+			"--operation",
+			"POST /a",
+		])
+		.expect("a credential grant parses");
+		assert_eq!(parsed.grant.origins.len(), 1);
+		assert_eq!(parsed.grant.operations.len(), 1);
+	}
+
+	#[test]
+	fn scope_flags_conflict_with_revoke() {
+		use clap::Parser as _;
+
+		#[derive(clap::Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			grant: ExtGrantArgs,
+		}
+		for scope in [["--origin", "https://x.test"], ["--operation", "POST /a"]] {
+			assert!(
+				Wrapper::try_parse_from(["t", "id", "--revoke", "--credential", "buildbuddy"]).is_ok(),
+				"a credential revoke names only the provider"
+			);
+			assert!(
+				Wrapper::try_parse_from(
+					["t", "id", "--revoke", "--credential", "buildbuddy"]
+						.into_iter()
+						.chain(scope)
+				)
+				.is_err(),
+				"{scope:?} narrows nothing on revoke, so it is refused rather than ignored"
+			);
+		}
+	}
+
+	#[test]
+	fn credential_grant_refused_when_the_manifest_changes_after_consent() {
+		let f = fixture("test.user");
+		let manifest = f.root.join("omp.toml");
+		let state = StatePaths::new(&f.data, &f.project);
+		let error = credential::grant_with(
+			&state,
+			&f.data,
+			&f.home,
+			&[],
+			&credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]),
+			|_| {
+				let text = std::fs::read_to_string(&manifest).expect("manifest");
+				std::fs::write(&manifest, format!("{text}# edited after the prompt\n"))
+					.expect("edit manifest");
+				Ok(true)
+			},
+		)
+		.expect_err("a manifest changed between consent and write is refused");
+		assert!(error.to_string().contains("changed after it was confirmed"), "{error}");
+		assert!(stored_credentials(&f).is_empty(), "nothing is written for a changed extension");
+	}
+
+	#[test]
+	fn a_credential_revoke_of_nothing_says_so() {
+		let f = fixture("test.user");
+		let revoke = ExtGrantArgs { revoke: true, ..credential_args("test.user", &[], &[]) };
+		run_credential(&f, &revoke, true).expect("revoking nothing is not an error");
+		let report = credential::revoke_report(&revoke, "buildbuddy", 0);
+		assert!(report.contains("nothing changed"), "{report}");
+		assert!(
+			!credential::revoke_report(&revoke, "buildbuddy", 1).contains("nothing changed"),
+			"a revoke that removed a row must not say it changed nothing"
+		);
+	}
+
+	#[test]
+	fn origin_parsing_edge_cases() {
+		let v6 = credential::parse_origin("https://[::1]:8443").expect("bracketed IPv6 origin");
+		assert_eq!((v6.host.as_str(), v6.port), ("[::1]", 8443));
+		let upper = credential::parse_origin("HTTPS://Example.Test").expect("uppercase scheme");
+		assert_eq!((upper.host.as_str(), upper.port), ("example.test", 443));
+		for bad in ["https://example.test:+443", "https://example.test:", "https://[::1]:+9"] {
+			assert!(credential::parse_origin(bad).is_err(), "{bad} must be refused");
+		}
+		let error = credential::parse_origin("https://user:hunter2@example.test")
+			.expect_err("userinfo is refused");
+		assert!(
+			!error.to_string().contains("hunter2"),
+			"a rejected origin must not echo the credentials typed in it: {error}"
+		);
+		let everything = credential::parse_operation("POST /").expect("a root prefix");
+		assert_eq!(
+			everything.path_prefix.as_str(),
+			"/",
+			"the prompt shows this scope to the operator"
+		);
 	}
 }
