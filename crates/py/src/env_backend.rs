@@ -93,18 +93,26 @@ macro_rules! emit_backend_methods {
 				}
 				let method = args.iter().next().expect("nonempty args").extract::<String>()?;
 				let operation = match method.as_str() {
-					"GET" => "omp.env.http_get",
-					"POST" => "omp.env.http_post",
-					"PUT" => "omp.env.http_put",
+					"GET" => "omp.env.http.get",
+					"POST" => "omp.env.http.post",
+					"PUT" => "omp.env.http.put",
 					_ => return Err(PyValueError::new_err("HTTP method must be GET, POST, or PUT")),
 				};
+				// The dispatcher takes the method as a named argument, as the wire does.
+				let keyword = PyDict::new(py);
+				if let Some(kwargs) = kwargs {
+					for (key, value) in kwargs {
+						keyword.set_item(key, value)?;
+					}
+				}
+				keyword.set_item("method", &method)?;
 				let remaining = args.get_slice(1, args.len());
 				self.forward_request(
 					py,
 					operation,
 					&["url", "body", "headers", "timeout", "redirects", "credential"],
 					&remaining,
-					kwargs,
+					Some(&keyword),
 				)
 			}
 		}

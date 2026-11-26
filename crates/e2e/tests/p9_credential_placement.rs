@@ -60,12 +60,13 @@ const SOURCE: &str = r#"
 import os
 
 import omp
+from omp.devices import Effects, FetchEffects
 
 URL = "__URL__"
 KEY = "__KEY__"
 
 
-@omp.tool("place", rev=1)
+@omp.tool("place", rev=1, effects=Effects(fetch=FetchEffects(credentials=True)))
 async def place():
     try:
         response = await omp.env.http_post(
