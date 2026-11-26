@@ -38,11 +38,6 @@ use omp_e2e::{
 };
 use omp_env::{EnvClient, InvocationEvent};
 use omp_envd::placement::{JsonlPlacementAudit, PlacementBinding, PlacementCredentials};
-use omp_ext::{
-	Layer,
-	credential_grant::{CredentialGrant, CredentialOperation, CredentialOrigin},
-	trust::GrantsFile,
-};
 use omp_proto::env::v1::InvokeTool;
 use omp_tool::CallOutcome;
 use parking_lot::Mutex;
@@ -318,33 +313,17 @@ async fn granted_extension_request_carries_the_host_placed_key() -> Result<()> {
 		.replace("__KEY__", KEY);
 	operator.install_extension(EXTENSION, &manifest(), &source)?;
 
-	// The operator's credential grant, bound to the extension as installed.
-	let identity =
-		omp_driver::discovery::native::user_extension_grant_identity(operator.home(), EXTENSION)
-			.context("reading the installed extension")?
-			.context("the extension is not installed in the user layer")?;
-	let grants_file = operator.grants_file();
-	std::fs::create_dir_all(grants_file.parent().context("grant store directory")?)
-		.context("creating the grant store directory")?;
-	GrantsFile::persist_credential_grant(&grants_file, CredentialGrant {
-		id:                identity.id.clone(),
-		publisher:         identity.publisher.clone(),
-		layer:             Layer::Client,
-		capability_digest: identity.capability_digest.clone(),
-		provider:          sf!("buildbuddy"),
-		origins:           vec![
-			CredentialOrigin::new("https", "127.0.0.1", Some(fake.port))
-				.map_err(|source| error(format!("origin: {source}")))?,
-		],
-		operations:        vec![
-			CredentialOperation::new("POST", "/run")
-				.map_err(|source| error(format!("operation: {source}")))?,
-		],
-		granted_at:        sf!("2026-11-26T00:00:00Z"),
-		granted_by:        sf!("p9-credential-placement"),
-	})
-	.context("writing the credential grant")?
-	.map_err(|source| error(format!("grant refused: {source}")))?;
+	// The operator's credential grant, written by the shipped `omp ext grant`.
+	operator
+		.grant_credential(
+			scratch.project(),
+			EXTENSION,
+			"buildbuddy",
+			&[&format!("https://127.0.0.1:{}", fake.port)],
+			&["POST /run"],
+		)
+		.await
+		.context("granting the credential through omp ext grant")?;
 
 	let admission = operator.admit(scratch.project(), EXTENSION)?;
 	assert!(

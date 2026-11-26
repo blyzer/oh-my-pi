@@ -152,6 +152,31 @@ impl OperatorHome {
 	/// workspace, which the grant's location checks must keep clear of the
 	/// store.
 	pub async fn grant(&self, project: &Path, id: &str) -> Result<()> {
+		self.run_ext_grant(project, id, &[]).await
+	}
+
+	/// Runs the shipped `omp ext grant <id> --credential <provider> --origin …
+	/// --operation … --yes` against this home: the operator's credential
+	/// placement grant (ADR 0075), written by the real command line.
+	pub async fn grant_credential(
+		&self,
+		project: &Path,
+		id: &str,
+		provider: &str,
+		origins: &[&str],
+		operations: &[&str],
+	) -> Result<()> {
+		let mut extra = vec!["--credential".to_owned(), provider.to_owned()];
+		for origin in origins {
+			extra.extend(["--origin".to_owned(), (*origin).to_owned()]);
+		}
+		for operation in operations {
+			extra.extend(["--operation".to_owned(), (*operation).to_owned()]);
+		}
+		self.run_ext_grant(project, id, &extra).await
+	}
+
+	async fn run_ext_grant(&self, project: &Path, id: &str, extra: &[String]) -> Result<()> {
 		let mut command = Command::new(omp_binary().context("resolving the omp executable")?);
 		command
 			.arg("ext")
@@ -160,6 +185,7 @@ impl OperatorHome {
 			.arg("--project")
 			.arg(project)
 			.args(["grant", id, "--yes"])
+			.args(extra)
 			.current_dir(project)
 			.env("HOME", &self.home)
 			.env("NO_COLOR", "1");

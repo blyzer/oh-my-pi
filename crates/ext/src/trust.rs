@@ -611,6 +611,19 @@ impl GrantsFile {
 		)
 	}
 
+	/// Replaces any earlier credential grant of the same extension identity and
+	/// provider with `grant`, in memory. Call it only under the grants lock, on
+	/// a grant that passed [`CredentialGrant::validate`].
+	pub fn replace_credential_grant(&mut self, grant: CredentialGrant) {
+		self.credential_grants.retain(|existing| {
+			existing.id != grant.id
+				|| existing.publisher != grant.publisher
+				|| existing.layer != grant.layer
+				|| existing.provider != grant.provider
+		});
+		self.credential_grants.push(grant);
+	}
+
 	/// Atomically records one credential grant, replacing an earlier grant of
 	/// the same extension identity and provider. A malformed grant is refused
 	/// and leaves the file untouched.
@@ -627,13 +640,7 @@ impl GrantsFile {
 			return Ok(Err(refusal));
 		}
 		Self::persisted(path, |grants| {
-			grants.credential_grants.retain(|existing| {
-				existing.id != grant.id
-					|| existing.publisher != grant.publisher
-					|| existing.layer != grant.layer
-					|| existing.provider != grant.provider
-			});
-			grants.credential_grants.push(grant);
+			grants.replace_credential_grant(grant);
 		})
 		.map(Ok)
 	}
