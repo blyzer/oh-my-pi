@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / ".githooks"
 INSTALLER = ROOT / "scripts/install-githooks.sh"
+DELETE_MERGED = ROOT / "scripts/delete-merged-branch.sh"
 
 
 def clean_env(**extra):
@@ -368,6 +369,97 @@ class InstallerTests(RepoCase):
         self.assertEqual(self.run_installer().returncode, 0)
         self.assertTrue((custom / "commit-msg").exists())
         self.assertFalse((self.hooks / "commit-msg").exists())
+
+
+class DeleteMergedBranchTests(RepoCase):
+    """scripts/delete-merged-branch.sh: `gh` is a stub that prints the merged PRs the test hands it."""
+
+    def setUp(self):
+        super().setUp()
+        origin = Path(self.tmp) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "trunk", str(origin)], check=True, env=clean_env())
+        self.git("remote", "add", "origin", str(origin))
+        self.git("push", "-q", "origin", "trunk")
+        bindir = Path(self.tmp) / "bin"
+        bindir.mkdir()
+        stub = bindir / "gh"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$STUB_PRS"\n')
+        stub.chmod(0o755)
+        self.bindir = bindir
+        self.git("switch", "-q", "-c", "feat")
+        self.git("commit", "-q", "--allow-empty", "-m", "work")
+        self.tip = self.git("rev-parse", "feat").stdout.strip()
+        self.git("switch", "-q", "trunk")
+        self.use_repo_hooks()
+
+    def merge_feat(self):
+        self.git("merge", "-q", "--no-ff", "-m", "Merge feat", "feat")
+        self.git("push", "-q", "origin", "trunk")
+
+    def run_script(self, *args, prs="", protected=None):
+        env = clean_env(PATH=f"{self.bindir}{os.pathsep}{os.environ['PATH']}", STUB_PRS=prs, OMP_GH_REPO="o/r")
+        if protected is not None:
+            env["GIT_PROTECTED_BRANCHES"] = protected
+        return subprocess.run(
+            ["bash", str(DELETE_MERGED), *args], cwd=self.repo, env=env, capture_output=True, text=True
+        )
+
+    def test_a_branch_merged_with_the_same_commit_is_deleted_even_though_the_hook_refuses_a_plain_delete(self):
+        self.merge_feat()
+        self.assertNotEqual(self.git("branch", "-D", "feat", check=False).returncode, 0)
+        result = self.run_script("feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("deleted: feat", result.stdout)
+        self.assertNotIn("feat", self.branches())
+
+    def test_dry_run_deletes_nothing(self):
+        self.merge_feat()
+        result = self.run_script("--dry-run", "feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would delete: feat", result.stdout)
+        self.assertIn("feat", self.branches())
+
+    def test_a_branch_that_moved_after_its_merged_pr_is_refused(self):
+        self.merge_feat()
+        self.git("switch", "-q", "feat")
+        self.git("commit", "-q", "--allow-empty", "-m", "after the merge")
+        self.git("switch", "-q", "trunk")
+        result = self.run_script("feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the branch moved after it", result.stderr)
+        self.assertIn("feat", self.branches())
+
+    def test_a_branch_without_a_merged_pull_request_is_refused(self):
+        self.merge_feat()
+        result = self.run_script("feat", prs="")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no merged pull request", result.stderr)
+        self.assertIn("feat", self.branches())
+
+    def test_a_commit_that_is_not_on_the_remote_base_is_refused(self):
+        # The PR claims the commit was merged, but origin/trunk never received it.
+        result = self.run_script("feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not on origin/trunk", result.stderr)
+        self.assertIn("feat", self.branches())
+
+    def test_a_protected_branch_and_a_checked_out_branch_are_refused(self):
+        self.merge_feat()
+        self.assertEqual(self.run_script("trunk", prs=f"7 {self.tip} trunk", protected="trunk").returncode, 1)
+        self.git("switch", "-q", "feat")
+        result = self.run_script("feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("checked out in a worktree", result.stderr)
+        self.assertIn("feat", self.branches())
+
+    def test_one_refusal_does_not_stop_the_other_branches(self):
+        self.merge_feat()
+        self.git("branch", "other")
+        result = self.run_script("other", "feat", prs=f"7 {self.tip} trunk")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("deleted: feat", result.stdout)
+        self.assertIn("other", self.branches())
+        self.assertNotIn("feat", self.branches())
 
 
 if __name__ == "__main__":
