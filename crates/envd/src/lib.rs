@@ -79,6 +79,10 @@ mod media_devices;
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;
+/// Host-side credential placement for extension HTTP egress (ADR 0075).
+pub mod placement;
+#[cfg(test)]
+mod placement_tests;
 #[cfg(test)]
 mod plan_writes;
 pub mod plugin_commands;
@@ -691,6 +695,7 @@ pub struct ProjectEnvironment {
 	eval_control:        EvalSessionControl,
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
 	github_credentials:  Arc<ForgeCredentialBridge>,
+	placement:           Arc<placement::PlacementAuthority>,
 	acp_documents:       AcpDocumentsBinding,
 	/// The route an attached session answers the daemon's relayed approval
 	/// prompts with; `None` for embedded and isolated compositions, whose host
@@ -1056,6 +1061,7 @@ impl ProjectEnvironment {
 		let eval_control = server.eval_control();
 		let search_bridge = server.search_bridge();
 		let github_credentials = server.github_credentials();
+		let placement = server.placement_authority();
 		let (client, transport) = EnvClient::in_process(64);
 		bind_command_credentials(
 			&server,
@@ -1084,6 +1090,7 @@ impl ProjectEnvironment {
 			eval_control,
 			search_bridge,
 			github_credentials,
+			placement,
 			acp_documents,
 			approval_relay: None,
 			lifecycle,
@@ -1154,6 +1161,7 @@ impl ProjectEnvironment {
 		let reflection_bridge = server.reflection_bridge();
 		let search_bridge = server.search_bridge();
 		let github_credentials = server.github_credentials();
+		let placement = server.placement_authority();
 
 		let (local_pipe, local_transport) = in_process_frames(64);
 		let local_server = Arc::clone(&server);
@@ -1237,6 +1245,7 @@ impl ProjectEnvironment {
 			eval_control,
 			search_bridge,
 			github_credentials,
+			placement,
 			acp_documents,
 			approval_relay: Some(approval_relay),
 			lifecycle,
@@ -1292,6 +1301,7 @@ impl ProjectEnvironment {
 		let eval_control = server.eval_control();
 		let search_bridge = server.search_bridge();
 		let github_credentials = server.github_credentials();
+		let placement = server.placement_authority();
 		let (client, transport) = EnvClient::in_process(64);
 		bind_command_credentials(
 			&server,
@@ -1320,6 +1330,7 @@ impl ProjectEnvironment {
 			eval_control,
 			search_bridge,
 			github_credentials,
+			placement,
 			acp_documents,
 			approval_relay: None,
 			lifecycle,
@@ -1467,6 +1478,13 @@ impl ProjectEnvironment {
 	/// Returns the Environment's provider credential projection.
 	pub fn github_credentials(&self) -> Arc<ForgeCredentialBridge> {
 		Arc::clone(&self.github_credentials)
+	}
+
+	/// Returns the credential authority this Environment places extension HTTP
+	/// credentials with (ADR 0075). Unbound until composition binds it; an
+	/// Environment that is not composed with one refuses placed requests.
+	pub fn placement_authority(&self) -> Arc<placement::PlacementAuthority> {
+		Arc::clone(&self.placement)
 	}
 
 	/// Forge `Delegated` router for this checkout.

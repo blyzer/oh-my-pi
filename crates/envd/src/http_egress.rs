@@ -1,6 +1,6 @@
 //! Capability-gated, bounded HTTP egress owned by the Environment.
 
-use std::{env, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
@@ -17,22 +17,101 @@ use tokio::time;
 use url::Url;
 
 use super::{
-	mcp::transport::header_policy::is_credential_header, worker_pool::MAX_TUNNEL_BUFFER_BYTES,
+	mcp::transport::header_policy::is_credential_header,
+	placement::{
+		PlacementAuditRow, PlacementAuthority, PlacementBinding, PlacementRefusal, ResolvedProvider,
+		check_caller_headers, lease_credential, resolve_provider,
+	},
+	worker_pool::MAX_TUNNEL_BUFFER_BYTES,
 };
 
 // Reuse the existing retained wire-buffer ceiling rather than defining a
 // second Environment response-size policy.
 const MAX_REDIRECTS: u32 = 10;
 
+/// The grants and identity a placed request is decided under, taken from the
+/// connection it arrived on. The extension never supplies any of it.
+pub struct PlacementRequest<'a> {
+	/// Host-held grants of the requesting extension.
+	pub(crate) grants:     &'a omp_ext::credential_grant::CredentialGrants,
+	/// Connection identity of the requesting extension.
+	pub(crate) owner:      &'a str,
+	/// Protocol request id of the request.
+	pub(crate) request_id: u64,
+}
+
+/// One placed request, resolved once and re-decided on every hop (ADR 0075 D5).
+struct Placed<'a> {
+	provider: &'a str,
+	context:  &'a PlacementRequest<'a>,
+	resolved: ResolvedProvider,
+	binding:  &'a PlacementBinding,
+}
+
+impl Placed<'_> {
+	/// Decides one hop and writes the key into `headers`, just before the hop
+	/// is sent. Returns the placed value so the response can be checked for an
+	/// echo (D10); it is zeroized on drop.
+	async fn place(
+		&self,
+		method: &Method,
+		url: &Url,
+		hop: u32,
+		headers: &mut HeaderMap,
+	) -> Result<zeroize::Zeroizing<Vec<u8>>, PlacementRefusal> {
+		self
+			.context
+			.grants
+			.authorize(self.provider, method.as_str(), url)
+			.map_err(|refusal| {
+				if hop == 0 {
+					PlacementRefusal::Grant(refusal)
+				} else {
+					PlacementRefusal::RedirectHop(refusal)
+				}
+			})?;
+		let lease = lease_credential(self.binding, &self.resolved).await?;
+		let row = PlacementAuditRow {
+			extension: omp_core::Str::new(self.context.owner),
+			provider: omp_core::Str::new(self.provider),
+			host: omp_core::Str::new(url.host_str().unwrap_or_default()),
+			port: url.port_or_known_default().unwrap_or_default(),
+			method: omp_core::Str::new(method.as_str()),
+			request_id: self.context.request_id,
+			hop,
+		};
+		if let Err(error) = self.binding.audit.record(&row).await {
+			tracing::warn!(kind = ?error.kind(), "credential placement audit write failed");
+			return Err(PlacementRefusal::AuditFailed);
+		}
+		lease
+			.apply_header(&self.resolved.header, headers)
+			.map_err(|_| PlacementRefusal::CredentialStoreFailed)?;
+		Ok(zeroize::Zeroizing::new(
+			headers
+				.get(&self.resolved.name)
+				.map(|value| value.as_bytes().to_vec())
+				.unwrap_or_default(),
+		))
+	}
+}
+
 #[derive(Clone)]
 pub struct HttpEgressHost {
-	client: omp_http::Client,
+	client:    omp_http::Client,
+	placement: Arc<PlacementAuthority>,
 }
 
 impl HttpEgressHost {
 	pub(crate) fn new() -> Self {
 		let client = omp_http::no_redirect_client();
-		Self { client }
+		Self { client, placement: Arc::new(PlacementAuthority::default()) }
+	}
+
+	/// The credential authority this host places keys with, bound at
+	/// composition. Unbound, a placed request is refused.
+	pub(crate) const fn placement(&self) -> &Arc<PlacementAuthority> {
+		&self.placement
 	}
 
 	#[tracing::instrument(
@@ -44,6 +123,7 @@ impl HttpEgressHost {
 	pub(crate) async fn request(
 		&self,
 		request: pb::HttpRequest,
+		placement: Option<PlacementRequest<'_>>,
 	) -> Result<pb::HttpResponse, HttpEgressError> {
 		if let Ok(url) = Url::parse(&request.url)
 			&& let Some(host) = url.host_str()
@@ -51,7 +131,7 @@ impl HttpEgressHost {
 			tracing::Span::current().record("host", host);
 		}
 		let timeout_ms = request.timeout_ms;
-		let request = self.request_once(request);
+		let request = self.request_once(request, placement);
 		if timeout_ms == 0 {
 			request.await
 		} else {
@@ -65,9 +145,33 @@ impl HttpEgressHost {
 		}
 	}
 
+	/// Resolves a placed request before the first hop: the grant, the catalog
+	/// provider, the caller's headers, and the bound authority, in that order.
+	fn begin_placement<'a>(
+		&'a self,
+		provider: &'a str,
+		context: &'a PlacementRequest<'a>,
+		method: &Method,
+		url: &Url,
+		headers: &HeaderMap,
+	) -> Result<Placed<'a>, PlacementRefusal> {
+		context
+			.grants
+			.authorize(provider, method.as_str(), url)
+			.map_err(PlacementRefusal::Grant)?;
+		let resolved = resolve_provider(provider)?;
+		check_caller_headers(headers, &resolved.name)?;
+		let binding = self
+			.placement
+			.binding()
+			.ok_or(PlacementRefusal::NoAuthority)?;
+		Ok(Placed { provider, context, resolved, binding })
+	}
+
 	async fn request_once(
 		&self,
 		request: pb::HttpRequest,
+		placement: Option<PlacementRequest<'_>>,
 	) -> Result<pb::HttpResponse, HttpEgressError> {
 		if request.redirects > MAX_REDIRECTS {
 			return Err(HttpEgressError::InvalidArgument(format!(
@@ -79,12 +183,35 @@ impl HttpEgressHost {
 		let mut headers = parse_headers(&request.headers)?;
 		let mut body = request.body;
 		let mut followed = 0;
+		// A request that names a provider is placed or refused: it never falls
+		// back to going out without the host's decision (D6).
+		let placed = match request.credential.as_deref() {
+			None => None,
+			Some(provider) => {
+				let context = placement.as_ref().ok_or(PlacementRefusal::Grant(
+					omp_ext::credential_grant::CredentialRefusal::NoGrant,
+				))?;
+				Some(self.begin_placement(provider, context, &method, &url, &headers)?)
+			},
+		};
 
 		loop {
-			let response = self
-				.client
+			let mut hop_headers = headers.clone();
+			let placed_value = match &placed {
+				Some(placed) => Some(
+					placed
+						.place(&method, &url, followed, &mut hop_headers)
+						.await?,
+				),
+				None => None,
+			};
+			let client = placed
+				.as_ref()
+				.and_then(|placed| placed.binding.client.as_ref())
+				.unwrap_or(&self.client);
+			let response = client
 				.request(method.clone(), url.as_str())
-				.headers(headers.clone())
+				.headers(hop_headers)
 				.body(body.clone())
 				.send()
 				.await
@@ -115,6 +242,11 @@ impl HttpEgressHost {
 			let status = u32::from(status_code.as_u16());
 			let response_headers = response_headers(response.headers());
 			let body = read_bounded(response).await?;
+			if let Some(value) = &placed_value
+				&& echoes_placed_value(&response_headers, &body, value)
+			{
+				return Err(PlacementRefusal::ResponseEchoesCredential.into());
+			}
 			return Ok(pb::HttpResponse {
 				status,
 				headers: response_headers,
@@ -130,6 +262,19 @@ impl HttpEgressHost {
 	}
 }
 
+/// Whether the response carries the placed value in a header or the body.
+/// Defense in depth (ADR 0075 D10), not a guarantee: an endpoint can re-encode
+/// the value.
+fn echoes_placed_value(headers: &[pb::HttpHeader], body: &[u8], value: &[u8]) -> bool {
+	let contains = |haystack: &[u8]| {
+		!value.is_empty() && haystack.windows(value.len()).any(|window| window == value)
+	};
+	headers
+		.iter()
+		.any(|header| contains(header.value.as_bytes()))
+		|| contains(body)
+}
+
 #[derive(Debug, Error)]
 pub enum HttpEgressError {
 	#[error("invalid HTTP egress request: {0}")]
@@ -138,6 +283,8 @@ pub enum HttpEgressError {
 	TimedOut,
 	#[error("HTTP egress response exceeds the bounded frame limit")]
 	ResponseTooLarge,
+	#[error(transparent)]
+	Placement(#[from] PlacementRefusal),
 	#[error(
 		"HTTP egress cannot use the SOCKS proxy configured by {variable}; unset {variable} or \
 		 configure an HTTP proxy"
@@ -436,7 +583,7 @@ mod tests {
 		let heads = serve(second, vec![OK.to_owned()]);
 
 		let response = HttpEgressHost::new()
-			.request(request_to(format!("http://127.0.0.1:{first_port}/start")))
+			.request(request_to(format!("http://127.0.0.1:{first_port}/start")), None)
 			.await
 			.expect("redirected request");
 		assert_eq!(response.status, 200);
@@ -460,7 +607,7 @@ mod tests {
 		]);
 
 		let response = HttpEgressHost::new()
-			.request(request_to(format!("http://127.0.0.1:{port}/start")))
+			.request(request_to(format!("http://127.0.0.1:{port}/start")), None)
 			.await
 			.expect("redirected request");
 		assert_eq!(response.status, 200);

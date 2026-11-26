@@ -1792,7 +1792,7 @@ async def _http_request(
         method,
         url=url,
         body=body,
-        headers=headers,
+        headers=dict(headers),
         timeout=timeout,
         redirects=redirects,
         **({} if credential is None else {"credential": credential}),

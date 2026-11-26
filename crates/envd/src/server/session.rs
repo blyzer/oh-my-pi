@@ -1418,6 +1418,12 @@ impl EnvServer {
 		Arc::clone(&self.github_credentials)
 	}
 
+	/// Returns the credential authority extension HTTP egress places keys
+	/// with, bound at composition.
+	pub fn placement_authority(&self) -> Arc<crate::placement::PlacementAuthority> {
+		Arc::clone(self.http_egress.placement())
+	}
+
 	/// Canonical project root this server was opened for.
 	pub(crate) fn project_root(&self) -> PathBuf {
 		self.workspace.root().to_path_buf()
