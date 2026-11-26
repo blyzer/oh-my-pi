@@ -127,6 +127,9 @@ pub enum RemoteError {
 	/// The credential source has an unsupported form.
 	#[error("remote credential must be an env:NAME or !command source")]
 	CredentialSource,
+	/// A profile that sends an operator credential was connected without one.
+	#[error("this remote profile needs an operator credential and none was resolved")]
+	MissingCredential,
 	/// The credential command failed.
 	#[error("operator remote credential command failed")]
 	Credential(#[source] omp_ai::auth::command::CommandCredentialError),
@@ -642,6 +645,16 @@ impl ExecutionSettings {
 		&self.profile
 	}
 
+	/// Whether this destination is served by an operator-held credential the
+	/// host resolves and passes on. A delegated profile is not: its extension
+	/// names the provider and the host places the header at egress (ADR 0075),
+	/// so resolving `sv_exec_remote_credential` for it would read a secret only
+	/// to drop it.
+	#[must_use]
+	pub fn needs_operator_credential(&self) -> bool {
+		self.profile_name() != DELEGATED_PROFILE
+	}
+
 	#[allow(dead_code)]
 	pub(crate) fn cache_name(&self) -> &str {
 		&self.cache
@@ -802,7 +815,7 @@ impl ExecutionSettings {
 		&self,
 		environment: EnvClient,
 		pins: &RepoPins,
-		credential: Credential,
+		credential: Option<Credential>,
 	) -> Result<ComposedBackend, RemoteError> {
 		self.require_accepted()?;
 		// Check if the profile indicates a delegated backend
@@ -812,6 +825,7 @@ impl ExecutionSettings {
 			let backend = DelegatedBackend::new(environment, BackendId::new_static(BACKEND_NAME));
 			return Ok(ComposedBackend::Delegated(backend));
 		}
+		let credential = credential.ok_or(RemoteError::MissingCredential)?;
 		let (profile, cache) = self.resolved_profile()?;
 		self
 			.connect_config(environment, self.config(pins, profile, cache, credential))
@@ -1197,6 +1211,20 @@ mod tests {
 		assert!(!data_dir.exists(), "environment credential must not start an environment");
 		settings.credential_source = Str::new_static("!printf token");
 		assert!(settings.environment_credential().unwrap().is_none());
+	}
+
+	#[test]
+	fn only_a_delegated_profile_skips_the_operator_credential() {
+		let ctx = context("grpcs://example.com");
+		for (profile, needed) in [("reapi", true), ("operator", true), ("buildbuddy", false)] {
+			SV_EXEC_REMOTE_PROFILE.set(&ctx, Str::new(profile)).unwrap();
+			let settings = ExecutionSettings::generic(&ctx).unwrap();
+			assert_eq!(
+				settings.needs_operator_credential(),
+				needed,
+				"profile {profile}: the host resolves sv_exec_remote_credential only when it sends it"
+			);
+		}
 	}
 
 	#[test]

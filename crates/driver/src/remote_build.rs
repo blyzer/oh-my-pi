@@ -140,9 +140,17 @@ impl RemoteBuildHost for EnvironmentHost {
 		cancel: &'a CancellationToken,
 	) -> impl Future<Output = Result<Self::Backend, RemoteError>> + Send + 'a {
 		async move {
-			let credential = settings
-				.credential(&self.environment, &self.root, cancel)
-				.await?;
+			// A delegated profile places the key at egress under a grant (ADR 0075), so the
+			// operator credential is not read for it.
+			let credential = if settings.needs_operator_credential() {
+				Some(
+					settings
+						.credential(&self.environment, &self.root, cancel)
+						.await?,
+				)
+			} else {
+				None
+			};
 			settings
 				.connect(self.environment.clone(), pins, credential)
 				.await
