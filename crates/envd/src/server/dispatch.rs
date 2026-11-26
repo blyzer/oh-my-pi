@@ -1051,9 +1051,10 @@ impl EnvServer {
 				}
 			},
 			client_frame::Body::HttpRequest(request) => {
-				// Placement is decided before egress is reached: a request carrying
+				// Placement is decided before egress is reached, from the grants the
+				// host holds for this connection's extension: a request carrying
 				// `credential` never opens a connection while no authority is bound.
-				if let Some(refusal) = placement_refusal(&request) {
+				if let Some(refusal) = placement_refusal(&request, &connection.credential_grants) {
 					send_placement_refusal(responses, frame.request_id, refusal).await;
 					return;
 				}

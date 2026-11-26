@@ -955,6 +955,26 @@ async fn test_connection_scoped(
 	extension_policy: bool,
 ) -> (flume::Sender<pb::ClientFrame>, Receiver<pb::ServerFrame>, tempfile::TempDir, tempfile::TempDir)
 {
+	test_connection_scoped_with(
+		capabilities,
+		with_dap,
+		policy_host,
+		authority_host,
+		extension_policy,
+		omp_ext::credential_grant::CredentialGrants::default(),
+	)
+	.await
+}
+
+async fn test_connection_scoped_with(
+	capabilities: &[&str],
+	with_dap: bool,
+	policy_host: HostKey,
+	authority_host: HostKey,
+	extension_policy: bool,
+	credential_grants: omp_ext::credential_grant::CredentialGrants,
+) -> (flume::Sender<pb::ClientFrame>, Receiver<pb::ServerFrame>, tempfile::TempDir, tempfile::TempDir)
+{
 	let root = tempfile::tempdir().expect("workspace");
 	let state = tempfile::tempdir().expect("state");
 	let workspace = WorkspaceHost::open(root.path()).expect("workspace host");
@@ -1086,7 +1106,8 @@ async fn test_connection_scoped(
 		ConnectionPolicy::extension(policy_host, grants.iter())
 	} else {
 		ConnectionPolicy::external(None)
-	};
+	}
+	.with_credential_grants(credential_grants);
 	let (requests, request_rx) = flume::bounded(16);
 	let (responses, response_rx) = flume::bounded(16);
 	tokio::spawn(async move {
@@ -3113,7 +3134,11 @@ async fn unbound_host_refuses_credential_request_with_zero_requests() {
 		.await
 		.expect("ordinary request deadline")
 		.expect("ordinary request frame");
-	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1, "control reached the listener");
+	assert_eq!(
+		accepted.load(std::sync::atomic::Ordering::SeqCst),
+		1,
+		"control reached the listener"
+	);
 }
 
 /// A UDS peer that handshakes, optionally advertising credential placement,
@@ -3133,7 +3158,9 @@ fn placement_peer(
 		loop {
 			let mut length = 0_u64;
 			for shift in (0..70).step_by(7) {
-				let Ok(byte) = stream.read_u8().await else { return };
+				let Ok(byte) = stream.read_u8().await else {
+					return;
+				};
 				length |= u64::from(byte & 0x7f) << shift;
 				if byte & 0x80 == 0 {
 					break;
@@ -3186,7 +3213,8 @@ async fn unsupported_peer_gets_zero_requests() {
 		capabilities: vec!["env.net".to_owned()],
 		..Default::default()
 	};
-	let scope = || omp_env::DataScope::new(sf!("invocation-p"), Bytes::from_static(b"effect-p"), 1, 1);
+	let scope =
+		|| omp_env::DataScope::new(sf!("invocation-p"), Bytes::from_static(b"effect-p"), 1, 1);
 
 	// A peer that predates placement: the sender fails locally, nothing is sent.
 	let (old_path, old_frames) = placement_peer(dir.path().join("old.sock"), false);
@@ -3213,4 +3241,149 @@ async fn unsupported_peer_gets_zero_requests() {
 	assert!(matches!(error, omp_env::ClientError::Protocol(_)), "{error:?}");
 	assert_eq!(new_frames.load(std::sync::atomic::Ordering::SeqCst), 1);
 	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+fn placement_grants(provider: &str, port: u16) -> omp_ext::credential_grant::CredentialGrants {
+	use omp_ext::{
+		Layer,
+		credential_grant::{
+			CredentialGrant, CredentialGrants, CredentialOperation, CredentialOrigin,
+		},
+	};
+
+	CredentialGrants::new([CredentialGrant {
+		id:                sf!("envd-test"),
+		publisher:         sf!("path:/ext/envd-test"),
+		layer:             Layer::Client,
+		capability_digest: sf!("digest"),
+		provider:          omp_core::Str::new(provider),
+		origins:           vec![
+			CredentialOrigin::new("https", "127.0.0.1", Some(port)).expect("origin"),
+		],
+		operations:        vec![CredentialOperation::new("POST", "/run").expect("operation")],
+		granted_at:        sf!("2026-11-26T00:00:00Z"),
+		granted_by:        sf!("test"),
+	}])
+}
+
+/// Sends one request on a connection and returns the typed refusal it drew.
+async fn refusal_of(
+	requests: &flume::Sender<pb::ClientFrame>,
+	responses: &Receiver<pb::ServerFrame>,
+	request_id: u64,
+	request: pb::HttpRequest,
+) -> (i32, String) {
+	requests
+		.send_async(pb::ClientFrame {
+			request_id,
+			body: Some(client_frame::Body::HttpRequest(request)),
+			props: Default::default(),
+			scope: None,
+		})
+		.await
+		.expect("send credential request");
+	let frame = time::timeout(Duration::from_secs(5), responses.recv_async())
+		.await
+		.expect("refusal deadline")
+		.expect("refusal frame");
+	assert_eq!(frame.request_id, request_id);
+	let Some(server_frame::Body::Error(error)) = frame.body else {
+		panic!("expected a typed refusal, got {frame:?}");
+	};
+	(error.code, error.message)
+}
+
+fn https_request(port: u16, path: &str, method: &str, provider: &str) -> pb::HttpRequest {
+	pb::HttpRequest {
+		method: method.to_owned(),
+		url: format!("https://127.0.0.1:{port}{path}"),
+		timeout_ms: 500,
+		credential: Some(provider.to_owned()),
+		..Default::default()
+	}
+}
+
+#[tokio::test]
+async fn grant_refusals_name_their_class_and_send_nothing() {
+	use omp_ext::credential_grant::CredentialRefusal as Class;
+
+	let (port, accepted) = counting_listener().await;
+	let host = HostKey::new("workspace", "sandboxed", "envd-test");
+	let (requests, responses, _root, _state) = test_connection_scoped_with(
+		&["env.net"],
+		false,
+		host.clone(),
+		host,
+		false,
+		placement_grants("buildbuddy", port),
+	)
+	.await;
+	let placement = pb::ProtocolErrorCode::PlacementUnavailable as i32;
+	let refused = |class: Class| (placement, format!("credential placement refused: {class}"));
+	let mut plain_http = https_request(port, "/run", "POST", "buildbuddy");
+	plain_http.url = format!("http://127.0.0.1:{port}/run");
+	let cases = [
+		(https_request(port, "/run", "POST", "other"), refused(Class::ProviderNotGranted)),
+		(plain_http, refused(Class::NotHttps)),
+		(https_request(port, "/other", "POST", "buildbuddy"), refused(Class::OperationNotGranted)),
+		(https_request(port, "/run", "GET", "buildbuddy"), refused(Class::OperationNotGranted)),
+		(
+			https_request(port.wrapping_add(1), "/run", "POST", "buildbuddy"),
+			refused(Class::OriginNotGranted),
+		),
+		// A request the grant covers is still not sent: no authority is bound.
+		(
+			https_request(port, "/run", "POST", "buildbuddy"),
+			(
+				placement,
+				"credential placement is unavailable: no credential authority is bound".to_owned(),
+			),
+		),
+	];
+	for (id, (request, expected)) in (1_u64..).zip(cases) {
+		assert_eq!(refusal_of(&requests, &responses, id, request).await, expected, "request {id}");
+	}
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0, "a connection was opened");
+}
+
+#[tokio::test]
+async fn grant_binds_extension_identity() {
+	use omp_ext::credential_grant::CredentialRefusal as Class;
+
+	let (port, accepted) = counting_listener().await;
+	let host = HostKey::new("workspace", "sandboxed", "envd-other");
+	// A connection whose extension holds no grant of its own: grants held for
+	// another extension never reach it, because they ride only on the policy
+	// of that extension's own DATA listener. The gate reads the connection's
+	// grants whichever policy built them.
+	let (requests, responses, _root, _state) = test_connection_scoped_with(
+		&["env.net"],
+		false,
+		host.clone(),
+		host,
+		false,
+		omp_ext::credential_grant::CredentialGrants::default(),
+	)
+	.await;
+	assert_eq!(
+		refusal_of(&requests, &responses, 1, https_request(port, "/run", "POST", "buildbuddy")).await,
+		(
+			pb::ProtocolErrorCode::PlacementUnavailable as i32,
+			format!("credential placement refused: {}", Class::NoGrant)
+		)
+	);
+	assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn data_binding_carries_the_admitted_grants_to_its_policy() {
+	let state = tempfile::tempdir().expect("state");
+	let key = HostKey::new("client", "sandboxed", "envd-test");
+	let grants = placement_grants("buildbuddy", 443);
+	let binding =
+		ExtensionDataBinding::scoped(state.path(), key.clone(), "session", 1, Grants::default())
+			.with_credential_grants(grants.clone());
+	assert_eq!(binding.policy().credential_grants, grants);
+	let plain = ExtensionDataBinding::scoped(state.path(), key, "session", 1, Grants::default());
+	assert!(plain.policy().credential_grants.is_empty(), "no grant unless admission supplied one");
 }

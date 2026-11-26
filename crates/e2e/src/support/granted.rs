@@ -234,7 +234,8 @@ pub(super) fn install_admitted(
 		session_id,
 		generation,
 		spec.data_grants.clone(),
-	);
+	)
+	.with_credential_grants(spec.credential_grants.clone());
 	binding
 		.prepare_endpoint()
 		.context("prepare scoped extension DATA socket")?;

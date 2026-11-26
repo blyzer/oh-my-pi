@@ -1,5 +1,7 @@
 //! Server identity, connection policy, and extension DATA bindings.
 
+use omp_ext::credential_grant::CredentialGrants;
+
 use super::prelude::*;
 #[cfg(unix)]
 use super::runtime::ensure_directory;
@@ -26,19 +28,33 @@ pub struct ServerIdentity {
 /// Per-connection transport and exact DATA grant bounds.
 #[derive(Clone)]
 pub(crate) struct ConnectionPolicy {
-	pub(in crate::server) retire: Option<CancellationToken>,
-	pub(in crate::server) grants: Grants,
-	pub(in crate::server) host:   Option<HostKey>,
+	pub(in crate::server) retire:            Option<CancellationToken>,
+	pub(in crate::server) grants:            Grants,
+	pub(in crate::server) host:              Option<HostKey>,
+	/// Host-held credential placement grants of the extension on this
+	/// connection (ADR 0075 D3). Empty for every connection that is not an
+	/// extension host's own DATA listener.
+	pub(in crate::server) credential_grants: CredentialGrants,
 }
 
 impl ConnectionPolicy {
 	pub(in crate::server) fn in_process() -> Self {
-		Self { retire: None, grants: Grants::all(), host: None }
+		Self {
+			retire:            None,
+			grants:            Grants::all(),
+			host:              None,
+			credential_grants: CredentialGrants::default(),
+		}
 	}
 
 	/// Grants owner-local lifecycle traffic while retaining DATA phase checks.
 	pub(crate) fn external(retire: Option<CancellationToken>) -> Self {
-		Self { retire, grants: Grants::all(), host: None }
+		Self {
+			retire,
+			grants: Grants::all(),
+			host: None,
+			credential_grants: CredentialGrants::default(),
+		}
 	}
 
 	/// Restricts an extension-host connection to explicitly granted, reachable
@@ -48,7 +64,20 @@ impl ConnectionPolicy {
 		I: IntoIterator<Item = S>,
 		S: AsRef<str>,
 	{
-		Self { retire: None, grants: Grants::supported(grants), host: Some(host) }
+		Self {
+			retire:            None,
+			grants:            Grants::supported(grants),
+			host:              Some(host),
+			credential_grants: CredentialGrants::default(),
+		}
+	}
+
+	/// Attaches the extension's host-held credential grants. They place
+	/// nothing by themselves.
+	#[must_use]
+	pub(crate) fn with_credential_grants(mut self, credential_grants: CredentialGrants) -> Self {
+		self.credential_grants = credential_grants;
+		self
 	}
 }
 
@@ -72,11 +101,12 @@ pub(in crate::server) fn approval_mode_from_wire(value: i32) -> Result<Option<Ap
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct ExtensionDataBinding {
-	pub(in crate::server) key:      HostKey,
-	pub(in crate::server) path:     PathBuf,
-	pub(in crate::server) grants:   Grants,
+	pub(in crate::server) key:               HostKey,
+	pub(in crate::server) path:              PathBuf,
+	pub(in crate::server) grants:            Grants,
+	pub(in crate::server) credential_grants: CredentialGrants,
 	#[cfg(unix)]
-	pub(in crate::server) prepared: Option<PreparedEndpoint>,
+	pub(in crate::server) prepared:          Option<PreparedEndpoint>,
 }
 
 /// A bound, published extension DATA socket awaiting its server.
@@ -159,9 +189,18 @@ impl ExtensionDataBinding {
 			key,
 			path,
 			grants,
+			credential_grants: CredentialGrants::default(),
 			#[cfg(unix)]
 			prepared: None,
 		}
+	}
+
+	/// Attaches the extension's host-held credential grants (ADR 0075 D3), as
+	/// admitted from the operator record. The default is none.
+	#[must_use]
+	pub fn with_credential_grants(mut self, credential_grants: CredentialGrants) -> Self {
+		self.credential_grants = credential_grants;
+		self
 	}
 
 	/// Returns the socket path passed only to this binding's child.
@@ -202,6 +241,7 @@ impl ExtensionDataBinding {
 	/// Returns the immutable connection policy carried by this listener.
 	pub(crate) fn policy(&self) -> ConnectionPolicy {
 		ConnectionPolicy::extension(self.key.clone(), self.grants.iter())
+			.with_credential_grants(self.credential_grants.clone())
 	}
 }
 

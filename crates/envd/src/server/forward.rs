@@ -2657,23 +2657,41 @@ pub(in crate::server) async fn send_document_error(
 /// never a fallback to the environment, the Keychain or an argument.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(in crate::server) enum PlacementRefusal {
+	/// The extension's host-held grant record does not cover the request: no
+	/// grant, another provider, a non-https URL, an origin or an operation
+	/// outside the grant. The class names which.
+	#[error("credential placement refused: {0}")]
+	Grant(#[from] omp_ext::credential_grant::CredentialRefusal),
 	/// No credential authority is bound to this host, so nothing can place a
-	/// credential. Later slices add the grant-dependent classes.
+	/// credential. A request the grant covers still lands here until a later
+	/// slice binds an authority.
 	#[error("credential placement is unavailable: no credential authority is bound")]
 	NoAuthority,
 }
 
 /// Returns the refusal for a request the host must not send, or `None` for an
-/// ordinary request. The placed header name and prefix never come from the
-/// request.
-pub(in crate::server) const fn placement_refusal(
+/// ordinary request. The grant classes come first and the authority last, and
+/// nothing binds an authority yet, so a request that carries `credential` is
+/// never sent. The placed header name and prefix never come from the request.
+pub(in crate::server) fn placement_refusal(
 	request: &pb::HttpRequest,
+	grants: &omp_ext::credential_grant::CredentialGrants,
 ) -> Option<PlacementRefusal> {
-	if request.credential.is_some() {
-		Some(PlacementRefusal::NoAuthority)
+	use omp_ext::credential_grant::CredentialRefusal;
+
+	let provider = request.credential.as_deref()?;
+	let method = if request.method.is_empty() {
+		"GET"
 	} else {
-		None
-	}
+		request.method.as_str()
+	};
+	let Ok(url) = url::Url::parse(&request.url) else {
+		return Some(PlacementRefusal::Grant(CredentialRefusal::NotHttps));
+	};
+	Some(match grants.authorize(provider, method, &url) {
+		Ok(_) => PlacementRefusal::NoAuthority,
+		Err(refusal) => PlacementRefusal::Grant(refusal),
+	})
 }
 
 pub(in crate::server) async fn send_placement_refusal(
