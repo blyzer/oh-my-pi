@@ -9,8 +9,14 @@ module and handles errors properly.
 from __future__ import annotations
 
 import ast
+import asyncio
+import importlib
+import os
+import sys
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICES_PY = ROOT / "src" / "omp_buildbuddy" / "devices.py"
@@ -144,6 +150,83 @@ class ClientSourceTests(unittest.TestCase):
         self.assertIn('"Run"', self.source)
         self.assertIn('"GetInvocation"', self.source)
         self.assertIn('"GetLog"', self.source)
+
+
+class ClientBehaviourTests(unittest.TestCase):
+    """Run client.py against a recording stand-in for the native `omp` host.
+
+    The source tests above only check spelling. These drive `_request` and
+    `_base_url` and look at what actually reaches `omp.env.http_post`.
+    """
+
+    def setUp(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.status = 200
+        self.body = b"{}"
+        outer = self
+
+        class _Response:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self.body = body
+
+        async def http_post(url, body=b"", headers=None, redirects=10):
+            outer.calls.append({"url": url, "headers": headers, "redirects": redirects})
+            return _Response(outer.status, outer.body)
+
+        omp_mod = types.ModuleType("omp")
+        env_mod = types.ModuleType("omp.env")
+        env_mod.http_post = http_post
+        env_mod.HttpResponse = _Response
+        omp_mod.env = env_mod
+        modules = mock.patch.dict(sys.modules, {"omp": omp_mod, "omp.env": env_mod})
+        modules.start()
+        self.addCleanup(modules.stop)
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop("SV_EXEC_REMOTE_ENDPOINT", None)
+        # An empty package pointing at the source directory: importing the real
+        # `omp_buildbuddy/__init__.py` would load `devices`, which needs the
+        # native host. Only `client`, `errors` and `profile` are exercised.
+        package = types.ModuleType("omp_buildbuddy")
+        package.__path__ = [str(ROOT / "src" / "omp_buildbuddy")]
+        sys.modules["omp_buildbuddy"] = package
+        self.client = importlib.import_module("omp_buildbuddy.client")
+
+    def _call(self) -> object:
+        return asyncio.run(self.client._request("Run", payload={}, api_key="secret"))
+
+    def test_requests_never_follow_redirects(self) -> None:
+        self._call()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["redirects"], 0)
+
+    def test_a_redirect_response_is_refused(self) -> None:
+        errors = self.client.errors
+        for status in (301, 302, 307, 308):
+            self.status = status
+            with self.assertRaises(errors.BuildBuddyUnavailable) as raised:
+                self._call()
+            self.assertIn("redirect refused", raised.exception.reason)
+
+    def test_plain_http_endpoints_are_refused(self) -> None:
+        errors = self.client.errors
+        for endpoint in ("grpc://app.buildbuddy.io", "http://app.buildbuddy.io", "ftp://x.io", "app.buildbuddy.io"):
+            os.environ["SV_EXEC_REMOTE_ENDPOINT"] = endpoint
+            with self.assertRaises(errors.BuildBuddyUnavailable, msg=endpoint):
+                self.client._base_url()
+
+    def test_the_key_is_never_sent_to_a_refused_endpoint(self) -> None:
+        os.environ["SV_EXEC_REMOTE_ENDPOINT"] = "grpc://app.buildbuddy.io"
+        with self.assertRaises(self.client.errors.BuildBuddyUnavailable):
+            self._call()
+        self.assertEqual(self.calls, [])
+
+    def test_https_and_grpcs_endpoints_are_accepted(self) -> None:
+        self.assertEqual(self.client._base_url(), "https://app.buildbuddy.io")
+        os.environ["SV_EXEC_REMOTE_ENDPOINT"] = "https://example.buildbuddy.io"
+        self.assertEqual(self.client._base_url(), "https://example.buildbuddy.io")
 
 
 if __name__ == "__main__":
