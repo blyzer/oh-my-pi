@@ -25,7 +25,6 @@ use omp_exec::{
 	ExecutionError, ExecutionEvent, ExecutionRequest, ExecutionResult, ExecutionRun, Outcome,
 	OutputFrame, Platform, ReattachHandle, ResumeSupport, Stream,
 };
-use omp_exec_reapi::profile::Credential;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -46,13 +45,6 @@ mod device {
 
 fn shell_quote(value: &str) -> String {
 	format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn credential_value(inner: &BackendInner) -> Option<String> {
-	inner
-		.credential
-		.as_ref()
-		.map(|credential| credential.expose().to_string())
 }
 
 /// Error from a delegated extension device call.
@@ -93,8 +85,6 @@ struct BackendInner {
 	id:           BackendId,
 	/// Capabilities for this backend.
 	capabilities: Arc<BackendCapabilities>,
-	/// API key credential for the extension.
-	credential:   Option<Credential>,
 }
 
 impl DelegatedBackend {
@@ -102,7 +92,7 @@ impl DelegatedBackend {
 	///
 	/// The `client` must have the extension loaded and admitted. The `id` is
 	/// the operator-given name used in execution handles.
-	pub fn new(client: EnvClient, id: BackendId, credential: Option<Credential>) -> Self {
+	pub fn new(client: EnvClient, id: BackendId) -> Self {
 		Self {
 			inner: Arc::new(BackendInner {
 				client,
@@ -118,7 +108,6 @@ impl DelegatedBackend {
 					warm_caches:    false,
 					enforced:       REMOTE_POSTURE,
 				}),
-				credential,
 			}),
 		}
 	}
@@ -283,18 +272,11 @@ impl DelegatedBackend {
 			.map(|e| (e.name.to_string(), serde_json::json!(e.value.as_str())))
 			.collect();
 
-		// Include the API key credential so the extension can use it directly
-		// instead of calling subprocess (which is blocked by the sandbox)
-		let api_key = self
-			.inner
-			.credential
-			.as_ref()
-			.map(|c| c.expose().to_string());
-
+		// The extension never receives the API key: its HTTP requests name the
+		// `buildbuddy` provider and the host places the header at egress (ADR 0075).
 		let args = serde_json::json!({
 			"steps": steps,
 			"env": env_map,
-			"api_key": api_key,
 		});
 
 		tracing::info!(step_count = steps.len(), "delegated backend calling start device");
@@ -447,10 +429,8 @@ impl DelegatedBackend {
 		log_cursor: Option<Str>,
 	) -> DelegatedNext {
 		let inner = &self.inner;
-		let auth = credential_value(inner);
 		let mut poll_args = serde_json::json!({
 			"operation": operation.as_str(),
-			"api_key": auth,
 		});
 		if let Some(cursor) = poll_cursor.as_ref() {
 			poll_args["cursor"] = serde_json::json!(cursor.as_str());
@@ -469,10 +449,8 @@ impl DelegatedBackend {
 			},
 		};
 		let next_poll_cursor = next_cursor(&poll_result).or(poll_cursor);
-		let auth = credential_value(inner);
 		let mut log_args = serde_json::json!({
 			"operation": operation.as_str(),
-			"api_key": auth,
 		});
 		if let Some(cursor) = log_cursor.as_ref() {
 			log_args["cursor"] = serde_json::json!(cursor.as_str());

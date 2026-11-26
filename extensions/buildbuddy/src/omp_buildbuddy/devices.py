@@ -19,8 +19,8 @@ Each device calls the corresponding function in ``client.py``, which uses
 ``omp.env.http_post`` to call BuildBuddy's Run API REST endpoints. All
 endpoints are POST-based JSON calls routed through the sandbox's HTTP egress
 broker, so the extension respects ``sv_sandbox_allow_domains``. The API key
-is read from the operator credential convar via ``omp.credential`` at call
-time.
+never reaches the extension: each request names ``credential="buildbuddy"`` and
+the host places the header at egress under a grant (ADR 0075).
 """
 
 from __future__ import annotations
@@ -55,8 +55,10 @@ async def start(args: dict[str, Any]) -> dict[str, Any]:
     """Start a remote execution run on BuildBuddy.
     
     Accepts args in two formats:
-    - DelegatedBackend format: {"steps": [...], "env": {...}, "api_key": "..."}
-    - Legacy format: {"request": {"steps": [...], "env": {...}, "api_key": "..."}}
+    - DelegatedBackend format: {"steps": [...], "env": {...}}
+    - Legacy format: {"request": {"steps": [...], "env": {...}}}
+    The BuildBuddy credential is never an argument: the host places it on the
+    HTTP request (ADR 0075), so an `api_key` in `args` is not read.
     """
     # DelegatedBackend passes args directly; legacy format wraps under "request"
     request = args.get("request")
@@ -80,10 +82,9 @@ async def poll(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("poll", "args.operation is required")
     cursor = args.get("cursor")
-    api_key = args.get("api_key")
     try:
         return await client.poll_run(
-            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+            str(operation), cursor=str(cursor) if cursor else None
         )
     except errors.BuildBuddyUnavailable:
         raise
@@ -97,10 +98,9 @@ async def get_log(args: dict[str, Any]) -> dict[str, Any]:
     if not operation:
         raise errors.BuildBuddyUnavailable("get_log", "args.operation is required")
     cursor = args.get("cursor")
-    api_key = args.get("api_key")
     try:
         return await client.get_log(
-            str(operation), cursor=str(cursor) if cursor else None, api_key=api_key
+            str(operation), cursor=str(cursor) if cursor else None
         )
     except errors.BuildBuddyUnavailable:
         raise

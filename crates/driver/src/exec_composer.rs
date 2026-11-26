@@ -807,11 +807,9 @@ impl ExecutionSettings {
 		self.require_accepted()?;
 		// Check if the profile indicates a delegated backend
 		if self.profile_name() == DELEGATED_PROFILE {
-			let backend = DelegatedBackend::new(
-				environment,
-				BackendId::new_static(BACKEND_NAME),
-				Some(credential),
-			);
+			// The credential is not handed on: the extension's HTTP requests name
+			// the provider and the host places the header at egress (ADR 0075 S4).
+			let backend = DelegatedBackend::new(environment, BackendId::new_static(BACKEND_NAME));
 			return Ok(ComposedBackend::Delegated(backend));
 		}
 		let (profile, cache) = self.resolved_profile()?;
