@@ -150,7 +150,7 @@ need appears (O5). Production changes are authorized only through these slices, 
 
 ## Status in omp
 
-Status: Partially implemented. S-amend, S0, S1, S2, S3 and S4 are in the tree. S5 (the BuildBuddy migration) is not started, so the extension still reads the key itself.
+Status: Partially implemented. S-amend, S0, S1, S2, S3, S4 and S5 are in the tree. The BuildBuddy extension no longer reads or receives the key: it names `credential="buildbuddy"` and the host places the header. D12 is unverified, and for the delegated profile the host still resolves the old `sv_exec_remote_credential` value in `exec_composer.rs` and drops it unused.
 
 - **S-amend, S0, S1, S3** landed in PR #734. S-amend is the ADR 0040 amendment (`0040:2035`) and the ADR 0049 rule 7 pointer (`0049:76`). S0 is `docs/research/adr-0075-s0-remote-env-placement-transports.md`. S1 is the `buildbuddy` provider with a stored header credential and an empty prefix (`crates/catalog/tests/catalog_conformance.rs:2214`). S3 is `HttpRequest.credential` (`crates/proto/proto/omp/env/v1/env.proto:1268`) and the `credential-placement` handshake capability with the sender gate (`crates/env/src/client.rs:229,2993`).
 - **S2, grant record and enforcement** (this slice; scopes come from the host record, never from the manifest):
@@ -171,7 +171,7 @@ Status: Partially implemented. S-amend, S0, S1, S2, S3 and S4 are in the tree. S
   - Gate. The path is unreachable without a grant record (`ConnectionState.credential_grants`, S2) and a bound authority; there is no convar.
   - Tests. `crates/envd/src/placement_tests.rs`, over a loopback TLS server that counts accepted connections: `no_grant_means_no_send`, `placed_header_reaches_only_the_granted_host`, `same_host_other_port_receives_zero_requests`, `ungranted_redirect_hop_receives_zero_requests` (302 and 307 with a body), `caller_host_header_refused`, `placed_header_set_by_request_refused`, `non_https_refused`, `ungranted_operation_refused`, `remote_environment_refuses_placement`, `audit_failure_blocks_send`, `no_stored_credential_means_no_send`, `response_containing_placed_value_is_not_returned`, `plaintext_absent_from_logs_errors_and_traces`. Driver: `crates/driver/src/placement_credentials.rs` (one, none, several accounts). E2E: `crates/e2e/tests/p9_credential_placement.rs` (a real user extension, Seatbelt, skips off macOS).
   - Also changed. `crates/py/src/env_backend.rs` sent `omp.env.http_post` to a dispatcher that handles `omp.env.http.post` and takes `method` as a named argument, so `omp.env.http_get`, `http_post` and `http_put` raised `Unsupported` from a real extension. S4's end-to-end proof found it; the routing is fixed there.
-  - Still true. The credentials CONTROL domain is unbound in production (Context 1). The BuildBuddy extension still passes the key itself (S5), and `crates/driver/src/delegated_backend.rs` still hands an `api_key` argument to it. D12 (the extension worker cannot reach the grant file, `credentials.db` or `omp token`) is unverified.
+  - Still true. The credentials CONTROL domain is unbound in production (Context 1). The BuildBuddy extension no longer passes or reads the key (S5), and `crates/driver/src/delegated_backend.rs` sends no `api_key` argument. D12 (the extension worker cannot reach the grant file, `credentials.db` or `omp token`) is unverified.
 
 ## References
 

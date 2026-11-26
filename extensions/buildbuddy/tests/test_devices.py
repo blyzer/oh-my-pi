@@ -129,13 +129,17 @@ class ClientSourceTests(unittest.TestCase):
         """Verify client does not use omp.env.http_get (all endpoints are POST)."""
         self.assertNotIn("omp.env.http_get", self.source)
 
-    def test_uses_buildbuddy_api_key_header(self) -> None:
-        """Verify client uses x-buildbuddy-api-key header."""
-        self.assertIn("x-buildbuddy-api-key", self.source)
+    def test_the_credential_is_placed_by_the_host_not_set_here(self) -> None:
+        """S5: the client names the provider; it neither sets nor reads the key."""
+        self.assertIn("credential=_PROVIDER", self.source)
+        self.assertIn('_PROVIDER = "buildbuddy"', self.source)
+        self.assertNotIn("x-buildbuddy-api-key", self.source)
 
-    def test_has_api_key_function(self) -> None:
-        """Verify _api_key function exists for credential retrieval."""
-        self.assertIsNotNone(self._find_func("_api_key"))
+    def test_no_api_key_plumbing_remains(self) -> None:
+        """No api_key argument, env read or subprocess keychain lookup is left."""
+        for name in ("_api_key", "api_key", "BUILDBUDDY_API_KEY", "subprocess"):
+            self.assertNotIn(name, self.source, name)
+        self.assertNotIn('get("api_key")', DEVICES_PY.read_text(encoding="utf-8"))
 
     def test_has_base_url_function(self) -> None:
         """Verify _base_url function exists for endpoint conversion."""
@@ -163,6 +167,8 @@ class ClientBehaviourTests(unittest.TestCase):
         self.calls: list[dict[str, object]] = []
         self.status = 200
         self.body = b"{}"
+        self.attempts: list[dict[str, object]] = []
+        self.refuse = False
         outer = self
 
         class _Response:
@@ -170,14 +176,29 @@ class ClientBehaviourTests(unittest.TestCase):
                 self.status = status
                 self.body = body
 
-        async def http_post(url, body=b"", headers=None, redirects=10):
-            outer.calls.append({"url": url, "headers": headers, "redirects": redirects})
+        class _PlacementUnavailable(Exception):
+            """Stand-in for omp.env.PlacementUnavailable."""
+
+        async def http_post(url, body=b"", headers=None, redirects=10, credential=None):
+            attempt = {
+                "url": url,
+                "body": body,
+                "headers": headers,
+                "redirects": redirects,
+                "credential": credential,
+            }
+            outer.attempts.append(attempt)
+            if outer.refuse:
+                # What a host with no grant does: nothing is sent.
+                raise _PlacementUnavailable("no grant")
+            outer.calls.append(attempt)
             return _Response(outer.status, outer.body)
 
         omp_mod = types.ModuleType("omp")
         env_mod = types.ModuleType("omp.env")
         env_mod.http_post = http_post
         env_mod.HttpResponse = _Response
+        env_mod.PlacementUnavailable = _PlacementUnavailable
         omp_mod.env = env_mod
         modules = mock.patch.dict(sys.modules, {"omp": omp_mod, "omp.env": env_mod})
         modules.start()
@@ -195,7 +216,7 @@ class ClientBehaviourTests(unittest.TestCase):
         self.client = importlib.import_module("omp_buildbuddy.client")
 
     def _call(self) -> object:
-        return asyncio.run(self.client._request("Run", payload={}, api_key="secret"))
+        return asyncio.run(self.client._request("Run", payload={}))
 
     def test_requests_never_follow_redirects(self) -> None:
         self._call()
@@ -227,6 +248,38 @@ class ClientBehaviourTests(unittest.TestCase):
         self.assertEqual(self.client._base_url(), "https://app.buildbuddy.io")
         os.environ["SV_EXEC_REMOTE_ENDPOINT"] = "https://example.buildbuddy.io"
         self.assertEqual(self.client._base_url(), "https://example.buildbuddy.io")
+
+    def test_the_request_names_the_provider_and_carries_no_key(self) -> None:
+        os.environ["BUILDBUDDY_API_KEY"] = "envsecret"
+        self._call()
+        attempt = self.calls[0]
+        self.assertEqual(attempt["credential"], "buildbuddy")
+        self.assertNotIn("envsecret", repr(attempt))
+        self.assertNotIn("x-buildbuddy-api-key", {key.lower() for key in attempt["headers"]})
+
+    def test_a_host_that_places_nothing_means_nothing_is_sent(self) -> None:
+        os.environ["BUILDBUDDY_API_KEY"] = "envsecret"
+        self.refuse = True
+        with self.assertRaises(self.client.errors.BuildBuddyNotGranted) as raised:
+            self._call()
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("envsecret", str(raised.exception))
+        self.assertNotIn("envsecret", repr(self.attempts))
+
+    def test_an_http_failure_is_unavailable_not_a_grant_error(self) -> None:
+        self.status = 503
+        with self.assertRaises(self.client.errors.BuildBuddyUnavailable) as raised:
+            self._call()
+        self.assertNotIsInstance(raised.exception, self.client.errors.BuildBuddyNotGranted)
+        self.assertIn("503", raised.exception.reason)
+
+    def test_start_run_succeeds_and_ignores_a_key_in_its_arguments(self) -> None:
+        self.body = b'{"invocationId": "inv-1"}'
+        result = asyncio.run(
+            self.client.start_run({"steps": [{"run": "true"}], "api_key": "leak"})
+        )
+        self.assertEqual(result["operation"], "inv-1")
+        self.assertNotIn("leak", repr(self.attempts))
 
 
 if __name__ == "__main__":
