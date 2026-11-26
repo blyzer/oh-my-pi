@@ -49,13 +49,17 @@ def _api_key(api_key_from_args: str | None = None) -> str:
 def _base_url() -> str:
     """Return the BuildBuddy REST base URL from the gRPC endpoint.
 
-    Converts `grpcs://app.buildbuddy.io` → `https://app.buildbuddy.io`.
+    Converts `grpcs://app.buildbuddy.io` → `https://app.buildbuddy.io`. The API
+    key is sent to this URL, so anything but https is refused: a plain `grpc://`
+    or `http://` endpoint would put the key on the wire in the clear.
     """
     endpoint = os.environ.get("SV_EXEC_REMOTE_ENDPOINT", ENDPOINT)
     if endpoint.startswith("grpcs://"):
-        return endpoint.replace("grpcs://", "https://", 1)
-    if endpoint.startswith("grpc://"):
-        return endpoint.replace("grpc://", "http://", 1)
+        endpoint = endpoint.replace("grpcs://", "https://", 1)
+    if not endpoint.startswith("https://"):
+        raise errors.BuildBuddyUnavailable(
+            "auth", "BuildBuddy endpoint must be https: the API key is sent to it"
+        )
     return endpoint
 
 
@@ -88,12 +92,20 @@ async def _request(
 
     response: HttpResponse
     try:
-        response = await omp.env.http_post(url, body=body_bytes, headers=headers)
+        # redirects=0: the egress broker would otherwise follow up to 10 hops
+        # with the API key header attached; a redirect is refused below.
+        response = await omp.env.http_post(
+            url, body=body_bytes, headers=headers, redirects=0
+        )
     except Exception as exc:
         raise errors.BuildBuddyUnavailable(
             endpoint, f"BuildBuddy host unreachable: {exc}"
         ) from exc
 
+    if 300 <= response.status < 400:
+        raise errors.BuildBuddyUnavailable(
+            endpoint, f"BuildBuddy HTTP {response.status} redirect refused"
+        )
     if response.status >= 400:
         raise errors.BuildBuddyUnavailable(
             endpoint, f"BuildBuddy HTTP {response.status}"
