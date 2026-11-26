@@ -82,6 +82,8 @@ pub mod model_discovery;
 /// Host-side credential placement for extension HTTP egress (ADR 0075).
 pub mod placement;
 #[cfg(test)]
+mod placement_tests;
+#[cfg(test)]
 mod plan_writes;
 pub mod plugin_commands;
 pub mod policy;
