@@ -424,12 +424,12 @@ Found while building units 2 and 4, and not part of R1:
 
 ## ADR 0075 — extension credential host placement (accepted 2026-11-25, with conditions)
 
-Accepted by the owner on 2026-11-25 with the answers to O1 to O5 (see the ADR). Not started. The owner chose option A: the host places the credential header and the key never reaches the extension. Slices are one PR each, in this order.
+Accepted by the owner on 2026-11-25 with the answers to O1 to O5 (see the ADR). Partially implemented: S-amend, S0, S1 and S3 landed in PR #734; S2, S4 and S5 are not started. The owner chose option A: the host places the credential header and the key never reaches the extension. Slices are one PR each, in this order.
 
 - **DONE** Owner questions O1 to O5 answered: same file as `omp ext grant`; project-scoped extensions never hold credentials (D13); ADR 0040 is amended first; no migration period; option A only, `reveal` on a concrete need.
 - **DONE** S-amend ADR 0040 amendment (`## Amendment (2026-11-25)` replacing the first credential rule) and a pointer from ADR 0049 rule 7. Landed first (O3). The `docs/py/11-env.md` `credential` keyword is documented with S3, when the keyword exists.
-- **OPEN** Prerequisite, not a slice: PR #723, cross-origin redirect hardening (merged by the owner). Proposal: PR #720 does not merge with the key in its arguments.
-- **OPEN** S0 remote Environment transport note (docs only), S1 catalog auth spec and stored credential, S3 additive wire shape with host refusal and a handshake capability gate (inert). Independent of each other, after S-amend.
+- **DONE** Prerequisite, not a slice: PR #723, cross-origin redirect hardening (merged 2026-11-25). PR #720 merged on 2026-11-25 (`ba30175b84`) with the key in its arguments, although its description said "draft, do not merge" and the proposal here was not to merge it that way. `crates/driver/src/delegated_backend.rs:297,453,475` still passes `api_key` to the extension, and `extensions/buildbuddy/src/omp_buildbuddy/client.py` does not pass `redirects=0`. S4 and S5 remove both.
+- **DONE** S0 remote Environment transport note (`docs/research/adr-0075-s0-remote-env-placement-transports.md`), S1 catalog auth spec and stored credential (`crates/catalog/tests/catalog_conformance.rs:2214`), S3 additive wire shape with host refusal and a handshake capability gate, inert (`crates/proto/proto/omp/env/v1/env.proto:1268`, `crates/env/src/client.rs:229,2993`). All three landed in PR #734 (2026-11-25).
 - **OPEN** S2 grant record and enforcement (unblocked by O1 and O2).
 - **BLOCKED** S4 host placement in `HttpEgressHost`: S1, S2 and S3.
 - **BLOCKED** S5 BuildBuddy extension migration: S4, the PR #720 outcome and the S-amend amendment. No warning period.
