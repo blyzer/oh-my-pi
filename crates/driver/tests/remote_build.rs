@@ -30,8 +30,8 @@ use omp_core::Str;
 use omp_dom::{PropKey, Value};
 use omp_driver::{
 	exec_composer::{
-		ExecutionSettings, PreparedExecution, REMOTE_POSTURE, RemoteError, SV_EXEC_REMOTE_ENDPOINT,
-		SV_EXEC_REMOTE_IMAGE,
+		ExecutionSettings, PreparedExecution, REMOTE_POSTURE, RemoteError, SV_EXEC_ACCEPTED,
+		SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_IMAGE,
 	},
 	headless::kernel::{EnvToolExecutor, SettingsAdmission, install_tool_authority},
 	remote_build::{RemoteBuildHost, RemoteBuildTool, SV_EXEC_AGENT_RUNS, enabled},
@@ -346,10 +346,19 @@ fn operator(endpoint: &'static str) -> Arc<omp_con::Ctx> {
 	Arc::new(ctx)
 }
 
-/// [`operator`] with `sv_exec_agent_runs` set.
-fn agent_runs(endpoint: &'static str) -> Arc<omp_con::Ctx> {
+/// [`operator`] with `sv_exec_agent_runs` set and ADR 0047 C1 left unrecorded,
+/// the default: `sv_exec_accepted` is false.
+fn agent_runs_unaccepted(endpoint: &'static str) -> Arc<omp_con::Ctx> {
 	let ctx = operator(endpoint);
 	SV_EXEC_AGENT_RUNS.set(&ctx, true).expect("agent runs");
+	ctx
+}
+
+/// [`agent_runs_unaccepted`] with the operator's C1 acceptance marker
+/// (`sv_exec_accepted`) set, the only state in which a remote build may run.
+fn agent_runs(endpoint: &'static str) -> Arc<omp_con::Ctx> {
+	let ctx = agent_runs_unaccepted(endpoint);
+	SV_EXEC_ACCEPTED.set(&ctx, true).expect("c1 accepted");
 	ctx
 }
 
@@ -645,6 +654,23 @@ async fn a_denied_prompt_connects_uploads_and_journals_nothing() {
 	let (result, is_error) = fixture.last_result();
 	assert!(is_error, "{result}");
 	assert!(result.contains(r#""kind":"not_approved","host":"build-a.example""#), "{result}");
+}
+
+#[tokio::test]
+async fn remote_build_refuses_until_c1_is_recorded_as_accepted() {
+	let ctx = agent_runs_unaccepted("grpcs://build-a.example");
+	assert!(!SV_EXEC_ACCEPTED.get(&ctx), "C1 must default to unaccepted");
+	// The user would approve: the refusal comes first, so nothing asks.
+	let mut fixture =
+		Fixture::compose(ctx, vec![("call-1", test_pkg())], |_, _| Reply::Answer(true));
+	fixture.turn().await;
+	assert!(fixture.offered(), "the model was not offered remote_build");
+	assert_eq!(fixture.host.calls(), (0, 0, 0), "no capture, connection or start while C1 is open");
+	assert!(fixture.prompts().is_empty(), "no approval prompt while C1 is open");
+	assert!(fixture.jobs().is_empty(), "a refused build journals no job");
+	let (result, is_error) = fixture.last_result();
+	assert!(is_error, "{result}");
+	assert!(result.contains(r#""kind":"not_accepted""#), "{result}");
 }
 
 #[tokio::test]

@@ -91,6 +91,14 @@ omp_con::var! {
 	pub static SV_EXEC_UPLOAD_ALLOW = sv_exec_upload_allow: Str {
 		default: Str::default(), flags: archive,
 	};
+	/// Whether the operator records ADR 0047 condition C1 (credential containment, gate G3) as
+	/// accepted. Every remote composition (`credential`, `connect`, `connect_config`,
+	/// `ResumeConnection::open`) and the `remote_build` tool refuse while this is false, whatever
+	/// `sv_exec_policy`, `--exec-policy` or `sv_exec_agent_runs` select. Project cfg cannot set
+	/// it: only `PROJECT`-flagged convars are settable from a repository's `.omp` overlay.
+	pub static SV_EXEC_ACCEPTED = sv_exec_accepted: bool {
+		default: false, flags: archive,
+	};
 }
 
 /// Enforced by the Linux runner profile: the remote action cannot write the
@@ -106,6 +114,13 @@ pub enum RemoteError {
 	/// The endpoint or image is not configured.
 	#[error("remote execution is not configured with an endpoint and digest-pinned image")]
 	MissingConfiguration,
+	/// Remote composition was refused because C1 is not recorded as accepted.
+	#[error(
+		"remote execution refused: ADR 0047 condition C1 (credential containment, gate G3) is not \
+		 recorded as accepted; set sv_exec_accepted = true in the user config only after that \
+		 record is accepted"
+	)]
+	NotAccepted,
 	/// The environment credential is missing or empty.
 	#[error("remote credential environment variable is missing or empty")]
 	EnvironmentCredential,
@@ -368,6 +383,8 @@ pub struct ExecutionSettings {
 	deny_globs:          Str,
 	/// Paths explicitly allowed for upload.
 	allow_paths:         Str,
+	/// Whether `sv_exec_accepted` recorded C1 when this snapshot was taken.
+	accepted:            bool,
 }
 
 /// A planned request with locally captured inputs and its repository pins.
@@ -589,7 +606,23 @@ impl ExecutionSettings {
 			refuse_action_cache: SV_EXEC_REMOTE_REFUSE_ACTION_CACHE.get(ctx),
 			deny_globs: SV_EXEC_UPLOAD_EXCLUDE.get(ctx),
 			allow_paths: SV_EXEC_UPLOAD_ALLOW.get(ctx),
+			accepted: SV_EXEC_ACCEPTED.get(ctx),
 		})
+	}
+
+	/// Refuses remote composition unless ADR 0047 condition C1 is recorded as
+	/// accepted.
+	///
+	/// # Errors
+	///
+	/// Returns [`RemoteError::NotAccepted`] while `sv_exec_accepted` was false
+	/// at snapshot time.
+	pub fn require_accepted(&self) -> Result<(), RemoteError> {
+		if self.accepted {
+			Ok(())
+		} else {
+			Err(RemoteError::NotAccepted)
+		}
 	}
 
 	/// Builds the REAPI profile and validated cache policy from this snapshot.
@@ -649,6 +682,7 @@ impl ExecutionSettings {
 		root: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Credential, RemoteError> {
+		self.require_accepted()?;
 		if let Some(credential) = self.environment_credential()? {
 			return Ok(credential);
 		}
@@ -770,6 +804,7 @@ impl ExecutionSettings {
 		pins: &RepoPins,
 		credential: Credential,
 	) -> Result<ComposedBackend, RemoteError> {
+		self.require_accepted()?;
 		// Check if the profile indicates a delegated backend
 		if self.profile_name() == DELEGATED_PROFILE {
 			let backend = DelegatedBackend::new(
@@ -790,6 +825,7 @@ impl ExecutionSettings {
 		environment: EnvClient,
 		config: ExecuteConfig,
 	) -> Result<ComposedBackend, RemoteError> {
+		self.require_accepted()?;
 		let backend =
 			ReapiBackend::connect(self.endpoint.clone(), config, EnvironmentInputs(environment))
 				.await
@@ -865,6 +901,9 @@ impl ResumeConnection {
 	///
 	/// Refuses a handle that names another backend before anything starts, and
 	/// returns the profile, Environment, credential, or connection failure.
+	///
+	/// Refuses with [`RemoteError::NotAccepted`] first, before the handle is
+	/// examined or any credential is resolved.
 	pub async fn open(
 		settings: &ExecutionSettings,
 		handle: &ReattachHandle,
@@ -873,6 +912,7 @@ impl ResumeConnection {
 		data_dir: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Self, RemoteError> {
+		settings.require_accepted()?;
 		if handle.backend.as_str() != BACKEND_NAME {
 			return Err(RemoteError::UnknownBackend { backend: handle.backend.clone() });
 		}
@@ -933,7 +973,9 @@ impl ResumeConnection {
 mod tests {
 	use super::*;
 
-	fn context(endpoint: &str) -> Ctx {
+	/// A configured endpoint and image with ADR 0047 C1 left unrecorded: the
+	/// default, `sv_exec_accepted = false`.
+	fn unaccepted_context(endpoint: &str) -> Ctx {
 		let ctx = Ctx::new();
 		SV_EXEC_REMOTE_ENDPOINT
 			.set(&ctx, Str::new(endpoint))
@@ -941,6 +983,13 @@ mod tests {
 		SV_EXEC_REMOTE_IMAGE
 			.set(&ctx, Str::new_static("image@sha256:abc"))
 			.unwrap();
+		ctx
+	}
+
+	/// [`unaccepted_context`] with the C1 acceptance marker set.
+	fn context(endpoint: &str) -> Ctx {
+		let ctx = unaccepted_context(endpoint);
+		SV_EXEC_ACCEPTED.set(&ctx, true).unwrap();
 		ctx
 	}
 
@@ -1150,5 +1199,70 @@ mod tests {
 		assert!(!data_dir.exists(), "environment credential must not start an environment");
 		settings.credential_source = Str::new_static("!printf token");
 		assert!(settings.environment_credential().unwrap().is_none());
+	}
+
+	#[test]
+	fn c1_defaults_to_unaccepted_and_the_snapshot_fixes_the_answer() {
+		let ctx = unaccepted_context("grpcs://example.com");
+		assert!(!SV_EXEC_ACCEPTED.get(&ctx));
+		let before = ExecutionSettings::generic(&ctx).unwrap();
+		assert!(matches!(before.require_accepted(), Err(RemoteError::NotAccepted)));
+		SV_EXEC_ACCEPTED.set(&ctx, true).unwrap();
+		// A snapshot taken while C1 was open stays refused; a later one is accepted.
+		assert!(matches!(before.require_accepted(), Err(RemoteError::NotAccepted)));
+		assert!(
+			ExecutionSettings::generic(&ctx)
+				.unwrap()
+				.require_accepted()
+				.is_ok()
+		);
+	}
+
+	#[test]
+	fn the_refusal_names_the_unmet_gate() {
+		let message = RemoteError::NotAccepted.to_string();
+		assert!(message.contains("ADR 0047"), "{message}");
+		assert!(message.contains("C1"), "{message}");
+		assert!(message.contains("G3"), "{message}");
+		assert!(message.contains("sv_exec_accepted"), "{message}");
+	}
+
+	#[tokio::test]
+	async fn resume_refuses_every_handle_until_c1_is_accepted() {
+		let missing = Path::new("/nonexistent/omp-resume");
+		let handle = |backend: &'static str| {
+			ReattachHandle::new(
+				BackendId::new_static(backend),
+				Str::new_static("operations/1"),
+				omp_exec::ExecutionId::new_static("exec-1"),
+			)
+		};
+		let refused = ExecutionSettings::generic(&unaccepted_context("grpcs://example.com")).unwrap();
+		// Even a handle for this backend is refused, before a credential is resolved
+		// or an Environment started: nothing under `missing` is touched.
+		for backend in [BACKEND_NAME, "other"] {
+			let opened = ResumeConnection::open(
+				&refused,
+				&handle(backend),
+				Arc::new(Ctx::new()),
+				missing,
+				missing,
+				&CancellationToken::new(),
+			)
+			.await;
+			assert!(matches!(&opened, Err(RemoteError::NotAccepted)), "{backend}");
+		}
+		// With C1 recorded the gate steps aside and the existing checks run.
+		let accepted = ExecutionSettings::generic(&context("grpcs://example.com")).unwrap();
+		let opened = ResumeConnection::open(
+			&accepted,
+			&handle("other"),
+			Arc::new(Ctx::new()),
+			missing,
+			missing,
+			&CancellationToken::new(),
+		)
+		.await;
+		assert!(matches!(&opened, Err(RemoteError::UnknownBackend { .. })));
 	}
 }

@@ -25,9 +25,9 @@ use super::production::{ProductionAdwHost, ProductionError};
 use crate::exec_composer::{EnvironmentInputs, ExecutionSettings, PreparedExecution, RemoteError};
 #[cfg(test)]
 use crate::exec_composer::{
-	SV_EXEC_REMOTE_ARCH_SPELLING, SV_EXEC_REMOTE_CACHE, SV_EXEC_REMOTE_CREDENTIAL_HEADER,
-	SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_FIXED_PROPERTIES, SV_EXEC_REMOTE_IMAGE,
-	SV_EXEC_REMOTE_PROFILE, SV_EXEC_REMOTE_REFUSE_ACTION_CACHE, config_list,
+	SV_EXEC_ACCEPTED, SV_EXEC_REMOTE_ARCH_SPELLING, SV_EXEC_REMOTE_CACHE,
+	SV_EXEC_REMOTE_CREDENTIAL_HEADER, SV_EXEC_REMOTE_ENDPOINT, SV_EXEC_REMOTE_FIXED_PROPERTIES,
+	SV_EXEC_REMOTE_IMAGE, SV_EXEC_REMOTE_PROFILE, SV_EXEC_REMOTE_REFUSE_ACTION_CACHE, config_list,
 };
 
 /// An ADW remote phase error: a shared composer error.
@@ -36,12 +36,6 @@ pub enum AdwRemoteError {
 	/// The shared composer failed.
 	#[error(transparent)]
 	Remote(#[from] RemoteError),
-	/// Remote execution gates are not satisfied (ADR 0047).
-	#[error(
-		"remote execution not accepted, set sv_exec_accepted = true after ADR 0040/0047 gates are \
-		 satisfied"
-	)]
-	GatesNotSatisfied,
 }
 
 /// Execution placement policy; mirrors ADR 0040 Part C.3.
@@ -81,14 +75,6 @@ omp_con::var! {
 	/// acceptance (ADR 0040 Part C.3). Default off: automatic local rerun of
 	/// a heavy command on a swapping Mac brings back the load this removes.
 	pub static SV_EXEC_FALLBACK_LOCAL = sv_exec_fallback_local: bool {
-		default: false, flags: archive,
-	};
-	/// Gate for remote execution (ADR 0047). Must be explicitly set to true
-	/// after the owner accepts ADR 0040 Gaps 1-4 (A0), decides credential
-	/// containment (G3), and measures relief (G8). Default false: remote
-	/// backend composition is refused until the operator acknowledges the
-	/// gates are satisfied.
-	pub static SV_EXEC_ACCEPTED = sv_exec_accepted: bool {
 		default: false, flags: archive,
 	};
 }
@@ -140,13 +126,9 @@ impl ProductionAdwHost {
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<super::PhaseResult, ProductionError> {
-		// Gate check (ADR 0047): refuse remote backend composition until the
-		// operator acknowledges that A0 (owner acceptance), G3 (credential
-		// containment), and G8 (measured relief) are satisfied.
-		if !SV_EXEC_ACCEPTED.get(&self.ctx) {
-			return Err(AdwRemoteError::GatesNotSatisfied.into());
-		}
 		let settings = ExecutionSettings::for_adw(&self.ctx)?;
+		// ADR 0047 C1: refuse before any Environment starts or credential resolves.
+		settings.require_accepted()?;
 		let environment = self.environment().await?.clone();
 		let credential = settings
 			.credential(&environment, &self.root, cancel)
