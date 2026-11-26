@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Reproduces PR #720 review finding P1: the delegated backend sends
+//! Reproduces the first P1 of the PR #720 review: the delegated backend sends
 //! `exec/start` as a top-level `InvokeTool`, and the server cannot route it.
 //!
 //! `DelegatedBackend::call_device` opens `InvokeTool { name: "exec/<op>", rev:
@@ -78,9 +78,20 @@ async fn a_top_level_invoke_of_an_exec_leaf_is_not_found_today() -> Result<()> {
 	// table here so the route question can be asked at all.
 	let manifest = root.join("omp.toml");
 	let text = fs::read_to_string(&manifest).context("reading the shipped manifest")?;
-	let without_requires = text.split("\n[requires]").next().unwrap_or(&text);
-	fs::write(&manifest, format!("{without_requires}\n"))
-		.context("writing the adjusted manifest")?;
+	// Drop only that table: skip from its header to the next table header.
+	let mut in_requires = false;
+	let adjusted = text
+		.lines()
+		.filter(|line| {
+			if line.trim_start().starts_with('[') {
+				in_requires = line.trim() == "[requires]";
+			}
+			!in_requires
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
+	assert!(!adjusted.contains("[requires]"), "the requires table was removed");
+	fs::write(&manifest, format!("{adjusted}\n")).context("writing the adjusted manifest")?;
 
 	let admission = operator.admit(&project, EXTENSION_ID)?;
 	let harness =

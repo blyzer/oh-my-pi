@@ -369,6 +369,15 @@ async fn extension_worker_cannot_reach_the_grant_store_the_credential_store_or_t
 		"D12: `omp token` must stop on the sandbox's EPERM reading credentials.key, not on a usage \
 		 or setup error. Probe result: {answer:#}"
 	);
+	for name in ["ext_grant", "token_list"] {
+		assert!(
+			!answer[name]["error"]
+				.as_str()
+				.is_some_and(|text| text.starts_with("TimeoutExpired")),
+			"D12: `{name}` hung instead of being refused, which proves nothing. Probe result: \
+			 {answer:#}"
+		);
+	}
 	assert!(
 		!went_through(&answer["ext_grant"]),
 		"D12: the extension worker ran `omp ext grant` successfully. Probe result: {answer:#}"

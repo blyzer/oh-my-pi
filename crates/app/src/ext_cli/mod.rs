@@ -618,11 +618,21 @@ pub struct ExtGrantArgs {
 	#[arg(long, value_name = "PROVIDER")]
 	pub credential: Option<Str>,
 	/// Origin the credential may reach, `https://host[:port]`. Repeat for more.
-	#[arg(long = "origin", value_name = "ORIGIN", requires = "credential")]
+	#[arg(
+		long = "origin",
+		value_name = "ORIGIN",
+		requires = "credential",
+		conflicts_with = "revoke"
+	)]
 	pub origins:    Vec<Str>,
 	/// Operation that may carry the credential, `"METHOD /path/prefix"`. Repeat
 	/// for more.
-	#[arg(long = "operation", value_name = "OPERATION", requires = "credential")]
+	#[arg(
+		long = "operation",
+		value_name = "OPERATION",
+		requires = "credential",
+		conflicts_with = "revoke"
+	)]
 	pub operations: Vec<Str>,
 }
 
@@ -5371,5 +5381,90 @@ mod grant_tests {
 		.expect("a credential grant parses");
 		assert_eq!(parsed.grant.origins.len(), 1);
 		assert_eq!(parsed.grant.operations.len(), 1);
+	}
+
+	#[test]
+	fn scope_flags_conflict_with_revoke() {
+		use clap::Parser as _;
+
+		#[derive(clap::Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			grant: ExtGrantArgs,
+		}
+		for scope in [["--origin", "https://x.test"], ["--operation", "POST /a"]] {
+			assert!(
+				Wrapper::try_parse_from(["t", "id", "--revoke", "--credential", "buildbuddy"]).is_ok(),
+				"a credential revoke names only the provider"
+			);
+			assert!(
+				Wrapper::try_parse_from(
+					["t", "id", "--revoke", "--credential", "buildbuddy"]
+						.into_iter()
+						.chain(scope)
+				)
+				.is_err(),
+				"{scope:?} narrows nothing on revoke, so it is refused rather than ignored"
+			);
+		}
+	}
+
+	#[test]
+	fn credential_grant_refused_when_the_manifest_changes_after_consent() {
+		let f = fixture("test.user");
+		let manifest = f.root.join("omp.toml");
+		let state = StatePaths::new(&f.data, &f.project);
+		let error = credential::grant_with(
+			&state,
+			&f.data,
+			&f.home,
+			&[],
+			&credential_args("test.user", &[BB_ORIGIN], &[BB_OPERATION]),
+			|_| {
+				let text = std::fs::read_to_string(&manifest).expect("manifest");
+				std::fs::write(&manifest, format!("{text}# edited after the prompt\n"))
+					.expect("edit manifest");
+				Ok(true)
+			},
+		)
+		.expect_err("a manifest changed between consent and write is refused");
+		assert!(error.to_string().contains("changed after it was confirmed"), "{error}");
+		assert!(stored_credentials(&f).is_empty(), "nothing is written for a changed extension");
+	}
+
+	#[test]
+	fn a_credential_revoke_of_nothing_says_so() {
+		let f = fixture("test.user");
+		let revoke = ExtGrantArgs { revoke: true, ..credential_args("test.user", &[], &[]) };
+		run_credential(&f, &revoke, true).expect("revoking nothing is not an error");
+		let report = credential::revoke_report(&revoke, "buildbuddy", 0);
+		assert!(report.contains("nothing changed"), "{report}");
+		assert!(
+			!credential::revoke_report(&revoke, "buildbuddy", 1).contains("nothing changed"),
+			"a revoke that removed a row must not say it changed nothing"
+		);
+	}
+
+	#[test]
+	fn origin_parsing_edge_cases() {
+		let v6 = credential::parse_origin("https://[::1]:8443").expect("bracketed IPv6 origin");
+		assert_eq!((v6.host.as_str(), v6.port), ("[::1]", 8443));
+		let upper = credential::parse_origin("HTTPS://Example.Test").expect("uppercase scheme");
+		assert_eq!((upper.host.as_str(), upper.port), ("example.test", 443));
+		for bad in ["https://example.test:+443", "https://example.test:", "https://[::1]:+9"] {
+			assert!(credential::parse_origin(bad).is_err(), "{bad} must be refused");
+		}
+		let error = credential::parse_origin("https://user:hunter2@example.test")
+			.expect_err("userinfo is refused");
+		assert!(
+			!error.to_string().contains("hunter2"),
+			"a rejected origin must not echo the credentials typed in it: {error}"
+		);
+		let everything = credential::parse_operation("POST /").expect("a root prefix");
+		assert_eq!(
+			everything.path_prefix.as_str(),
+			"/",
+			"the prompt shows this scope to the operator"
+		);
 	}
 }

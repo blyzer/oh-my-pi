@@ -377,8 +377,8 @@ async fn granted_extension_request_carries_the_host_placed_key() -> Result<()> {
 	Ok(())
 }
 
-/// PR #720 review finding P1: the extension picks the recipient of the key (its
-/// client reads `SV_EXEC_REMOTE_ENDPOINT`). With a host-held grant the
+/// The third P1 of the PR #720 review: the extension picks the recipient of the
+/// key (its client reads `SV_EXEC_REMOTE_ENDPOINT`). With a host-held grant the
 /// recipient is the operator's: an endpoint the extension chooses outside the
 /// grant receives no request, so no key.
 #[tokio::test]
@@ -423,6 +423,15 @@ async fn an_endpoint_the_extension_picks_outside_the_grant_receives_nothing() ->
 	let answer = call_place(harness.client()).await?;
 
 	assert_eq!(answer["outcome"], "refused", "the request outside the grant was sent: {answer}");
+	// Refused because the origin is outside the grant, not because nothing was
+	// granted or no authority was bound: the first test shows the same extension
+	// is placed when the grant covers its origin.
+	assert!(
+		answer["reason"]
+			.as_str()
+			.is_some_and(|reason| reason.contains("does not cover this scheme, host and port")),
+		"the refusal must be the origin check: {answer}"
+	);
 	assert!(!answer.to_string().contains(KEY), "the refusal holds the key: {answer}");
 	assert_eq!(
 		chosen.accepted.load(Ordering::SeqCst),

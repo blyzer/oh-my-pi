@@ -19,10 +19,23 @@ use omp_ext::{
 
 use super::{ExtGrantArgs, GrantRefusal, StatePaths, create_private_store, grants_update_failure};
 
+/// A port is decimal digits only: `str::parse` would also take a leading `+`.
+fn parse_port(text: &str) -> Option<u16> {
+	(!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+		.then(|| text.parse().ok())
+		.flatten()
+}
+
 /// Parses `https://host` or `https://host:port`.
 pub(super) fn parse_origin(text: &str) -> miette::Result<CredentialOrigin> {
+	// A rejected origin is echoed back, so never echo userinfo the operator typed.
+	let shown = if text.contains('@') {
+		"<an origin with userinfo>"
+	} else {
+		text
+	};
 	let invalid = || {
-		miette!("`{text}` is not an origin: write it as https://host or https://host:port, no path")
+		miette!("`{shown}` is not an origin: write it as https://host or https://host:port, no path")
 	};
 	let (scheme, rest) = text.split_once("://").ok_or_else(invalid)?;
 	if rest.is_empty() || rest.contains(['/', '?', '#', '@']) {
@@ -36,14 +49,14 @@ pub(super) fn parse_origin(text: &str) -> miette::Result<CredentialOrigin> {
 			tail => {
 				let port = tail
 					.strip_prefix(':')
-					.and_then(|port| port.parse::<u16>().ok())
+					.and_then(parse_port)
 					.ok_or_else(invalid)?;
 				(host, Some(port))
 			},
 		}
 	} else {
 		match rest.rsplit_once(':') {
-			Some((host, port)) => (host, Some(port.parse::<u16>().map_err(|_| invalid())?)),
+			Some((host, port)) => (host, Some(parse_port(port).ok_or_else(invalid)?)),
 			None => (rest, None),
 		}
 	};
@@ -59,9 +72,17 @@ pub(super) fn parse_operation(text: &str) -> miette::Result<CredentialOperation>
 		.map_err(|error| miette!("operation `{text}`: {error}"))
 }
 
-/// What `--revoke --credential` reports: the records removed, and that a
-/// running session keeps the grant it was admitted with until it restarts.
-fn revoke_report(args: &ExtGrantArgs, provider: &str, removed: usize) -> String {
+/// What `--revoke --credential` reports. The revoke is scoped by extension id
+/// and provider only, so it also clears a row left by an earlier install at
+/// another root; withdrawing authority never widens it. A session already
+/// running keeps the grant it was admitted with until it restarts.
+pub(super) fn revoke_report(args: &ExtGrantArgs, provider: &str, removed: usize) -> String {
+	if removed == 0 {
+		return format!(
+			"{}: no credential grant for `{provider}` was recorded; nothing changed",
+			args.id
+		);
+	}
 	format!(
 		"{}: removed {removed} credential grant(s) for `{provider}`\nrunning sessions keep this \
 		 grant until they restart",
@@ -128,7 +149,7 @@ pub(super) fn grant_with(
 					extension_root.display()
 				)
 			})?;
-	let record = CredentialGrant {
+	let mut record = CredentialGrant {
 		id: identity.id.clone(),
 		publisher: identity.publisher.clone(),
 		layer: Layer::Client,
@@ -136,7 +157,7 @@ pub(super) fn grant_with(
 		provider: provider.clone(),
 		origins,
 		operations,
-		granted_at: omp_core::Str::new(jiff::Timestamp::now().to_string()),
+		granted_at: omp_core::Str::new_static(""),
 		granted_by: omp_core::Str::new_static("explicit-grant"),
 	};
 	record
@@ -166,6 +187,8 @@ pub(super) fn grant_with(
 			args.id
 		));
 	}
+	// Stamp the grant when the operator consented, not before the prompt.
+	record.granted_at = omp_core::Str::new(jiff::Timestamp::now().to_string());
 	if let Some(parent) = state.grants.parent() {
 		create_private_store(parent).map_err(|error| miette!("{error}"))?;
 	}
