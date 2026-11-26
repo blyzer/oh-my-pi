@@ -2651,62 +2651,10 @@ pub(in crate::server) async fn send_document_error(
 	send_error(responses, request_id, code, &error.to_string()).await;
 }
 
-/// Why the host refuses a request that carries `credential` (ADR 0075 D6).
-///
-/// The refusal is the host's, made before any connection is opened. There is
-/// never a fallback to the environment, the Keychain or an argument.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(in crate::server) enum PlacementRefusal {
-	/// The extension's host-held grant record does not cover the request: no
-	/// grant, another provider, a non-https URL, an origin or an operation
-	/// outside the grant. The class names which.
-	#[error("credential placement refused: {0}")]
-	Grant(#[from] omp_ext::credential_grant::CredentialRefusal),
-	/// No credential authority is bound to this host, so nothing can place a
-	/// credential. A request the grant covers still lands here until a later
-	/// slice binds an authority.
-	#[error("credential placement is unavailable: no credential authority is bound")]
-	NoAuthority,
-}
-
-/// Returns the refusal for a request the host must not send, or `None` for an
-/// ordinary request. The grant classes come first and the authority last, and
-/// nothing binds an authority yet, so a request that carries `credential` is
-/// never sent. The placed header name and prefix never come from the request.
-pub(in crate::server) fn placement_refusal(
-	request: &pb::HttpRequest,
-	grants: &omp_ext::credential_grant::CredentialGrants,
-) -> Option<PlacementRefusal> {
-	use omp_ext::credential_grant::CredentialRefusal;
-
-	let provider = request.credential.as_deref()?;
-	let method = if request.method.is_empty() {
-		"GET"
-	} else {
-		request.method.as_str()
-	};
-	let Ok(url) = url::Url::parse(&request.url) else {
-		return Some(PlacementRefusal::Grant(CredentialRefusal::NotHttps));
-	};
-	Some(match grants.authorize(provider, method, &url) {
-		Ok(_) => PlacementRefusal::NoAuthority,
-		Err(refusal) => PlacementRefusal::Grant(refusal),
-	})
-}
-
-pub(in crate::server) async fn send_placement_refusal(
-	responses: &flume::Sender<pb::ServerFrame>,
-	request_id: u64,
-	refusal: PlacementRefusal,
-) {
-	send_error(
-		responses,
-		request_id,
-		pb::ProtocolErrorCode::PlacementUnavailable,
-		&refusal.to_string(),
-	)
-	.await;
-}
+/// The typed error for a placed request the host refused (ADR 0075 D6): the
+/// request was not sent and no connection was opened for the refused hop. The
+/// refusal is the host's, never the sender's, and never carries a secret.
+const PLACEMENT_REFUSED: pb::ProtocolErrorCode = pb::ProtocolErrorCode::PlacementUnavailable;
 
 pub(in crate::server) async fn send_http_error(
 	responses: &flume::Sender<pb::ServerFrame>,
@@ -2719,6 +2667,7 @@ pub(in crate::server) async fn send_http_error(
 		HttpEgressError::ResponseTooLarge => pb::ProtocolErrorCode::ResourceExhausted,
 		HttpEgressError::UnsupportedSocksProxy { .. } => pb::ProtocolErrorCode::Internal,
 		HttpEgressError::Transport(_) => pb::ProtocolErrorCode::Internal,
+		HttpEgressError::Placement(_) => PLACEMENT_REFUSED,
 	};
 	send_error(responses, request_id, code, &error.to_string()).await;
 }
