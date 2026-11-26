@@ -183,6 +183,10 @@ pub struct ExtHostSpec {
 	/// Operator-granted CONTROL capabilities, carried only by the CONTROL
 	/// identity and never by DATA authority.
 	pub control_grants:    BTreeSet<Str>,
+	/// Host-held credential placement grants (ADR 0075 D3), set only by native
+	/// admission from the operator grant record and never from the manifest.
+	/// They reach the DATA connection only; they place nothing by themselves.
+	pub credential_grants: omp_ext::credential_grant::CredentialGrants,
 	/// Optional site-packages directory passed through as `OMP_PY_SITE`.
 	pub python_site:       Option<PathBuf>,
 	/// Exact entry file preloaded under the manifest module name.
@@ -208,6 +212,7 @@ impl ExtHostSpec {
 			manifest,
 			data_grants: Grants::default(),
 			control_grants: BTreeSet::new(),
+			credential_grants: omp_ext::credential_grant::CredentialGrants::default(),
 			python_site: None,
 			entry_path: None,
 			data_socket: None,

@@ -344,6 +344,7 @@ impl ConnectionState {
 			approvals: None,
 			reflection: None,
 			host: policy.host.clone(),
+			credential_grants: policy.credential_grants.clone(),
 			authority,
 			connection_owner,
 			quotas,

@@ -498,31 +498,34 @@ struct InvocationAcpRoutes {
 }
 
 struct ConnectionState {
-	owner:            Str,
-	requests:         HashMap<u64, RequestState>,
-	invocation_ids:   HashMap<Str, u64>,
-	tool_settings:    ToolSettings,
-	exec_host:        ExecHost,
-	document_leases:  HashMap<Bytes, DocumentLease>,
-	grants:           Grants,
-	capabilities:     BTreeSet<Str>,
-	hello_props:      Option<ValueMap>,
+	owner:             Str,
+	requests:          HashMap<u64, RequestState>,
+	invocation_ids:    HashMap<Str, u64>,
+	tool_settings:     ToolSettings,
+	exec_host:         ExecHost,
+	document_leases:   HashMap<Bytes, DocumentLease>,
+	grants:            Grants,
+	capabilities:      BTreeSet<Str>,
+	hello_props:       Option<ValueMap>,
 	/// The editor binding this connection serves document queries for; a
 	/// fresh binding per `AcpBind` so anchors never outlive a session switch.
-	acp_documents:    Option<Arc<EditorSession>>,
+	acp_documents:     Option<Arc<EditorSession>>,
 	/// Relays the approval prompts of the commands this connection issues;
 	/// present only for an application connection to an environment host
 	/// that advertised the capability.
-	approvals:        Option<ConnectionApprovals>,
+	approvals:         Option<ConnectionApprovals>,
 	/// Relays the memory reflections of the `reflect` calls this connection
 	/// issues, directly or through its commands' `dyn`; present under the
 	/// same conditions for its own capability.
-	reflection:       Option<ConnectionReflection>,
-	host:             Option<HostKey>,
-	authority:        Arc<AuthorityTable>,
-	connection_owner: u64,
-	quotas:           QuotaAccount,
-	presence:         Option<PresenceLease>,
+	reflection:        Option<ConnectionReflection>,
+	host:              Option<HostKey>,
+	/// Host-held credential placement grants of the extension on this
+	/// connection; empty unless the connection is an extension host's own.
+	credential_grants: omp_ext::credential_grant::CredentialGrants,
+	authority:         Arc<AuthorityTable>,
+	connection_owner:  u64,
+	quotas:            QuotaAccount,
+	presence:          Option<PresenceLease>,
 }
 
 enum RequestState {

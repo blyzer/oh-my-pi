@@ -31,6 +31,7 @@ use super::{
 		WorkspaceTrustRefusal,
 	},
 };
+use crate::credential_grant::{CredentialGrant, CredentialGrantError, CredentialGrants};
 
 /// The local grant file under an omp data directory:
 /// `<data>/ext/grants.toml`.
@@ -165,17 +166,20 @@ impl PluginCommandGrant {
 pub struct GrantsFile {
 	/// File format version.
 	#[serde(default = "one")]
-	pub version:         u32,
+	pub version:           u32,
 	/// Durable grants.
 	#[serde(rename = "grant", default)]
-	pub grants:          Vec<Grant>,
+	pub grants:            Vec<Grant>,
 	/// Approved plugin-launched commands.
 	#[serde(rename = "plugin_command", default, skip_serializing_if = "Vec::is_empty")]
-	pub plugin_commands: Vec<PluginCommandGrant>,
+	pub plugin_commands:   Vec<PluginCommandGrant>,
 	/// Operator trust in workspaces' project-sourced inputs
 	/// ([`crate::workspace_trust`]).
 	#[serde(rename = "workspace_trust", default, skip_serializing_if = "Vec::is_empty")]
-	pub workspace_trust: Vec<WorkspaceTrustGrant>,
+	pub workspace_trust:   Vec<WorkspaceTrustGrant>,
+	/// Host-held credential placement grants ([`crate::credential_grant`]).
+	#[serde(rename = "credential_grant", default, skip_serializing_if = "Vec::is_empty")]
+	pub credential_grants: Vec<CredentialGrant>,
 }
 
 /// Failure reading the local grant file.
@@ -488,20 +492,21 @@ impl GrantsFile {
 	/// [`Self::update`] and the persisting writers built on it.
 	pub(crate) fn write(&self, path: &Path) -> io::Result<()> {
 		let durable = Self {
-			version:         self.version,
-			grants:          self
+			version:           self.version,
+			grants:            self
 				.grants
 				.iter()
 				.filter(|grant| grant.duration == GrantDuration::Persistent)
 				.cloned()
 				.collect(),
-			plugin_commands: self.plugin_commands.clone(),
-			workspace_trust: self
+			plugin_commands:   self.plugin_commands.clone(),
+			workspace_trust:   self
 				.workspace_trust
 				.iter()
 				.filter(|row| row.duration == GrantDuration::Persistent)
 				.cloned()
 				.collect(),
+			credential_grants: self.credential_grants.clone(),
 		};
 		atomic_toml(path, &durable)
 	}
@@ -583,6 +588,73 @@ impl GrantsFile {
 				.plugin_commands
 				.retain(|existing| existing.plugin != grant.plugin || existing.digest != grant.digest);
 			grants.plugin_commands.push(grant);
+		})
+	}
+
+	/// The credential grants bound to one extension identity: every field
+	/// matches, and only the user layer ever holds one (ADR 0075 D3, D13).
+	/// A row that fails validation holds nothing.
+	#[must_use]
+	pub fn credential_grants_for(
+		&self,
+		id: &Str,
+		publisher: &Str,
+		layer: Layer,
+		capability_digest: &Str,
+	) -> CredentialGrants {
+		CredentialGrants::new(
+			self
+				.credential_grants
+				.iter()
+				.filter(|row| row.binds(id, publisher, layer, capability_digest))
+				.cloned(),
+		)
+	}
+
+	/// Atomically records one credential grant, replacing an earlier grant of
+	/// the same extension identity and provider. A malformed grant is refused
+	/// and leaves the file untouched.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] as [`Self::update`]; the inner `Err` is the
+	/// refusal of a malformed grant.
+	pub fn persist_credential_grant(
+		path: &Path,
+		grant: CredentialGrant,
+	) -> Result<Result<Self, CredentialGrantError>, GrantPersistenceError> {
+		if let Err(refusal) = grant.validate() {
+			return Ok(Err(refusal));
+		}
+		Self::persisted(path, |grants| {
+			grants.credential_grants.retain(|existing| {
+				existing.id != grant.id
+					|| existing.publisher != grant.publisher
+					|| existing.layer != grant.layer
+					|| existing.provider != grant.provider
+			});
+			grants.credential_grants.push(grant);
+		})
+		.map(Ok)
+	}
+
+	/// Removes the credential grants of extension `id`, only those for
+	/// `provider` when one is named. Returns how many rows were removed.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] as [`Self::update`].
+	pub fn revoke_credential_grants(
+		path: &Path,
+		id: &Str,
+		provider: Option<&str>,
+	) -> Result<usize, GrantPersistenceError> {
+		Self::update(path, |grants| {
+			let before = grants.credential_grants.len();
+			grants.credential_grants.retain(|row| {
+				row.id != *id || provider.is_some_and(|name| row.provider.as_str() != name)
+			});
+			before - grants.credential_grants.len()
 		})
 	}
 
@@ -1637,14 +1709,14 @@ mod tests {
 		let team = Path::new("/work/team");
 		let repo = Path::new("/work/team/repo");
 		let grants = GrantsFile {
-			version:         1,
-			grants:          vec![workspace_grant(
+			version:           1,
+			grants:            vec![workspace_grant(
 				workspace("file:///work/"),
 				GrantScope::Subtree,
 				"b3:capabilities",
 			)],
-			plugin_commands: vec![plugin_command_grant("p@m", &["--stdio"])],
-			workspace_trust: vec![
+			plugin_commands:   vec![plugin_command_grant("p@m", &["--stdio"])],
+			workspace_trust:   vec![
 				exact_trust(Path::new("/work/solo"), "solo"),
 				trust_row(team, TrustBinding::Subtree),
 				trust_row(repo, TrustBinding::Pin {
@@ -1653,6 +1725,7 @@ mod tests {
 				}),
 				trust_row(Path::new("/work/team/hostile"), TrustBinding::Deny),
 			],
+			credential_grants: Vec::new(),
 		};
 		grants.write(&first).expect("write grants");
 		let text = fs::read_to_string(&first).expect("written grants");

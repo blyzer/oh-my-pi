@@ -8,6 +8,7 @@
 pub mod claude_hooks;
 pub mod claude_plugin;
 pub mod config;
+pub mod credential_grant;
 pub mod doctor;
 pub mod index;
 pub mod lock;

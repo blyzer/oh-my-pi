@@ -1683,7 +1683,8 @@ fn worker_config(
 			session_id.as_str(),
 			session_generation,
 			extension.data_grants.clone(),
-		);
+		)
+		.with_credential_grants(extension.credential_grants.clone());
 		extension.data_socket = Some(extension_data_endpoint(&binding));
 		config.extensions.push(extension);
 		bindings.push(binding);

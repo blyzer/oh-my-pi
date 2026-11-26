@@ -28,6 +28,7 @@ use omp_ext::{
 	config::{
 		CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
 	},
+	credential_grant::CredentialGrants,
 	trust::{GrantsFile, grant_covers, grants_path, native_path_publisher, path_grant_digest},
 	workspace_trust::inventory::EXTENSIONS_DIR,
 };
@@ -145,12 +146,13 @@ pub(crate) fn control_grant_sandbox_matches(
 		})
 }
 
-/// Drops every CONTROL grant from `specs`. A grant holds only under the sandbox
-/// facts it was admitted under, and a spec the caller supplied never carries
-/// one.
+/// Drops every operator grant from `specs`: CONTROL capabilities and
+/// credential placement grants. A grant holds only under the sandbox facts it
+/// was admitted under, and a spec the caller supplied never carries one.
 pub(crate) fn withhold_control_grants(specs: &mut [ExtHostSpec]) {
 	for spec in specs {
 		spec.control_grants.clear();
+		spec.credential_grants = CredentialGrants::default();
 	}
 }
 
@@ -711,6 +713,18 @@ fn lower_manifest(
 			control,
 		)
 	});
+	let credential_grants = control.map_or_else(CredentialGrants::default, |control| {
+		admitted_credential_grants(
+			&manifest.id,
+			&root,
+			&text,
+			&declared_capabilities,
+			origin,
+			project_root,
+			home,
+			control,
+		)
+	});
 	let mut properties = BTreeMap::new();
 	properties.insert(
 		Str::new_static("declarations"),
@@ -793,6 +807,7 @@ fn lower_manifest(
 	let mut spec = ExtHostSpec::new(key, runtime_manifest);
 	spec.data_grants = Grants::supported(projection.capabilities);
 	spec.control_grants = control_grants;
+	spec.credential_grants = credential_grants;
 	spec.python_site = Some(python_site);
 	spec.entry_path = Some(entry_path);
 	spec.settings = settings;
@@ -880,6 +895,83 @@ fn admitted_control_grants(
 	} else {
 		BTreeSet::new()
 	}
+}
+
+/// The credential placement grants (ADR 0075) the operator holds for one
+/// extension, read from the same protected store as the CONTROL grants.
+///
+/// Only a user-layer extension can hold one (D13); a workspace or explicit
+/// root never does. The rows come from `grants.toml` alone and are bound to the
+/// extension's identity and manifest digest, so a manifest can neither create
+/// nor widen one and a changed manifest voids them. The store's location is
+/// checked before it is read, and the exec sandbox is probed only when a
+/// matching row exists.
+fn admitted_credential_grants(
+	id: &Str,
+	canonical_root: &Path,
+	manifest_text: &str,
+	declared_capabilities: &[Str],
+	origin: RootOrigin,
+	workspace_root: &Path,
+	home: &Path,
+	options: &NativeControlGrantOptions<'_>,
+) -> CredentialGrants {
+	if !matches!(origin, RootOrigin::User) {
+		return CredentialGrants::default();
+	}
+	let extension_root = match user_extension_root(home) {
+		Ok(path) => path,
+		Err(error) => {
+			tracing::warn!(extension = %id, path = %home.display(), reason = %error, "withholding extension credential grants");
+			return CredentialGrants::default();
+		},
+	};
+	if let Err(error) = check_grant_locations(
+		options.data_dir,
+		&extension_root,
+		workspace_root,
+		options.writable_roots,
+	) {
+		tracing::warn!(
+			extension = %id,
+			reason = %error,
+			"withholding extension credential grants because a protected location is unsafe"
+		);
+		return CredentialGrants::default();
+	}
+	let grants_file = grants_path(options.data_dir);
+	let grants = match GrantsFile::read(&grants_file) {
+		Ok(grants) => grants,
+		Err(error) => {
+			tracing::warn!(
+				extension = %id,
+				path = %grants_file.display(),
+				reason = %error,
+				"withholding extension credential grants because the grant store is unreadable"
+			);
+			return CredentialGrants::default();
+		},
+	};
+	let identity = path_grant_identity(id, canonical_root, manifest_text, declared_capabilities);
+	let held = grants.credential_grants_for(
+		id,
+		&identity.publisher,
+		Layer::Client,
+		&identity.capability_digest,
+	);
+	if held.is_empty() {
+		return held;
+	}
+	if options.sandbox_mode == ExecSandboxMode::Off || !options.sandbox_available.get() {
+		tracing::warn!(
+			extension = %id,
+			mode = %options.sandbox_mode,
+			sandbox_available = ?options.sandbox_available.probed(),
+			"withholding extension credential grants because no kernel-enforced exec sandbox is active"
+		);
+		return CredentialGrants::default();
+	}
+	held
 }
 
 /// `ship` recorded on every operator path grant for an unsigned native
@@ -1690,6 +1782,235 @@ failure = "fault"
 			.find(|item| item.spec.key.extension().as_str() == "test.workspace")
 			.expect("workspace extension admitted");
 		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	const CREDENTIAL_REQUEST: [&str; 2] = ["credentials.allow:buildbuddy", "env.net"];
+
+	/// A manifest that asks for a credential, by a declared capability. The
+	/// request never creates a grant.
+	fn credential_extension(root: &Path, id: &str, capabilities: &[&str]) {
+		extension(root, id, false);
+		let list = capabilities
+			.iter()
+			.map(|name| format!("\"{name}\""))
+			.collect::<Vec<_>>()
+			.join(", ");
+		fs::write(
+			root.join("omp.toml"),
+			format!(
+				r#"id = "{id}"
+entry = "demo"
+capabilities = [{list}]
+
+[settings.enabled]
+type = "boolean"
+default = false
+"#
+			),
+		)
+		.expect("credential manifest");
+	}
+
+	/// Writes the operator's credential grant for the manifest as it is now.
+	fn persist_credential_grant(data_dir: &Path, root: &Path, id: &Str, declared: &[&str]) {
+		use omp_ext::credential_grant::{CredentialGrant, CredentialOperation, CredentialOrigin};
+
+		let manifest = fs::read_to_string(root.join("omp.toml")).expect("manifest");
+		let manifest_digest = Hash32::sum(manifest.as_bytes()).into_bytes();
+		let canonical_root = fs::canonicalize(root).expect("canonical extension root");
+		let grant = CredentialGrant {
+			id:                id.clone(),
+			publisher:         native_path_publisher(&canonical_root),
+			layer:             Layer::Client,
+			capability_digest: path_grant_digest(
+				declared.iter().map(|name| Str::new(name)),
+				&manifest_digest,
+			),
+			provider:          sf!("buildbuddy"),
+			origins:           vec![
+				CredentialOrigin::new("https", "remote.buildbuddy.io", None).expect("origin"),
+			],
+			operations:        vec![
+				CredentialOperation::new("POST", "/api/v1/Run").expect("operation"),
+			],
+			granted_at:        sf!("2026-11-26T00:00:00Z"),
+			granted_by:        sf!("explicit-grant"),
+		};
+		let file = grants_path(data_dir);
+		fs::create_dir_all(file.parent().expect("grant parent")).expect("grant directory");
+		GrantsFile::persist_credential_grant(&file, grant)
+			.expect("persist grant")
+			.expect("valid grant");
+	}
+
+	fn held_providers(report: &NativeAdmissionReport, id: &str) -> Vec<Str> {
+		report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == id)
+			.expect("extension admitted")
+			.spec
+			.credential_grants
+			.providers()
+	}
+
+	fn confined_admission(project: &Path, home: &Path, data_dir: &Path) -> NativeAdmissionReport {
+		user_control_admission(project, home, data_dir, ExecSandboxMode::WorkspaceWrite, true, &[])
+	}
+
+	#[test]
+	fn host_grant_reaches_the_spec_of_a_user_extension() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert_eq!(held_providers(&report, "test.user"), vec![sf!("buildbuddy")]);
+	}
+
+	#[test]
+	fn manifest_request_without_host_grant_is_denied() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert!(
+			held_providers(&report, "test.user").is_empty(),
+			"a manifest that asks for a provider holds nothing without an operator grant"
+		);
+	}
+
+	#[test]
+	fn changed_credential_request_invalidates_grant() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+		// The extension now asks for another provider than the operator approved.
+		credential_extension(&root, "test.user", &["credentials.allow:other", "env.net"]);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert!(held_providers(&report, "test.user").is_empty());
+	}
+
+	#[test]
+	fn credential_grant_binds_the_extension_root() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		let other = tree.path().join("other-root");
+		fs::create_dir_all(&other).expect("other root");
+		credential_extension(&other, "test.user", &CREDENTIAL_REQUEST);
+		persist_credential_grant(&data_dir, &other, &sf!("test.user"), &CREDENTIAL_REQUEST);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert!(held_providers(&report, "test.user").is_empty());
+	}
+
+	#[test]
+	fn project_layer_extension_never_holds_a_credential_grant() {
+		let tree = security_test_tree();
+		let home = tree.path().join("home");
+		let project = tree.path().join("workspace");
+		let data_dir = tree.path().join("data");
+		let root = project.join(EXTENSIONS_DIR).join("test.workspace");
+		fs::create_dir_all(&project).expect("workspace");
+		fs::create_dir_all(&data_dir).expect("data dir");
+		credential_extension(&root, "test.workspace", &CREDENTIAL_REQUEST);
+		// A row that names the project extension's exact identity and digest.
+		persist_credential_grant(&data_dir, &root, &sf!("test.workspace"), &CREDENTIAL_REQUEST);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert!(
+			held_providers(&report, "test.workspace").is_empty(),
+			"D13: the project layer holds none"
+		);
+	}
+
+	#[test]
+	fn credential_grant_needs_a_confining_exec_sandbox() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+
+		let off = user_control_admission(&project, &home, &data_dir, ExecSandboxMode::Off, true, &[]);
+		let unavailable = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			false,
+			&[],
+		);
+
+		assert!(held_providers(&off, "test.user").is_empty());
+		assert!(held_providers(&unavailable, "test.user").is_empty());
+	}
+
+	#[test]
+	fn credential_grant_in_a_store_inside_the_workspace_is_denied() {
+		let tree = security_test_tree();
+		let (home, project, _data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		let data_dir = project.join("data");
+		fs::create_dir_all(&data_dir).expect("store inside the workspace");
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+
+		let report = confined_admission(&project, &home, &data_dir);
+
+		assert!(held_providers(&report, "test.user").is_empty());
+	}
+
+	#[test]
+	fn sandbox_is_probed_only_when_a_credential_grant_matches() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		let calls = AtomicUsize::new(0);
+
+		let report =
+			counted_admission(&project, &home, &data_dir, ExecSandboxMode::WorkspaceWrite, &calls);
+		assert!(held_providers(&report, "test.user").is_empty());
+		assert_eq!(calls.load(Ordering::SeqCst), 0, "no row, so nothing asks for the sandbox");
+
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+		let report =
+			counted_admission(&project, &home, &data_dir, ExecSandboxMode::WorkspaceWrite, &calls);
+		assert_eq!(held_providers(&report, "test.user"), vec![sf!("buildbuddy")]);
+		assert_eq!(calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[test]
+	fn assemble_trusted_specs_never_keeps_a_caller_credential_grant() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		credential_extension(&root, "test.user", &CREDENTIAL_REQUEST);
+		persist_credential_grant(&data_dir, &root, &sf!("test.user"), &CREDENTIAL_REQUEST);
+		let report = confined_admission(&project, &home, &data_dir);
+		let granted = report
+			.extensions
+			.into_iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted")
+			.spec;
+		assert!(!granted.credential_grants.is_empty(), "the fixture starts with a grant");
+
+		let kept = assemble_trusted_specs(vec![granted.clone()], vec![granted.clone()], true);
+		assert!(kept[0].credential_grants.is_empty(), "a caller spec must never carry a grant");
+		assert_eq!(kept[1].credential_grants, granted.credential_grants);
+
+		let changed = assemble_trusted_specs(vec![granted.clone()], vec![granted], false);
+		assert!(changed.iter().all(|spec| spec.credential_grants.is_empty()));
 	}
 
 	#[test]
