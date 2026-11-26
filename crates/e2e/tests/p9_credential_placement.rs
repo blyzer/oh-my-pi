@@ -376,3 +376,64 @@ async fn granted_extension_request_carries_the_host_placed_key() -> Result<()> {
 	assert!(!audit.contains(KEY), "the audit file holds the key: {audit}");
 	Ok(())
 }
+
+/// PR #720 review finding P1: the extension picks the recipient of the key (its
+/// client reads `SV_EXEC_REMOTE_ENDPOINT`). With a host-held grant the
+/// recipient is the operator's: an endpoint the extension chooses outside the
+/// grant receives no request, so no key.
+#[tokio::test]
+async fn an_endpoint_the_extension_picks_outside_the_grant_receives_nothing() -> Result<()> {
+	if !runs_user_extension_hosts()? {
+		return Ok(());
+	}
+	let operator = OperatorHome::new()?;
+	let scratch = Scratch::new()?;
+	let tls = tls()?;
+	let granted = endpoint(&tls).await?;
+	let chosen = endpoint(&tls).await?;
+	let source = SOURCE
+		.replace("__URL__", &format!("https://127.0.0.1:{}/run", chosen.port))
+		.replace("__KEY__", KEY);
+	operator.install_extension(EXTENSION, &manifest(), &source)?;
+	operator
+		.grant_credential(
+			scratch.project(),
+			EXTENSION,
+			"buildbuddy",
+			&[&format!("https://127.0.0.1:{}", granted.port)],
+			&["POST /run"],
+		)
+		.await
+		.context("granting the credential through omp ext grant")?;
+
+	let admission = operator.admit(scratch.project(), EXTENSION)?;
+	let audit_path = operator.home().join("placement-audit.jsonl");
+	let harness =
+		InProcessEnvHarness::spawn_with_admitted_extension(scratch, &admission.extension).await?;
+	harness
+		.server()
+		.placement_authority()
+		.bind(PlacementBinding {
+			credentials: Arc::new(StoredKey),
+			audit:       Arc::new(JsonlPlacementAudit::new(audit_path.clone())),
+			client:      Some(tls.client.clone()),
+		})
+		.map_err(|_| error("the placement authority was already bound"))?;
+
+	let answer = call_place(harness.client()).await?;
+
+	assert_eq!(answer["outcome"], "refused", "the request outside the grant was sent: {answer}");
+	assert!(!answer.to_string().contains(KEY), "the refusal holds the key: {answer}");
+	assert_eq!(
+		chosen.accepted.load(Ordering::SeqCst),
+		0,
+		"the endpoint the extension chose opened a connection"
+	);
+	assert_eq!(
+		granted.accepted.load(Ordering::SeqCst),
+		0,
+		"the granted endpoint was never asked, so it must not have been contacted"
+	);
+	assert!(chosen.requests.lock().is_empty(), "the endpoint the extension chose saw a request");
+	Ok(())
+}
