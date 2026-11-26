@@ -19,9 +19,7 @@ use std::{
 
 use async_trait::async_trait;
 use http::{HeaderMap, HeaderName, header::HOST};
-use omp_ai::auth::{
-	AuthSpec, CredentialError, CredentialLease, CredentialNeed, HeaderPlacement, KeyPlacement,
-};
+use omp_ai::auth::{AuthSpec, CredentialError, CredentialLease, HeaderPlacement, KeyPlacement};
 use omp_catalog::{AuthSpecId, Catalog, ProviderId};
 use omp_core::Str;
 use omp_ext::credential_grant::CredentialRefusal;

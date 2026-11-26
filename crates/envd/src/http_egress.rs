@@ -31,7 +31,7 @@ const MAX_REDIRECTS: u32 = 10;
 
 /// The grants and identity a placed request is decided under, taken from the
 /// connection it arrived on. The extension never supplies any of it.
-pub(crate) struct PlacementRequest<'a> {
+pub struct PlacementRequest<'a> {
 	/// Host-held grants of the requesting extension.
 	pub(crate) grants:     &'a omp_ext::credential_grant::CredentialGrants,
 	/// Connection identity of the requesting extension.

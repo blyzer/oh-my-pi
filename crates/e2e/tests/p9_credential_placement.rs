@@ -18,7 +18,7 @@
 
 use std::{
 	sync::{
-		Arc, Mutex,
+		Arc,
 		atomic::{AtomicUsize, Ordering},
 	},
 	time::Duration,
@@ -45,6 +45,7 @@ use omp_ext::{
 };
 use omp_proto::env::v1::InvokeTool;
 use omp_tool::CallOutcome;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::{
 	io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
@@ -209,7 +210,7 @@ async fn endpoint(tls: &Tls) -> Result<Endpoint> {
 					return;
 				};
 				let request = read_request(&mut stream).await;
-				log.lock().expect("requests").push(request);
+				log.lock().push(request);
 				let body = "accepted";
 				let response = format!(
 					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -381,7 +382,7 @@ async fn granted_extension_request_carries_the_host_placed_key() -> Result<()> {
 	assert!(!answer.to_string().contains(KEY), "the extension's return value holds the key");
 	// The endpoint received the catalog's header with the key, once.
 	assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
-	let seen = fake.requests.lock().expect("requests").clone();
+	let seen = fake.requests.lock().clone();
 	assert_eq!(seen.len(), 1);
 	assert!(
 		seen[0]

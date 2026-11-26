@@ -6,7 +6,7 @@
 use std::{
 	io,
 	sync::{
-		Arc, Mutex,
+		Arc,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 };
@@ -26,6 +26,7 @@ use omp_ext::{
 	},
 };
 use omp_proto::env::v1 as pb;
+use parking_lot::Mutex;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
 	net::TcpListener,
@@ -81,7 +82,7 @@ impl Server {
 	}
 
 	fn requests(&self) -> Vec<String> {
-		self.requests.lock().expect("requests").clone()
+		self.requests.lock().clone()
 	}
 }
 
@@ -133,7 +134,7 @@ async fn serve(tls: &Tls, respond: impl Fn(&str) -> String + Send + Sync + 'stat
 				};
 				let request = read_request(&mut stream).await;
 				let response = respond(&request);
-				log.lock().expect("requests").push(request);
+				log.lock().push(request);
 				let _ = stream.write_all(response.as_bytes()).await;
 				let _ = stream.shutdown().await;
 			});
@@ -209,7 +210,7 @@ impl PlacementAudit for RecordingAudit {
 		if self.fail.load(Ordering::SeqCst) {
 			return Err(io::Error::other("audit sink unavailable"));
 		}
-		self.rows.lock().expect("rows").push(row.clone());
+		self.rows.lock().push(row.clone());
 		Ok(())
 	}
 }
@@ -285,7 +286,7 @@ async fn no_grant_means_no_send() {
 	assert_eq!(refusal(result), PlacementRefusal::Grant(CredentialRefusal::NoGrant));
 	assert_eq!(server.connections(), 0, "a connection was opened");
 	assert_eq!(fixture.credentials.calls.load(Ordering::SeqCst), 0, "the key was leased anyway");
-	assert!(fixture.audit.rows.lock().expect("rows").is_empty());
+	assert!(fixture.audit.rows.lock().is_empty());
 
 	// Another provider's grant never covers this one.
 	let mut other = request(server.port, "/run");
@@ -324,7 +325,7 @@ async fn placed_header_reaches_only_the_granted_host() {
 	let returned = format!("{response:?}");
 	assert!(!returned.contains(KEY), "{returned}");
 	// The audit row names the extension, provider and host, never the key.
-	let rows = fixture.audit.rows.lock().expect("rows").clone();
+	let rows = fixture.audit.rows.lock().clone();
 	assert_eq!(rows.len(), 1);
 	assert_eq!(rows[0].extension.as_str(), OWNER);
 	assert_eq!(rows[0].provider.as_str(), "buildbuddy");
@@ -543,7 +544,7 @@ struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for LogBuffer {
 	fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-		self.0.lock().expect("log").extend_from_slice(bytes);
+		self.0.lock().extend_from_slice(bytes);
 		Ok(bytes.len())
 	}
 
@@ -610,7 +611,7 @@ async fn plaintext_absent_from_logs_errors_and_traces() {
 	for output in &outputs {
 		assert!(!output.contains(KEY), "a result carries the key: {output}");
 	}
-	let log = String::from_utf8(logs.0.lock().expect("log").clone()).expect("utf-8 log");
+	let log = String::from_utf8(logs.0.lock().clone()).expect("utf-8 log");
 	assert!(!log.contains(KEY), "a log line carries the key: {log}");
 	let audit = std::fs::read_to_string(&audit_path).expect("audit file");
 	assert!(audit.contains("credential_placed") && audit.contains("buildbuddy"), "{audit}");

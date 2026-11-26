@@ -105,13 +105,12 @@ pub fn bind_placement(
 
 #[cfg(test)]
 mod tests {
-	use std::sync::Mutex;
-
 	use omp_ai::{
 		auth::{CredentialFuture, LeaseMeta},
 		id::PrincipalId,
 	};
 	use omp_core::SecretString;
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -138,7 +137,7 @@ mod tests {
 			need: CredentialNeed,
 		) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
 			let account = need.account.clone().expect("an account is always chosen");
-			self.needs.lock().expect("needs").push(need);
+			self.needs.lock().push(need);
 			futures::future::Either::Left(futures::future::ready(Ok(CredentialLease::api_key(
 				LeaseMeta {
 					account,
@@ -169,7 +168,7 @@ mod tests {
 			lease_with(vec![("buildbuddy:other", false), ("buildbuddy:owner", true)]).await;
 
 		assert!(lease.is_ok());
-		let needs = authority.needs.lock().expect("needs");
+		let needs = authority.needs.lock();
 		assert_eq!(needs.len(), 1);
 		assert_eq!(needs[0].account, Some(AccountId::from("buildbuddy:owner")));
 		assert_eq!(needs[0].spec, AuthSpecId::from("buildbuddy"));
@@ -181,7 +180,7 @@ mod tests {
 			let (lease, authority) = lease_with(accounts).await;
 
 			assert!(matches!(lease, Err(CredentialError::Unavailable)));
-			assert!(authority.needs.lock().expect("needs").is_empty(), "nothing was leased");
+			assert!(authority.needs.lock().is_empty(), "nothing was leased");
 		}
 	}
 
@@ -191,7 +190,7 @@ mod tests {
 			lease_with(vec![("buildbuddy:a", true), ("buildbuddy:b", true)]).await;
 
 		assert!(matches!(lease, Err(CredentialError::Unavailable)));
-		assert!(authority.needs.lock().expect("needs").is_empty(), "no account was chosen");
+		assert!(authority.needs.lock().is_empty(), "no account was chosen");
 	}
 
 	#[tokio::test]
