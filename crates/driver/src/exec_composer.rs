@@ -772,7 +772,11 @@ impl ExecutionSettings {
 	) -> Result<ComposedBackend, RemoteError> {
 		// Check if the profile indicates a delegated backend
 		if self.profile_name() == DELEGATED_PROFILE {
-			let backend = DelegatedBackend::new(environment, BackendId::new_static(BACKEND_NAME));
+			let backend = DelegatedBackend::new(
+				environment,
+				BackendId::new_static(BACKEND_NAME),
+				Some(credential),
+			);
 			return Ok(ComposedBackend::Delegated(backend));
 		}
 		let (profile, cache) = self.resolved_profile()?;

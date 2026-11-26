@@ -1,0 +1,47 @@
+[
+  {
+    "worktree": "/workspace/oh-my-pi",
+    "HEAD": "310cee55c7903b89597639e82bf6452de933f2be",
+    "branch": "refs/heads/feat/verification-native-checks"
+  },
+  {
+    "worktree": "/workspace/omp-ci-path-scopes",
+    "HEAD": "b6f2220f798c3014d984b87703bf55ab49669690",
+    "branch": "refs/heads/feat/ci-path-scopes"
+  },
+  {
+    "worktree": "/workspace/omp-macos-fallback-design",
+    "HEAD": "376d6715439a9d64d20d1c0e4b79be78c4b3939b",
+    "branch": "refs/heads/design/macos-hosted-fallback"
+  },
+  {
+    "worktree": "/workspace/omp-macos-fallback-impl",
+    "HEAD": "21b8d1c476043ffc53d6756f11100e32a80db2b0",
+    "branch": "refs/heads/feat/macos-hosted-fallback"
+  },
+  {
+    "worktree": "/workspace/omp-macos-fallback-plan",
+    "HEAD": "5b42294368cf692e6fa0ba2387ec73656b5593f6",
+    "branch": "refs/heads/research/macos-hosted-fallback-plan"
+  },
+  {
+    "worktree": "/workspace/omp-native-research",
+    "HEAD": "fda1315052b8b4074f9ea5acc842b2cc0b08b2b2",
+    "detached": true
+  },
+  {
+    "worktree": "/workspace/omp-package-merge-check",
+    "HEAD": "48c886a51ad2df4d78a9d5dde1dc2ea6b8c11630",
+    "detached": true
+  },
+  {
+    "worktree": "/workspace/omp-validated-packages",
+    "HEAD": "56b4927e49682bc4bfd427e2ff78ce615dda0704",
+    "branch": "refs/heads/fix/macos-validated-packages"
+  },
+  {
+    "worktree": "/workspace/omp-worker-cache",
+    "HEAD": "1adadf7cfc9ff86ad76de49eb7a479f8b2054ea5",
+    "branch": "refs/heads/fix/macos-worker-cache"
+  }
+]

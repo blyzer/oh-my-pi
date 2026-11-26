@@ -1845,7 +1845,13 @@ async fn start_execution_run<B: ExecutionBackend>(
 	};
 	match started {
 		Ok(run) => supervise_execution(run, cancel, detach, Some(accepted_tx), None).await,
-		Err(error) => submission_unknown("failed", EXECUTION_START_FAILED, error),
+		Err(error) => {
+			// The public `error` text stays the stable `EXECUTION_START_FAILED`; the cause
+			// rides in the typed `execution.error` and is logged here so a failed device
+			// call is diagnosable.
+			tracing::warn!(?error, "execution start failed; its submission is unknown");
+			submission_unknown("failed", EXECUTION_START_FAILED, error)
+		},
 	}
 }
 
