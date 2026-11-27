@@ -19,6 +19,8 @@ The package must be importable from the extension's site tree. `entry` names the
 
 ## Manifest anatomy
 
+> **Note** This example shows the manifest layout of the design documents, and the parser the product runs does not accept it as written. That parser reads declarations as `[[declarations]]` rows (`id`, `kind`, `module`, `key`, `trigger`, `api`, `failure`), each setting as a `[settings.<name>]` table with a `type`, and `requires` as a list of requirements, not a table. `omp ext new <id>` writes a manifest that loads. 14 of the 17 manifests in `extensions/` load, and `crates/ext/tests/first_party_manifests.rs` checks them.
+
 ```toml
 id = "dev.example.word-tools"
 name = "Word tools"
