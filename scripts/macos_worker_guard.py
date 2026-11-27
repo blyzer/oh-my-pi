@@ -293,6 +293,16 @@ def verify_checkout(request):
         raise VerificationError("source checkout is unavailable or modified") from error
 
 
+# The phase `main` is in. A refusal prints it, and the exception's type, but never
+# the exception text: API diagnostics, paths and command values can carry tokens.
+_stage = "start"
+
+
+def _enter(stage):
+    global _stage
+    _stage = stage
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("admit", "run"))
@@ -305,6 +315,7 @@ def main(argv=None):
         # Even failed initial admission must remove a previous success receipt.
         with contextlib.suppress(FileNotFoundError):
             Path(args.result_file).unlink()
+    _enter("load request")
     request = load_request(args.request_file)
     api = GitHub()
 
@@ -312,15 +323,18 @@ def main(argv=None):
         verify_parent(api, request, require_running=True)
         verify_worker(api, request)
 
+    _enter("initial admission")
     admission_started = time.monotonic()
     check()
     if time.monotonic() - admission_started >= LEASE_SECONDS:
         raise VerificationError("initial admission verification expired")
     worker_id = int(os.environ["GITHUB_RUN_ID"])
     worker_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+    _enter("admission lease")
     lease = Lease(lambda: verify_admission_liveness(api, request, worker_id, worker_attempt))
     lease.refresh(initial=True)
     if args.action == "admit":
+        _enter("admit output")
         output = os.environ.get("GITHUB_OUTPUT")
         if not output:
             raise VerificationError("GITHUB_OUTPUT missing")
@@ -340,6 +354,7 @@ def main(argv=None):
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous[sig] = signal.signal(sig, interrupted)
         if request["pool"] == "self-hosted":
+            _enter("worker lock")
             lock = HostLock(Path.home() / "Library/Caches/omp-macos-worker/physical-host.lock")
             while not lock.acquire():
                 time.sleep(POLL_SECONDS)
@@ -347,14 +362,18 @@ def main(argv=None):
         native_env = {"AFFECTED_SCOPE": request["coverage"],
                       "AFFECTED_ARGS": " ".join("-p " + package for package in request["packages"]),
                       "AFFECTED_DOC_ARGS": " ".join("-p " + package for package in request["doc_packages"])}
+        _enter("checkout verification")
         verify_checkout(request)
+        _enter("native objective")
         supervise(command, lease, native_env=native_env)
+        _enter("publication admission")
         if not lease.refresh():
             raise VerificationError("publication admission unavailable")
         check()
         verify_checkout(request)
         if time.monotonic() - lease.last_valid >= LEASE_SECONDS:
             raise VerificationError("publication admission expired")
+        _enter("result receipt")
         write_result(args.result_file, request)
     finally:
         if lock:
@@ -364,10 +383,18 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """Run `main`, turning a refusal into one exit code and a fixed-name report."""
     try:
-        sys.exit(main())
-    except (VerificationError, OSError):
-        # Never echo API diagnostics or command/environment values containing tokens.
+        return main(argv)
+    except (VerificationError, OSError) as error:
+        # Never echo API diagnostics or command/environment values containing tokens:
+        # the stage is one of the names above and the type is the exception's class.
         print("macOS worker admission or objective failed", file=sys.stderr)
-        sys.exit(1)
+        print(f"  stage: {_stage}", file=sys.stderr)
+        print(f"  error type: {type(error).__name__}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli())
