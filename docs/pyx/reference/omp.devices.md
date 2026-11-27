@@ -589,7 +589,7 @@ Construction copies `schema` through JSON and freezes the resulting mapping, so 
 ### `omp.devices.DynamicDeviceParent`
 
 ```python
-DynamicDeviceParent(name: str, family: str, rev: int, place: str)
+DynamicDeviceParent(name: str, family: str, rev: int, place: str, effects: Effects | None = None)
 ```
 
 Represents a manifest-authorized top-level parent for post-freeze leaves.
@@ -600,6 +600,7 @@ Represents a manifest-authorized top-level parent for post-freeze leaves.
 | `family` | `str` | Frozen revision family. |
 | `rev` | `int` | Frozen semantic revision. |
 | `place` | `str` | Frozen placement spelling. |
+| `effects` | `Effects \| None` | Maximum effect envelope of every leaf mounted below the parent. `None` declares none. |
 
 #### `DynamicDeviceParent.path`
 
@@ -657,6 +658,7 @@ def parent(
     family: str,
     rev: int,
     place: str = "host",
+    effects: Effects | None = None,
 ) -> DynamicDeviceParent
 ```
 
@@ -668,6 +670,7 @@ Declares a manifest-backed dynamic parent during import.
 - `family` (`str`) — revision family.
 - `rev` (`int`) — semantic revision; booleans are rejected.
 - `place` (`str`) — placement spelling.
+- `effects` (`Effects | None`) — maximum effect envelope of every leaf mounted below the parent; a leaf runs under its parent's declared effects. Without it the parent declares none, and a leaf that makes an HTTP request is denied: the DATA gate needs `env.net` in the effect envelope as well as in the manifest, and a `FetchEffects` entry is what derives it.
 
 **Returns**
 
@@ -676,7 +679,7 @@ The registered `DynamicDeviceParent`.
 **Raises**
 
 - `DeviceError` for an invalid name or placement.
-- `TypeError` for invalid `family` or `rev` values.
+- `TypeError` for invalid `family`, `rev` or `effects` values.
 
 #### `Devices.set_availability`
 

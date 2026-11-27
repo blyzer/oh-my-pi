@@ -963,7 +963,7 @@ class DeclarationRegistry:
             source_module=declaration.module,
             kind=declaration.kind,
             place=parent.place,
-            effects=None,
+            effects=parent.effects,
             constraint=None,
             serial=False,
             summary=summary,

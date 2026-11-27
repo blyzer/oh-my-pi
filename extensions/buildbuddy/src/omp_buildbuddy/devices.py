@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 import omp
-from omp.devices import MountSpec
+from omp.devices import Effects, FetchEffects, MountSpec
 
 from . import client, errors
 
@@ -38,7 +38,18 @@ _ARGS_SCHEMA: dict[str, Any] = {
 }
 
 # Manifest-backed dynamic parent (sealed soft tool). Leaves attach post-FREEZE.
-EXEC_PARENT = omp.devices.parent("exec", family="buildbuddy", rev=1, place="host")
+# Every leaf calls the BuildBuddy Run API with `omp.env.http_post` and the
+# `buildbuddy` placement credential. The DATA gate needs `env.net` in the
+# invocation's effect envelope as well as in the manifest, and a fetch effect
+# with credentials is what derives it. It is a remote call and changes nothing
+# locally, so it is a fetch and not an exec effect.
+EXEC_PARENT = omp.devices.parent(
+    "exec",
+    family="buildbuddy",
+    rev=1,
+    place="host",
+    effects=Effects(fetch=FetchEffects(credentials=True)),
+)
 
 
 async def describe(args: dict[str, Any]) -> dict[str, Any]:

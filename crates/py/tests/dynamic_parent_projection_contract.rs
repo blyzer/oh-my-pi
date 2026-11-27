@@ -25,6 +25,9 @@ import tomllib
 
 import omp
 import omp._registry as registry_module
+from omp.devices import Effects, FetchEffects
+
+expected_effects = @EXPECTED_EFFECTS@
 
 with open("@EXTENSION_ROOT@/omp.toml", "rb") as handle:
     manifest = tomllib.load(handle)
@@ -91,12 +94,19 @@ for declared in manifest["declarations"]:
     assert row.kind == declared["kind"], (row.kind, declared)
     assert row.source_module == declared["module"], (row.source_module, declared)
     assert str(row.place) == "host", row.place
+    # What the parent declares reaches the row: every leaf below it runs under
+    # this envelope, and the DATA gate needs `env.net` in it.
+    assert row.effects == expected_effects, (row.effects, expected_effects)
 "#;
 
-fn seal_and_project(extension: &str) {
+fn seal_and_project(extension: &str, expected_effects: &str) {
 	let root = format!("{}/../../extensions/{extension}", env!("CARGO_MANIFEST_DIR"));
-	let script =
-		CString::new(SCRIPT.replace("@EXTENSION_ROOT@", &root)).expect("script has no NUL byte");
+	let script = CString::new(
+		SCRIPT
+			.replace("@EXTENSION_ROOT@", &root)
+			.replace("@EXPECTED_EFFECTS@", expected_effects),
+	)
+	.expect("script has no NUL byte");
 	let engine = Engine::builder().init().expect("embedded Python boots");
 	engine
 		.attach(|py| py.run(script.as_c_str(), None, None))
@@ -107,15 +117,36 @@ fn seal_and_project(extension: &str) {
 
 #[test]
 fn the_real_buildbuddy_exec_parent_projects_to_a_control_row() {
-	seal_and_project("buildbuddy");
+	// Every leaf calls the Run API with `http_post` and a placement credential.
+	seal_and_project("buildbuddy", "Effects(fetch=FetchEffects(credentials=True))");
 }
 
 #[test]
 fn the_real_ci_parent_projects_to_a_control_row() {
-	seal_and_project("ci");
+	seal_and_project("ci", "None");
 }
 
 #[test]
 fn the_real_forge_parent_projects_to_a_control_row() {
-	seal_and_project("forge");
+	seal_and_project("forge", "None");
+}
+
+#[test]
+fn a_dynamic_parent_rejects_effects_that_are_not_effects() {
+	let script = c"
+import omp
+
+try:
+    omp.devices.parent('probe', family='probe', rev=1, effects={'fetch': True})
+except TypeError as error:
+    # Not the unexpected-keyword TypeError that a parent without the
+    # parameter would also raise.
+    assert 'must be omp.Effects or None' in str(error), error
+else:
+    raise AssertionError('a value that is not omp.Effects was accepted')
+";
+	let engine = Engine::builder().init().expect("embedded Python boots");
+	engine
+		.attach(|py| py.run(script, None, None))
+		.expect("a dynamic parent validates its effects");
 }
