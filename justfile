@@ -365,14 +365,21 @@ e2e-p7:
 e2e-p8:
     cargo nextest run -p omp-e2e --test p8_baselines --locked
 
-# Run proof P9: isolated environment and extension control registration.
+# Run proof P9: isolated environment, extension control registration, and the
+# credential isolation proofs. The last four need Seatbelt: they skip off macOS
+# and, on macOS, fail when the Seatbelt probe fails. CI runs them in the macOS
+# objective (`scripts/ci-macos-objective.sh`); keep the two lists in step.
 [group('e2e')]
 e2e-p9:
     cargo nextest run -p omp-e2e --locked \
         --test p9_isolation \
         --test p9_extension_control \
         --test p9_agent_settled \
-        --test p9_continuation_grants
+        --test p9_continuation_grants \
+        --test p9_extension_isolation \
+        --test p9_credential_placement \
+        --test p9_delegated_route \
+        --test p9_session_shell_isolation
 
 # Run proof P10: idempotent historical tool lift through live dispatch.
 [group('e2e')]
