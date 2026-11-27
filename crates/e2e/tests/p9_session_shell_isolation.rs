@@ -7,8 +7,9 @@
 //! thing an agent can type: a shell command through the production daemon's
 //! `exec`, under the shipped `workspace-write` sandbox. The daemon is the real
 //! `omp envd` child, its data directory is the grant store's parent, and a
-//! relaying client answers every approval prompt with a denial, recording the
-//! prompt it was shown.
+//! relaying client answers every approval prompt with YES, recording the
+//! prompt it was shown: the worst case, a person who approves everything the
+//! sandbox offers.
 //!
 //! Two layouts. In the first the data directory sits outside every writable
 //! root, as it does for a user whose workspace is not their home: the sandbox
@@ -17,14 +18,22 @@
 //! carve-out can keep `ext/` closed: a sibling file in the same directory
 //! must stay writable, or the denial proves nothing.
 //!
-//! What this does not show. The shipped sandbox reads the whole host
-//! (`sv_sandbox_read_mode = host`, no `sv_sandbox_read_deny`), so the same
-//! shell can READ `credentials.db` and its adjacent `credentials.key`, the
-//! default key source of an interactive session. A one-off probe, not kept
-//! here because it would pin an insecure result as a pass, read both. With
-//! the data directory inside the workspace it can also WRITE `credentials.db`:
-//! the carve-out covers `ext/` only. This file proves the grant store is
-//! closed to the shell; it does not prove the credential store is.
+//! The credential store. The shipped sandbox reads the whole host
+//! (`sv_sandbox_read_mode = host`, no `sv_sandbox_read_deny`), and the key
+//! that opens `credentials.db` sits beside it as `credentials.key`, the
+//! default key source of an interactive session. The sandbox therefore denies
+//! the shell both reads and writes of the credential store files by
+//! construction, with no setting involved: the last two tests type commands
+//! that read, copy, write, delete and move them, builtin and external, directly
+//! and through a link, under both layouts, while a neighbouring file in the
+//! same directory stays readable. They are the proof that the credential
+//! store is closed to the shell as well as the grant store.
+//!
+//! A trailing `echo rc=$?` makes a command exit 0, and the sandbox only offers
+//! an approval for a denial that is the command's final status. A proof that
+//! types every command with that suffix therefore sees no prompt whatever the
+//! sandbox would offer. `refused_and_never_offered` types each command both
+//! ways; the bare form is the one that can be offered an approval.
 //!
 //! Mutation check: with the carve-out removed, the first test fails at the
 //! append to `grants.toml`. The second still passes, because there the data
@@ -60,6 +69,9 @@ use url::Url;
 const SQLITE_MAGIC: &str = "SQLite format 3";
 const GRANT_BEFORE: &str = "# operator grants\n";
 const EXTENSION: &str = "shellproof";
+const KEY_MARKER: &str = "key-marker-0123";
+const DB_MARKER: &str = "secret-marker";
+const NEIGHBOUR_MARKER: &str = "neighbour-ok";
 
 const SOURCE: &str = r#"
 import omp
@@ -95,11 +107,13 @@ failure = "fault"
 #[derive(Debug)]
 struct Observed {
 	output:  String,
-	/// The approval prompts the command filed (each was answered with a denial).
+	/// The approval prompts the command filed (each was answered as the shell
+	/// was started to).
 	prompts: Vec<ApprovalQuery>,
 }
 
-/// One production daemon, a session on it, and the denying relay.
+/// One production daemon, a session on it, and the relay that answers
+/// approvals.
 struct Shell {
 	process:    ProcessEnvHarness,
 	docserver:  DocServerTask,
@@ -111,7 +125,10 @@ struct Shell {
 }
 
 impl Shell {
-	async fn start(scratch: Scratch, data_dir: &Path) -> Result<Self> {
+	/// A shell whose relaying client answers every approval prompt with
+	/// `approve`, recording the prompt it was shown. Approving is the worst
+	/// case: a person who clicks through everything the sandbox offers.
+	async fn start_answering(scratch: Scratch, data_dir: &Path, approve: bool) -> Result<Self> {
 		let executable = omp_binary().context("resolving the daemon executable")?;
 		let docserver = DocServerTask::spawn_for_daemon(
 			scratch.project(),
@@ -151,7 +168,7 @@ impl Shell {
 					seen.lock().push(query.clone());
 					let _ = client
 						.answer_approval(request_id, query.query_id, ApprovalDecision {
-							approved: false,
+							approved: approve,
 							scope: "once".to_owned(),
 							source: "user".to_owned(),
 							..ApprovalDecision::default()
@@ -236,19 +253,61 @@ struct Store {
 
 impl Store {
 	fn seed(data: PathBuf) -> Result<Self> {
+		use std::os::unix::fs::PermissionsExt as _;
+
 		let ext = data.join("ext");
 		fs::create_dir_all(&ext).context("creating the grant store directory")?;
 		let grants = ext.join("grants.toml");
 		fs::write(&grants, GRANT_BEFORE).context("seeding grants.toml")?;
-		fs::write(data.join("credentials.db"), format!("{SQLITE_MAGIC}\0secret-marker"))
+		fs::write(data.join("credentials.db"), format!("{SQLITE_MAGIC}\0{DB_MARKER}"))
 			.context("seeding credentials.db")?;
+		// SQLite leaves its write-ahead log beside the database while it is open.
+		fs::write(data.join("credentials.db-wal"), DB_MARKER).context("seeding the sidecar")?;
+		let key = data.join("credentials.key");
+		fs::write(&key, KEY_MARKER).context("seeding credentials.key")?;
+		fs::set_permissions(&key, fs::Permissions::from_mode(0o600))
+			.context("restricting credentials.key like the real key file")?;
+		fs::write(data.join("notes.txt"), NEIGHBOUR_MARKER).context("seeding the neighbour")?;
 		Ok(Self { data, grants })
 	}
 }
 
+/// Types `command` the two ways an agent can, against a client that answers
+/// every approval prompt with yes.
+///
+/// Followed by `echo rc=$?` it shows the command was refused, but the script
+/// then exits 0, so its denial is never the command's final status and the
+/// sandbox never offers an approval for it. Typed bare, the denial IS the final
+/// status, which is when the sandbox would offer one: a prompt the client
+/// would approve, handing the shell the location. Neither form may be offered.
+async fn refused_and_never_offered(shell: &Shell, name: &str, command: &str) -> Result<()> {
+	let masked = shell.run(&format!("{command}; echo rc=$?")).await?;
+	eprintln!("[{name}] {masked:?}");
+	assert!(!masked.output.contains("rc=0"), "{name}: the shell was allowed: {masked:?}");
+	assert!(
+		masked.output.contains("denied") || masked.output.contains("not permitted"),
+		"{name}: refused, but not by the sandbox (a missing file would read the same): {masked:?}"
+	);
+	assert!(
+		!masked.output.contains(KEY_MARKER) && !masked.output.contains(DB_MARKER),
+		"{name}: the shell saw a credential: {masked:?}"
+	);
+	let bare = shell.run(command).await?;
+	eprintln!("[{name}, bare] {bare:?}");
+	assert!(
+		bare.prompts.is_empty(),
+		"{name}: a denial offered an approval that, once approved, would open the location: {bare:?}"
+	);
+	assert!(
+		!bare.output.contains(KEY_MARKER) && !bare.output.contains(DB_MARKER),
+		"{name}: the shell saw a credential after an approval: {bare:?}"
+	);
+	Ok(())
+}
+
 /// Inside the workspace, the protected-path carve-out is the only thing that
 /// keeps `ext/` closed, and the shell cannot write, replace, delete or move
-/// the grant store, nor reach for an approval to do so.
+/// the grant store, even when every approval it is offered is approved.
 #[tokio::test]
 async fn session_shell_cannot_change_the_grant_store_inside_the_workspace() -> Result<()> {
 	if !runs_here()? {
@@ -256,7 +315,7 @@ async fn session_shell_cannot_change_the_grant_store_inside_the_workspace() -> R
 	}
 	let scratch = Scratch::new()?;
 	let store = Store::seed(scratch.project().join("odata"))?;
-	let shell = Shell::start(scratch, &store.data).await?;
+	let shell = Shell::start_answering(scratch, &store.data, true).await?;
 
 	let ext = quoted(&store.data.join("ext"));
 	let grants = quoted(&store.grants);
@@ -271,23 +330,18 @@ async fn session_shell_cannot_change_the_grant_store_inside_the_workspace() -> R
 	assert_eq!(fs::read_to_string(&sibling).context("control file")?, "ok");
 
 	for (name, command) in [
-		("append to grants.toml", format!("printf x >> {grants}; echo rc=$?")),
-		("truncate grants.toml", format!("printf x > {grants}; echo rc=$?")),
+		("append to grants.toml", format!("printf x >> {grants}")),
+		("truncate grants.toml", format!("printf x > {grants}")),
 		(
 			"add a file under ext",
-			format!("printf x > {}; echo rc=$?", quoted(&store.data.join("ext/extra.toml"))),
+			format!("printf x > {}", quoted(&store.data.join("ext/extra.toml"))),
 		),
-		("delete grants.toml", format!("rm -f {grants}; echo rc=$?")),
-		("move ext aside", format!("mv {ext} {}; echo rc=$?", quoted(&store.data.join("ext.old")))),
+		("delete grants.toml", format!("rm -f {grants}")),
+		("move ext aside", format!("mv {ext} {}", quoted(&store.data.join("ext.old")))),
+		// An external program is stopped by the kernel, not by the interpreter.
+		("external append to grants.toml", format!("/bin/sh -c \"printf x >> {grants}\"")),
 	] {
-		let seen = shell.run(&command).await?;
-		eprintln!("[{name}] {seen:?}");
-		assert!(!seen.output.contains("rc=0"), "{name}: the shell was allowed: {seen:?}");
-		assert!(
-			seen.prompts.is_empty(),
-			"{name}: a denial must not offer an approval that would let the shell widen a grant: \
-			 {seen:?}"
-		);
+		refused_and_never_offered(&shell, name, &command).await?;
 		assert_eq!(
 			fs::read_to_string(&store.grants).context("grants.toml after the probe")?,
 			GRANT_BEFORE,
@@ -323,7 +377,7 @@ async fn session_shell_cannot_widen_a_credential_grant_through_omp_ext_grant() -
 	let text = String::from_utf8_lossy(&granted);
 	assert!(text.contains("builds.example"), "the control grant is missing: {text}");
 
-	let shell = Shell::start(scratch, operator.data_dir()).await?;
+	let shell = Shell::start_answering(scratch, operator.data_dir(), true).await?;
 	let omp = omp_binary().context("resolving the omp executable")?;
 	let command = format!(
 		"unset OMP_CONFIG_DIR OMP_STATE_DIR OMP_CACHE_DIR OMP_DATA_DIR; HOME={} NO_COLOR=1 {} ext \
@@ -353,4 +407,100 @@ async fn session_shell_cannot_widen_a_credential_grant_through_omp_ext_grant() -
 		"the attacker's origin reached grants.toml"
 	);
 	shell.shutdown().await
+}
+
+/// The shell reads and writes nothing of the credential store, and gets no
+/// approval prompt that would let it, even when the client approves every
+/// prompt it is shown. A neighbouring file in the same directory is the
+/// control: it reads normally, so the denials below are the credential rule
+/// and not a missing permission.
+async fn credential_store_is_closed_to_the_shell(inside_workspace: bool) -> Result<()> {
+	let scratch = Scratch::new()?;
+	let data = if inside_workspace {
+		scratch.project().join("odata")
+	} else {
+		scratch.root().join("odata")
+	};
+	let store = Store::seed(data)?;
+	let key = store.data.join("credentials.key");
+	let db = store.data.join("credentials.db");
+	let neighbour = store.data.join("notes.txt");
+	let link = scratch.project().join("innocent-link");
+	std::os::unix::fs::symlink(&key, &link).context("linking to the key")?;
+	let stolen = scratch.project().join("stolen-key");
+	let database_before = fs::read(&db).context("credentials.db before")?;
+	let shell = Shell::start_answering(scratch, &store.data, true).await?;
+
+	for reader in ["cat", "/bin/cat"] {
+		let seen = shell
+			.run(&format!("{reader} {}; echo rc=$?", quoted(&neighbour)))
+			.await?;
+		assert!(
+			seen.output.contains(NEIGHBOUR_MARKER) && seen.output.contains("rc=0"),
+			"control: `{reader}` could not read the neighbouring file: {seen:?}"
+		);
+	}
+
+	for (name, command) in [
+		("builtin cat of the key", format!("cat {}", quoted(&key))),
+		("external cat of the key", format!("/bin/cat {}", quoted(&key))),
+		("external cat of the database", format!("/bin/cat {}", quoted(&db))),
+		("head of the database", format!("/usr/bin/head -c 16 {}", quoted(&db))),
+		("cat from a redirect", format!("/bin/cat < {}", quoted(&key))),
+		("builtin cat through a link", format!("cat {}", quoted(&link))),
+		("external cat through a link", format!("/bin/cat {}", quoted(&link))),
+		// The write-ahead log SQLite leaves beside the database holds recent pages.
+		(
+			"builtin cat of the write-ahead log",
+			format!("cat {}", quoted(&store.data.join("credentials.db-wal"))),
+		),
+		("copy the key out", format!("/bin/cp {} {}", quoted(&key), quoted(&stolen))),
+		("append to the database", format!("printf x >> {}", quoted(&db))),
+		("truncate the key", format!("printf x > {}", quoted(&key))),
+		("delete the key", format!("rm -f {}", quoted(&key))),
+		(
+			"move the database aside",
+			format!("mv {} {}", quoted(&db), quoted(&store.data.join("db.old"))),
+		),
+	] {
+		refused_and_never_offered(&shell, name, &command).await?;
+		assert_eq!(
+			fs::read_to_string(&key).context("credentials.key after the probe")?,
+			KEY_MARKER,
+			"{name}: credentials.key changed"
+		);
+		assert_eq!(
+			fs::read(&db).context("credentials.db after the probe")?,
+			database_before,
+			"{name}: credentials.db changed"
+		);
+		assert!(!store.data.join("db.old").exists(), "{name}: the database was moved");
+		assert!(
+			fs::read_to_string(&stolen).map_or(true, |text| !text.contains(KEY_MARKER)),
+			"{name}: the key was copied out"
+		);
+	}
+	shell.shutdown().await
+}
+
+/// The data directory inside the workspace, a writable and readable root: only
+/// the built-in rule can close the credential store here.
+#[tokio::test]
+async fn session_shell_cannot_read_or_write_the_credential_store_inside_the_workspace() -> Result<()>
+{
+	if !runs_here()? {
+		return Ok(());
+	}
+	credential_store_is_closed_to_the_shell(true).await
+}
+
+/// The data directory outside the workspace, where the default read mode would
+/// otherwise let the shell read it.
+#[tokio::test]
+async fn session_shell_cannot_read_or_write_the_credential_store_outside_the_workspace()
+-> Result<()> {
+	if !runs_here()? {
+		return Ok(());
+	}
+	credential_store_is_closed_to_the_shell(false).await
 }

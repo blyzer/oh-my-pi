@@ -392,7 +392,9 @@ pub struct SandboxSettings {
 	pub write_deny:            Vec<Str>,
 	/// Absolute paths the session owner protects from sandboxed writes,
 	/// wherever a sandbox spec is built and enforced, whether they exist yet or
-	/// not: the operator grants store and the user extension root. Not a user
+	/// not: the operator grants store, the user extension root and the
+	/// credential store files. The credential store files are also denied to
+	/// sandboxed reads (`is_credential_store_path`). Not a user
 	/// convar. Skipped when empty so the policy digest of settings without
 	/// protected paths is unchanged. Serialized lossily, so a path that is not
 	/// valid UTF-8 still digests: only the daemon policy digest serializes
@@ -534,10 +536,49 @@ impl SandboxSettings {
 	}
 }
 
+/// The files of the credential store inside a data directory: the database,
+/// the SQLite sidecars it can leave beside it, and the local key file that
+/// opens it (`<data>/credentials.key`, the database path with its extension
+/// replaced; see `open_local_file_credential_store`). A key source that lives
+/// elsewhere, such as the OS keychain, leaves the key file absent, which a
+/// denial spells out all the same.
+const CREDENTIAL_STORE_FILES: [&str; 5] = [
+	"credentials.db",
+	"credentials.db-wal",
+	"credentials.db-shm",
+	"credentials.db-journal",
+	"credentials.key",
+];
+
+/// The credential store files inside `data_dir`, for the owner-protected set.
+pub fn credential_store_paths(data_dir: &Path) -> Vec<PathBuf> {
+	CREDENTIAL_STORE_FILES
+		.iter()
+		.map(|name| data_dir.join(name))
+		.collect()
+}
+
+/// Whether `path` names one of the credential store files.
+///
+/// The sandbox refuses to let a command *read* these, not only write them: a
+/// readable key opens every stored credential, so a read-only protection would
+/// leave the secret itself open. The owner-protected set holds only locations
+/// the owner chose, so matching the file name cannot catch an unrelated file.
+pub fn is_credential_store_path(path: &Path) -> bool {
+	path
+		.file_name()
+		.and_then(|name| name.to_str())
+		.is_some_and(|name| CREDENTIAL_STORE_FILES.contains(&name))
+}
+
 /// Returns the same protected paths for both the launching process and its
 /// envd.
+///
+/// Every location here is denied to sandboxed writes. The credential store
+/// files are also denied to sandboxed reads (see [`is_credential_store_path`]).
 pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
 	let mut candidates = vec![data_dir.join("ext")];
+	candidates.extend(credential_store_paths(data_dir));
 	if let Ok(config_root) = omp_core::dirs::profile_config_dir(home) {
 		candidates.push(config_root.join("agent/extensions"));
 	}
@@ -589,12 +630,21 @@ fn host_protected_write_paths() -> Vec<PathBuf> {
 	)
 }
 
-/// Without a home directory only the data directory's store can be protected,
-/// spelled like every other protected path; without a data directory, nothing.
+/// Without a home directory only the data directory's store can be protected
+/// (its extension root and credential files), spelled like every other
+/// protected path; without a data directory, nothing.
 fn protected_paths_for_host(data_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
 	match (data_dir, home) {
 		(Some(data_dir), Some(home)) => protected_write_paths(data_dir, home),
-		(Some(data_dir), None) => vec![protected_spelling(data_dir.join("ext"))],
+		(Some(data_dir), None) => {
+			let mut paths = std::iter::once(data_dir.join("ext"))
+				.chain(credential_store_paths(data_dir))
+				.map(protected_spelling)
+				.collect::<Vec<_>>();
+			paths.sort_unstable();
+			paths.dedup();
+			paths
+		},
 		(None, _) => Vec::new(),
 	}
 }
@@ -1062,6 +1112,7 @@ mod tests {
 			Err(_) => extension_root,
 		};
 		let mut expected = vec![real.join("data-real/ext"), canonical_extension_root];
+		expected.extend(credential_store_paths(&real.join("data-real")));
 		expected.sort_unstable();
 
 		assert_eq!(protected_write_paths(&data_dir, &home), expected);
@@ -1089,11 +1140,15 @@ mod tests {
 		// The store resolves to the extension root, so both candidates name it.
 		symlink(&extension_root, data_dir.join("ext")).expect("store link");
 
-		assert_eq!(protected_write_paths(&data_dir, &home), [extension_root]);
+		let mut expected = vec![extension_root];
+		expected.extend(credential_store_paths(&data_dir));
+		expected.sort_unstable();
+		assert_eq!(protected_write_paths(&data_dir, &home), expected);
 	}
 
-	/// Without a home directory only the data directory's store is protected,
-	/// and it is canonical like the store of every other host.
+	/// Without a home directory only the data directory's store is protected
+	/// (extension root and credential files), and it is canonical like the
+	/// store of every other host.
 	#[cfg(unix)]
 	#[test]
 	fn host_protected_paths_without_a_home_keep_the_canonical_store() {
@@ -1105,13 +1160,37 @@ mod tests {
 		symlink(real.join("data-real"), real.join("data")).expect("data link");
 		let data_dir = real.join("data");
 
-		assert_eq!(protected_paths_for_host(Some(data_dir.as_path()), None), [
-			real.join("data-real/ext")
-		]);
+		let mut expected = vec![real.join("data-real/ext")];
+		expected.extend(credential_store_paths(&real.join("data-real")));
+		expected.sort_unstable();
+		assert_eq!(protected_paths_for_host(Some(data_dir.as_path()), None), expected);
 		assert!(
 			protected_paths_for_host(None, Some(real.as_path())).is_empty(),
 			"a host without a data directory protects nothing"
 		);
+	}
+
+	/// Exactly the database, its SQLite sidecars and the local key file are
+	/// credential store files; the grants store and any other file are not, so
+	/// the read deny cannot reach them.
+	#[test]
+	fn only_the_credential_store_files_are_read_protected() {
+		let data = Path::new("/srv/omp");
+		for path in credential_store_paths(data) {
+			assert!(is_credential_store_path(&path), "{} is a credential file", path.display());
+			assert_eq!(path.parent(), Some(data));
+		}
+		assert_eq!(credential_store_paths(data).len(), 5);
+		for other in [
+			"/srv/omp/ext/grants.toml",
+			"/srv/omp/ext",
+			"/srv/omp/credentials",
+			"/srv/omp/credentials.key.bak",
+			"/srv/omp/credentials.txt",
+			"/",
+		] {
+			assert!(!is_credential_store_path(Path::new(other)), "{other} is not a credential file");
+		}
 	}
 
 	/// Settings without protected paths serialize exactly as before the field

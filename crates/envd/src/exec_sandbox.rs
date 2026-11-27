@@ -29,7 +29,7 @@ use crate::{
 	exec_network_diag::is_network_url,
 	exec_settings::{
 		EnvironmentInheritance, ExecSandboxMode, NetworkConfinement, ReadMode, SandboxSettings,
-		UnscopedWrites,
+		UnscopedWrites, is_credential_store_path,
 	},
 	sandbox_proxy::{BrokerDenial, BrokerRefusal, EgressGrants, ScopedProxy},
 };
@@ -505,13 +505,23 @@ impl ExecSandbox {
 	///
 	/// The caller must capture this before asking for approval and pass the
 	/// returned value to [`Self::amended_scope`] after approval.
+	///
+	/// An owner-protected location offers no amendment: not when the denial
+	/// names one, and not when the approved scope contains one (the scope of a
+	/// missing path is its nearest existing ancestor). An approval overrides
+	/// every denial under its scope, so offering one would hand the shell the
+	/// grants store or the credential store on a single click.
 	pub(crate) fn freeze_amendment(&self, denial: &SandboxDenialFact) -> Option<ApprovedPathScope> {
 		let (path, access) = match denial {
 			SandboxDenialFact::ReadPath(path) => (path, ApprovedPathAccess::Read),
 			SandboxDenialFact::WritePath(path) => (path, ApprovedPathAccess::Write),
 			SandboxDenialFact::Network { .. } | SandboxDenialFact::Unknown => return None,
 		};
-		ApprovedPathScope::capture(path, access).ok()
+		let scope = ApprovedPathScope::capture(path, access).ok()?;
+		if amendment_reaches_owner_protected(&self.settings, path, &scope.scope, access) {
+			return None;
+		}
+		Some(scope)
 	}
 
 	/// Compiles a fresh one-shot policy using a previously frozen path scope.
@@ -1335,20 +1345,22 @@ fn policy_parts_with_approved_scope(
 		}
 	}
 	for path in &settings.read_deny {
-		spec.deny_read(path.as_str())?;
-		let absolute = std::path::absolute(path.as_str()).map_err(|source| {
-			SandboxError::Canonicalize { path: PathBuf::from(path.as_str()), source }
-		})?;
-		push_unique(
-			&mut read_denied,
-			normalize_absolute(&absolute)
-				.map_err(|source| SandboxError::Canonicalize { path: absolute.clone(), source })?,
-		);
-		push_unique(
-			&mut read_denied,
-			resolve_write_path(&absolute)
-				.map_err(|source| SandboxError::Canonicalize { path: absolute, source })?,
-		);
+		record_read_deny(&mut spec, &mut read_denied, Path::new(path.as_str()))?;
+	}
+	// The credential store files are denied to reads as well as writes, under
+	// both their literal and resolved spellings, whether or not they exist yet.
+	// A command that could read the key could open every stored credential, so
+	// this is not a user setting: it follows the owner-protected set, wherever
+	// the data directory lies, and applies whenever the sandbox is on.
+	for path in settings
+		.protected_write_paths
+		.iter()
+		.filter(|path| is_credential_store_path(path))
+	{
+		if !path.is_absolute() {
+			return Err(SandboxError::InvalidDenyPath { path: path.clone() });
+		}
+		record_read_deny(&mut spec, &mut read_denied, path)?;
 	}
 
 	let mut writable = Vec::new();
@@ -1534,6 +1546,75 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 	if !paths.contains(&path) {
 		paths.push(path);
 	}
+}
+
+/// Denies reads of `path` in the spec and in the in-process path policy, under
+/// both its normalized and its resolved spelling, so a link aimed at it stays
+/// refused. The path need not exist yet.
+fn record_read_deny(
+	spec: &mut SandboxSpec,
+	read_denied: &mut Vec<PathBuf>,
+	path: &Path,
+) -> Result<(), SandboxError> {
+	spec.deny_read(path)?;
+	let absolute = std::path::absolute(path)
+		.map_err(|source| SandboxError::Canonicalize { path: path.to_path_buf(), source })?;
+	push_unique(
+		read_denied,
+		normalize_absolute(&absolute)
+			.map_err(|source| SandboxError::Canonicalize { path: absolute.clone(), source })?,
+	);
+	push_unique(
+		read_denied,
+		resolve_write_path(&absolute)
+			.map_err(|source| SandboxError::Canonicalize { path: absolute, source })?,
+	);
+	Ok(())
+}
+
+/// Whether approving `scope`, offered for a denial of `path`, would open an
+/// owner-protected location: the denial names one, or the scope contains one.
+///
+/// A write approval is judged against every protected location. A read
+/// approval is judged against the credential store files only, because the
+/// other protected locations are readable by default. When the denied path
+/// cannot be spelled, a host that protects anything refuses the amendment.
+fn amendment_reaches_owner_protected(
+	settings: &SandboxSettings,
+	path: &Path,
+	scope: &Path,
+	access: ApprovedPathAccess,
+) -> bool {
+	fn spellings(location: &Path) -> Vec<PathBuf> {
+		let mut found = Vec::new();
+		if let Ok(absolute) = std::path::absolute(location) {
+			if let Ok(literal) = normalize_absolute(&absolute) {
+				found.push(literal);
+			}
+			if let Ok(resolved) = resolve_write_path(&absolute) {
+				found.push(resolved);
+			}
+		}
+		found
+	}
+
+	let named = spellings(path);
+	let mut protected = settings
+		.protected_write_paths
+		.iter()
+		.filter(|location| access == ApprovedPathAccess::Write || is_credential_store_path(location))
+		.peekable();
+	if protected.peek().is_none() {
+		return false;
+	}
+	if named.is_empty() {
+		return true;
+	}
+	protected
+		.flat_map(|location| spellings(location))
+		.any(|location| {
+			location.starts_with(scope) || named.iter().any(|named| named.starts_with(&location))
+		})
 }
 
 fn record_write_deny(
@@ -2931,6 +3012,172 @@ mod tests {
 			ExecSandbox::compile(&settings, &root, true, SandboxConsumer::Probe)
 				.expect("native policy with protected paths");
 		}
+	}
+
+	/// The credential store files are owner-protected from reads as well as
+	/// writes, whether or not they exist yet, and a neighbouring file or the
+	/// grants store stays readable.
+	#[test]
+	fn sandbox_denies_read_of_the_credential_store_files() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let root = fs::canonicalize(workspace.path()).expect("canonical workspace");
+		let data = root.join("data");
+		fs::create_dir_all(data.join("ext")).expect("store");
+		fs::write(data.join("credentials.db"), "database").expect("database");
+		fs::write(data.join("credentials.key"), "key").expect("key");
+		fs::write(data.join("notes.txt"), "notes").expect("neighbour");
+		fs::write(data.join("ext/grants.toml"), "grants").expect("grants");
+		let mut protected = vec![data.join("ext")];
+		protected.extend(crate::exec_settings::credential_store_paths(&data));
+		let settings =
+			SandboxSettings { protected_write_paths: protected.clone(), ..SandboxSettings::default() };
+		let policy = policy_parts(&settings, &root, WriteMode::Scoped, None, None)
+			.expect("policy")
+			.file_policy;
+		for secret in [
+			data.join("credentials.db"),
+			data.join("credentials.key"),
+			// Neither exists: the deny is by spelling, like a missing carve-out.
+			data.join("credentials.db-wal"),
+			data.join("credentials.db-journal"),
+		] {
+			let denied = policy
+				.check_read(&secret)
+				.expect_err("a credential store file was readable");
+			assert_eq!(denied.access, PathAccess::Read, "{}", secret.display());
+			assert!(policy.check_write(&secret).is_err(), "writable: {}", secret.display());
+		}
+		assert!(policy.open(&data.join("credentials.key"), READ).is_err());
+		for readable in [data.join("notes.txt"), data.join("ext/grants.toml")] {
+			assert!(
+				policy.check_read(&readable).is_ok(),
+				"denied a read of {}, which is not a credential store file",
+				readable.display()
+			);
+		}
+		if native_backend() {
+			let settings =
+				SandboxSettings { protected_write_paths: protected, ..workspace_settings() };
+			ExecSandbox::compile(&settings, &root, true, SandboxConsumer::Probe)
+				.expect("native policy with the credential store protected");
+		}
+	}
+
+	/// A link inside the workspace aimed at the key is judged by its target.
+	#[cfg(unix)]
+	#[test]
+	fn a_link_into_the_credential_store_stays_unreadable() {
+		use std::os::unix::fs::symlink;
+
+		let workspace = tempfile::tempdir().expect("workspace");
+		let root = fs::canonicalize(workspace.path()).expect("canonical workspace");
+		let data = root.join("data");
+		fs::create_dir_all(&data).expect("data");
+		fs::write(data.join("credentials.key"), "key").expect("key");
+		symlink(data.join("credentials.key"), root.join("innocent")).expect("link");
+		let settings = SandboxSettings {
+			protected_write_paths: crate::exec_settings::credential_store_paths(&data),
+			..SandboxSettings::default()
+		};
+		let policy = policy_parts(&settings, &root, WriteMode::Scoped, None, None)
+			.expect("policy")
+			.file_policy;
+		assert!(policy.check_read(&root.join("innocent")).is_err());
+		assert!(policy.open(&root.join("innocent"), READ).is_err());
+	}
+
+	/// A relative credential store path is refused like any relative protected
+	/// path, rather than being resolved against the process directory.
+	#[test]
+	fn a_relative_credential_store_path_is_refused() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let root = fs::canonicalize(workspace.path()).expect("canonical workspace");
+		let relative = SandboxSettings {
+			protected_write_paths: vec![PathBuf::from("data/credentials.key")],
+			..workspace_settings()
+		};
+		assert!(
+			policy_parts(&relative, &root, WriteMode::Scoped, None, None).is_err(),
+			"a relative credential path was accepted"
+		);
+	}
+
+	/// A denial that names an owner-protected location, or whose approved scope
+	/// would contain one, offers no amendment; an ordinary denial, and a read of
+	/// a protected location that is readable by default, still do.
+	#[test]
+	fn an_owner_protected_location_offers_no_amendment() {
+		let tree = tempfile::tempdir().expect("tree");
+		let root = fs::canonicalize(tree.path()).expect("canonical tree");
+		let data = root.join("data");
+		fs::create_dir_all(data.join("ext")).expect("store");
+		fs::write(data.join("credentials.key"), "key").expect("key");
+		fs::write(data.join("ext/grants.toml"), "").expect("grants");
+		let elsewhere = tempfile::tempdir().expect("elsewhere");
+		let elsewhere = fs::canonicalize(elsewhere.path()).expect("canonical elsewhere");
+		let mut protected = vec![data.join("ext")];
+		protected.extend(crate::exec_settings::credential_store_paths(&data));
+		let settings =
+			SandboxSettings { protected_write_paths: protected, ..SandboxSettings::default() };
+		let reaches = |path: &Path, scope: &Path, access| {
+			amendment_reaches_owner_protected(&settings, path, scope, access)
+		};
+		let (read, write) = (ApprovedPathAccess::Read, ApprovedPathAccess::Write);
+
+		// The denial names a protected location, existing or not.
+		for (path, access) in [
+			(data.join("ext/grants.toml"), write),
+			(data.join("ext/new/deeper"), write),
+			(data.join("credentials.key"), write),
+			(data.join("credentials.key"), read),
+			(data.join("credentials.db-wal"), read),
+		] {
+			assert!(reaches(&path, &path, access), "offered an amendment for {}", path.display());
+		}
+		// The denial names a neighbour, but its scope is an ancestor holding the store.
+		assert!(reaches(&root.join("newdir/file"), &root, write), "a scope containing the store");
+		assert!(reaches(&data.join("missing-key"), &data, read), "a read scope holding the key");
+
+		// Everything else still offers its amendment.
+		assert!(!reaches(&elsewhere.join("file"), &elsewhere, write), "an ordinary write");
+		assert!(!reaches(&elsewhere.join("file"), &elsewhere, read), "an ordinary read");
+		let grants = data.join("ext/grants.toml");
+		assert!(!reaches(&grants, &grants, read), "the grants store is readable by default");
+		assert!(!reaches(&data.join("notes.txt"), &data.join("notes.txt"), read), "a neighbour");
+	}
+
+	/// A link aimed at the key is judged by its target, so a denial that names
+	/// the link offers no amendment either.
+	#[cfg(unix)]
+	#[test]
+	fn a_link_to_a_credential_store_file_offers_no_amendment() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let root = fs::canonicalize(tree.path()).expect("canonical tree");
+		let data = root.join("data");
+		fs::create_dir_all(&data).expect("data");
+		fs::write(data.join("credentials.key"), "key").expect("key");
+		symlink(data.join("credentials.key"), root.join("innocent")).expect("link");
+		let settings = SandboxSettings {
+			protected_write_paths: crate::exec_settings::credential_store_paths(&data),
+			..SandboxSettings::default()
+		};
+		let link = root.join("innocent");
+		assert!(amendment_reaches_owner_protected(&settings, &link, &link, ApprovedPathAccess::Read));
+	}
+
+	/// With nothing protected, no amendment is refused on this ground.
+	#[test]
+	fn without_protected_locations_every_amendment_is_offered() {
+		let tree = tempfile::tempdir().expect("tree");
+		let root = fs::canonicalize(tree.path()).expect("canonical tree");
+		assert!(!amendment_reaches_owner_protected(
+			&SandboxSettings::default(),
+			&root.join("file"),
+			&root,
+			ApprovedPathAccess::Write
+		));
 	}
 
 	/// A protected location that contains the workspace cannot be denied without
