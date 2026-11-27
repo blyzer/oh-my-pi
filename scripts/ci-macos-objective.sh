@@ -65,6 +65,7 @@ python3 scripts/check-python-examples.py
 cargo nextest run --profile ci -p omp-e2e --locked \
   --lib \
   --test p1_doc_race \
+  --test p1_editor_buffer \
   --test p2_cancel_matrix \
   --test p3_detached_jobs \
   --test p4_schema_isolation \

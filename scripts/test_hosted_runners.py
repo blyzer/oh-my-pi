@@ -184,7 +184,7 @@ source "$1" rust
             'cargo nextest run --profile ci --workspace --exclude omp-e2e --locked',
             'cargo test --doc --workspace --exclude omp-e2e --locked',
             'python3 scripts/check-python-examples.py',
-            '--test p1_doc_race', '--test p2_cancel_matrix', '--test p3_detached_jobs',
+            '--test p1_doc_race', '--test p1_editor_buffer', '--test p2_cancel_matrix', '--test p3_detached_jobs',
             '--test p4_schema_isolation', '--test p5_prefix_stability', '--test p6_crash_resume',
             '--test p7_tui --test p7_tsp', '--test p12_daemon_approvals --test p9_continuation_grants', '--test p9_extension_isolation',
             '--test p9_credential_placement', '--test p9_delegated_route', '--test p9_session_shell_isolation',
