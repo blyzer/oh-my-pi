@@ -57,6 +57,7 @@ registry_module.configure_manifest(
     tools=tuple(tools),
     hooks=tuple(hooks),
     capabilities=tuple(manifest["capabilities"]),
+    declarations=tuple(manifest["declarations"]),
 )
 
 step = "import omp_buildbuddy"
@@ -76,7 +77,17 @@ except BaseException as error:
 
 exec_rows = [row for row in rows if row.name == "exec"]
 assert len(exec_rows) == 1, [(row.name, row.family, row.rev) for row in rows]
-assert exec_rows[0].family == "buildbuddy" and exec_rows[0].rev == 1, exec_rows[0]
+row = exec_rows[0]
+assert row.family == "buildbuddy" and row.rev == 1, row
+# CONTROL (`seal_tool`) requires the row to match its manifest declaration: the
+# same `soft` kind and the declared module, and a `{name}@{family}.{rev}` key
+# present in the manifest. A sub-module such as `omp_buildbuddy.devices`, where
+# the parent is created, would be refused.
+declared = next(r for r in manifest["declarations"] if r["id"] == "exec")
+assert row.kind == declared["kind"] == "soft", (row.kind, declared)
+assert row.source_module == declared["module"], (row.source_module, declared)
+assert f"{row.name}@{row.family}.{row.rev}" == declared["key"], (row, declared)
+assert str(row.place) == "host", row.place
 "#;
 
 #[test]
