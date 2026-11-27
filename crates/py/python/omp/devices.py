@@ -897,6 +897,7 @@ class DynamicDeviceParent:
     family: str
     rev: int
     place: str
+    effects: Effects | None = None
 
     def path(self, subpath: str) -> str:
         """Return the canonical absolute path for one relative leaf."""
@@ -986,8 +987,15 @@ class Devices:
         family: str,
         rev: int,
         place: str = "host",
+        effects: Effects | None = None,
     ) -> DynamicDeviceParent:
-        """Declare a manifest-backed dynamic parent during IMPORT."""
+        """Declare a manifest-backed dynamic parent during IMPORT.
+
+        ``effects`` is the maximum effect envelope of every leaf mounted below
+        the parent. Without it the parent is a tool that declares no effects, and
+        its leaves get only what the host's tier allows by default, which has no
+        network.
+        """
         try:
             parsed_place = Place.parse(place)
         except (TypeError, ValueError) as error:
@@ -996,8 +1004,10 @@ class Devices:
             raise TypeError("dynamic device family must be a string")
         if not isinstance(rev, int) or isinstance(rev, bool):
             raise TypeError("dynamic device rev must be int")
+        if effects is not None and not isinstance(effects, Effects):
+            raise TypeError("dynamic device effects must be omp.Effects or None")
         parent = DynamicDeviceParent(
-            _segment(name), family, rev, str(parsed_place)
+            _segment(name), family, rev, str(parsed_place), effects
         )
         registry.register_tool(parent.name, parent.family, parent.rev, parent)
         return parent
