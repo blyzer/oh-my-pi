@@ -4,7 +4,7 @@ version = "0.1.0"
 omp_api = 1
 description = "BuildBuddy REAPI profile data and Run API delegate (ADR 0040 Dimension 1)"
 entry = "omp_buildbuddy"
-capabilities = ["env.net.fetch"]
+capabilities = ["env.net", "env.net.fetch"]
 
 # BuildBuddy vendor integration extension. Provides:
 # - REAPI profile data (credential header, arch spelling, fixed properties)
