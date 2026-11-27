@@ -1286,6 +1286,84 @@ default = false
 		})
 	}
 
+	/// The in-tree extensions whose Python source calls a DATA HTTP operation.
+	fn in_tree_http_callers() -> Vec<PathBuf> {
+		const CALLS: [&str; 3] = ["omp.env.http_get(", "omp.env.http_post(", "omp.env.http_put("];
+
+		fn calls_http(directory: &Path) -> bool {
+			let Ok(entries) = fs::read_dir(directory) else {
+				return false;
+			};
+			entries.flatten().any(|entry| {
+				let path = entry.path();
+				if path.is_dir() {
+					return path.file_name().is_some_and(|name| name != "tests") && calls_http(&path);
+				}
+				path.extension().is_some_and(|extension| extension == "py")
+					&& fs::read_to_string(&path)
+						.is_ok_and(|text| CALLS.iter().any(|call| text.contains(call)))
+			})
+		}
+
+		let extensions = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+		let mut callers = fs::read_dir(&extensions)
+			.expect("the in-tree extensions directory")
+			.flatten()
+			.map(|entry| entry.path())
+			.filter(|root| root.join("omp.toml").is_file() && calls_http(&root.join("src")))
+			.collect::<Vec<_>>();
+		callers.sort();
+		callers
+	}
+
+	/// The DATA gate serves an HTTP request only to an extension holding
+	/// `env.net` (`crates/envd/src/server/forward.rs`). `env.net.fetch` is not
+	/// a DATA capability: `Grants::supported` drops it, so a manifest that
+	/// declares only that name is admitted with no network grant and every
+	/// request it makes is denied. This admits the real in-tree manifests, not
+	/// copies of them.
+	#[test]
+	fn in_tree_extensions_that_call_http_operations_hold_env_net() {
+		let callers = in_tree_http_callers();
+		assert!(
+			!callers.is_empty(),
+			"no in-tree extension calls an HTTP operation any more: this test is stale"
+		);
+		let mut without_network = Vec::new();
+		for root in callers {
+			let tree = tempfile::tempdir().expect("tree");
+			let admitted = admit_native_extensions(tree.path(), tree.path(), NativeAdmissionOptions {
+				explicit_roots:    std::slice::from_ref(&root),
+				mode:              NativeLoadMode::ExplicitOnly,
+				include_workspace: false,
+				setting_overrides: &[],
+				disabled:          &[],
+			})
+			.unwrap_or_else(|error| panic!("{} was not admitted: {error:?}", root.display()));
+			let [extension] = admitted.as_slice() else {
+				panic!("{} admitted {} extensions, not one", root.display(), admitted.len());
+			};
+			if !extension.spec.data_grants.contains("env.net") {
+				without_network.push((
+					root
+						.file_name()
+						.map(|name| name.to_string_lossy().into_owned()),
+					extension
+						.spec
+						.data_grants
+						.iter()
+						.map(str::to_owned)
+						.collect::<Vec<_>>(),
+				));
+			}
+		}
+		assert!(
+			without_network.is_empty(),
+			"these extensions call an HTTP operation but are not granted `env.net` (name, grants \
+			 held); declare `env.net` next to `env.net.fetch`: {without_network:?}"
+		);
+	}
+
 	#[test]
 	fn native_tool_declarations_lower_as_name_family_rev() {
 		let admitted = admit_demo_rows(

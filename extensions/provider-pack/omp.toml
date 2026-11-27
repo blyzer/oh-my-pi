@@ -41,6 +41,3 @@ key = "ovhai@0"
 trigger = "lazy"
 api = 1
 failure = "fault"
-
-[requires]
-python = ">=3.14"

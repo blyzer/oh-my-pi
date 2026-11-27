@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -105,6 +106,22 @@ class GuardTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 guard.main(["admit", "--request-file", "/nonexistent"])
         load.assert_called_once_with("/nonexistent")
+
+    def test_refusal_names_the_stage_and_error_type_but_never_the_error_text(self):
+        # The worker runs this file as a process, and the only thing the job log
+        # shows is its stderr. A refusal must say where it happened, so a failed
+        # run can be told apart from another, without echoing the error text:
+        # API diagnostics, paths and command values can carry tokens.
+        secret = "SECRET-TOKEN-4242"
+        done = subprocess.run(
+            [sys.executable, guard.__file__, "admit", "--request-file", f"/nonexistent/{secret}"],
+            capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")},
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("macOS worker admission or objective failed", done.stderr)
+        self.assertIn("stage: load request", done.stderr)
+        self.assertIn("error type: FileNotFoundError", done.stderr)
+        self.assertNotIn(secret, done.stderr + done.stdout)
 
     def test_transient_failure_expires_exactly_at_lease_deadline(self):
         clock = Clock()

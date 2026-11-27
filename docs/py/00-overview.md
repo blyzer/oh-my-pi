@@ -412,6 +412,8 @@ Everything in this section lives at the package root: `import omp`.
 
 This is what makes lazy spawn possible, and it is the same principle as ADMIT-before-IMPORT one step further: you cannot run code to find out what code offers, if the whole point is to avoid running it. Detail that genuinely requires import — the full JSON schema, docs, examples — is fetched by `dyn <name> --help`, which may boot the child. That is a deliberate model action and an acceptable place to pay for a boot.
 
+> **Note** This is the design-time layout, and the parser the product runs does not accept it as written. That parser reads declarations as `[[declarations]]` rows, each setting as a `[settings.<name>]` table with a `type` of `string`, `number`, `boolean` or `enum`, and `requires` as a list of requirements, not a table. A setting whose default is a table or a list cannot be written yet. See `crates/ext/tests/first_party_manifests.rs`.
+
 ```toml
 id          = "dev.example.lint"
 name        = "Lint Gate"
