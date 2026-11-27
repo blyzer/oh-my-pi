@@ -229,9 +229,15 @@ ci-p7-linux:
 lint-editing-discipline:
     python3 scripts/check-editing-discipline.py
 
+# Fail when a proof in crates/e2e/tests is not run by `just e2e` and by a CI job. AGENTS.md: every
+# proof is gated in CI, and ci.yml and `just e2e` stay in step (CI: the `Rust format` job).
+[group('format & lint')]
+check-e2e-wiring:
+    python3 scripts/check-e2e-wiring.py
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
-lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet lint-editing-discipline
+lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet lint-editing-discipline check-e2e-wiring
 
 # ---------------------------------------------------------------------------
 # Build & check
@@ -349,6 +355,7 @@ e2e-core:
     cargo nextest run -p omp-e2e --locked \
         --lib \
         --test p1_doc_race \
+        --test p1_editor_buffer \
         --test p2_cancel_matrix \
         --test p3_detached_jobs \
         --test p4_schema_isolation \

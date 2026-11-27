@@ -125,6 +125,10 @@ jobs:
         run: python3 scripts/test_affected_crates.py
       - name: Check the editing discipline of repo text
         run: python3 scripts/check-editing-discipline.py
+      - name: Check every e2e proof is run by `just e2e` and by CI
+        run: python3 scripts/check-e2e-wiring.py
+      - name: Test the e2e wiring check
+        run: python3 scripts/test_check_e2e_wiring.py
 
   # crates/proto/proto holds the wire contracts other processes speak. `just lint`
   # and `just fmt-check` already run buf locally; this is the CI half. The binary is
