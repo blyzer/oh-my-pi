@@ -190,12 +190,27 @@ impl EnvHarness {
 		executable: &Path,
 		docserver_socket: &Path,
 	) -> Result<ProcessEnvHarness> {
+		Self::spawn_attached_with_data_dir(scratch, executable, docserver_socket, None).await
+	}
+
+	/// [`Self::spawn_attached`] with the daemon's data directory (the one whose
+	/// `ext/` holds the grant store) placed at `data_dir` instead of under the
+	/// scratch home. A proof uses it to put that directory inside, or outside,
+	/// the sandbox's writable roots.
+	pub async fn spawn_attached_with_data_dir(
+		scratch: &Scratch,
+		executable: &Path,
+		docserver_socket: &Path,
+		data_dir: Option<&Path>,
+	) -> Result<ProcessEnvHarness> {
 		install_omp_binary_env().context("exposing worker-capable host")?;
 		let socket = scratch.socket("env-attached.sock");
 		let home = scratch.root().join("home");
 		for root in ["config", "data", "state", "cache"] {
 			fs::create_dir_all(home.join(root)).context("creating isolated daemon home")?;
 		}
+		let data_dir = data_dir.map_or_else(|| home.join("data"), Path::to_path_buf);
+		fs::create_dir_all(&data_dir).context("creating the daemon data directory")?;
 		let mut command = Command::new(executable);
 		command
 			.arg("envd")
@@ -209,7 +224,7 @@ impl EnvHarness {
 			.arg(scratch.state())
 			.env("HOME", &home)
 			.env("OMP_CONFIG_DIR", home.join("config"))
-			.env("OMP_DATA_DIR", home.join("data"))
+			.env("OMP_DATA_DIR", &data_dir)
 			.env("OMP_STATE_DIR", home.join("state"))
 			.env("OMP_CACHE_DIR", home.join("cache"));
 		let process = OwnedProcess::spawn(command).context("starting attached environment daemon")?;
