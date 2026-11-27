@@ -886,7 +886,11 @@ class DeclarationRegistry:
                 continue
             definition = self._device_definitions.get(key)
             if definition is None:
-                raise RuntimeError(f"sealed tool {key!r} has no worker projection")
+                parent_row = self._project_dynamic_parent(key, control_key)
+                if parent_row is None:
+                    raise RuntimeError(f"sealed tool {key!r} has no worker projection")
+                projected.append(parent_row)
+                continue
             body = definition.body
             source_module = getattr(body, "__module__", "")
             if not isinstance(source_module, str) or not source_module:
@@ -916,6 +920,54 @@ class DeclarationRegistry:
                 )
             )
         return tuple(projected)
+
+    def _project_dynamic_parent(
+        self, key: _ToolKey, control_key: _ToolKey
+    ) -> WorkerToolDefinition | None:
+        """Project a dynamic device parent; return None for any other tool.
+
+        A parent has no body: its leaves are mounted at runtime and run from the
+        dynamic bodies. CONTROL admits a mount only when the parent is in the
+        sealed evidence, and it requires the row to name the module of the
+        manifest declaration it came from, so the row takes that module.
+        """
+
+        from .devices import DeviceUnavailable, DynamicDeviceParent
+
+        parent = self._tools[key]
+        if not isinstance(parent, DynamicDeviceParent):
+            return None
+        static_key = _manifest_tool_static_key(control_key)
+        declaration = self._manifest_executables.get(("soft", static_key))
+        if declaration is None:
+            raise RuntimeError(
+                f"dynamic device parent {key!r} has no `soft` row in the manifest; "
+                f"its omp.toml key must be {static_key!r}"
+            )
+        summary = f"Parent of the {parent.name} devices mounted at runtime."
+
+        async def refuse(params: Mapping[str, object], context: object) -> object:
+            raise DeviceUnavailable(
+                f"{parent.name!r} is a dynamic device parent; call one of its mounted leaves"
+            )
+
+        return WorkerToolDefinition(
+            name=control_key[0],
+            family=control_key[1],
+            rev=control_key[2],
+            description=summary,
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
+            strict=None,
+            streams_args=False,
+            handler=refuse,
+            source_module=declaration.module,
+            kind=declaration.kind,
+            place=parent.place,
+            effects=None,
+            constraint=None,
+            serial=False,
+            summary=summary,
+        )
 
     def register_child_device(
         self,
