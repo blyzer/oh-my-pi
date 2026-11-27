@@ -9,6 +9,3 @@ capabilities = ["env.net.fetch"]
 # Backend only — do not declare a forge or ci parent here. Dyn adapters call
 # fixed paths; a second mount owner would collide. See extensions/forge/,
 # extensions/ci/, and extensions/WAVE1.md.
-
-[requires]
-python = ">=3.14"

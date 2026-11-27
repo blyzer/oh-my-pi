@@ -6,11 +6,18 @@ description = "Route durable approval tickets to a remote phone or watch service
 entry = "omp_remote_approve"
 capabilities = ["env.net.fetch", "schedules:project"]
 
-[requires]
-python = ">=3.14"
+[settings.webhook]
+type = "string"
+default = "https://approvals.example.invalid/omp"
 
-[settings]
-webhook = "https://approvals.example.invalid/omp"
-poll_interval = "30s"
-unreachable = "ask"
-allow_fail_open = false
+[settings.poll_interval]
+type = "string"
+default = "30s"
+
+[settings.unreachable]
+type = "string"
+default = "ask"
+
+[settings.allow_fail_open]
+type = "boolean"
+default = false

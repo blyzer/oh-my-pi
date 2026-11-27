@@ -30,9 +30,6 @@ phase = "observe"
 order = 40
 failure = "fail-open"
 
-[requires]
-python = ">=3.14"
-
 [settings]
 tips = [
   "Use /help to discover commands without leaving the composer.",

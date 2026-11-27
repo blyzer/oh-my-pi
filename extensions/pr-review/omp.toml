@@ -17,9 +17,6 @@ trigger = "lazy"
 api = 1
 failure = "fail-closed"
 
-[requires]
-python = ">=3.14"
-
 [settings]
 areas = [
   { area = "correctness", model = "@slow", thinking = "hi", max_requests = 6, max_input_tokens = 160000, max_output_tokens = 24000, max_usd = 4.0, max_wall = "15m" },
