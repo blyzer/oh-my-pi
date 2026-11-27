@@ -17,9 +17,9 @@ use omp_ext::config::DeploymentManifest;
 /// manifest that is not here must load, and one that is here and now loads must
 /// be removed.
 ///
-/// `SettingType` has `string`, `number`, `boolean` and `enum`, so a setting whose
-/// default is a table or a list cannot be written. Either the type grows an
-/// object and an array kind, or these extensions restructure their settings.
+/// `SettingType` has `string`, `number`, `boolean` and `enum`, so a setting
+/// whose default is a table or a list cannot be written. Either the type grows
+/// an object and an array kind, or these extensions restructure their settings.
 const NOT_YET_LOADABLE: [(&str, &str); 3] = [
 	("green-loop", "`settings.affected` defaults to a table of tables"),
 	("pr-review", "`settings.areas` defaults to a list of tables"),
