@@ -1,7 +1,7 @@
 //! The real `omp_buildbuddy` extension must seal and project its dynamic
 //! `exec` parent into a runnable CONTROL row.
 //!
-//! The extension declares one soft tool `exec@.1` in its manifest and registers
+//! The extension declares its `exec` tool in `omp.toml` and registers
 //! `omp.devices.parent("exec", family="buildbuddy", rev=1)` at import. The Rust
 //! side admits a dynamic mount only when that parent is in the sealed
 //! registration evidence, and that evidence comes from
@@ -13,6 +13,7 @@ use std::ffi::CString;
 
 use omp_py::Engine;
 
+const EXTENSION_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../extensions/buildbuddy");
 const EXTENSION_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../extensions/buildbuddy/src");
 
 const SCRIPT: &str = r#"
@@ -33,14 +34,29 @@ omp.packages._install_snapshot(
     }],
     own="omp.buildbuddy",
 )
-# The two rows of extensions/buildbuddy/omp.toml, in the form the host hands to
-# `configure_manifest`: the soft tool `exec@.1` and the `extension_activate`
-# observer hook.
+# The rows of extensions/buildbuddy/omp.toml, read from the real file and put in
+# the form the host hands to `configure_manifest`: a `soft` or `hard` row is a
+# tool `name@family.rev`, and a `hook` row is `event/phase`. A manifest that
+# names a different identity than the code registers must fail here.
+import tomllib
+
+with open("@EXTENSION_ROOT@/omp.toml", "rb") as handle:
+    manifest = tomllib.load(handle)
+tools, hooks = [], []
+for row in manifest["declarations"]:
+    if row["kind"] in ("soft", "hard"):
+        name, tail = row["key"].rsplit("@", 1)
+        family, rev = tail.rsplit(".", 1)
+        tools.append((name, family, int(rev)))
+    elif row["kind"] == "hook":
+        event, phase = row["key"].split("/", 1)
+        hooks.append((event, phase))
+assert tools and hooks, manifest["declarations"]
 registry_module.configure_manifest(
-    extension="omp.buildbuddy",
-    tools=(("exec", "", 1),),
-    hooks=(("extension_activate", "observe"),),
-    capabilities=("env.net", "env.net.fetch"),
+    extension=manifest["id"],
+    tools=tuple(tools),
+    hooks=tuple(hooks),
+    capabilities=tuple(manifest["capabilities"]),
 )
 
 step = "import omp_buildbuddy"
@@ -65,8 +81,12 @@ assert exec_rows[0].family == "buildbuddy" and exec_rows[0].rev == 1, exec_rows[
 
 #[test]
 fn the_real_buildbuddy_exec_parent_projects_to_a_control_row() {
-	let script = CString::new(SCRIPT.replace("@EXTENSION_SRC@", EXTENSION_SRC))
-		.expect("script has no NUL byte");
+	let script = CString::new(
+		SCRIPT
+			.replace("@EXTENSION_SRC@", EXTENSION_SRC)
+			.replace("@EXTENSION_ROOT@", EXTENSION_ROOT),
+	)
+	.expect("script has no NUL byte");
 	let engine = Engine::builder().init().expect("embedded Python boots");
 	engine
 		.attach(|py| py.run(script.as_c_str(), None, None))
