@@ -1,47 +1,47 @@
-//! The real `omp_buildbuddy` extension must seal and project its dynamic
-//! `exec` parent into a runnable CONTROL row.
+//! Every in-tree extension that registers a dynamic device parent must seal
+//! and project it into a runnable CONTROL row.
 //!
-//! The extension declares its `exec` tool in `omp.toml` and registers
-//! `omp.devices.parent("exec", family="buildbuddy", rev=1)` at import. The Rust
-//! side admits a dynamic mount only when that parent is in the sealed
-//! registration evidence, and that evidence comes from
-//! `DeclarationRegistry.worker_tool_definitions()`. No other test seals the
-//! real extension, so this is the only place a parent that cannot be projected
-//! would show.
+//! An extension declares its tool in `omp.toml` and registers
+//! `omp.devices.parent(...)` at import. The Rust side admits a dynamic mount
+//! only when that parent is in the sealed registration evidence, and that
+//! evidence comes from `DeclarationRegistry.worker_tool_definitions()`. No
+//! other test seals the real extensions, so this is the only place a parent
+//! that cannot be projected would show.
+//!
+//! Each case reads the rows of the extension's own `omp.toml`, so a manifest
+//! that names a different identity than the code registers fails here.
 
 use std::ffi::CString;
 
 use omp_py::Engine;
 
-const EXTENSION_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../extensions/buildbuddy");
-const EXTENSION_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../extensions/buildbuddy/src");
-
 const SCRIPT: &str = r#"
 import sys
 
-sys.path.insert(0, "@EXTENSION_SRC@")
+sys.path.insert(0, "@EXTENSION_ROOT@/src")
+
+import importlib
+import tomllib
 
 import omp
 import omp._registry as registry_module
 
-omp.packages._install_snapshot(
-    [{
-        "name": "omp-buildbuddy",
-        "version": "0.1.0",
-        "extension_id": "omp.buildbuddy",
-        "root": "/omp-buildbuddy",
-        "files": (),
-    }],
-    own="omp.buildbuddy",
-)
-# The rows of extensions/buildbuddy/omp.toml, read from the real file and put in
-# the form the host hands to `configure_manifest`: a `soft` or `hard` row is a
-# tool `name@family.rev`, and a `hook` row is `event/phase`. A manifest that
-# names a different identity than the code registers must fail here.
-import tomllib
-
 with open("@EXTENSION_ROOT@/omp.toml", "rb") as handle:
     manifest = tomllib.load(handle)
+
+omp.packages._install_snapshot(
+    [{
+        "name": manifest["id"],
+        "version": manifest["version"],
+        "extension_id": manifest["id"],
+        "root": "/extension",
+        "files": (),
+    }],
+    own=manifest["id"],
+)
+# The rows of omp.toml in the form the host hands to `configure_manifest`: a
+# `soft` or `hard` row is a tool `name@family.rev`, and a `hook` row is
+# `event/phase`.
 tools, hooks = [], []
 for row in manifest["declarations"]:
     if row["kind"] in ("soft", "hard"):
@@ -51,18 +51,18 @@ for row in manifest["declarations"]:
     elif row["kind"] == "hook":
         event, phase = row["key"].split("/", 1)
         hooks.append((event, phase))
-assert tools and hooks, manifest["declarations"]
+assert tools, manifest["declarations"]
 registry_module.configure_manifest(
     extension=manifest["id"],
     tools=tuple(tools),
     hooks=tuple(hooks),
-    capabilities=tuple(manifest["capabilities"]),
+    capabilities=tuple(manifest.get("capabilities", ())),
     declarations=tuple(manifest["declarations"]),
 )
 
-step = "import omp_buildbuddy"
+step = "import " + manifest["entry"]
 try:
-    import omp_buildbuddy  # noqa: F401  (registers EXEC_PARENT and the hook)
+    importlib.import_module(manifest["entry"])  # registers the parent and its hook
 
     step = "freeze_declarations"
     registry_module.freeze_declarations()
@@ -71,35 +71,51 @@ try:
     rows = registry_module.registry.worker_tool_definitions()
 except BaseException as error:
     raise AssertionError(
-        f"the real buildbuddy extension fails at `{step}`: "
-        f"{type(error).__name__}: {error}"
+        f"{manifest['id']} fails at `{step}`: {type(error).__name__}: {error}"
     ) from error
 
-exec_rows = [row for row in rows if row.name == "exec"]
-assert len(exec_rows) == 1, [(row.name, row.family, row.rev) for row in rows]
-row = exec_rows[0]
-assert row.family == "buildbuddy" and row.rev == 1, row
-# CONTROL (`seal_tool`) requires the row to match its manifest declaration: the
-# same `soft` kind and the declared module, and a `{name}@{family}.{rev}` key
-# present in the manifest. A sub-module such as `omp_buildbuddy.devices`, where
-# the parent is created, would be refused.
-declared = next(r for r in manifest["declarations"] if r["id"] == "exec")
-assert row.kind == declared["kind"] == "soft", (row.kind, declared)
-assert row.source_module == declared["module"], (row.source_module, declared)
-assert f"{row.name}@{row.family}.{row.rev}" == declared["key"], (row, declared)
-assert str(row.place) == "host", row.place
+# CONTROL (`seal_tool`) requires each row to match its manifest declaration: the
+# same kind and module, and a `{name}@{family}.{rev}` key present in the
+# manifest. A sub-module such as the one where the parent is created would be
+# refused.
+for declared in manifest["declarations"]:
+    if declared["kind"] not in ("soft", "hard"):
+        continue
+    matching = [
+        row
+        for row in rows
+        if f"{row.name}@{row.family}.{row.rev}" == declared["key"]
+    ]
+    assert len(matching) == 1, (declared, [(r.name, r.family, r.rev) for r in rows])
+    row = matching[0]
+    assert row.kind == declared["kind"], (row.kind, declared)
+    assert row.source_module == declared["module"], (row.source_module, declared)
+    assert str(row.place) == "host", row.place
 "#;
 
-#[test]
-fn the_real_buildbuddy_exec_parent_projects_to_a_control_row() {
-	let script = CString::new(
-		SCRIPT
-			.replace("@EXTENSION_SRC@", EXTENSION_SRC)
-			.replace("@EXTENSION_ROOT@", EXTENSION_ROOT),
-	)
-	.expect("script has no NUL byte");
+fn seal_and_project(extension: &str) {
+	let root = format!("{}/../../extensions/{extension}", env!("CARGO_MANIFEST_DIR"));
+	let script =
+		CString::new(SCRIPT.replace("@EXTENSION_ROOT@", &root)).expect("script has no NUL byte");
 	let engine = Engine::builder().init().expect("embedded Python boots");
 	engine
 		.attach(|py| py.run(script.as_c_str(), None, None))
-		.expect("the real buildbuddy extension seals and projects its dynamic parent");
+		.unwrap_or_else(|error| {
+			panic!("the real {extension} extension seals and projects its dynamic parent: {error}")
+		});
+}
+
+#[test]
+fn the_real_buildbuddy_exec_parent_projects_to_a_control_row() {
+	seal_and_project("buildbuddy");
+}
+
+#[test]
+fn the_real_ci_parent_projects_to_a_control_row() {
+	seal_and_project("ci");
+}
+
+#[test]
+fn the_real_forge_parent_projects_to_a_control_row() {
+	seal_and_project("forge");
 }
