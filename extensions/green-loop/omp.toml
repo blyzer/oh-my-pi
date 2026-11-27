@@ -15,9 +15,6 @@ trigger = "lazy"
 api = 1
 failure = "fault"
 
-[requires]
-python = ">=3.14"
-
 [settings]
 idle = "20s"
 timeout = "10m"

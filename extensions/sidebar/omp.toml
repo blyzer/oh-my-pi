@@ -19,6 +19,3 @@ queue = 256
 overflow = "coalesce_by_key"
 replay = true
 replay_limit = 512
-
-[requires]
-python = ">=3.14"
