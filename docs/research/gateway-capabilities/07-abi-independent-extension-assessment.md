@@ -129,7 +129,7 @@ Cards use the capability-card template from [`evidence/01-method-and-dimension-i
 **Actual missing capability:** One closed, versioned vocabulary shared by `omp-ext` and the host, with unknown names refused at install and shown in `omp ext info --capabilities`.
 **Alternatives considered:** Leave names free-form (current); split DATA, CONTROL and UI vocabularies per owner.
 **Expected benefit:** Security (a declared name always means something) and reliability.
-**Implementation complexity:** medium: crosses `omp-ext` and `omp-envd`; touches 7 shipped manifests (count from `extensions/*/omp.toml`).
+**Implementation complexity:** medium: crosses `omp-ext` and `omp-envd`; 12 of the 17 shipped manifests declare at least one name outside the 15 DATA names (counted from `extensions/*/omp.toml`; 8 distinct names). Some may belong to a UI, placement or schedule vocabulary that was not traced here.
 **Security implications:** Directly supports ADR 0076 scoped grants.
 **Maintenance cost:** Low once centralized.
 **Performance measurement strategy:** not applicable.
@@ -169,7 +169,7 @@ Cards use the capability-card template from [`evidence/01-method-and-dimension-i
 **Decision class:** Suitable as an external integration
 **Existing implementation evidence:** Configured endpoints and OmniRoute or CLIProxyAPI examples are treated as ordinary routes (`docs/research/native-resource-architecture/04-providers-context-and-allocation.md:93-99`); MCP stdio and `Delegated` adapters (`delegated_acp.rs:1-33`); `ExecutorId`/`AcpProfile` launch profiles disabled until an operator names a program.
 **Actual missing capability:** None in the extension system. A provider with a bespoke wire protocol runs as its own gateway process that OMP2 reaches with a declarative route.
-**Alternatives considered:** Executable native extension class (EXT-10); Wasm (EXT-09).
+**Alternatives considered:** Executable native extension class (EXT-11); Wasm (EXT-10).
 **Expected benefit:** Keeps the locked deviation intact; isolates unreviewed code in a separate OS process.
 **Implementation complexity:** low (documentation and an example).
 **Security implications:** The operator owns the process and its credentials; Provider terms apply to what that gateway does.
