@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	Y	Guest bindings generators from WIT for C, C++, C#, D, Go, Rust and MoonBit; build-time tool, no runtime	bytecodealliance/wit-bindgen@e3b53be:README.md; bytecodealliance/wit-bindgen@e3b53be:crates
+X02	Y	WIT files specify imports and exports; the generator lowers them to flat Wasm signatures	bytecodealliance/wit-bindgen@e3b53be:crates/core/src/abi.rs:WasmSignature
+X03	N	No registry or distribution; tool only	bytecodealliance/wit-bindgen@e3b53be:README.md
+X04	N	No signing or integrity features	bytecodealliance/wit-bindgen@e3b53be:README.md
+X05	N	No isolation of its own; isolation comes from the Wasm host	bytecodealliance/wit-bindgen@e3b53be:crates/guest-rust/NATIVE.md:3
+X06	N	Not applicable to a bindings generator	bytecodealliance/wit-bindgen@e3b53be:README.md
+X07	N	No health reporting	bytecodealliance/wit-bindgen@e3b53be:README.md
+X08	N	No upgrade or rollback	bytecodealliance/wit-bindgen@e3b53be:README.md
+X09	P	Same guest crate also compiles for native targets with encoded export symbols; Wasm remains the portable form	bytecodealliance/wit-bindgen@e3b53be:crates/guest-rust/NATIVE.md:16
+X10	N	Dependencies are expressed in WIT packages by the host toolchain; not examined in code	bytecodealliance/wit-bindgen@e3b53be:README.md
+X11	D	WIT and the Component Model define interface versions; code not read	bytecodealliance/wit-bindgen@e3b53be:README.md

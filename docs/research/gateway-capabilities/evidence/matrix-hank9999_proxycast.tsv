@@ -1,0 +1,85 @@
+dim_id	status	note	evidence
+G01	P	ProviderType is a fixed Rust enum; adding a provider needs code	hank9999/proxycast@3ad8ff6:src-tauri/src/lib.rs:ProviderType
+G02	P	Alias to model via ModelMapper; a hardcoded Kiro model map lives in converter code	hank9999/proxycast@3ad8ff6:src-tauri/src/router/mapper.rs;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_cw.rs:get_model_map
+G03	Y	Alias resolution before routing in RequestProcessor	hank9999/proxycast@3ad8ff6:src-tauri/src/processor/mod.rs:resolve_and_route;hank9999/proxycast@3ad8ff6:src-tauri/src/router/mapper.rs
+G04	P	Vertex credentials carry per-credential alias maps	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:CredentialData
+G05	U	Not examined in this pass	
+G06	U	Not examined in this pass	
+G07	U	Not examined in this pass	
+G08	P	Per-credential not_supported_models, wildcard excluded_models, hardcoded Antigravity model list	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:supports_model;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_cw.rs:get_supported_models
+G09	Y	Each CredentialData variant encodes whether it is an OAuth file or an API key	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:CredentialData
+G10	U	Not examined in this pass	
+G11	U	Not examined in this pass	
+A01	Y	API keys held in the SQLite pool as plain String fields; grep encrypt|aes|keyring|chacha in src-tauri/src found nothing	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:CredentialData
+A02	Y	OAuth flows for Kiro, Gemini, Qwen, Antigravity, Codex, Claude, iFlow	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/codex.rs:20;hank9999/proxycast@3ad8ff6:src-tauri/src/providers/claude_oauth.rs:26;hank9999/proxycast@3ad8ff6:src-tauri/src/providers/antigravity.rs:661
+A03	Y	Device-code flow for Qwen	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/qwen.rs:335
+A04	P	Reads another client's token cache (~/.aws/sso/cache/kiro-auth-token.json) instead of delegating to its CLI	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/kiro.rs:default_creds_path
+A05	P	OAuth credentials referenced by file path; API keys inline	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:CredentialData
+A06	N	grep keyring|encrypt|aes|chacha over src-tauri/src returned no hits; no OS keychain use	
+A07	P	Refresh is &mut self per credential object with retry; no cross-process lease read	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/traits.rs:TokenManager
+A08	Y	Expiring-soon check (5 min) and ensure_valid_token with retried refresh	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/traits.rs:is_token_expiring_soon;hank9999/proxycast@3ad8ff6:src-tauri/src/providers/traits.rs:ensure_valid_token
+A09	U	Not examined in this pass	
+A10	U	Not examined in this pass	
+A11	P	README markets reusing one's own client subscription credentials in other tools; entitlement terms not checked	hank9999/proxycast@3ad8ff6:README.md:21-27
+A12	U	Not examined in this pass	
+S01	Y	Round robin, least used, random, plus a 100-point weighted score (health 40, usage 30, idle time)	hank9999/proxycast@3ad8ff6:src-tauri/src/credential/balancer.rs:BalanceStrategy;hank9999/proxycast@3ad8ff6:src-tauri/src/services/provider_pool_service.rs:calculate_credential_score
+S02	Y	Available = healthy and not disabled, then supports_model filter	hank9999/proxycast@3ad8ff6:src-tauri/src/models/provider_pool_model.rs:is_available;hank9999/proxycast@3ad8ff6:src-tauri/src/services/provider_pool_service.rs:select_credential
+S03	Y	Error count threshold flips is_healthy; HealthChecker module	hank9999/proxycast@3ad8ff6:src-tauri/src/services/provider_pool_service.rs:341;hank9999/proxycast@3ad8ff6:src-tauri/src/credential/health.rs:HealthStatus
+S04	U	Not examined in this pass	
+S05	U	Not examined in this pass	
+S06	P	Pattern/priority routing rules map model names to a provider; per-credential model support	hank9999/proxycast@3ad8ff6:src-tauri/src/router/rules.rs;hank9999/proxycast@3ad8ff6:src-tauri/src/processor/mod.rs:resolve_and_route
+S07	U	Not examined in this pass	
+S08	U	Not examined in this pass	
+S09	P	Cooldown marking and FailoverManager exist; HTTP handlers call select_credential once and no caller of execute_with_resilience found	hank9999/proxycast@3ad8ff6:src-tauri/src/credential/balancer.rs:mark_cooldown;hank9999/proxycast@3ad8ff6:src-tauri/src/resilience/failover.rs:Failover;hank9999/proxycast@3ad8ff6:src-tauri/src/server/handlers/api.rs:705
+S10	U	Not examined in this pass	
+S11	U	Not examined in this pass	
+S12	P	Retrier with backoff and jitter is defined; one Kiro refresh-and-retry is inline in handler	hank9999/proxycast@3ad8ff6:src-tauri/src/resilience/retry.rs:backoff_delay_with_jitter;hank9999/proxycast@3ad8ff6:src-tauri/src/server/handlers/api.rs:1203
+S13	Y	FailureType: QuotaExceeded, AuthenticationFailed, ServiceUnavailable, Other, detected from status plus message text	hank9999/proxycast@3ad8ff6:src-tauri/src/resilience/failover.rs:FailureType::detect
+S14	U	Not examined in this pass	
+T01	Y	Typed ChatCompletionRequest handler	hank9999/proxycast@3ad8ff6:src-tauri/src/server/handlers/api.rs:chat_completions
+T02	P	Codex upstream uses /v1/responses; no inbound Responses route in the route table read	hank9999/proxycast@3ad8ff6:src-tauri/src/providers/codex.rs:1476;hank9999/proxycast@3ad8ff6:src-tauri/src/server/mod.rs:842
+T03	Y	Anthropic Messages in, converted to OpenAI types	hank9999/proxycast@3ad8ff6:src-tauri/src/server/handlers/api.rs:anthropic_messages;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/anthropic_to_openai.rs:convert_anthropic_to_openai
+T04	P	/v1/gemini/*path route plus Gemini provider; handler body not read	hank9999/proxycast@3ad8ff6:src-tauri/src/server/mod.rs:850
+T05	Y	CodeWhisperer (Kiro) and Antigravity wire formats	hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_cw.rs:convert_openai_to_codewhisperer;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_antigravity.rs:convert_openai_to_antigravity_with_context
+T06	P	Kiro thinking tags injected for thinking-enabled requests; Antigravity ThinkingConfig	hank9999/proxycast@3ad8ff6:src-tauri/src/converter/kiro_thinking.rs:ensure_kiro_thinking_tags;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_antigravity.rs:ThinkingConfig
+T07	U	Not examined in this pass	
+T08	Y	AWS EventStream parser to events to OpenAI chunks	hank9999/proxycast@3ad8ff6:src-tauri/src/streaming/aws_parser.rs:AwsEventStreamParser;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/cw_to_openai.rs:convert_cw_event_to_openai_chunk
+T09	U	Not examined in this pass	
+T10	U	Not examined in this pass	
+T11	U	Not examined in this pass	
+T12	Y	Pairwise converters around OpenAI as hub, typed Rust structs, serde_json::Value at the Antigravity boundary	hank9999/proxycast@3ad8ff6:src-tauri/src/converter/protocol_selector.rs:Protocol;hank9999/proxycast@3ad8ff6:src-tauri/src/converter/openai_to_antigravity.rs:365
+I01	Y	axum 0.7 server with TLS option	hank9999/proxycast@3ad8ff6:src-tauri/Cargo.toml:axum;hank9999/proxycast@3ad8ff6:src-tauri/src/server/mod.rs:run_server
+I02	Y	Byte-stream StreamingProvider trait over reqwest streams	hank9999/proxycast@3ad8ff6:src-tauri/src/streaming/traits.rs:StreamingProvider
+I03	Y	WebSocket endpoints /v1/ws and /ws	hank9999/proxycast@3ad8ff6:src-tauri/src/server/mod.rs:852;hank9999/proxycast@3ad8ff6:src-tauri/src/websocket/handler.rs
+I04	U	Not examined in this pass	
+I05	U	Not examined in this pass	
+I06	U	Not examined in this pass	
+I07	Y	AWS EventStream binary frames parsed for Kiro	hank9999/proxycast@3ad8ff6:src-tauri/src/streaming/aws_parser.rs:AwsEventStreamParser
+I08	U	Not examined in this pass	
+I09	U	Not examined in this pass	
+I10	U	Not examined in this pass	
+I11	U	Not examined in this pass	
+I12	U	Not examined in this pass	
+I13	U	Not examined in this pass	
+I14	U	Not examined in this pass	
+I15	P	Amp CLI router and client-type detection by headers	hank9999/proxycast@3ad8ff6:src-tauri/src/router/amp_router.rs;hank9999/proxycast@3ad8ff6:src-tauri/src/server/client_detector.rs
+E01	U	Not examined in this pass	
+E02	U	Not examined in this pass	
+E03	U	Not examined in this pass	
+E04	U	Not examined in this pass	
+E05	U	Not examined in this pass	
+E06	U	Not examined in this pass	
+E07	U	Not examined in this pass	
+E08	P	Per-credential HTTP clients with optional proxy via ProxyClientFactory	hank9999/proxycast@3ad8ff6:src-tauri/src/credential/balancer.rs:create_client_for_credential;hank9999/proxycast@3ad8ff6:src-tauri/src/proxy/client_factory.rs
+E09	U	Not examined in this pass	
+E10	Y	TokenTracker and tiktoken-rs based counting	hank9999/proxycast@3ad8ff6:src-tauri/src/telemetry/tokens.rs;hank9999/proxycast@3ad8ff6:src-tauri/Cargo.toml:tiktoken-rs
+E11	U	Not examined in this pass	
+E12	U	Not examined in this pass	
+O01	Y	Credential health and tray status	hank9999/proxycast@3ad8ff6:src-tauri/src/credential/health.rs:HealthStatus
+O02	U	Not examined in this pass	
+O03	P	StatsAggregator and TokenTracker in telemetry	hank9999/proxycast@3ad8ff6:src-tauri/src/telemetry/stats.rs
+O04	U	Not examined in this pass	
+O05	Y	Flow monitor records request/response flows with replay and export	hank9999/proxycast@3ad8ff6:src-tauri/src/flow_monitor/monitor.rs;hank9999/proxycast@3ad8ff6:src-tauri/src/flow_monitor/replayer.rs
+O06	Y	Tauri desktop UI plus /v0/management/* behind ManagementAuthLayer	hank9999/proxycast@3ad8ff6:src-tauri/src/server/mod.rs:802;hank9999/proxycast@3ad8ff6:src-tauri/src/middleware/management_auth.rs
+O07	P	Flow exporters including code exporter	hank9999/proxycast@3ad8ff6:src-tauri/src/flow_monitor/exporter.rs;hank9999/proxycast@3ad8ff6:src-tauri/src/flow_monitor/code_exporter.rs
+O08	N	Not an agent harness; no deterministic execution status	

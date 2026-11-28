@@ -1,0 +1,6 @@
+dim_id	status	note	evidence
+C02	D	Ingests SCIP and LSIF per README; glean/lang/scip and a Rust scip_to_glean CLI exist; their code was not read	facebookincubator/Glean@92ba871:README.md:Language coverage;glean/lang/scip/Glean/SCIP/Driver.hs
+C04	D	Fact store plus Angle query language for code facts; Haskell, C++, RocksDB, Thrift; read build files only	facebookincubator/Glean@92ba871:README.md;glean.cabal.in;install_deps.sh
+C05	U	Not examined	facebookincubator/Glean@92ba871:
+C18	D	Server mode (glean-server) is documented; sharing semantics not read	facebookincubator/Glean@92ba871:glean/website/docs/server.md
+C19	D	Databases are documented as the unit of revision; docs not read in depth	facebookincubator/Glean@92ba871:glean/website/docs/databases.md

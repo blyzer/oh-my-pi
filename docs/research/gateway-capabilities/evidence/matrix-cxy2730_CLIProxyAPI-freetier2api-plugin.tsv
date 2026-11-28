@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	Y	Zcode credentials hold an api_key or a JWT; README lists API-key account addition	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/vendors/zcode/login.go:ValidateCredential;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:24
+A02	Y	Per-vendor OAuth logins reproduced from vendor desktop clients, with local callback paste fallback	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/vendors/zcode/login.go:LoginPoll;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
+A03	D	README lists device authorization for WorkBuddy, Qoder, Cline and MiniMax Code; only zcode login code was read	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
+A04	N	No official-CLI delegation; each vendor client's login and request identity is reproduced	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/vendors/zcode/credential.go:NewDeviceProfile
+A05	P	Credentials are vendor JSON files in the host auth directory with tokens inline; plugin state file written 0600 by temp plus rename	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/state/state.go:435;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/hostbridge/auth.go:SaveAuth
+A06	N	Searched repository for keyring, keychain, dpapi, secret service: no match	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:.
+A07	Y	Per-account refresh gate serialises renewal and reuses a result when the token already changed; one orchestrator writes back	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:refreshGate;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:RefreshAccount
+A08	P	Zcode has no refresh token: validation is local only, to avoid a periodic upstream signal; other vendors not read	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/vendors/zcode/login.go:Refresh
+A09	P	Console re-login, batch enable, disable and delete, and a corrupt state file is quarantined	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/state/state.go:480
+A10	P	Scheduled keepalive task inside the plugin renews tokens ahead of use	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:Keepalive
+A11	P	Quota view per account and a daily check-in task that restores credits; automation of credit claiming across accounts	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/checkin.go;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/app/executor.go:handleQuotaReset
+A12	P	Separate cn and global vendor instances with isolated credentials	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
+G09	D	README table lists a login kind per vendor instance; credentials isolated per vendor; code not read	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
+G10	Y	Whole purpose is free-tier vendors; credit tracking and daily claims; pattern classified as rejected	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:19-29
+G11	P	Account identity from credential file name; aliases keyed by identity survive re-login; account count unlimited	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:127;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/hostbridge/auth.go:AccountIdentity
+S02	P	Account-level 10 minute cooldown after a 429 recorded in state	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:135
+O02	P	Console shows quota (README); keepalive results are returned as JSON	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:KeepaliveResult

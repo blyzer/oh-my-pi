@@ -1,0 +1,7 @@
+dim_id	status	note	evidence
+Z10	Y	gRPC over HTTP/2; default decode limit 4 MiB, send limit unbounded (code read)	hyperium/tonic@c7e68c5:tonic/src/codec/mod.rs
+I05	Y	Client and server codegen via tonic-prost-build	hyperium/tonic@c7e68c5:tonic-prost-build
+I06	Y	Prost codec crate `tonic-prost`	hyperium/tonic@c7e68c5:tonic-prost
+I08	Y	Streaming decode in codec (file read for limits only; streaming semantics from OMP use of `tonic::Streaming`)	hyperium/tonic@c7e68c5:tonic/src/codec/decode.rs
+Z01	N	Not applicable; tonic-web exists for browsers (listing only)	hyperium/tonic@c7e68c5:tonic-web
+I14	U	UDS support not examined in the clone; OMP uses local endpoints	hyperium/tonic@c7e68c5:README.md

@@ -1,0 +1,6 @@
+dim_id	status	note	evidence
+Z03	Y	Reader options default to 8 Mi words traversal and 64 nesting depth (code read)	capnproto/capnproto-rust@d53310e:capnp/src/message.rs
+Z08	D	Primitive lists and data blobs exist as modules; not benchmarked or read for tensor use	capnproto/capnproto-rust@d53310e:capnp/src/primitive_list.rs
+I05	D	capnp-rpc crate exists with its own RPC protocol; code not read	capnproto/capnproto-rust@d53310e:capnp-rpc/src/lib.rs
+I08	P	capnp-futures reads and writes messages asynchronously; not a bidirectional RPC stream in the gRPC sense (listing and signatures only)	capnproto/capnproto-rust@d53310e:capnp-futures/src/serialize.rs
+Z07	U	Mapped-file support not examined	capnproto/capnproto-rust@d53310e:capnp/src/serialize.rs

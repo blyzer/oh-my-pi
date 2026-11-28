@@ -1,0 +1,9 @@
+dim_id	status	note	evidence
+C02	Y	Proto defines the transmission format; Rust bindings parse and format symbols; scip CLI lints, prints, snapshots, stats	scip-code/scip@8fe5037:scip.proto:26 Index;bindings/rust/src/symbol.rs:170 parse_symbol;cmd/scip/main.go
+C03	Y	Rust binding writes messages to a file; README lists indexers that emit SCIP (rust-analyzer, scip-typescript, scip-python, others)	scip-code/scip@8fe5037:bindings/rust/src/mod.rs:write_message_to_file;README.md:Tools using SCIP
+C10	P	SymbolInformation carries documentation, signature, kind, enclosing symbol and relationships; no summaries	scip-code/scip@8fe5037:scip.proto:253 SymbolInformation
+C15	N	Not an IR for agents: DESIGN.md calls it a transmission format, not a storage or efficient navigation format	scip-code/scip@8fe5037:docs/DESIGN.md:Non-goals
+C16	N	Code modification is an explicit non-goal in DESIGN.md	scip-code/scip@8fe5037:docs/DESIGN.md:Non-goals
+C18	P	Package manager, name and version in each Symbol plus external_symbols allow cross-repo links; no sharing runtime	scip-code/scip@8fe5037:scip.proto:199 Package;scip.proto:26 Index
+C19	P	Metadata has project_root, tool_info, encoding; no commit or revision field. Document.text and position_encoding pin offsets	scip-code/scip@8fe5037:scip.proto:41 Metadata;scip.proto:76 Document
+C20	D	DESIGN.md lists file-level incrementality as a producer goal; schema is per Document so partial reindex is possible	scip-code/scip@8fe5037:docs/DESIGN.md:Primary goals

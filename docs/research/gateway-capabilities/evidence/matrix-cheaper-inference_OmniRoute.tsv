@@ -1,0 +1,63 @@
+dim_id	status	note	evidence
+G01	U	not examined	
+G02	U	not examined	
+G03	Y	Named combos with strategy: priority, weighted, round-robin, least-used, cost-optimized, reset-aware, strict-random	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/combo.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/comboConfig.ts
+G04	U	not examined	
+G05	P	Built-in catalog and per-provider quota fetchers; discovery depth not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/autoCombo/builtinCatalog.ts
+G06	U	not examined	
+G07	U	not examined	
+G08	U	not examined	
+S01	Y	Deterministic engine: rules, cost-priority, latency-aware, cooldown over in-memory state	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/routingStrategies.ts:DeterministicRoutingEngine
+S03	Y	Provider cooldown tracker and web session pool health	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/providerCooldownTracker.ts
+S04	Y	Rate limit manager and per-provider trackers	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/rateLimitManager.ts
+S05	Y	Session fingerprinting for sticky routing and prompt caching	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/sessionManager.ts
+S06	P	Auto combo task and tier fitness scorers; capability target ordering	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/autoCombo/taskFitness.ts
+S07	Y	costPriority ordering by USD per 1M input tokens	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/routingStrategies.ts:costPriority
+S08	Y	Per-provider latency samples (200 max) drive latency-aware order	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/routingStrategies.ts:recordLatency;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/connectionLatencyTracker.ts
+S09	Y	States CLOSED, DEGRADED, OPEN, HALF_OPEN; adaptive backoff; per-failure-kind thresholds	cheaper-inference/OmniRoute@3e23a8a:src/shared/utils/circuitBreaker.ts
+S10	Y	Account semaphore, admission queue and adaptive connection concurrency	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/accountSemaphore.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/admission/queue.ts
+S11	U	not examined	
+S12	P	Combo attempt loop with authorized retry wait; policy depth not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/combo/comboAttemptLoop.ts
+S13	P	attemptFailure module; mapping not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/combo/attemptFailure.ts
+S14	Y	Quota preflight and monitor, free-access quota	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/quotaPreflight.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/autoCombo/freeAccessQuota.ts
+T01	U	not examined	
+T02	U	not examined	
+T03	U	not examined	
+T04	U	not examined	
+T05	U	not examined	
+T06	P	adaptiveEffort and reasoningCache services; rules not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/reasoningCache.ts
+T07	U	not examined	
+T08	U	not examined	
+T09	U	not examined	
+T10	U	not examined	
+T11	U	not examined	
+T12	P	Request and response translator registry with *-to-openai and cross pairs; hub-like but not strictly	cheaper-inference/OmniRoute@3e23a8a:open-sse/translator/registry.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/translator/request
+I01	U	not examined	
+I02	U	not examined	
+I03	U	not examined	
+I04	U	not examined	
+I05	U	not examined	
+I07	U	not examined	
+I08	U	not examined	
+I09	U	not examined	
+I10	U	not examined	
+I11	U	not examined	
+I12	P	Gateway-side batch queue processing items asynchronously; provider batch endpoints not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/batchProcessor.ts:processPendingBatches
+I13	U	not examined	
+I15	U	not examined	
+E01	P	Signature cache and session ids for prompt caching	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/signatureCache.ts
+E02	U	not examined	
+E03	U	not examined	
+E04	U	not examined	
+E05	P	Dual-layer semantic response cache: SHA-256 exact plus vector similarity	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/cache/semanticCacheManager.ts
+E06	P	Compression pipeline exists with its own breaker; algorithm not read	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/compression/pipelineEngineBreaker.ts
+E07	P	Gateway-side batch queue only	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/batchProcessor.ts
+E08	U	not examined	
+E09	U	not examined	
+E10	U	not examined	
+E11	U	not examined	
+E12	U	not examined	
+O01	Y	Breaker health hook and web session pool health	cheaper-inference/OmniRoute@3e23a8a:src/hooks/useProviderBreakerHealth.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/webSessionPoolHealth.ts
+O03	P	Combo metrics and tool latency tracker	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/comboMetrics.ts
+O04	Y	Provider cost data and connection billing	cheaper-inference/OmniRoute@3e23a8a:open-sse/services/providerCostData.ts;cheaper-inference/OmniRoute@3e23a8a:open-sse/services/autoCombo/connectionBilling.ts
+O05	U	not examined	

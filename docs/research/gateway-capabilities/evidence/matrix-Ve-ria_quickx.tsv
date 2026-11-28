@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	Y	Declarative provider templates (data rows with placeholders) plus built-in presets; no executable plugin	Ve-ria/quickx@e13db37:src/lib/templates.ts:builtinTemplates
+X02	P	Template fields (wireApi, authMethod, requiredEnvs, docsUrl); no capability or version table	Ve-ria/quickx@e13db37:src/types.ts:Template; Ve-ria/quickx@e13db37:src/lib/templates.ts:22
+X03	Y	Remote template registry on a GitHub branch via contents API and raw URLs, merged with built-ins, 1 hour cache	Ve-ria/quickx@e13db37:src/lib/templates.ts:REGISTRY_API_URL
+X04	N	No hash or signature check found in templates.ts by string search; mutable main branch	Ve-ria/quickx@e13db37:src/lib/templates.ts:239
+X05	N	No permission or isolation; a remote TOML fragment is written into the Codex config	Ve-ria/quickx@e13db37:src/lib/templates.ts:248
+X06	N	Not applicable; templates are data	Ve-ria/quickx@e13db37:src/lib/templates.ts
+X07	N	No health reporting	Ve-ria/quickx@e13db37:src/index.tsx
+X08	N	No upgrade or rollback of templates beyond cache expiry	Ve-ria/quickx@e13db37:src/lib/templates.ts:CACHE_TTL_MS
+X09	N	Not applicable; no executable artifacts	Ve-ria/quickx@e13db37:src/lib/templates.ts
+X10	P	requiredEnvs lists environment variables a template needs; no inter-template dependencies	Ve-ria/quickx@e13db37:src/lib/templates.ts:requiredEnvs
+X11	N	No compatibility field; scope list names the client (codex)	Ve-ria/quickx@e13db37:src/lib/templates.ts:scope

@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	Y	Compile-time Go registration (Executor interface linked into the program) plus config-declared endpoints; no dynamic host	Ve-ria/CLIProxyAPIPlus@60bb379:examples/custom-provider/main.go:MyExecutor; Ve-ria/CLIProxyAPIPlus@60bb379:sdk/access/registry.go:RegisterProvider
+X02	N	No capability manifest; interface methods and process-global registries only (name search for plugin and manifest)	Ve-ria/CLIProxyAPIPlus@60bb379:sdk/access/registry.go:RegisterProvider
+X03	N	No plugin registry or store in internal/ or sdk/ (directory listing and name search)	Ve-ria/CLIProxyAPIPlus@60bb379:internal
+X04	N	No artifact signing or checksum code for extensions found by name search	Ve-ria/CLIProxyAPIPlus@60bb379:internal
+X05	N	Extensions compiled into the process; no isolation or permission model	Ve-ria/CLIProxyAPIPlus@60bb379:examples/custom-provider/main.go
+X06	N	No lazy load or independent termination for extensions; compiled in	Ve-ria/CLIProxyAPIPlus@60bb379:examples/custom-provider/main.go
+X07	U	Not examined for extension health	Ve-ria/CLIProxyAPIPlus@60bb379:internal
+X08	N	No extension upgrade or rollback mechanism; rebuild the program	Ve-ria/CLIProxyAPIPlus@60bb379:internal
+X09	N	No per-platform extension artifacts; platform builds are the whole program (Dockerfile, build scripts)	Ve-ria/CLIProxyAPIPlus@60bb379:Dockerfile
+X10	N	No extension dependency declarations	Ve-ria/CLIProxyAPIPlus@60bb379:internal
+X11	N	No extension compatibility declaration; Go module version only	Ve-ria/CLIProxyAPIPlus@60bb379:go.mod

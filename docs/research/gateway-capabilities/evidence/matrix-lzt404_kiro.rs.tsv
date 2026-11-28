@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	Y	API-key credential type exists and skips refresh	lzt404/kiro.rs@8331585:src/kiro/model/credentials.rs:is_api_key_credential
+A02	Y	Social and IdC refresh grants inherited from the ancestor; usage also read through a cookie-based web portal client	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:refresh_social_token;lzt404/kiro.rs@8331585:src/kiro/web_portal.rs:1-4
+A03	N	Searched src for device_code, deviceCode, device_authorization: no match	lzt404/kiro.rs@8331585:src
+A04	N	No CLI delegation; calls Kiro IDE runtime and web portal endpoints directly	lzt404/kiro.rs@8331585:src/kiro/web_portal.rs:1-4
+A05	P	Credentials are inline fields of a plaintext JSON file; written by temp file plus rename	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:persist_credentials
+A06	N	Searched src for keyring and keychain: no match	lzt404/kiro.rs@8331585:src
+A07	P	In-process tokio mutex around refresh with recheck; no cross-process lock	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:refresh_lock
+A08	Y	invalid_grant matched by error text and disabled at once; expiry windows as ancestor	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:is_invalid_grant_error
+A09	P	Admin reset, re-enable and force refresh; persisted overage status restored on start	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:record_overage_status
+A10	P	A periodic balance-refresh task runs in-process; no separate keeper	lzt404/kiro.rs@8331585:src/kiro/provider.rs:start_periodic_balance_refresh
+A11	Y	Overage status and overage-aware remaining balance per credential	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:record_overage_status
+A12	U	Region fields exist as in the ancestor; tests cover credential region over config region	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs
+G09	P	Per-credential auth method selects the refresh protocol; single provider	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:refresh_social_token
+G10	N	Searched src for free tier or anonymous access: no match	lzt404/kiro.rs@8331585:src
+G11	U	Duplicate detection not re-checked; ancestor rejects duplicates by SHA-256	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs
+S02	Y	Cooldown classification for 429s with clamped durations	lzt404/kiro.rs@8331585:src/kiro/provider.rs:classify_429_cooldown
+O02	P	Snapshot of credential state through an admin API	lzt404/kiro.rs@8331585:src/kiro/token_manager.rs:snapshot

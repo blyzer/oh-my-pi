@@ -1,0 +1,96 @@
+dim_id	status	note	evidence
+G01	Y	Providers registered in a Map<Platform, BaseProvider>; Platform is a TS union	fallencolors/freellmapi@b5d8333:server/src/providers/index.ts:register;fallencolors/freellmapi@b5d8333:shared/types.ts:Platform
+G02	P	Model identity is platform plus model_id row; served-model drift guard compares upstream id with routed id	fallencolors/freellmapi@b5d8333:server/src/lib/served-model.ts:1-12;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:151 ChainRow
+G03	Y	auto:* sort aliases, named profiles and fallback chains resolve to model chains	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:resolveRoutingChain;fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:22-29
+G04	P	Custom OpenAI-compatible endpoints with endpoint scope; services read by name only	fallencolors/freellmapi@b5d8333:server/src/services/custom-endpoint.ts;fallencolors/freellmapi@b5d8333:server/src/lib/endpoint-scope.ts
+G05	Y	Discovers models from the operator's own custom endpoint /models; 2 MiB body cap, 500 id cap, tolerant of envelope variants	fallencolors/freellmapi@b5d8333:server/src/services/model-discovery.ts:20-28
+G06	Y	Signed catalog fetched from catalog service; premium licence gets live tier, others a monthly snapshot	fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:24-34
+G07	Y	Twice-daily sync, Ed25519 verified over exact bytes, version floor so a stale catalog cannot roll back models	fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:41-75
+G08	Y	Routing requires vision/tools support and checks context-window fit with a safety factor	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:fitsContextWindow
+G09	P	BaseProvider.keyless flag marks providers needing no key	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:224
+G10	Y	Keyless/anonymous free providers registered with sentinel key row (e.g. 200 req/hr per IP gateway, AI Horde)	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:220-224;fallencolors/freellmapi@b5d8333:server/src/providers/index.ts:223-235;fallencolors/freellmapi@b5d8333:server/src/providers/aihorde.ts:keyless
+G11	P	Custom endpoints identified by base_url; key import dedups by decrypted value; no cross-provider connection identity	fallencolors/freellmapi@b5d8333:server/src/lib/provider-identity.ts:1-12;fallencolors/freellmapi@b5d8333:server/src/routes/keys.ts:1300-1317
+A01	Y	Provider keys encrypted AES-256-GCM at rest; key from ENCRYPTION_KEY or a 0600 key file next to the DB	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:ALGORITHM;fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:KEY_FILE_NAME
+A02	N	Searched oauth, device_code, keychain, refresh_token in server, cli, desktop: only a key-parser test that skips oauth entries	fallencolors/freellmapi@b5d8333:server/src/__tests__/lib/key-parser.test.ts:127-133
+A03	N	No device authorization flow found (same search as A02)	
+A04	N	No delegation to an official CLI found (same search as A02)	
+A05	P	Master key referenced by env var or file; provider secrets themselves stored in the DB (encrypted)	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:7-27
+A06	N	No OS keychain; key file chmod 0600 beside the DB per code comment	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:22-27
+A07	N	Static API keys only, so nothing to refresh	
+A08	P	validateKey surfaces 401/403 reasons; health service persists them; Cloudflare challenge treated as inconclusive	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:validationResult;fallencolors/freellmapi@b5d8333:server/src/services/health.ts
+A09	P	rotate-encryption-key script re-encrypts stored keys; no other recovery flow read	fallencolors/freellmapi@b5d8333:server/package.json:scripts:rotate-encryption-key
+A10	N	Single in-process store; no separate credential keeper process found	
+A11	N	No entitlement model; free-tier allowance is described in catalog rows and docs	fallencolors/freellmapi@b5d8333:shared/types.ts:63-110 Platform comments
+A12	P	Per-key outbound proxy override documented as geo-ban or risk-control avoidance; no entitlement or region model	fallencolors/freellmapi@b5d8333:server/src/lib/proxy.ts:10-14;fallencolors/freellmapi@b5d8333:server/src/lib/key-proxy.ts:4-10
+S01	Y	Contextual bandit: reliability, speed, intelligence weights times headroom and rate-limit factors; priority strategy	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest;fallencolors/freellmapi@b5d8333:server/src/services/scoring.ts;fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:9-16
+S02	Y	Only models with a usable, non-cooling key are candidates; separate key-selection strategy (auto, least-remaining)	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:hasUsableKeyForModel;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routableKeyIdsForModel
+S03	Y	Per-model penalties and per-key cooldown map with escalating 24 h hit history	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:recordModelFailure;fallencolors/freellmapi@b5d8333:server/src/services/ratelimit.ts:cooldowns
+S04	P	Per-key quota and rate-limit engine (1,511 lines); only cooldown section read	fallencolors/freellmapi@b5d8333:server/src/services/ratelimit.ts:839-870
+S05	Y	Model pin per session for 30 min; key is x-session-id header or hash of first user message; capped map	fallencolors/freellmapi@b5d8333:server/src/routes/proxy.ts:167-168,259-298;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:2304 resolveStickyPreference
+S06	Y	requireVision, requireTools and context-fit filters in route selection	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest
+S07	D	Docs list auto:cheap sort alias	fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:28
+S08	Y	Observed speed ranks written back from traffic, speed weight in score	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:writeObservedSpeedRanks
+S09	Y	3 failures in 15 min benches a model for 10 min; truncation and empty-completion streak benches	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:MODEL_FAILURE_THRESHOLD;fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:TRUNCATION_BENCH_MS
+S10	P	Per-key concurrency leases (2 min max age) and inbound per-IP limiter; no bounded wait queue read	fallencolors/freellmapi@b5d8333:server/src/services/ratelimit.ts:61-147 acquireLease;fallencolors/freellmapi@b5d8333:server/src/app.ts:291-309
+S11	Y	Client abort and hedge abort are distinct typed errors; committed streams are not failed over	fallencolors/freellmapi@b5d8333:server/src/lib/error-classify.ts:262-306;fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:1165-1166
+S12	Y	Up to 20 attempts under a 45 s time budget with hedging	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:FALLBACK_MAX_RETRIES;fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:DEFAULT_FALLBACK_TIME_BUDGET_MS
+S13	P	cooldownDecisionForError and a 694-line error classifier; internals not read	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:cooldownDecisionForError;fallencolors/freellmapi@b5d8333:server/src/lib/error-classify.ts
+S14	P	Headroom ramp and quota forecast feed the score; forecast code not read	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:HEADROOM_RAMP_START_KEY;fallencolors/freellmapi@b5d8333:server/src/services/quota-forecast.ts
+T01	Y	OpenAI chat completions proxy route	fallencolors/freellmapi@b5d8333:server/src/routes/proxy.ts
+T02	Y	Responses API shim for Codex CLI	fallencolors/freellmapi@b5d8333:server/src/routes/responses.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:305
+T03	Y	Anthropic Messages surface with content negotiation on /v1/models	fallencolors/freellmapi@b5d8333:server/src/routes/anthropic.ts;fallencolors/freellmapi@b5d8333:server/src/services/anthropic-map.ts
+T04	Y	Native Gemini surface on /v1beta	fallencolors/freellmapi@b5d8333:server/src/routes/gemini.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:310
+T05	Y	Dedicated adapters for Google, Cohere, Cloudflare, Sail, AI Horde, Zhipu and others	fallencolors/freellmapi@b5d8333:server/src/providers/google.ts;fallencolors/freellmapi@b5d8333:server/src/providers/sail.ts;fallencolors/freellmapi@b5d8333:server/src/providers/cohere.ts
+T06	P	think-tag handling lib	fallencolors/freellmapi@b5d8333:server/src/lib/think-tags.ts
+T07	P	Tool-call rescue, argument repair and validation libs	fallencolors/freellmapi@b5d8333:server/src/lib/tool-call-rescue.ts;fallencolors/freellmapi@b5d8333:server/src/lib/tool-validate.ts
+T08	Y	Providers yield OpenAI-shaped ChatCompletionChunk; each surface re-encodes SSE; not a semantic event model	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:234 streamChatCompletion;fallencolors/freellmapi@b5d8333:server/src/routes/anthropic.ts:908 writeSse
+T09	Y	Image, audio and embeddings services and routes	fallencolors/freellmapi@b5d8333:server/src/services/media.ts;fallencolors/freellmapi@b5d8333:server/src/routes/embeddings.ts
+T10	P	structured-output lib	fallencolors/freellmapi@b5d8333:server/src/lib/structured-output.ts
+T11	Y	Upstream errors become ProviderHttpError, redacted, and re-shaped into an Anthropic error envelope on that surface	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:143 providerHttpError;fallencolors/freellmapi@b5d8333:server/src/routes/anthropic.ts:165-191;fallencolors/freellmapi@b5d8333:server/src/lib/error-redaction.ts
+T12	Y	OpenAI chat shape (ChatMessage) as internal hub; per-surface map files for Anthropic and Gemini	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:chatCompletion;fallencolors/freellmapi@b5d8333:server/src/services/anthropic-map.ts;fallencolors/freellmapi@b5d8333:server/src/services/gemini-map.ts
+I01	Y	Express 4-style app with helmet, cors and body limit	fallencolors/freellmapi@b5d8333:server/src/app.ts:127-199
+I02	Y	SSE streaming adapters and AsyncGenerator<ChatCompletionChunk> provider interface	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:streamChatCompletion;fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:SseStreamOptions
+I03	N	Searched server/src outside tests for WebSocket, upgrade, realtime: no hits	
+I04	N	Stateless HTTP; only a small in-memory handoff buffer, no persistent inference session	fallencolors/freellmapi@b5d8333:server/src/services/context-handoff.ts:14-18
+I05	N	No gRPC in server/src or server dependencies	fallencolors/freellmapi@b5d8333:server/package.json:dependencies
+I06	N	No Protobuf in server/src file list	
+I07	N	No AWS EventStream decoding found in server/src	
+I08	N	No bidirectional streaming; SSE and request-response only	
+I09	N	No WebRTC found	
+I10	N	No HTTP/3 or QUIC found; undici dependency only	fallencolors/freellmapi@b5d8333:server/package.json:dependencies:undici
+I11	P	Sail provider submits background jobs and polls Responses	fallencolors/freellmapi@b5d8333:server/src/providers/sail.ts
+I12	N	No /batches route or batch upstream call found	
+I13	N	Node and TypeScript gateway; no native inference	fallencolors/freellmapi@b5d8333:server/package.json:engines
+I14	P	Desktop shell hosts the server in-process (file name only; not read); CLI package exists	fallencolors/freellmapi@b5d8333:desktop/src/server-host.ts;fallencolors/freellmapi@b5d8333:cli/src/index.ts
+I15	P	Stateless Streamable-HTTP MCP server exposing gateway introspection tools	fallencolors/freellmapi@b5d8333:server/src/routes/mcp.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:315
+E01	P	Anthropic surface keeps cache_control blocks intact and ids deterministic; no cache-aware routing	fallencolors/freellmapi@b5d8333:server/src/lib/anthropic-documents.ts:54;fallencolors/freellmapi@b5d8333:server/src/routes/anthropic.ts:490-496
+E02	P	Sticky model pin is for quota continuity, not declared cache reuse	fallencolors/freellmapi@b5d8333:server/src/routes/proxy.ts:167-168
+E03	N	Responses previous_response_id is accepted and ignored	fallencolors/freellmapi@b5d8333:server/src/routes/responses.ts:92
+E04	N	No provider-side state; conversations table is the dashboard playground transcript	fallencolors/freellmapi@b5d8333:server/src/routes/conversations.ts:6-14
+E05	P	Injects up to 6000 chars of recent messages after a model switch (mode on_model_switch)	fallencolors/freellmapi@b5d8333:server/src/services/context-handoff.ts:4,14-18
+E06	P	Compression pipeline with engines (aging, dedup, jsoncompact, toolfilter, hard-budget) and a fidelity gate; internals not read	fallencolors/freellmapi@b5d8333:server/src/services/compression/pipeline.ts;fallencolors/freellmapi@b5d8333:server/src/services/compression/fidelity-gate.ts
+E07	N	No batch inference found	
+E08	U	undici is a dependency; pool settings not read	fallencolors/freellmapi@b5d8333:server/package.json:dependencies:undici
+E09	U	Not examined beyond stream pump abort handling	fallencolors/freellmapi@b5d8333:server/src/routes/proxy.ts:1306
+E10	P	Model pricing table and request log; counting not read	fallencolors/freellmapi@b5d8333:server/src/db/model-pricing.ts;fallencolors/freellmapi@b5d8333:server/src/lib/request-log.ts
+E11	P	Response cache stores platform, model and key for savings accounting; provider cache tokens passed through for two providers	fallencolors/freellmapi@b5d8333:server/src/services/cache.ts:14-17;fallencolors/freellmapi@b5d8333:server/src/providers/sail.ts:305
+E12	Y	Request log records latency_ms and ttfb_ms per request	fallencolors/freellmapi@b5d8333:server/src/lib/request-log.ts:60-91
+X01	P	Declarative JSON config and custom OpenAI-compatible endpoints; providers are compiled-in TypeScript classes	fallencolors/freellmapi@b5d8333:server/src/services/declarative-config.ts:80-133;fallencolors/freellmapi@b5d8333:server/src/providers/index.ts
+X02	P	Zod schema validates the declarative config; catalog rows carry quirks with severity and targets	fallencolors/freellmapi@b5d8333:server/src/services/declarative-config.ts:18-98;fallencolors/freellmapi@b5d8333:server/src/services/quirks.ts:1-14
+X03	P	Distributes model rows and quirks through a signed hosted catalog; no code distribution	fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:24-34
+X04	Y	Catalog verified against a pinned Ed25519 public key over received bytes; unsigned or altered data discarded	fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:43-75
+X05	N	No plugin isolation; user-configured base_url is screened by an SSRF classifier	fallencolors/freellmapi@b5d8333:server/src/lib/url-guard.ts:38-166
+X06	N	No extension process model	
+X07	P	Health and quota status for keys; nothing for extensions	fallencolors/freellmapi@b5d8333:server/src/services/health.ts
+X08	P	SQL migrations with up, down and roundtrip test; catalog version floor; backups service	fallencolors/freellmapi@b5d8333:server/package.json:scripts:db:migration:*;fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:51-53
+X09	D	Release workflows for desktop and CLI per platform; workflow names only	fallencolors/freellmapi@b5d8333:.github/workflows/desktop-release.yml;fallencolors/freellmapi@b5d8333:.github/workflows/cli-release.yml
+X10	N	No dependency declarations for extensions	
+X11	P	Node engine range declared; catalog MIN_CATALOG_VERSION acts as a compatibility floor	fallencolors/freellmapi@b5d8333:server/package.json:engines;fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts:53
+O01	Y	Health service and /livez /readyz probes	fallencolors/freellmapi@b5d8333:server/src/services/health.ts;fallencolors/freellmapi@b5d8333:server/src/routes/status.ts
+O02	P	Health service probes keys every 5 min, persists status and last error, disables after 3 consecutive invalid results	fallencolors/freellmapi@b5d8333:server/src/services/health.ts:13-16,83-115
+O03	P	Analytics routes, error chart, attempt traces	fallencolors/freellmapi@b5d8333:server/src/routes/analytics.ts;fallencolors/freellmapi@b5d8333:server/src/lib/attempt-trace.ts
+O04	P	Per-key budget and quota services; cost roll-up not read	fallencolors/freellmapi@b5d8333:server/src/services/key-budget.ts;fallencolors/freellmapi@b5d8333:server/src/lib/budget.ts
+O05	P	Server log buffer and redaction libs	fallencolors/freellmapi@b5d8333:server/src/lib/server-logs.ts;fallencolors/freellmapi@b5d8333:server/src/lib/log-redaction.ts
+O06	Y	React dashboard, REST under /api, desktop app (Electron-style) and CLI	fallencolors/freellmapi@b5d8333:server/src/app.ts:230-271;fallencolors/freellmapi@b5d8333:desktop/src;fallencolors/freellmapi@b5d8333:cli/src
+O07	N	No artifact reporting found	
+O08	N	Not an agent harness	

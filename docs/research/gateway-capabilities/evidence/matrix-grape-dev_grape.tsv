@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+W01	N	Python FastAPI platform, not an agent loop; agents run on separate runtime nodes	grape-dev/grape@b31f8d8:src/domains/runtime
+W02	Y	Dispatch batches create child issues asynchronously; a sweeper aggregates terminal state	grape-dev/grape@b31f8d8:src/domains/mgmt/org_dispatch.py
+W03	U	Not examined	
+W04	U	Not examined	
+W05	P	Separate worker process started by script; agent loop internals not read	grape-dev/grape@b31f8d8:start-worker.sh
+W06	U	Not examined	
+W07	D	README describes external AI agents driven from issues; adapters not read	grape-dev/grape@b31f8d8:README.md
+W08	U	Not examined	
+W09	P	Shared MySQL, locks and config kernel across domains; not an agent runtime share	grape-dev/grape@b31f8d8:src/kernel/config.py
+W10	U	Not examined	
+W11	P	Runtime table has max_concurrent and priority per runtime	grape-dev/grape@b31f8d8:src/domains/contracts/local/runtime_local.py
+W12	Y	Deterministic dispatch state machine, idempotent by unique key, conditional updates	grape-dev/grape@b31f8d8:src/domains/mgmt/org_dispatch.py
+W13	P	Single-target cancel or retry and a status aggregation sweeper	grape-dev/grape@b31f8d8:src/domains/runtime/issue_cancel.py
+W14	P	Worker restart loop with delay and max restart count; lock lease probe script	grape-dev/grape@b31f8d8:start-worker.sh;grape-dev/grape@b31f8d8:scripts/mysql_lock_probe.py
+W15	D	Comment mentions a bare baseline repo and worktree for org context; not read in full	grape-dev/grape@b31f8d8:src/domains/mgmt/org_context_repo.py
+W16	U	Not examined	

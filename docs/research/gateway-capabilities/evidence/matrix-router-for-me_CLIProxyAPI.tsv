@@ -1,0 +1,63 @@
+dim_id	status	note	evidence
+G01	P	Executor per provider under internal/runtime/executor; registry code not read	router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor
+G02	U	not examined	
+G03	U	not examined	
+G04	U	not examined	
+G05	P	Antigravity model probes and discovery advertiser files; depth not read	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/antigravity_models_refresh.go;router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/discovery_advertiser.go
+G06	U	not examined	
+G07	U	not examined	
+G08	P	Per-key model capability and native tool search capability files; semantics not read	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/api_key_model_capabilities.go
+S01	Y	RoundRobin, smooth WeightedRoundRobin and FillFirst selectors	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/selector.go:RoundRobinSelector,WeightedRoundRobinSelector,FillFirstSelector
+S03	Y	Per-auth and per-model cooldown state, persisted and restored	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_cooldown.go:RestoreCooldownStates
+S04	Y	Reads provider response headers into QuotaState with backoff level	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/quota_signals.go:ObserveResponseHeadersForProvider
+S05	P	Continuity and session alias files; Plus fork has SessionAffinitySelector	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_continuity.go
+S06	U	not examined	
+S07	U	not examined	
+S08	U	not examined	
+S09	N	grep circuit|breaker over non-test Go in internal and sdk: no breaker, only a comment hit	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/service_executors.go:536
+S10	P	In-flight and concurrency files exist; semantics not read	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_inflight.go
+S11	U	not examined	
+S12	P	Configurable cooldown seconds for 408/500/502/503/504 plus Retry-After hint	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_cooldown.go:SetTransientErrorCooldownSeconds,recoverableFailureRetryAfterWithHint
+S13	P	classification.go and errors.go exist; mapping table not read	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/classification.go
+S14	P	Quota cooldown with a per-auth disable switch; no scheduler by quota reserve read	router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_cooldown.go:SetQuotaCooldownDisabled
+T01	Y	Inbound /v1/chat/completions and OpenAI translators	router-for-me/CLIProxyAPI@dbe641f:internal/api:POST /v1/chat/completions;router-for-me/CLIProxyAPI@dbe641f:internal/translator/openai
+T02	Y	Inbound /v1/responses route	router-for-me/CLIProxyAPI@dbe641f:internal/api:POST /v1/responses
+T03	Y	Inbound /v1/messages route and Claude translators	router-for-me/CLIProxyAPI@dbe641f:internal/api:POST /v1/messages;router-for-me/CLIProxyAPI@dbe641f:internal/translator/claude
+T04	Y	Gemini translators and /v1beta models route	router-for-me/CLIProxyAPI@dbe641f:internal/translator/gemini
+T05	Y	Codex and Antigravity translator and executor families	router-for-me/CLIProxyAPI@dbe641f:internal/translator/codex;router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/antigravity_executor.go
+T06	P	Thinking package and replay files; normalization rules not read	router-for-me/CLIProxyAPI@dbe641f:internal/thinking
+T07	U	not examined	
+T08	Y	Stream translation by (from, to) format pair	router-for-me/CLIProxyAPI@dbe641f:sdk/translator/helpers.go:TranslateStreamByFormatName
+T09	U	not examined	
+T10	U	not examined	
+T11	U	not examined	
+T12	Y	Pairwise: each (from,to) pair registers its own request and response translator, 38 registration lines	router-for-me/CLIProxyAPI@dbe641f:internal/translator/openai/claude/init.go:RegisterRequestEnvelope;router-for-me/CLIProxyAPI@dbe641f:sdk/translator/helpers.go:TranslateRequestByFormatName
+I01	Y	Gin HTTP server with OpenAI, Claude and Gemini inbound routes	router-for-me/CLIProxyAPI@dbe641f:internal/api/server.go
+I02	P	Per-provider stream executors; SSE framing not read	router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/claude_executor_stream.go
+I03	Y	Codex WebSocket executor, duplex and session files; relay package	router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/codex_websockets_executor.go;router-for-me/CLIProxyAPI@dbe641f:internal/wsrelay
+I04	P	Codex WebSocket session file	router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/codex_websockets_session.go
+I05	U	not examined	
+I07	U	not examined	
+I08	P	Codex WebSocket duplex file	router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/codex_websockets_duplex.go
+I09	U	not examined	
+I10	U	not examined	
+I11	U	not examined	
+I12	U	not examined	
+I13	U	not examined	
+I15	U	not examined	
+E01	U	not examined	
+E02	U	not examined	
+E03	U	not examined	
+E04	U	not examined	
+E05	U	not examined	
+E06	U	not examined	
+E07	U	not examined	
+E08	U	not examined	
+E09	U	not examined	
+E10	U	not examined	
+E11	U	not examined	
+E12	U	not examined	
+O01	D	Management API documented; code not read	router-for-me/CLIProxyAPI@dbe641f:docs/management-api-v8.md
+O03	U	not examined	
+O04	U	not examined	
+O05	U	not examined	

@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	U	API-key credential type not examined in this fork; shares ancestor code with hank9999	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs
+A02	Y	Adds a hosted browser sign-in (PKCE, loopback listener) and external-IdP refresh on top of social and IdC refresh	Foxfishc/kiro.rs@15c0a3a:src/kiro/sso.rs:poll_kiro_sso_auth;Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs:refresh_external_idp_token
+A03	N	Searched src for device_code, deviceCode, device_authorization: no match; login is PKCE with a loopback listener	Foxfishc/kiro.rs@15c0a3a:src
+A04	N	No CLI delegation; the login reproduces the Kiro IDE sign-in flow against the vendor portal	Foxfishc/kiro.rs@15c0a3a:src/kiro/sso.rs:1-24
+A05	P	Credentials are inline fields of a plaintext JSON file; written by temp file plus rename	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs:persist_credentials
+A06	N	Searched src for keyring and keychain: no match	Foxfishc/kiro.rs@15c0a3a:src
+A07	P	In-process tokio mutex around refresh with recheck; no cross-process lock	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs:refresh_lock
+A08	Y	invalid_grant matched by error text and disabled at once; expiry windows as ancestor	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs:is_invalid_grant_error
+A09	P	Admin start, poll and cancel of a login session in addition to reset and force refresh	Foxfishc/kiro.rs@15c0a3a:src/admin/handlers.rs:poll_kiro_sso
+A10	P	A periodic balance-refresh task runs in-process; no separate keeper	Foxfishc/kiro.rs@15c0a3a:src/kiro/provider.rs:start_periodic_balance_refresh
+A11	Y	Usage limits, overage status and an overage-aware remaining-balance calculation per credential	Foxfishc/kiro.rs@15c0a3a:src/admin/handlers.rs:get_overage_status
+A12	Y	Resolves a profile ARN region and probes candidate regions; per-credential region and proxy	Foxfishc/kiro.rs@15c0a3a:src/kiro/profile_resolver.rs:resolve_across_regions;Foxfishc/kiro.rs@15c0a3a:src/kiro/profile_resolver.rs:region_from_profile_arn
+G09	P	Per-credential auth method (social, IdC, external IdP) selects the refresh protocol; single provider	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs
+G10	N	Searched src for free tier or anonymous access: no match	Foxfishc/kiro.rs@15c0a3a:src
+G11	U	Duplicate detection not re-checked; ancestor rejects duplicates by SHA-256	Foxfishc/kiro.rs@15c0a3a:src/kiro/token_manager.rs
+S02	Y	Cooldown classification: capacity 429s switch account without penalty, other 429s get a clamped 60-300 s cooldown	Foxfishc/kiro.rs@15c0a3a:src/kiro/provider.rs:classify_429_cooldown
+O02	P	Snapshot and cooldown listing through an admin API	Foxfishc/kiro.rs@15c0a3a:src/admin/handlers.rs

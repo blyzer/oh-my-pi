@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	D	Registry for CLIProxyAPI native C ABI plugins; data only, mechanism lives in the core	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X02	P	Registry metadata (id, name, author, repository, tags, locales) with grammar rules; no capability table	stark-shadow/ecpa-plugins-store@2d82289:registry.json; stark-shadow/ecpa-plugins-store@2d82289:README.md
+X03	Y	Hand-maintained schema_version 2 registry, 17 entries, added as an extra store source; install data derived from releases	stark-shadow/ecpa-plugins-store@2d82289:registry.json; stark-shadow/ecpa-plugins-store@2d82289:README.md
+X04	P	SHA-256 checksums.txt shipped in the same release as the zip; no signature, pinning or revocation described	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X05	N	No permission or isolation model in the registry; plugins are native libraries loaded by the core	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X06	N	Not addressed by the registry	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X07	N	No health reporting in the registry	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X08	P	Latest-release polling and version sync timer; no rollback described	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X09	D	Zip per goos/goarch named id_version_goos_goarch with one .dylib, .so or .dll at root (documented rule)	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X10	N	No dependency declarations in the entry schema	stark-shadow/ecpa-plugins-store@2d82289:README.md
+X11	P	schema_version 2 gates the install field; no plugin-to-core compatibility field	stark-shadow/ecpa-plugins-store@2d82289:README.md

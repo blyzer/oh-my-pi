@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	U	not examined in this pass	
+L02	Y	Python generation library and server over MLX models	ml-explore/mlx-lm@6fe0ce4:mlx_lm/server.py
+L03	U	not examined in this pass	
+L04	U	not examined in this pass	
+L05	U	not examined in this pass	
+L06	U	not examined in this pass	
+L07	U	not examined in this pass	
+L08	Y	Runs on MLX (Python dependency)	ml-explore/mlx-lm@6fe0ce4:mlx_lm/generate.py
+L09	U	not examined in this pass	
+L10	U	not examined in this pass	
+L11	U	not examined in this pass	
+L12	U	not examined in this pass	
+L13	P	GPU use is inherited from MLX; not read here	ml-explore/mlx-lm@6fe0ce4:mlx_lm/generate.py
+L14	Y	Server holds one model plus LRUPromptCache of per-sequence KV caches; weights shared, KV per prompt	ml-explore/mlx-lm@6fe0ce4:mlx_lm/server.py:47
+L15	U	not examined in this pass	
+L16	N	No hardware-aware workload allocation read in server.py	ml-explore/mlx-lm@6fe0ce4:mlx_lm/server.py

@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	N	No plugin mechanism; supervises a CLIProxyAPI core as a child process and edits its YAML	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs:start_core_process
+X02	N	No manifest; only a plugins.enabled boolean mirrored into core YAML	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_config/settings.rs:612
+X03	N	No plugin store code found in src, src-tauri/src or README by string search	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs
+X04	P	SHA-256 of bundled and downloaded core archives; no signature found	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs:validate_bundled_core_checksum
+X05	N	Not applicable to a GUI supervisor; the core is a separate process	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs
+X06	Y	Explicit start, stop, restart and terminate of the core child process	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs:stop_core_process_inner
+X07	P	Provider health probes with bounded concurrency; core status returned by lifecycle commands	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/provider_health.rs:PROVIDER_HEALTH_SLOTS
+X08	P	Core version pinned in core-version.txt; app and core update code present, rollback not examined	lzt404/EasyCLIProxyAPI@faf29b2:core-version.txt; lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/app_update.rs
+X09	P	Bundles a matching core archive for offline install; per-platform handling not examined in detail	lzt404/EasyCLIProxyAPI@faf29b2:src-tauri/src/core_runtime.rs
+X10	N	No dependency declarations	lzt404/EasyCLIProxyAPI@faf29b2:core-version.txt
+X11	P	Pinned core version file couples app and core	lzt404/EasyCLIProxyAPI@faf29b2:core-version.txt

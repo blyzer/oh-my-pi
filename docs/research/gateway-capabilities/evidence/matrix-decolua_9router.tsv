@@ -1,0 +1,85 @@
+dim_id	status	note	evidence
+G01	Y	One registry file per provider (152) with a template and shared index	decolua/9router@5ae63d2:open-sse/providers/index.js;decolua/9router@5ae63d2:open-sse/providers/REGISTRY_TEMPLATE.js;decolua/9router@5ae63d2:open-sse/providers/registry/anthropic.js
+G02	P	Model strings parsed to provider/model; capability tables keyed by canonical model id	decolua/9router@5ae63d2:open-sse/services/combo.js:parseModel;decolua/9router@5ae63d2:open-sse/providers/capabilities.js
+G03	Y	Combos are named ordered model lists with strategies; MITM model synonyms	decolua/9router@5ae63d2:open-sse/services/combo.js:getComboModelsFromData;decolua/9router@5ae63d2:src/mitm/server.js:MODEL_SYNONYMS
+G04	P	Per-provider overrides in PROVIDER_CAPABILITIES and quirks (e.g. preserveCacheControl)	decolua/9router@5ae63d2:open-sse/providers/capabilities.js;decolua/9router@5ae63d2:open-sse/translator/index.js:102
+G05	U	Not examined in this pass	
+G06	P	Capability/limit data overlaid from models.dev catalog fetched in background (per file comment)	decolua/9router@5ae63d2:open-sse/providers/capabilities.js:1-30
+G07	P	Background refresh into a synced catalog installed via setCatalogSource; refresher body not read	decolua/9router@5ae63d2:open-sse/providers/capabilities.js:1-30;decolua/9router@5ae63d2:open-sse/providers/catalogOverride.js
+G08	Y	Four-layer capability resolution: provider override, exact id, glob patterns, default floor	decolua/9router@5ae63d2:open-sse/providers/capabilities.js
+G09	U	Not examined in this pass	
+G10	D	README promotes free-tier fallbacks; free-provider registry files not read	decolua/9router@5ae63d2:README.md:38-42
+G11	U	Not examined in this pass	
+A01	P	Provider registry covers API-key providers; stored-connection handling not read	decolua/9router@5ae63d2:open-sse/providers/registry/anthropic.js
+A02	Y	OAuth provider modules under src/lib/oauth	decolua/9router@5ae63d2:src/lib/oauth/providers/xiaomi-mimo.js
+A03	U	Not examined in this pass	
+A04	U	Not examined in this pass	
+A05	N	grep createCipheriv|aes-256|keytar|safeStorage hits only mitm manager, a login helper, qoder cosy; no connection-store encryption found	decolua/9router@5ae63d2:src/mitm/manager.js
+A06	N	grep keytar|safeStorage found no OS keychain use for connections	
+A07	U	Not examined in this pass	
+A08	D	README claims automatic token refresh	decolua/9router@5ae63d2:README.md:60
+A09	U	Not examined in this pass	
+A10	U	Not examined in this pass	
+A11	U	Not examined in this pass	
+A12	U	Not examined in this pass	
+S01	Y	fill-first default or round-robin per provider; combo round-robin with sticky limit	decolua/9router@5ae63d2:src/sse/services/auth.js:146;decolua/9router@5ae63d2:open-sse/services/combo.js:getRotatedModels
+S02	Y	Filters accounts that are cooling or locked, optionally excluding one id	decolua/9router@5ae63d2:open-sse/services/accountFallback.js:filterAvailableAccounts;decolua/9router@5ae63d2:open-sse/services/accountFallback.js:isAccountUnavailable
+S03	Y	Per-account error state, backoff level and per-model locks	decolua/9router@5ae63d2:open-sse/services/accountFallback.js:applyErrorState;decolua/9router@5ae63d2:open-sse/services/accountFallback.js:buildModelLockUpdate
+S04	P	429 backoff 1 s doubling to a cap; README claims quota tracking	decolua/9router@5ae63d2:open-sse/services/accountFallback.js:getQuotaCooldown;decolua/9router@5ae63d2:README.md:39
+S05	P	Sticky combo member per session key, not cache-locality affinity	decolua/9router@5ae63d2:open-sse/services/combo.js:getStickyComboModel
+S06	Y	Detects required capabilities from the request body and reorders combo members	decolua/9router@5ae63d2:open-sse/services/combo.js:detectRequiredCapabilities;decolua/9router@5ae63d2:open-sse/services/combo.js:reorderByCapabilities
+S07	D	README: subscription then cheap then free fallback	decolua/9router@5ae63d2:README.md:40
+S08	U	Not examined in this pass	
+S09	Y	Exponential backoff levels with max level; model-scoped locks	decolua/9router@5ae63d2:open-sse/services/accountFallback.js:checkFallbackError;decolua/9router@5ae63d2:open-sse/config/errorConfig.js
+S10	U	Not examined in this pass	
+S11	U	Not examined in this pass	
+S12	Y	Combo fallback across members, empty-response failover by peeking SSE	decolua/9router@5ae63d2:open-sse/services/combo.js:handleComboChat;decolua/9router@5ae63d2:open-sse/services/emptyFailover.js:scanSSEBuffer
+S13	Y	Data-driven ERROR_RULES (status, message text, provider, cooldown, backoff, modelScoped) plus requestScoped flag	decolua/9router@5ae63d2:open-sse/services/accountFallback.js:checkFallbackError;decolua/9router@5ae63d2:open-sse/config/errorConfig.js:ERROR_RULES
+S14	U	Not examined in this pass	
+T01	Y	OpenAI is the hub format	decolua/9router@5ae63d2:open-sse/translator/index.js:translateRequest
+T02	Y	OpenAI Responses translators	decolua/9router@5ae63d2:open-sse/translator/request/openai-responses.js;decolua/9router@5ae63d2:open-sse/translator/response/openai-responses.js
+T03	Y	Claude to/from OpenAI request and response translators	decolua/9router@5ae63d2:open-sse/translator/request/claude-to-openai.js;decolua/9router@5ae63d2:open-sse/translator/response/openai-to-claude.js
+T04	Y	Gemini to/from OpenAI and OpenAI to Vertex	decolua/9router@5ae63d2:open-sse/translator/request/gemini-to-openai.js;decolua/9router@5ae63d2:open-sse/translator/request/openai-to-vertex.js
+T05	Y	Kiro, Cursor, CommandCode, Antigravity, Ollama dedicated translators	decolua/9router@5ae63d2:open-sse/translator/request/openai-to-kiro.js;decolua/9router@5ae63d2:open-sse/translator/request/openai-to-cursor.js
+T06	U	Not examined in this pass	
+T07	U	Not examined in this pass	
+T08	Y	Per-format response translators over streams, with AWS EventStream decode	decolua/9router@5ae63d2:open-sse/translator/response/kiro-to-openai.js;decolua/9router@5ae63d2:open-sse/utils/awsEventStream.js
+T09	Y	Handlers for STT, TTS, image generation and video	decolua/9router@5ae63d2:open-sse/handlers/sttCore.js;decolua/9router@5ae63d2:open-sse/handlers/imageGenerationCore.js;decolua/9router@5ae63d2:open-sse/handlers/videoCore.js
+T10	U	Not examined in this pass	
+T11	Y	Client-facing OpenAI error type map by status	decolua/9router@5ae63d2:open-sse/config/errorConfig.js:ERROR_TYPES
+T12	Y	Source to openai to target with optional direct pair route in a registry	decolua/9router@5ae63d2:open-sse/translator/index.js:translateRequest
+I01	Y	Next.js route handlers and custom server	decolua/9router@5ae63d2:custom-server.js;decolua/9router@5ae63d2:src/sse/handlers/chat.js
+I02	Y	SSE with replay-after-peek for failover	decolua/9router@5ae63d2:open-sse/services/emptyFailover.js;decolua/9router@5ae63d2:open-sse/services/combo.js:peekComboResponse
+I03	U	Not examined in this pass	
+I04	U	Not examined in this pass	
+I05	U	Not examined in this pass	
+I06	Y	Protobuf encode/decode for the Cursor wire	decolua/9router@5ae63d2:open-sse/utils/cursorProtobuf.js
+I07	Y	AWS EventStream and SigV4 for Kiro and Bedrock	decolua/9router@5ae63d2:open-sse/utils/awsEventStream.js;decolua/9router@5ae63d2:open-sse/utils/awsSigv4.js;decolua/9router@5ae63d2:open-sse/executors/bedrock.js
+I08	U	Not examined in this pass	
+I09	U	Not examined in this pass	
+I10	U	Not examined in this pass	
+I11	U	Not examined in this pass	
+I12	U	Not examined in this pass	
+I13	U	Not examined in this pass	
+I14	U	Not examined in this pass	
+I15	P	Client detection for Claude Code and similar CLIs	decolua/9router@5ae63d2:open-sse/utils/clientDetector.js
+E01	P	Preserves cache_control for OpenAI-format targets whose provider declares the quirk	decolua/9router@5ae63d2:open-sse/translator/index.js:102
+E02	U	Not examined in this pass	
+E03	U	Not examined in this pass	
+E04	U	Not examined in this pass	
+E05	U	Not examined in this pass	
+E06	Y	RTK: deterministic filters compress tool_result content before translation; also prompt-style modes	decolua/9router@5ae63d2:open-sse/rtk/index.js:compressMessages;decolua/9router@5ae63d2:open-sse/rtk/autodetect.js
+E07	U	Not examined in this pass	
+E08	U	Not examined in this pass	
+E09	U	Not examined in this pass	
+E10	P	usageDb tracks usage; counting method not read	decolua/9router@5ae63d2:src/lib/usageDb.js
+E11	U	Not examined in this pass	
+E12	U	Not examined in this pass	
+O01	U	Not examined in this pass	
+O02	U	Not examined in this pass	
+O03	P	usageDb and requestDetailsDb	decolua/9router@5ae63d2:src/lib/usageDb.js;decolua/9router@5ae63d2:src/lib/requestDetailsDb.js
+O04	P	Provider pricing table; cost roll-up not read	decolua/9router@5ae63d2:open-sse/providers/pricing.js
+O05	U	Not examined in this pass	
+O06	Y	Next.js dashboard (302 files under src/app) and a CLI	decolua/9router@5ae63d2:src/app;decolua/9router@5ae63d2:cli/src
+O07	U	Not examined in this pass	
+O08	N	Not an agent harness	

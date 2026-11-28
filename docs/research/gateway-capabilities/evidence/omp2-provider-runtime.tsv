@@ -1,0 +1,63 @@
+dim_id	status	note	evidence
+G01	Implemented	ProviderId newtype; 125 providers and 171 routes in the embedded snapshot (measurement 11)	crates/catalog/src/id.rs:6 ProviderId; crates/catalog/src/provider.rs:698 ProviderDef
+G02	Implemented	ModelKey is provider/model; opaque WireModelId; PolicyModel hides wire ids; 5289 models	crates/catalog/src/id.rs:40 provider_scoped; crates/catalog/src/model.rs:285 PolicyModel
+G03	Implemented	230 exact provider-scoped aliases; no cross-provider virtual model, fallback chains instead	crates/catalog/src/compile.rs:1048 CatalogAlias; crates/catalog/src/snapshot.rs:716 resolve_alias
+G04	Partial	Per-route wire ids and templated Azure deployment URL; no per-account deployment inventory	crates/catalog/src/model.rs:236 ModelSpec.wire_ids
+G05	Implemented	Probe, SQLite TTL store and session refresh owner with atomic registry swap	crates/ai/src/discovery/probe.rs:79 DiscoveryProbe; crates/driver/src/registry.rs:847 DiscoveryRefresher::spawn
+G06	Prototype	Shared-catalog overlay compiler has no production caller, only a test	crates/catalog/src/snapshot.rs:236 additive_shared_catalog_overlay
+G07	Partial	Pinned offline snapshot plus runtime overlay layers; no remote catalog pull	crates/driver/src/registry.rs:451 production_catalog; crates/catalog/src/snapshot.rs:529 with_overlay_stack
+G08	Implemented	Tri-state Availability per capability, negotiated per route with receipt evidence	crates/catalog/src/capability.rs:181 Availability; crates/ai/src/plan.rs:570 negotiate
+S01	Implemented	Total deterministic order: rank, affinity, health, quota, latency, price, ids	crates/ai/src/router.rs:1277 compare_evaluated
+S03	Partial	RouteHealth exists but production Router never supplies evidence, so health is Unknown	crates/ai/src/router.rs:785 default RuntimeRouteEvidence; crates/ai/src/plan.rs:388 RouteHealth
+S04	Partial	Rate windows and limiter exist; only report_block and 429 helpers write them, no header observer	crates/ai/src/provider/builtin.rs:2721 PoolRateLimiter; crates/ai/src/auth/manager.rs:552 report_block
+S05	Partial	Account and principal affinity and pin work; route-level affinity_route always None	crates/ai/src/account/pool.rs:932 select; crates/ai/src/router.rs:285
+S06	Implemented	Required versus preferred features negotiated; route restrictions; forced-call ladder	crates/ai/src/plan.rs:570 negotiate; crates/catalog/src/provider.rs:721 RouteRestrictions
+S07	Partial	Price is a late tiebreaker summing mixed units; per-call budget ledger exists	crates/ai/src/router.rs:1346 price_score; crates/ai/src/layer/budget.rs
+S08	Prototype	Latency is ranked but never populated (Duration::MAX) in production	crates/ai/src/router.rs:1302; crates/ai/src/plan.rs:410 latency
+S09	Absent	No breaker or half-open logic in ai, serve, catalog, http; grep circuit, breaker, half_open	crates/ai/src/account/pool.rs:632 cooldown (closest, no production writer)
+S10	Implemented	Per-provider in-flight cap and bounded queue (default 64) failing fast	crates/ai/src/layer/admission.rs:24 AdmissionController; crates/ai/src/settings.rs:412
+S11	Implemented	Cancel flag plus Notify, checkpoint between phases, transport Cancellation handle	crates/ai/src/layer/mod.rs:516 checkpoint; crates/ai/src/codec/mod.rs:957 Cancellation
+S12	Implemented	Same-route jittered retry pre-commit, credential re-entry, replay-gated cross-route fallback	crates/ai/src/layer/retry.rs:97 TransportRetryService; crates/ai/src/registry.rs:874 fallback_is_safe
+S13	Implemented	43 ErrorKind variants, RetryAction, deterministic HTTP status and body table	crates/ai/src/error.rs:26 ErrorKind; crates/ai/src/transport/http.rs:1273 classify_http_error_with_hint
+S14	Partial	Reserve policies and 15 usage fetchers exist; no writer of fetched usage into the pool found	crates/ai/src/account/pool.rs:134 QuotaReservePolicy; crates/ai/src/operation/usage.rs
+T01	Implemented	openai-chat codec, 81 routes	crates/ai/src/codec/openai_chat.rs:2595 classify_error
+T02	Implemented	openai-responses 14 routes plus openai-codex 10 routes	crates/ai/src/codec/openai_responses.rs:3764; crates/ai/src/codec/openai_codex.rs:590
+T03	Implemented	anthropic codec, 28 routes	crates/ai/src/codec/anthropic.rs:3326 classify_http_error
+T04	Implemented	google-genai, google-vertex, google-cca with CodecProfile variants	crates/ai/src/codec/gemini.rs:3562; crates/catalog/src/provider.rs:67 CodecProfile
+T05	Implemented	Bedrock, Cursor Connect, Devin, GitLab Duo, Ollama, local, omp_native codecs	crates/ai/src/codec/mod.rs:43-71 codec modules
+T06	Implemented	Catalog ThinkingPolicy plus sans-I/O recovery reasoning and thinking modules	crates/ai/src/recovery/reasoning.rs; crates/ai/src/recovery/thinking.rs
+T07	Implemented	ToolCallReady is the sole execution authorization; deltas are display-only	crates/ai/src/event.rs:203-224 ChatEvent tool variants
+T08	Implemented	Decoder emits RawEvent which maps to canonical ChatEvent; no rollback event	crates/ai/src/codec/mod.rs:844 Decoder; crates/ai/src/event.rs:178 ChatEvent
+T09	Partial	Image input capability and media operations; audio and video input per provider not verified	crates/ai/src/codec/openai_media.rs; crates/ai/src/operation/image.rs
+T10	Partial	JSON recovery and StructuredOutputFailure; ADR 0021 status is Partial	crates/ai/src/recovery/json.rs; docs/adr/STATUS.md:39
+T11	Implemented	One Error type with kind, phase, retry action and receipt	crates/ai/src/error.rs:696 Error
+T12	Implemented	Canonical IR with one sans-I/O codec per wire protocol; no pairwise wire translators	crates/ai/src/codec/mod.rs:918 Codec trait
+I01	Implemented	Pooled hyper client over rustls, HTTP/1.1 and HTTP/2; 165 of 171 routes	crates/ai/src/transport/http.rs:336 pooled_client
+I02	Implemented	SSE and NDJSON framing; stream_protocol values in providers.toml	crates/ai/src/transport/sse.rs; crates/ai/src/transport/ndjson.rs
+I03	Implemented	WebSocket transport; 1 route Websocket, 2 providers websocket-preferred	crates/ai/src/transport/websocket_transport.rs; fixtures/llm-oracle/catalog/providers.toml openai-codex
+I04	Implemented	Server-state binding and revisions; ReseedSession recovery	crates/ai/src/session/mod.rs; crates/catalog/src/model.rs:46 ServerStatePolicy
+I05	Partial	gRPC Inference service is served by omp-serve via tonic; no provider codec uses gRPC	crates/proto/proto/omp/inference/v1/inference.proto:39; crates/serve/Cargo.toml:33
+I07	Implemented	Bounded EventStream framing with CRC; 2 bedrock-converse routes	crates/ai/src/transport/eventstream.rs
+I08	Implemented	gRPC Turn and Realtime bidi streams; WebSocket realtime	crates/proto/proto/omp/inference/v1/inference.proto:48
+I09	Implemented	webrtc behind omp-ai realtime feature; omp-app enables it and imports it; 0 catalog routes use Webrtc	crates/ai/Cargo.toml:40; crates/app/Cargo.toml:94; crates/app/src/chat_voice.rs:25
+I10	Absent	quinn and h3 not in resolved graph; quinn only in Cargo.lock under reqwest optional	Cargo.lock reqwest dependencies; cargo tree -i quinn
+I11	Partial	Job operation and video generation exist; semantics not read	crates/ai/src/operation/job.rs; crates/ai/src/operation/video.rs
+I12	Absent	No batch API code in ai or serve; grep batches, batch_api, BatchJob, message_batches	crates/ai/src/operation (searched)
+I13	Implemented	Local transport kind; Apple FM and candle routes behind local features	crates/ai/src/local; crates/ai/Cargo.toml:16
+I15	Partial	ACP and Codex delegated executors live outside omp-ai; ADR 0043 Partially implemented	crates/driver/src/delegated_acp.rs; docs/adr/STATUS.md:61
+E01	Implemented	Prompt cache capabilities, prefix cache policy, route override to disable caching	crates/catalog/src/capability.rs:446; crates/catalog/src/model.rs:35
+E02	Partial	Account stickiness keeps caches reachable; no cache-key or route affinity	crates/ai/src/account/pool.rs:974 affinity_rank
+E03	Implemented	previous_response_id chaining in Responses and Codex codecs	crates/ai/src/codec/openai_responses.rs; crates/catalog/src/model.rs:46
+E04	Implemented	ServerStateBinding with SessionExpired and SessionConflict errors	crates/ai/src/session/mod.rs; crates/ai/src/error.rs:26
+E05	Implemented	Canonical history reseed, ContextStrategy, remote compaction, context promotion fallback	crates/catalog/src/model.rs:58; crates/ai/src/registry.rs:816
+E06	Partial	Compaction model is catalog data; snapcompact and minimizer crates not read	crates/catalog/src/model.rs:236 ModelSpec.compaction_model
+E07	Absent	No batch inference path; same search as I12	crates/ai/src/operation (searched)
+E08	Implemented	One pooled client with HTTP/2; sizing and idle policy not read	crates/ai/src/transport/http.rs:318
+E09	Partial	Bounded realtime queue with Backpressure error and buffer ceiling; HTTP path not verified	crates/ai/src/operation/realtime.rs:169; crates/ai/src/layer/mod.rs:93
+E10	Implemented	Usage in receipts, atomics in ExecutionContext, OTel token histogram	crates/ai/src/layer/mod.rs:91; crates/observability/src/metrics.rs:73
+E11	Implemented	cache_read, cache_write and one-hour cache write token counters	crates/ai/src/receipt.rs:147
+E12	Implemented	ttft_ms on span exported as time_to_first_chunk; not used for routing	crates/observability/src/span.rs:123; crates/serve/src/inference.rs:2661
+O01	Partial	No inference provider health probe; roster-probe is tool-roster only; RouteHealth unpopulated	crates/roster-probe/src/lib.rs:1; crates/ai/src/discovery/store.rs:81
+O03	Partial	Token, call, duration, error, cost metrics; no queue-latency metric found	crates/observability/src/metrics.rs:73
+O04	Implemented	Receipt Cost, cost_micro_usd and estimated_usd counter	crates/ai/src/layer/mod.rs:95; crates/observability/src/metrics.rs:78
+O05	Implemented	ExecutionReceipt attempts and provider_request spans with fallback warnings	crates/ai/src/registry.rs:785; crates/ai/src/registry.rs:834

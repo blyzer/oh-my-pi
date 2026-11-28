@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	U	not examined in this pass	
+L02	U	not examined in this pass	
+L03	U	not examined in this pass	
+L04	U	not examined in this pass	
+L05	U	not examined in this pass	
+L06	U	not examined in this pass	
+L07	N	Not an ONNX Runtime component; converters are separate tooling	apple/coremltools@a207b1a:coremltools/converters/mil/converter.py
+L08	U	not examined in this pass	
+L09	Y	Python conversion and prediction wrapper for Core ML models; runtime is the OS framework	apple/coremltools@a207b1a:coremltools/models/model.py
+L10	U	not examined in this pass	
+L11	U	not examined in this pass	
+L12	Y	ComputeUnit.CPU_AND_NE documented; gated to macOS 13 or later	apple/coremltools@a207b1a:coremltools/models/model.py:428
+L13	U	not examined in this pass	
+L14	U	not examined in this pass	
+L15	P	Prediction needs macOS (model.py version gate); conversion is Python tooling	apple/coremltools@a207b1a:coremltools/models/model.py:505
+L16	P	ComputeUnit enum picks CPU, GPU or NE per model load; no workload policy	apple/coremltools@a207b1a:coremltools/models/model.py:425

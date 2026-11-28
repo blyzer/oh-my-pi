@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	D	Server mode serves /v1/embeddings from one resident model (README); handler code not read	ggml-org/llama.cpp@8e23278:tools/server/README.md
+L02	Y	Runs GGUF generative models in slots; per-slot server_slot state	ggml-org/llama.cpp@8e23278:tools/server/server-context.cpp
+L03	N	README endpoint list has no classifier endpoint (rerank only)	ggml-org/llama.cpp@8e23278:tools/server/README.md
+L04	Y	Rerank needs a non-causal rank-pooling model; check in server context	ggml-org/llama.cpp@8e23278:tools/server/server-context.cpp:534
+L05	N	No compression feature in the README endpoint list	ggml-org/llama.cpp@8e23278:tools/server/README.md
+L06	N	README does not mention ONNX Runtime; whole tree not searched	
+L07	U	not examined in this pass	
+L08	N	README does not mention MLX; whole tree not searched	
+L09	U	not examined in this pass	
+L10	U	not examined in this pass	
+L11	Y	This is llama.cpp: C/C++ server binary with OpenAI, Anthropic and native HTTP APIs	ggml-org/llama.cpp@8e23278:tools/server/server.cpp
+L12	U	ANE use not examined	
+L13	D	Metal backend directory exists; -ngl and -dev options in README; kernels not read	ggml-org/llama.cpp@8e23278:tools/server/README.md
+L14	Y	One model, N parallel slots, per-slot KV; --kv-unified-per-slot sizes a shared pool; slot save/restore	ggml-org/llama.cpp@8e23278:tools/server/server-context.cpp:1473
+L15	D	Unix build and run instructions; Docker is one option among several (README)	ggml-org/llama.cpp@8e23278:tools/server/README.md
+L16	D	-ngl auto, --device, router --models-memory-margin LRU unloading (README); no CPU/ANE split	ggml-org/llama.cpp@8e23278:tools/server/server-models-sched.cpp
