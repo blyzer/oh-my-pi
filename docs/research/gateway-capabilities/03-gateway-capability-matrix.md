@@ -88,10 +88,11 @@ Source-file counts are the number of files with a source extension (`.go .rs .ts
 - **AGPL-3.0**: `QuantumNous/new-api`, `Ve-ria/CLIProxyAPIPlus` (the clone also has `LICENSE-MIT`; which files fall under which is not verified). Copyleft over network use: ideas only, no code reuse, no linking, no vendoring.
 - **GPL-3.0**: `Ve-ria/quickx`, `limecloud/lime`. Same: study only.
 - **No licence detected**: `stark-shadow/ecpa-plugins-store`, `hank9999/proxycast`, `BenedictKing/kiro.rs`. Without a licence the default is "all rights reserved", so nothing may be copied.
-- **`facebookincubator/Glean`**: GitHub reports `NOASSERTION`; the licence text itself must be read from the `LICENSE` file before any statement (done in deliverable 11, not here).
+- **`facebookincubator/Glean`**: GitHub reports `NOASSERTION`; the `LICENSE` text was read for deliverable 11 (CIX-08): BSD 3-clause under a non-standard heading, which explains GitHub's `NOASSERTION` (an engineering reading, not legal advice).
 - **MIT, Apache-2.0, BSD-3-Clause, MPL-2.0** (`hashicorp/go-plugin` is MPL-2.0, file-level copyleft): permissive or weak copyleft; reuse of a library still goes through `cargo deny` (`deny.toml`) and `THIRD-PARTY-NOTICES.txt`. Not verified against `deny.toml` here.
 
 Deliverable 14 holds the full security and licensing assessment.
+
 
 
 ## 4. Capability matrix
@@ -258,19 +259,19 @@ Sources: [local-inference notes](evidence/ref-local-inference.md) and [code-inte
 
 | ID | Dimension |  OMP2 |llama.cpp | mlx | mlx-lm | candle | coremltools | scip | Glean | tantivy |
 |---|---|---|---|---|---|---|---|---|---|---|
-| C02 | SCIP import | . | . | . | . | . | . | Y | D | . |
-| C03 | SCIP export | . | . | . | . | . | . | Y | . | . |
-| C04 | Glean | . | . | . | . | . | . | . | D | . |
-| C05 | tree-sitter | . | . | . | . | . | . | . | U | . |
-| C07 | tgrep or native trigram search | . | . | . | . | . | . | . | . | P |
-| C08 | Tantivy | . | . | . | . | . | . | . | . | Y |
-| C09 | native text search | . | . | . | . | . | . | . | . | Y |
-| C10 | structural summaries | . | . | . | . | . | . | P | . | . |
-| C15 | CodeIR | . | . | . | . | . | . | N | . | . |
-| C16 | ChangeIR | . | . | . | . | . | . | N | . | . |
-| C18 | sharing across agents | . | . | . | . | . | . | P | D | P |
-| C19 | revision and document-version consistency | . | . | . | . | . | . | P | D | P |
-| C20 | incremental invalidation | . | . | . | . | . | . | D | . | Y |
+| C02 | SCIP import | Y | . | . | . | . | . | Y | D | . |
+| C03 | SCIP export | N | . | . | . | . | . | Y | . | . |
+| C04 | Glean | N | . | . | . | . | . | . | D | . |
+| C05 | tree-sitter | Y | . | . | . | . | . | . | U | . |
+| C07 | tgrep or native trigram search | P | . | . | . | . | . | . | . | P |
+| C08 | Tantivy | N | . | . | . | . | . | . | . | Y |
+| C09 | native text search | Y | . | . | . | . | . | . | . | Y |
+| C10 | structural summaries | Y | . | . | . | . | . | P | . | . |
+| C15 | CodeIR | A | . | . | . | . | . | N | . | . |
+| C16 | ChangeIR | A | . | . | . | . | . | N | . | . |
+| C18 | sharing across agents | P | . | . | . | . | . | P | D | P |
+| C19 | revision and document-version consistency | P | . | . | . | . | . | P | D | P |
+| C20 | incremental invalidation | P | . | . | . | . | . | D | . | Y |
 | L01 | shared embedding worker | R | D | U | U | P | U | . | . | . |
 | L02 | tiny generative model | P | Y | U | Y | P | U | . | . | . |
 | L03 | local classifier | N | N | U | U | U | U | . | . | . |

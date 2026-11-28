@@ -54,6 +54,7 @@ Each row is the `Performance measurement strategy` line of a capability card, sh
 | [AUTH-04](05b-authentication-and-credential-lifecycle.md) | OS credential facility for the master key on Linux and Windows | Missing and justified: propose | cold `cargo run --bin omp` build time and binary size delta with the feature on and off; first-lease latency. Not measured. |
 | [AUTH-05](05b-authentication-and-credential-lifecycle.md) | Refresh keeper behaviour inside the existing broker daemon | Requires benchmarking | measure the p50 and p95 extra latency of a refresh on the request path against a stub endpoint, and the provider-side idle expiry of each bundled OAuth provider from its documentation. Not measured. |
 | [AUTH-08](05b-authentication-and-credential-lifecycle.md) | Entitlement and region facts as catalog data feeding existing eligi... | Partially implemented: extend | count refused-by-entitlement requests per account-model pair in a recorded session set; not measured. |
+| [AUTH-11](05b-authentication-and-credential-lifecycle.md) | At-most-once refresh send for single-use refresh tokens | Partially implemented: extend | crash-injection tests at three points with a stub endpoint that rotates and enforces reuse detection; count revoked families with and without the marker. Not measured. |
 | [PRV-11](06-transport-and-protocol-recommendations.md) | WebRTC feature weight in the default app build | Requires benchmarking | `cargo build --timings` cold for `omp` with and without `omp-ai/realtime`, crate count from `cargo tree`, stripped binary size. Not measured here. |
 | [PRV-13](06-transport-and-protocol-recommendations.md) | OpenAI-compatible HTTP facade over `omp-serve` | Suitable as an optional extension | Added latency of the facade over the gRPC path, per-token overhead; not measured. |
 | [PRV-14](06-transport-and-protocol-recommendations.md) | Keep canonical IR; no pairwise translators | Already implemented: reuse | Token streaming overhead per codec is not measured; plan: replay a cassette through each decoder and time frames per second. |
@@ -95,6 +96,11 @@ Each row is the `Performance measurement strategy` line of a capability card, sh
 | [INF-10](10-local-inference-assessment.md) | Typed hardware placement policy replacing the dead TinyDevice | Missing and justified: propose | Reuse B1 to B5 results (`not measured`). |
 | [INF-11](10-local-inference-assessment.md) | Local reranker lane | Partially implemented: extend | B4 (`not measured`). |
 | [INF-12](10-local-inference-assessment.md) | Linux without Docker or Podman | Partially implemented: extend | `not measured`; run B1 on a Linux host. |
+| [CIX-02](11-code-intelligence-and-scip-assessment.md) | Give agents a read-only query surface over the shared index | Partially implemented: extend | B2 and B3 in section 8. |
+| [CIX-03](11-code-intelligence-and-scip-assessment.md) | Share one index across swarm children by workspace identity and rev... | Missing and justified: propose | B4 in section 8. |
+| [CIX-06](11-code-intelligence-and-scip-assessment.md) | Document-level incremental invalidation instead of a full rebuild | Requires benchmarking | B1 and B5 in section 8. |
+| [CIX-09](11-code-intelligence-and-scip-assessment.md) | Do not add Tantivy now; decide with a measured grep baseline | Unnecessary or redundant | B3 in section 8 compares grep, the trigram extension, FTS5 and, only if grep fails the budget, Tantivy. |
+| [CIX-10](11-code-intelligence-and-scip-assessment.md) | Keep semantic and associative results advisory and separate from au... | Requires benchmarking | B6 in section 8, following ADR 0060 D1's spike. |
 
 ## 5. Area benchmark tables
 

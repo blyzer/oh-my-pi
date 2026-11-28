@@ -19,7 +19,7 @@ Licences are from the GitHub API and the files in the pinned clones ([`evidence/
 | GPL-3.0 | `Ve-ria/quickx`, `limecloud/lime` | study only |
 | No licence detected | `stark-shadow/ecpa-plugins-store`, `hank9999/proxycast`, `BenedictKing/kiro.rs` | all rights reserved by default; nothing may be copied |
 | MPL-2.0 | `hashicorp/go-plugin` | file-level copyleft; as a design reference only (OMP2 has no Go extension runtime); `deny.toml` allows MPL-2.0 only as package-scoped exceptions |
-| `NOASSERTION` | `facebookincubator/Glean` | the `LICENSE` text must be read before any reuse; see deliverable 11 |
+| `NOASSERTION` | `facebookincubator/Glean` | the `LICENSE` text reads as BSD 3-clause under a non-standard heading (deliverable 11, CIX-08; an engineering reading, not legal advice); licence is not the blocker, build weight is |
 | MIT, Apache-2.0, BSD-3-Clause | the remaining repositories | libraries may be adopted through the normal review |
 
 OMP2's own gate: `deny.toml` (cargo-deny) evaluates every target and `all-features = true`, allows only permissive licences (`0BSD`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `BSL-1.0`, `CC0-1.0`, `ISC`, `MIT`, `Zlib` and a few others), grants `MPL-2.0` to five named crates only, and denies unknown registries and git sources except one (`[sources]`). A GPL or AGPL crate would therefore fail the existing gate; an optional-feature dependency is covered because of `all-features`. `THIRD-PARTY-NOTICES.txt` and `about.toml` carry the notices. This was read, not run.
@@ -63,6 +63,10 @@ Taken from the `Security implications` line of each capability card (shortened).
 | [AUTH-07](05b-authentication-and-credential-lifecycle.md) | Partially implemented: extend | disabling a revoked credential reduces repeated use of a dead token; mistaken disable denies service, so the terminal set must be explicit. |
 | [AUTH-08](05b-authentication-and-credential-lifecycle.md) | Partially implemented: extend | facts are metadata only; a wrong cached fact must degrade to the current behaviour (try and learn), never block permanently. |
 | [AUTH-09](05b-authentication-and-credential-lifecycle.md) | Partially implemented: extend | events must stay secret-free (`RefreshReceipt` is already non-secret by construction). |
+| [AUTH-10](05b-authentication-and-credential-lifecycle.md) | Requires ADR reconsideration | a default read of another product's credential store is credential extraction by the ADR 0043 definition; the borrowed token is a full account credential and is then held in OMP's store; the code path is macOS-only. |
+| [AUTH-11](05b-authentication-and-credential-lifecycle.md) | Partially implemented: extend | the consumed marker is non-secret; the receipt design in the reference stores credentials, which OMP does not need because the generation CAS already carries the new bundle on success. |
+| [AUTH-12](05b-authentication-and-credential-lifecycle.md) | Partially implemented: extend | none beyond refresh traffic volume. |
+| [AUTH-13](05b-authentication-and-credential-lifecycle.md) | Rejected for security, licensin... | account termination risk, provider-terms violation, and exposure of full-account credentials; plaintext credential files in the references. |
 | [PRV-10](06-transport-and-protocol-recommendations.md) | Unnecessary or redundant | New network stack and proxy-bypass surface (QUIC does not pass HTTP proxies); the existing `ProxyDiscoveryRoutes` and proxy transport (`transport/proxy.rs`) would not cover it. |
 | [PRV-11](06-transport-and-protocol-recommendations.md) | Requires benchmarking | Smaller default attack surface if voice is optional; the device-attestation feature is already coupled to `realtime` (`Cargo.toml:40-46`). |
 | [PRV-12](06-transport-and-protocol-recommendations.md) | Unnecessary or redundant | None new. |
@@ -92,6 +96,8 @@ Taken from the `Security implications` line of each capability card (shortened).
 | [EXT-10](07-abi-independent-extension-assessment.md) | Requires ADR reconsideration | Smaller attack surface per component than a Python host in principle; larger engine dependency surface. |
 | [EXT-11](07-abi-independent-extension-assessment.md) | Requires ADR reconsideration | Executable distribution plus a sandbox profile for a non-Python process; ADR 0076 limits apply. |
 | [EXT-12](07-abi-independent-extension-assessment.md) | Requires benchmarking | Zero-copy readers need strict validation. |
+| [EXT-13](07-abi-independent-extension-assessment.md) | Already implemented: reuse | TOFU pins and revocations apply per extension id; a second index adds a second trust root that the operator must opt into. |
+| [EXT-14](07-abi-independent-extension-assessment.md) | Rejected for security, licensin... | Credential pooling and private-API use expose credentials and violate provider terms; an extension of this kind would also need CONTROL and credential grants that ADR 0075 deliberately withholds from extension code. |
 | [PY-01](08-python-runtime-comparative-assessment.md) | Already implemented: reuse | Child already isolates the interpreter from the agent process. Embedding does not add isolation by itself; isolation comes from the process and sandbox (see the answer in section 1). |
 | [PY-02](08-python-runtime-comparative-assessment.md) | Requires benchmarking | none beyond running the existing child entries; run on an isolated checkout, do not run untrusted extensions. |
 | [PY-03](08-python-runtime-comparative-assessment.md) | Requires benchmarking | none: benchmark runs on local fixtures. |
@@ -128,6 +134,20 @@ Taken from the `Security implications` line of each capability card (shortened).
 | [INF-10](10-local-inference-assessment.md) | Missing and justified: propose | None beyond not widening the surface; placement never routes local-pinned data to a remote. |
 | [INF-11](10-local-inference-assessment.md) | Partially implemented: extend | Candidate memory text goes to the model; local only. |
 | [INF-12](10-local-inference-assessment.md) | Partially implemented: extend | Downloaded binaries need pinning. |
+| [CIX-01](11-code-intelligence-and-scip-assessment.md) | Already implemented: reuse | Producers are external processes started with `Command::new` and `stdin`/`stdout` null (`producer.rs:95`); output is path-validated (`UnsafePath`, `graph.rs:248`) and only read, never executed. Env overrides (`RUST_ANALYZER`, `OMP_KB_SCI... |
+| [CIX-02](11-code-intelligence-and-scip-assessment.md) | Partially implemented: extend | Read-only. The tool must not start producers implicitly; `update` runs `rust-analyzer`, which executes build scripts and proc macros (`cli.rs:52` comment), so it needs Exec-tier approval like any process. |
+| [CIX-03](11-code-intelligence-and-scip-assessment.md) | Missing and justified: propose | The index describes source text; a child must not be able to write the shared index or the parent's. Reads go through the Environment authority; paths stay relative and validated (`UnsafePath`). |
+| [CIX-04](11-code-intelligence-and-scip-assessment.md) | Unnecessary or redundant | A retained `.scip` file contains paths and symbol names of the repository; it needs the same access class as the source. |
+| [CIX-05](11-code-intelligence-and-scip-assessment.md) | Partially implemented: extend | Prevents a model from acting on embedding or text-derived edges as if compiler-resolved. |
+| [CIX-06](11-code-intelligence-and-scip-assessment.md) | Requires benchmarking | No new surface beyond CIX-02. |
+| [CIX-07](11-code-intelligence-and-scip-assessment.md) | Already implemented: reuse | Existing policies on path scope and edit approvals apply. |
+| [CIX-08](11-code-intelligence-and-scip-assessment.md) | Unnecessary or redundant | A resident database service would hold the whole codebase; licence is BSD 3-clause text under a non-standard heading, not the blocker. |
+| [CIX-09](11-code-intelligence-and-scip-assessment.md) | Unnecessary or redundant | An on-disk index of source text copies code into another store; it needs the same location and permission policy as the omp-kb cache. |
+| [CIX-10](11-code-intelligence-and-scip-assessment.md) | Requires benchmarking | Retrieved text goes to model context; candidates must be rechecked against the SCIP or grep layer before any edit. |
+| [CIX-11](11-code-intelligence-and-scip-assessment.md) | Missing and justified: propose | As CIX-05. |
+| [CIX-12](11-code-intelligence-and-scip-assessment.md) | Unnecessary or redundant | none |
+| [CIX-13](11-code-intelligence-and-scip-assessment.md) | Already implemented: reuse | Servers run project code analysis in the Environment; existing approvals apply. |
+| [CIX-14](11-code-intelligence-and-scip-assessment.md) | Suitable as an external integra... | Producer discovery by PATH is an existing trust input; report the resolved path, not file contents. |
 
 ## 5. Invariants this set asks the owner to keep
 
