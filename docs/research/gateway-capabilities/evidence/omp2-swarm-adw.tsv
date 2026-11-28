@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+W01	Implemented	Child kernels composed in the same process, journal-first	crates/driver/src/subagent/spawn.rs:89 DriverSubagentSpawner;crates/driver/src/headless/kernel.rs:2457 compose_kernel
+W02	Implemented	Child runs as a detached tokio task settling a job; parent polls the job board	crates/driver/src/subagent/spawn.rs:903 tokio::spawn;crates/agent/src/jobs.rs:699 JobBoard
+W03	Absent	No dedicated worker threads for agents; agents are tokio tasks (searched subagent/*.rs for thread spawn)	crates/driver/src/subagent/spawn.rs:903 tokio::spawn
+W04	Partial	In-process child kernel is the lightweight form; revive.rs not read	crates/driver/src/subagent/spawn.rs:923 run_child
+W05	Proposed	Headless composition exists in-process; out-of-process omp serve --worker only in ADR 0039 B1; no code found	docs/adr/0039-remote-control-and-factory-modes.md:346
+W06	Implemented	Recursion depth journaled and capped (default max 2)	crates/driver/src/subagent/settings.rs:106 SV_TASK_MAX_RECURSION_DEPTH;crates/driver/src/subagent/spawn.rs:459 admit_child
+W07	Partial	ExecutorRegistry and Executor contract; ADR 0052 row Partially implemented	crates/driver/src/delegated_host.rs:19 ExecutorRegistry;crates/contract/src/delegated/executor.rs:217 Executor
+W08	Partial	Sandbox crates and envd exec sandbox exist (not re-read); child agents themselves are not sandboxed processes	crates/envd/src/child_tree.rs:1
+W09	Partial	envd, blobs, session registry shared; registry, credentials, memory not examined	crates/driver/src/subagent/spawn.rs:89 DriverSubagentSpawner
+W10	Partial	Sandbox probe lazy; LSP in children off by default; extension admission per child	crates/driver/src/headless/kernel.rs:2497 sandbox_probe;crates/driver/src/subagent/settings.rs:237 SV_TASK_ENABLE_LSP
+W11	Partial	Pool limit is a count from a convar; no CPU, memory or provider input	crates/driver/src/subagent/workpool_scheduler.rs:101 WorkpoolPolicy;crates/driver/src/subagent/settings.rs:123 SV_TASK_MAX_CONCURRENCY
+W12	Partial	Decomposition by the model via task; sequencing by ADW; concurrent phase driver not verified	crates/adw/src/run.rs:173 Run;crates/tools/src/task.rs:1
+W13	Partial	Role defined in ADR 0039 D3; integration by finish_isolation and merge_worktree; no foreman code	docs/adr/0039-remote-control-and-factory-modes.md:618;crates/driver/src/subagent/spawn.rs:1042 finish_isolation
+W14	Partial	Cancel tree, TERM/grace/KILL, deadline, orphan settle exist; default runtime Never; auto-restart not found	crates/agent/src/cancel.rs:1;crates/envd/src/child_tree.rs:1;crates/driver/src/subagent/settings.rs:144 SV_TASK_MAX_RUNTIME
+W15	Partial	Per-file CoW clone implemented; git worktree backend absent by design (ADR 0007)	crates/envd/src/workspace/operations.rs:673 create_worktree;docs/adr/0007-subagent-filesystem-isolation.md:53
+W16	Partial	Generation counter plus snapshot manifest and tree hashes; not on the job record	crates/envd/src/workspace/operations.rs:253 WorktreeRecord;crates/envd/src/workspace/operations.rs:275 DurableSnapshotRecord

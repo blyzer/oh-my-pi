@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	P	BERT-family encoder models exist in candle-transformers; no embedding server in candle-core	huggingface/candle@9c1fcff:candle-transformers/src/models/bert.rs
+L02	P	Quantized llama and LFM2 model code exist; library, not a server	huggingface/candle@9c1fcff:candle-transformers/src/models/quantized_lfm2.rs
+L03	U	not examined in this pass	
+L04	U	not examined in this pass	
+L05	U	not examined in this pass	
+L06	U	not examined in this pass	
+L07	U	not examined in this pass	
+L08	U	not examined in this pass	
+L09	U	not examined in this pass	
+L10	Y	This is Candle: Rust tensor library with CPU, CUDA and Metal devices	huggingface/candle@9c1fcff:candle-core/src/device.rs
+L11	U	not examined in this pass	
+L12	U	ANE use not examined	
+L13	Y	Device::new_metal(0) and a candle-metal-kernels crate	huggingface/candle@9c1fcff:candle-core/src/device.rs:244
+L14	N	Library only: no cross-process weight sharing in candle-core; examples not searched	huggingface/candle@9c1fcff:candle-core/src/device.rs
+L15	P	CPU backend plus optional mkl and accelerate modules	huggingface/candle@9c1fcff:candle-core/src/cpu_backend
+L16	U	not examined in this pass	

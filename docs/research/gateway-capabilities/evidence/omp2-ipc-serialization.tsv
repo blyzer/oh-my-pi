@@ -1,0 +1,15 @@
+dim_id	status	note	evidence
+Z01	Implemented	JSON and JSONL on four channels: journal SSE+JSON, embedding worker NDJSON, `omp rpc` NDJSON, extension CONTROL (length-prefixed JSON)	crates/memory/src/embedding/protocol.rs:12 MAX_FRAME_BYTES
+Z02	Implemented	19 proto3 files, 15 packages, prost 0.14.4 and tonic 0.14.6 in Cargo.lock; codegen in build.rs with protox	crates/proto/build.rs:64 compile_fds
+Z03	Absent	No capnp package in Cargo.lock; searched Cargo.lock and workspace Cargo.toml	crates/proto/src/lib.rs:51 SCHEMA_REV
+Z04	Absent	No flatbuffers package in Cargo.lock; ADR 0048 rejected without measurement	crates/proto/src/lib.rs:51 SCHEMA_REV
+Z05	Absent	rkyv 0.8.18 appears in Cargo.lock only as a dependency of dtls; no omp crate declares it	crates/proto/src/lib.rs:51 SCHEMA_REV
+Z06	Absent	No rmp or rmp-serde in Cargo.lock	crates/proto/src/lib.rs:51 SCHEMA_REV
+Z07	Absent	No shared memory, memfd or IPC mmap; memmap2 only in shell-builtins for file reads	crates/shell-builtins/src/tac.rs:15 Mmap
+Z08	Partial	Packed repeated float in gRPC Embed and bytes chunks exist; no raw tensor buffer framing and the worker pipe uses JSON floats	crates/proto/proto/omp/inference/v1/inference.proto:895 values
+Z09	Implemented	JSON-RPC for ACP, MCP, LSP and DAP	crates/envd/src/mcp/transport/stdio.rs:1
+Z10	Implemented	tonic servers for Inference, Auth, Blob, Gateway, ForwardProxy and SessionControl	crates/serve/src/lib.rs:1
+I05	Implemented	gRPC with explicit 64 MiB message limits	crates/app/src/daemon.rs:63 RPC_MESSAGE_MAX_BYTES
+I06	Implemented	Protobuf is the process and network contract	crates/proto/build.rs:64 compile_fds
+I08	Implemented	Turn and Realtime are bidirectional streaming RPCs; Blob.Put is client streaming	crates/proto/proto/omp/inference/v1/inference.proto:48 Turn
+I14	Implemented	UDS or named pipe for envd, socketpair for CONTROL, piped stdio for workers	crates/envd/src/exthost/spawn.rs:545 UnixStream

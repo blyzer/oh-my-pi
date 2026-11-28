@@ -1,0 +1,5 @@
+dim_id	status	note	evidence
+Z04	Y	Rust verifier with max_depth 64 and table and size limits; `root` verifies, `root_unchecked` does not (code read)	google/flatbuffers@5eb190f:rust/flatbuffers/src/verifier.rs
+Z08	D	Vector types for scalars exist; tensor use not examined	google/flatbuffers@5eb190f:rust/flatbuffers/src/vector.rs
+I05	U	grpc directory present in upstream; not examined	google/flatbuffers@5eb190f:rust/flatbuffers/src/lib.rs
+I08	N	Rust crate has no stream framing (file listing of rust/flatbuffers/src)	google/flatbuffers@5eb190f:rust/flatbuffers/src/lib.rs

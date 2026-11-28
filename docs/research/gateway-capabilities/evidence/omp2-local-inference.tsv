@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	Prototype	Supervisor and stdio worker exist; nothing builds EmbeddingSupervisor; recall passes no query vector	crates/memory/src/embedding/supervisor.rs:50 EmbeddingSupervisor; crates/tools/src/memory.rs:261 search
+L02	Partial	Tiny role resolves to an online model; Apple FM route is opt-in on-device text; no in-process GGUF generator	docs/adr/0023-tiny-local-model.md:20; crates/ai/src/local/tiny_catalog.rs:24 TinyWorkload
+L03	Absent	CLASSIFIER_MODELS aliases MEMORY_MODELS (catalog only); difficulty classifier deleted; only the installer reads the catalog	crates/ai/src/local/tiny_catalog.rs:263 CLASSIFIER_MODELS; crates/app/src/tiny_models_cmd.rs:40 unique_models
+L04	Prototype	Apple FM 0-10 relevance reranker behind apple-aux-memory; only tests call rank	crates/memory/src/aux_lane.rs:17 rank
+L05	Partial	Standalone semantic-compression command uses the configured session model; no local-model path read	crates/driver/src/compress/mod.rs:1 Standalone
+L06	Prototype	ONNX Runtime via fastembed (ort-download-binaries); opt-in features in omp-ai and omp-memory; not default	Cargo.toml:60 fastembed; crates/ai/src/local/embedding.rs:195 EmbeddingAdapter
+L07	Absent	No Core ML execution provider feature on fastembed; only ort-download-binaries-rustls-tls is enabled	Cargo.toml:60 fastembed
+L08	Absent	No mlx crate in Cargo.lock (parent grep of package names); no MLX server route in catalog	crates/catalog/compat/providers/llama.cpp.kdl:3 provider
+L09	Absent	Only a name: TinyDevice::Coreml; TinyDevice has no reference outside its own file	crates/ai/src/local/device.rs:12 TinyDevice
+L10	Prototype	Candle Whisper, Parakeet and Kokoro behind local-stt and local-tts; no candle embedding or text generator	crates/ai/src/local/stt.rs:433 whisper_device; Cargo.toml:42 candle-core
+L11	Partial	Server route Implemented (loopback discovery of llama-server, /props); in-process llama.cpp barred by AGENTS.md	crates/ai/src/discovery/endpoints.rs:113 known_loopback_endpoints; crates/ai/src/discovery/probe.rs:896 apply_llama_props
+L12	Absent	No explicit ANE control; Apple FM placement is decided by the OS inside the framework	crates/ai/src/local/applefm.rs:97 FRAMEWORK_TIMEOUT
+L13	Prototype	Candle Metal device for Whisper, Parakeet, Kokoro (opt-in); CPU default for tiny devices	crates/ai/src/local/parakeet.rs:240 parakeet_device; crates/ai/src/local/tts.rs:397 kokoro_device
+L14	Partial	LocalRuntime clones share weights per process; MemoryRuntime shared with subagents; pools per consumer, no process-wide pool	crates/ai/src/local/runtime.rs:246 LocalRuntime; crates/envd/src/memory.rs:101 session
+L15	Partial	Default graph has no local feature; Apple FM macOS only; ORT binaries downloaded at build; Linux build not run here	crates/ai/Cargo.toml:20 local-applefm; Cargo.toml:60 fastembed
+L16	Absent	TinyDevice names devices (and a llama.cpp gpu_layers map) but nothing reads it; no placement policy	crates/ai/src/local/device.rs:83 gpu_layers

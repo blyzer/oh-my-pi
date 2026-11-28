@@ -1,0 +1,5 @@
+dim_id	status	note	evidence
+Z05	Y	Checked access API built on bytecheck exists next to unchecked access (code read of the module header)	djkoloski/rkyv@d963abc:rkyv/src/api/high/checked.rs
+Z08	D	Alignment and archived-layout tie to Rust types; no tensor-specific API examined	djkoloski/rkyv@d963abc:README.md
+Z07	U	Mapped access not examined	djkoloski/rkyv@d963abc:README.md
+I08	N	No transport or streaming; rkyv_dyn is trait-object serialization	djkoloski/rkyv@d963abc:rkyv_dyn

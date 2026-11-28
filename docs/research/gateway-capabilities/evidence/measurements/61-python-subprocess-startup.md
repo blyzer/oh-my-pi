@@ -44,3 +44,5 @@ vendor python3.14t -I -S -c pass: 22.6 29.7 26.0 45.5 44.7 35.5 37.6 38.1 30.3 2
 
 ## What this shows and does not show
 Shows the cost floor of starting a standalone CPython process on this laptop, including the exact vendored free-threaded 3.14 build that `omp-py` links statically. Does NOT show the startup of the embedded interpreter inside `omp __omp-eval-child` or `__omp-ext-host`: no `omp` binary was built (`target/debug` has no `omp`), and the embedded boot also installs the frozen table, the `_omp` module and the omp bootstrap. Embedded child startup is `not measured` (plan in deliverable 8, PY-02).
+
+Back to the [index](../../README.md).

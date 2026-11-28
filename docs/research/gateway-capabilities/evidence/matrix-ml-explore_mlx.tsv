@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+L01	U	not examined in this pass	
+L02	U	not examined in this pass	
+L03	U	not examined in this pass	
+L04	U	not examined in this pass	
+L05	U	not examined in this pass	
+L06	U	not examined in this pass	
+L07	U	not examined in this pass	
+L08	Y	This is MLX: array framework with CPU, Metal and CUDA backends	ml-explore/mlx@2e094ae:mlx/backend/metal/allocator.cpp
+L09	U	not examined in this pass	
+L10	U	not examined in this pass	
+L11	U	not examined in this pass	
+L12	N	grep of README, index.rst, unified_memory.rst for Neural Engine and ANE found nothing	ml-explore/mlx@2e094ae:docs/src/usage/unified_memory.rst
+L13	Y	Metal backend with allocator in mlx/backend/metal	ml-explore/mlx@2e094ae:mlx/backend/metal/allocator.cpp
+L14	P	Unified memory shared by CPU and GPU in one process; cross-process weight sharing not examined	ml-explore/mlx@2e094ae:docs/src/usage/unified_memory.rst
+L15	D	README documents a CUDA backend install for Linux	ml-explore/mlx@2e094ae:README.md
+L16	D	Per-stream device choice documented (using_streams.rst); no workload policy	ml-explore/mlx@2e094ae:docs/src/usage/using_streams.rst

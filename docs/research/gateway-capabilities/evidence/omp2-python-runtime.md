@@ -51,7 +51,7 @@ Extension hosts and named workers have no external-interpreter mode: they always
 |---|---|---|
 | Standalone CPython | Eval only, opt-in (section 3) | read `crates/envd/src/eval/process.rs` |
 | RustPython | Absent | `Cargo.lock` has no `rustpython` entry (parent check, `02-verified-current-state.md` section 7); documentation only otherwise |
-| Native Rust executable extensions | Absent as an extension kind. Non-Python tools run as MCP stdio servers (`crates/envd/src/mcp/stdio.rs:1`) | ADR 0036 decision 2; ADR 0046 line 52 |
+| Native Rust executable extensions | Absent as an extension kind. Non-Python tools run as MCP stdio servers (`crates/envd/src/mcp/transport/stdio.rs:1`) | ADR 0036 decision 2; ADR 0046 line 52 |
 | Go executable adapters | Absent. Only a Go test fixture (`fixtures/sarif/sources/golangci/outcomes.go`) and a doc remark that a Maven or Go build adapter would be a new adapter (`crates/exec/README.md:38`) | `git ls-files '*.go' go.mod`; grep for `go adapter`, `go executable`, `go binary` in `crates`, `docs`, `extensions`, `AGENTS.md` |
 | WebAssembly components | Absent | `Cargo.lock` has no `wasmtime`, `wasmer`, `extism` (parent check) |
 

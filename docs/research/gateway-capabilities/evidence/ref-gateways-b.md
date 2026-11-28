@@ -128,4 +128,89 @@ Checked against the locked decisions; `fit` says which lock each idea touches.
 | A5 | Required Postgres and Redis, Next.js console, mandatory web UI | Contradicts a lightweight native harness; owner brief section 13 forbids a mandatory dashboard or database server. Unnecessary or redundant |
 | A6 | Importing another gateway's auth files or management API to move accounts | Credential-handling surface with no OMP2 use case. Rejected |
 
+## 2. hank9999/proxycast (`3ad8ff6`)
+
+### 2.1 What it is
+
+A Tauri 2 desktop application, version 0.20.1 (`src-tauri/Cargo.toml`), that turns credentials of other AI clients (Kiro, Gemini CLI, Qwen, Antigravity, Codex, Claude OAuth, iFlow) and plain API keys into a local OpenAI-compatible and Anthropic-compatible endpoint (`README.md` lines 16-45, Chinese). The README says it is the desktop version of AIClient-2-API (`README.md:43-45`). Last commit 2025-12-26 (`fix: ...上游的编译错误`).
+
+Language and size: 591 tracked files; 203 `.rs` files (117,444 lines, `src-tauri/src`), 136 `.tsx` (42,939) and 65 `.ts` (7,595) for the React UI. Rust stack: tokio, axum 0.7 with WebSocket and rustls, reqwest, rusqlite, serde, tiktoken-rs (`src-tauri/Cargo.toml`). Tests: `tests.rs` files per module (for example `router/tests.rs` 760 lines, `credential/tests.rs` 1,929 lines); no test run.
+
+### 2.2 Entry points and request path
+
+`src-tauri/src/lib.rs` wires Tauri state; `server/mod.rs:run_server` builds the axum router: `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/gemini/*path`, `/v1/ws`, `/v1/models`, `/api/provider/:provider/v1/messages` (Amp), `/v0/management/*` behind `ManagementAuthLayer` (`server/mod.rs:801-882`).
+
+`handlers/api.rs:chat_completions` (line 621): `verify_api_key`; `RequestContext`; `processor.resolve_and_route` (alias map then routing rules, `processor/mod.rs:218`); optional parameter injection (`api.rs:662-680`); `select_provider_for_client` by detected client type (`api.rs:349`); `pool_service.select_credential` (`api.rs:705`); flow-monitor capture with optional user intercept (`api.rs:726-760`); `call_provider_openai` (`api.rs:768`); telemetry and token-usage recording (`api.rs:777-794`).
+
+A seven-step `RequestProcessor` pipeline (Auth, Injection, Routing, PluginPre, Provider with retry and failover, PluginPost, Telemetry) is documented in `processor/mod.rs:5-14` and implemented in `processor/steps/*`, but the HTTP handlers only call `resolve_and_route`; a grep for `execute_with_resilience`, `execute_with_retry`, `.failover.` and `.retrier.` finds callers only inside `processor/steps/provider.rs`. So retry and failover exist as library code that this reading did not find on the live request path (`[INFERENCE]` that it is dead code; only the absence of callers is observed).
+
+### 2.3 Registry, credentials and secrets
+
+- Registry: `ProviderType` is a fixed enum (`lib.rs:63`); `CredentialData` has one variant per provider, either `creds_file_path` (OAuth) or `api_key` (`models/provider_pool_model.rs:33-87`). Model support is per credential: `not_supported_models`, wildcard `excluded_models` for Gemini keys, and a hardcoded Antigravity model list (`provider_pool_model.rs:290-310`). A hardcoded Kiro model map lives in `converter/openai_to_cw.rs:get_model_map`. These are model-name conditionals in Rust.
+- Secrets: OAuth tokens stay in the other client's token files, for example Kiro reads `~/.aws/sso/cache/kiro-auth-token.json` (`providers/kiro.rs:default_creds_path`); API keys are plain `String` fields persisted in SQLite. A grep for `encrypt|aes|keyring|chacha` over `src-tauri/src` finds no hits, so no encryption at rest or keychain use was found.
+- Refresh: `CredentialProvider`/`TokenManager` traits with expiring-soon check (5 min) and retried refresh (`providers/traits.rs`); each provider implements its own OAuth (`providers/codex.rs`, `claude_oauth.rs`, `qwen.rs` device code, `antigravity.rs`).
+
+### 2.4 Scheduling and routing
+
+Two overlapping mechanisms: `credential/balancer.rs:LoadBalancer` (RoundRobin, LeastUsed, Random, cooldown marking, failover-on-proxy-error) and the DB-backed `services/provider_pool_service.rs:select_credential`, which is what the handlers call: filter healthy-and-enabled credentials that support the model, return the only one, otherwise pick the best by a 100-point score (health 40, usage frequency 30, idle time up to 30; `calculate_credential_score`, lines 240-290). Health flips after `max_error_count` errors (`provider_pool_service.rs:341`). Every request reads the credential rows from SQLite under a mutex (`select_credential:187-191`). No session affinity, no rate-limit-header parsing and no cost or latency routing were seen (`quota.rs` 1,141 lines was not read, so quota awareness is `U`). `resilience/failover.rs:FailureType::detect` classifies QuotaExceeded, AuthenticationFailed, ServiceUnavailable, Other from status code and message text.
+
+### 2.5 Protocol translation
+
+Pairwise converters around OpenAI types: Anthropic to OpenAI (`converter/anthropic_to_openai.rs`), OpenAI to CodeWhisperer and back (`openai_to_cw.rs`, `cw_to_openai.rs`), OpenAI to Antigravity/Gemini (`openai_to_antigravity.rs`), with a `ProtocolSelector` that scores conversion paths (`protocol_selector.rs`). Request and response types are typed Rust structs in `models/openai.rs`, `anthropic.rs`, `codewhisperer.rs`; the Antigravity converter returns `serde_json::Value` (`openai_to_antigravity.rs:365`). Kiro thinking is emulated by injecting tags (`kiro_thinking.rs:ensure_kiro_thinking_tags`).
+
+### 2.6 Streaming and errors
+
+`streaming/traits.rs:StreamingProvider` returns `Pin<Box<dyn Stream<Item = Result<Bytes, StreamError>>>>` plus a `stream_format`; `streaming/aws_parser.rs:AwsEventStreamParser` decodes AWS EventStream binary frames from Kiro (`AwsEvent` enum) and `cw_to_openai.rs` maps events to OpenAI chunks. Errors are `ProviderError`, `ProcessError`, `StreamError` enums (`providers/error.rs`, `processor/error.rs`, `streaming/error.rs`; bodies not read).
+
+### 2.7 Usage, observability, management, extension
+
+`telemetry/tokens.rs` (tiktoken-rs) and `stats.rs` aggregate usage; there is no money cost accounting found. The flow monitor (24,418 lines under `flow_monitor/`) captures each request and response, supports interception, replay, diff, filter DSL and export including code export (`flow_monitor/monitor.rs`, `replayer.rs`, `interceptor.rs`, `code_exporter.rs`). Management is the Tauri UI plus `/v0/management/*` (`server/mod.rs:802`). Extension: a `Plugin` trait with `Script` (JSON-driven) and reserved `Native` types and pre/post hooks (`plugin/types.rs:138-145`, `plugin/loader.rs:ScriptPlugin`), loaded from `~/.config/proxycast/plugins`.
+
+### 2.8 Dependencies on unofficial endpoints, pooling and similar (neutral description)
+
+Provider code targets consumer and internal endpoints: Kiro/CodeWhisperer through AWS OIDC tokens (`providers/kiro.rs:544` `oidc.{region}.amazonaws.com/token`), ChatGPT backend `chatgpt.com/backend-api/codex` (`codex.rs:19`), Claude consumer OAuth at `claude.ai` (`claude_oauth.rs:26`), Google internal Cloud Code endpoints and sandbox hosts for Gemini CLI and Antigravity (`gemini.rs:17`, `antigravity.rs:16-17`), Qwen and iFlow consumer OAuth. It reuses tokens written by the official clients. The README frames the purpose as using "client quota" in other tools and balancing several accounts "whichever has quota" (`README.md:18-27`). A `MachineIdService` can read and overwrite the operating-system machine identifier, generate a random one, and keep a history, requiring admin rights (`services/machine_id_service.rs:set_machine_id`, `generate_random_machine_id`, `check_admin_privileges`). `browser_interceptor/` and `scripts/playwright-login` automate capture of browser login flows. For OMP2 these patterns are classified as rejected (section 2.12).
+
+### 2.9 Relation to other repositories
+
+No reference to `proxycast` appears in `limecloud/lime`'s README, `CLAUDE.md`, `AGENTS.md`, `FEATURE-MAP.md`, `docs`, `lime-rs/Cargo.toml`, `package.json` or `governance` (bounded grep, 2026-11-28). Lime is described as a desktop and CLI/TUI agent with a Rust workspace `lime-rs`, GPL-3.0, last commit 2026-11-18. Supersession is therefore not established from the clones; ProxyCast's own README names AIClient-2-API as its upstream. GitHub fork-parent metadata was not queried.
+
+### 2.10 What it does well
+
+- Idiomatic Rust gateway on tokio and axum with typed request structs, a direct comparison point for OMP2's own stack (`server/mod.rs`, `models/openai.rs`).
+- Binary AWS EventStream decoding into typed events (`streaming/aws_parser.rs`).
+- A flow monitor that records, replays and diffs real requests, a useful debugging model for provider-runtime regressions (`flow_monitor/replayer.rs`, `diff.rs`).
+- Clear provider-credential trait with proactive refresh (`providers/traits.rs`).
+
+### 2.11 Risks
+
+- Secrets at rest are plaintext in SQLite (grep found no encryption), and OAuth tokens are borrowed from other applications' files.
+- Routing, retry and failover are partly dead or duplicated code (two balancers, processor steps not on the handler path), which is the kind of drift OMP2's "no second scheduler" rule exists to prevent.
+- Model-name conditionals and hardcoded model maps in `.rs` (`provider_pool_model.rs:309`, `openai_to_cw.rs:16`).
+- Failure classification relies on message text (`failover.rs:FailureType::detect`).
+- One SQLite read under a mutex on every request (`provider_pool_service.rs:187-191`).
+- Licence ambiguity (below).
+
+### 2.12 Licence implications
+
+No `LICENSE` file, no `license` field in `Cargo.toml` or `package.json`; the README badge and text declare GPL-3.0 (`README.md:7`, `README.md:221`). The GitHub API reports none. Treat it as GPL-3.0 by declaration with no verifiable grant. Study ideas only and copy nothing; GPL-3.0 code cannot be merged into OMP2 without a licence decision by the owner.
+
+### 2.13 Ideas worth adopting in OMP2's existing provider runtime
+
+| # | Idea | Evidence | Fit with locks | Suggested handling |
+|---|---|---|---|---|
+| P1 | Request/response flow recorder with replay and diff for provider regressions | `flow_monitor/monitor.rs`, `replayer.rs`, `diff.rs` | Must reuse OMP2's journal and artifact addressing rather than a new store (no second store) | Compare with existing journal replay; at most an extension (T2) |
+| P2 | Binary frame parser producing a typed event enum for a non-SSE provider protocol | `streaming/aws_parser.rs:AwsEvent` | Consistent with "stream frames decode to canonical semantic events" if the codec is genuinely a different wire protocol (ADR 0049 D6 class B) | Only if a Bedrock-style provider is in scope |
+| P3 | Proactive token-expiry check with a fixed lead and retried refresh behind one trait | `providers/traits.rs:is_token_expiring_soon`, `ensure_valid_token` | Fine | Already a common pattern; low value beyond LLMHub's lease idea |
+
+### 2.14 Ideas to avoid
+
+| # | Idea | Why |
+|---|---|---|
+| A1 | Borrowing tokens from other clients' credential files and presenting them through a local proxy | Uses another product's entitlement outside its client; provider-terms risk. Rejected for security, licensing or operational reasons |
+| A2 | OS machine-identifier rewriting and browser-login interception | Identity manipulation and credential capture; Rejected for security, licensing or operational reasons |
+| A3 | Plaintext API keys in a local DB | Contradicts credential-reference practice; Rejected |
+| A4 | Two parallel credential balancers plus an unused resilience pipeline | Second scheduler; Unnecessary or redundant |
+| A5 | Model maps and supported-model lists in `.rs` | Violates providers-as-data (lintx reviewer-reject) |
+| A6 | GPL-3.0 licensed code as a copy source | Licence conflict; study only |
+
 Back to the [index](../README.md).

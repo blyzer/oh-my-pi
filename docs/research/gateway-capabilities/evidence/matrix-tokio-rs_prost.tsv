@@ -1,0 +1,6 @@
+dim_id	status	note	evidence
+Z02	Y	Protobuf runtime and codegen config; `bytes()` and `btree_map()` options on the builder (code read)	tokio-rs/prost@894f4a7:prost-build/src/config.rs
+Z01	N	No JSON mapping in prost itself; searched the clone listing, serde is a codegen attribute only (not code-read beyond config)	tokio-rs/prost@894f4a7:prost-build/src/config.rs
+I05	N	prost is message-only; gRPC is tonic	tokio-rs/prost@894f4a7:README.md
+I06	Y	Protobuf is the whole crate; unknown fields are skipped by `skip_field`, no retention found by name	tokio-rs/prost@894f4a7:prost/src/encoding.rs
+I08	N	No streaming transport; framing is the caller's job (`encode_length_delimited` used by OMP)	tokio-rs/prost@894f4a7:prost/src/encoding.rs
