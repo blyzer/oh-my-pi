@@ -21,7 +21,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 11 | Shared code intelligence and SCIP assessment | [11-code-intelligence-and-scip-assessment.md](11-code-intelligence-and-scip-assessment.md) | TODO |
 | 12 | Proposed architecture diagrams | [12-proposed-architecture-diagrams.md](12-proposed-architecture-diagrams.md) | TODO |
 | 13 | Performance and benchmark plan | [13-performance-and-benchmark-plan.md](13-performance-and-benchmark-plan.md) | DONE |
-| 14 | Security and licensing assessment | [14-security-and-licensing-assessment.md](14-security-and-licensing-assessment.md) | TODO |
+| 14 | Security and licensing assessment | [14-security-and-licensing-assessment.md](14-security-and-licensing-assessment.md) | DONE |
 | 15 | Prioritized architectural backlog | [15-prioritized-architectural-backlog.md](15-prioritized-architectural-backlog.md) | TODO |
 | 16 | Draft ADRs (only where justified) | [16-draft-adrs.md](16-draft-adrs.md) | TODO |
 | 17 | Incremental implementation roadmap | [17-incremental-implementation-roadmap.md](17-incremental-implementation-roadmap.md) | TODO |

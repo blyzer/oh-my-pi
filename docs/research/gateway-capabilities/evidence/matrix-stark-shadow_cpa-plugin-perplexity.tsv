@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	N	Does not use the Perplexity API or API keys; README states a signed-in web session is used instead	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:3-5
+A02	N	No OAuth: login is capture or paste of the web session cookie; README says no device endpoint or OAuth client exists	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:64-74
+A03	N	README cites acceptance evidence that no device endpoint exists; code not read	stark-shadow/cpa-plugin-perplexity@0d09161:acceptance/LOGIN-EVIDENCE.md
+A04	N	No official-CLI delegation; a companion browser extension copies the HttpOnly session cookie	stark-shadow/cpa-plugin-perplexity@0d09161:extension/README.md
+A05	D	README says import clears the textarea, never prints the token and keeps the management key in page memory only	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:115
+A06	N	Searched repository for keyring, keychain, dpapi, secret service: no match	stark-shadow/cpa-plugin-perplexity@0d09161:.
+A07	N	No token minting: sessions are probed through /api/auth/session; expired sessions need re-import	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:121
+A08	P	Validity probe with an 8 s timeout; valid false may mean expired or unreachable	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:140
+A09	P	Re-import of a fresh cookie is the only recovery; no automatic re-login	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:121
+A10	N	Credentials are saved through the host auth store; the plugin keeps no independent keeper	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:129-137
+A11	D	Import result and status list report account email and plan; tier-dependent model catalog	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:129;stark-shadow/cpa-plugin-perplexity@0d09161:README.md:137
+A12	U	Not examined	stark-shadow/cpa-plugin-perplexity@0d09161:README.md
+G09	N	Single provider; requirement (web session cookie) is fixed in code	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:3-5
+G10	U	Not examined; plan tier is read from the account	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:129
+G11	D	Saved name is the first 12 hex characters of the SHA-256 of the session, so re-import maps to one file	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:137
+S02	D	Per-session concurrency limit in config; no account selection logic in the plugin	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:50
+O02	D	Status endpoint returns per-account validity, email and plan without credential data	stark-shadow/cpa-plugin-perplexity@0d09161:README.md:131

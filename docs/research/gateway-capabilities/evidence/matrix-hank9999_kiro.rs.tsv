@@ -15,4 +15,4 @@ G09	P	authMethod per credential (social, idc, api key) selects the refresh proto
 G10	N	Searched README and src for free tier or anonymous access: no match	hank9999/kiro.rs@3c9723f:README.md
 G11	Y	Rejects duplicates by SHA-256 of kiroApiKey or refreshToken and by id	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:add_credential;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:sha256_hex
 S02	Y	Priority or balanced selection that skips disabled credentials	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:select_next_credential;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:acquire_context
-O02	P	Admin snapshot of per-credential state, failure counts and refresh-token hash prefix; admin UI	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:snapshot;hank9999/kiro.rs@3c9723f:src/admin/service.rs
+O02	P	Admin snapshot of per-credential state, failure counts and a refresh-token hash; admin UI	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:snapshot;hank9999/kiro.rs@3c9723f:src/admin/service.rs

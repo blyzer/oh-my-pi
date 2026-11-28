@@ -11,8 +11,8 @@ A09	P	Console re-login, batch enable, disable and delete, and a corrupt state fi
 A10	P	Scheduled keepalive task inside the plugin renews tokens ahead of use	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:Keepalive
 A11	P	Quota view per account and a daily check-in task that restores credits; automation of credit claiming across accounts	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/checkin.go;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/app/executor.go:handleQuotaReset
 A12	P	Separate cn and global vendor instances with isolated credentials	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
-G09	P	Each vendor declares its login kind in a registry; credentials isolated per vendor	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/core/registry.go
-G10	Y	Whole purpose is free-tier vendors; credit tracking and daily claims; pattern classified as rejected	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:19-29;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/core/credits.go
+G09	D	README table lists a login kind per vendor instance; credentials isolated per vendor; code not read	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50
+G10	Y	Whole purpose is free-tier vendors; credit tracking and daily claims; pattern classified as rejected	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:19-29
 G11	P	Account identity from credential file name; aliases keyed by identity survive re-login; account count unlimited	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:127;cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/hostbridge/auth.go:AccountIdentity
 S02	P	Account-level 10 minute cooldown after a 429 recorded in state	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:135
-O02	P	Console shows quota, keepalive results and task history; results returned as JSON	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:KeepaliveResult
+O02	P	Console shows quota (README); keepalive results are returned as JSON	cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/tasks/keepalive.go:KeepaliveResult
