@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	Y	Out-of-process plugin binaries over netrpc or gRPC on a local control address; cross-language via gRPC	hashicorp/go-plugin@415e29b:protocol.go:Protocol; hashicorp/go-plugin@415e29b:docs/internals.md
+X02	N	No manifest; plugin set is a Go map in the host (PluginSet)	hashicorp/go-plugin@415e29b:client.go:VersionedPlugins
+X03	N	Library only; no registry or distribution	hashicorp/go-plugin@415e29b:README.md
+X04	P	Optional binary checksum (SecureConfig) compared in constant time before launch; no signatures	hashicorp/go-plugin@415e29b:client.go:SecureConfig
+X05	P	Process boundary and optional AutoMTLS; no sandbox, filesystem or network policy of its own	hashicorp/go-plugin@415e29b:client.go:AutoMTLS
+X06	Y	Start timeout, Kill with cleanup, Reattach to a running plugin; launched on demand by the embedder	hashicorp/go-plugin@415e29b:client.go:Kill; hashicorp/go-plugin@415e29b:client.go:StartTimeout
+X07	Y	Standard gRPC health service and a Ping check for gRPC plugins	hashicorp/go-plugin@415e29b:grpc_server.go:health; hashicorp/go-plugin@415e29b:grpc_client.go:Ping
+X08	N	No upgrade or rollback; host replaces the binary	hashicorp/go-plugin@415e29b:README.md
+X09	N	No per-platform artifact handling; the embedder supplies the command	hashicorp/go-plugin@415e29b:client.go:Cmd
+X10	N	No dependency declarations	hashicorp/go-plugin@415e29b:client.go:ClientConfig
+X11	Y	Core protocol version must match; application versions negotiated through VersionedPlugins	hashicorp/go-plugin@415e29b:client.go:CoreProtocolVersion; hashicorp/go-plugin@415e29b:client.go:checkProtoVersion

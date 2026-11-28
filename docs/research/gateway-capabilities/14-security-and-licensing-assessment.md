@@ -134,7 +134,7 @@ Taken from the `Security implications` line of each capability card (shortened).
 1. Credentials: the refresh fence and owner identity must work across processes ([AUTH-01](05b-authentication-and-credential-lifecycle.md)); a locked keychain must fail closed; no plaintext fallback inside a keychain mode.
 2. Extensions: Ed25519-signed index, exact capability grants, host-placed credentials (ADR 0075), declared effects. Manifest codes that are declared but never produced ([EXT-03 to EXT-05](07-abi-independent-extension-assessment.md)) are a gap in enforcement, not in design.
 3. Local servers (llama-server, MLX server): loopback only, no default exposure, treated as untrusted model output sources; this is a condition on INF-03 and INF-05, not an assumption that it already holds.
-4. The `omp.gateway.v1.ForwardProxy` surface already requires bearer authentication and an allowlisted request vocabulary (`crates/proto/proto/omp/gateway/v1/gateway.proto:29`); an OpenAI-compatible facade ([PRV-13](05-provider-integration-recommendations.md)) must not widen it.
+4. The `omp.gateway.v1.ForwardProxy` surface already requires bearer authentication and an allowlisted request vocabulary (`crates/proto/proto/omp/gateway/v1/gateway.proto:29`); an OpenAI-compatible facade ([PRV-13](06-transport-and-protocol-recommendations.md)) must not widen it.
 5. WebRTC and live voice are in the default `omp-app` build (`crates/app/Cargo.toml:94`); their attack surface is accepted today and is not changed by anything proposed here.
 
 ## 6. Not verified
