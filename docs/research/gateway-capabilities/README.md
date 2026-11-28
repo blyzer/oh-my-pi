@@ -29,7 +29,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 19 | Source references with pinned commits and paths | [19-source-references.md](19-source-references.md) | DONE |
 | 20 | Open questions requiring architectural approval | [20-open-questions.md](20-open-questions.md) | DONE |
 
-Companion files linked from the deliverables: `05b-authentication-and-credential-lifecycle.md` (part of 5), `06b-ipc-and-serialization.md` (Part B of 6), draft ADRs `docs/adr/0077-route-runtime-evidence-producers.md`, `0078-credential-refresh-owner-and-shared-auth-stack.md`, `0079-shared-code-index-and-query-result.md`, `0080-local-inference-placement-and-shared-residency.md` (deliverable 16; provisional numbers, proposed, not approved), `diagrams/` (the 19 diagrams of owner section 14, indexed in deliverable 12).
+Companion files linked from the deliverables: `05b-authentication-and-credential-lifecycle.md` (part of 5), `06b-ipc-and-serialization.md` (Part B of 6), draft ADRs `docs/adr/0077-route-runtime-evidence-producers.md`, `0078-credential-refresh-owner-and-shared-auth-stack.md`, `0079-shared-code-index-and-query-result.md`, `0080-local-inference-placement-and-shared-residency.md` (deliverable 16; provisional numbers, proposed, not approved; submitted in a separate pull request, so these files are not in this one), `diagrams/` (the 19 diagrams of owner section 14, indexed in deliverable 12).
 
 ## Supporting material
 
