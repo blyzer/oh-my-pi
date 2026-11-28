@@ -8,6 +8,9 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
+// These tests exercise the opted-in Kiro provider. The gate itself is tested in kiro-optin.test.ts.
+process.env.OMP_KIRO_THIRD_PARTY_OPT_IN = "1";
+
 const AUTO = { modelId: "auto", tokenLimits: { maxInputTokens: 1_000_000, maxOutputTokens: 64_000 } };
 const OPUS = { modelId: "claude-opus-5.5", tokenLimits: { maxInputTokens: 1_000_000, maxOutputTokens: 64_000 } };
 const ROSTERS: Record<string, unknown[]> = { "Bearer token-free": [AUTO], "Bearer token-pro": [AUTO, OPUS] };

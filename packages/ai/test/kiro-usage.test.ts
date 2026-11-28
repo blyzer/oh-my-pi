@@ -6,6 +6,9 @@ import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
 import { kiroRankingStrategy, kiroUsageProvider, parseKiroUsage } from "../src/usage/kiro";
 
+// These tests exercise the opted-in Kiro provider. The gate itself is tested in kiro-optin.test.ts.
+process.env.OMP_KIRO_THIRD_PARTY_OPT_IN = "1";
+
 const PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:123456789012:profile/test-profile";
 const RESET_S = 1796083200;
 const BONUS_EXPIRES_S = 1825966765.739;

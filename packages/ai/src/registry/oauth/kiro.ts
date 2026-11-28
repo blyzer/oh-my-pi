@@ -28,6 +28,7 @@ import {
 	KIRO_CLI_SOCIAL_HEADERS,
 	kiroCliOidcHeaders,
 } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
+import { assertKiroOptIn, KIRO_OPT_IN_NOTICE } from "@oh-my-pi/pi-catalog/wire/kiro-optin";
 import { fetchWithRetry, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { readBoundedJson } from "@oh-my-pi/pi-utils/bounded-json";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
@@ -84,6 +85,7 @@ async function postJson(
 	body: unknown,
 	headers: (attempt: KiroCliAttempt) => Record<string, string>,
 ): Promise<JsonResponse> {
+	assertKiroOptIn();
 	throwIfCancelled(ctx.signal);
 	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 	try {
@@ -120,7 +122,10 @@ async function pollJson(
 	}
 }
 
-const socialHeaders = (): Record<string, string> => ({ ...KIRO_CLI_SOCIAL_HEADERS });
+const socialHeaders = (): Record<string, string> => {
+	assertKiroOptIn();
+	return { ...KIRO_CLI_SOCIAL_HEADERS };
+};
 
 function requireOk(response: JsonResponse, message: string): Record<string, unknown> {
 	if (!response.ok)
@@ -348,8 +353,13 @@ async function loginApiKey(ctrl: OAuthController): Promise<string> {
 
 /** `login "custom" hook="kiro-login"`: Identity Center / Builder ID / API key / Google / GitHub. */
 export async function loginKiroHook(ctrl: OAuthController): Promise<OAuthCredentials | string> {
+	assertKiroOptIn();
 	const answer = (
-		await ask(ctrl, { message: prompt.render(kiroLoginMethodPrompt), placeholder: "1" }, "Kiro login method")
+		await ask(
+			ctrl,
+			{ message: `${KIRO_OPT_IN_NOTICE}\n\n${prompt.render(kiroLoginMethodPrompt)}`, placeholder: "1" },
+			"Kiro login method",
+		)
 	)
 		.trim()
 		.toLowerCase();

@@ -7,6 +7,8 @@ import {
 	KiroNotEnabledError,
 } from "../src/wire/kiro-optin";
 import { kiroCliOidcHeaders, kiroCliServiceHeaders } from "../src/wire/kiro-cli";
+import { fetchKiroModels } from "../src/discovery/kiro";
+import type { KiroCredential } from "../src/wire/kiro";
 
 const OFF = {};
 const ON = { [KIRO_OPT_IN_ENV]: "1" };
@@ -74,6 +76,29 @@ describe("Kiro requests ask for the opt-in first", () => {
 		} finally {
 			if (previous === undefined) delete process.env[KIRO_OPT_IN_ENV];
 			else process.env[KIRO_OPT_IN_ENV] = previous;
+		}
+	});
+});
+
+describe("Kiro model discovery without the opt-in", () => {
+	const credential: KiroCredential = { kind: "oauth", token: "access", region: "us-east-1", loginId: "login-a" };
+
+	test("sends no request and returns null, so the cached roster is kept", async () => {
+		const previous = process.env[KIRO_OPT_IN_ENV];
+		delete process.env[KIRO_OPT_IN_ENV];
+		const requests: string[] = [];
+		try {
+			const models = await fetchKiroModels({
+				credential,
+				fetch: async input => {
+					requests.push(String(input));
+					return Response.json({ models: [] });
+				},
+			});
+			expect(models).toBeNull();
+			expect(requests).toEqual([]);
+		} finally {
+			if (previous !== undefined) process.env[KIRO_OPT_IN_ENV] = previous;
 		}
 	});
 });

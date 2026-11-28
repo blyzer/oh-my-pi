@@ -9,6 +9,9 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 
+// These tests exercise the opted-in Kiro provider. The gate itself is tested in kiro-optin.test.ts.
+process.env.OMP_KIRO_THIRD_PARTY_OPT_IN = "1";
+
 const MODEL_ENDPOINT = "https://runtime.us-east-1.kiro.dev/";
 const API_KEY = encodeKiroCredential({ kind: "api_key", token: "ksk_kiro-token" });
 const CONTEXT: Context = { messages: [{ role: "user", content: "Say hello", timestamp: 0 }] };

@@ -5,6 +5,7 @@
  * the identity lives in one place. Credential-free: callers pass the bearer.
  */
 import { KIRO_API_KEY_PREFIX } from "./kiro";
+import { assertKiroOptIn } from "./kiro-optin";
 
 const KIRO_CLI_APP_VERSION = "3.2.0";
 const AWS_SDK_RUST_UA = "aws-sdk-rust/1.6.0 ua/2.1";
@@ -114,6 +115,7 @@ export function kiroCliServiceHeaders(
 	token: string,
 	attempt: KiroCliAttempt,
 ): Record<string, string> {
+	assertKiroOptIn();
 	const client = OPERATIONS[operation];
 	return {
 		"content-type": "application/x-amz-json-1.0",
@@ -135,6 +137,7 @@ export function kiroCliServiceHeaders(
 
 /** Headers for one attempt of an AWS SSO-OIDC call (`client/register`, `device_authorization`, `token`). */
 export function kiroCliOidcHeaders(attempt: KiroCliAttempt): Record<string, string> {
+	assertKiroOptIn();
 	return {
 		"content-type": "application/json",
 		...userAgents(SSO_OIDC_CLIENT),
