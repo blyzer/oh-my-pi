@@ -12,12 +12,12 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | DONE |
 | 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | PARTIAL (first pass, see the file's status note) |
 | 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | PARTIAL (first pass, see the file's status note) |
-| 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | TODO |
-| 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | TODO |
-| 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | TODO |
-| 8 | Python runtime comparative assessment | [08-python-runtime-comparative-assessment.md](08-python-runtime-comparative-assessment.md) | TODO |
-| 9 | Single-session swarm assessment | [09-single-session-swarm-assessment.md](09-single-session-swarm-assessment.md) | TODO |
-| 10 | Local inference assessment | [10-local-inference-assessment.md](10-local-inference-assessment.md) | TODO |
+| 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | PARTIAL (first pass, see the file's status note) |
+| 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | PARTIAL (first pass, see the file's status note) |
+| 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | PARTIAL (first pass, see the file's status note) |
+| 8 | Python runtime comparative assessment | [08-python-runtime-comparative-assessment.md](08-python-runtime-comparative-assessment.md) | DONE |
+| 9 | Single-session swarm assessment | [09-single-session-swarm-assessment.md](09-single-session-swarm-assessment.md) | DONE |
+| 10 | Local inference assessment | [10-local-inference-assessment.md](10-local-inference-assessment.md) | DONE |
 | 11 | Shared code intelligence and SCIP assessment | [11-code-intelligence-and-scip-assessment.md](11-code-intelligence-and-scip-assessment.md) | TODO |
 | 12 | Proposed architecture diagrams | [12-proposed-architecture-diagrams.md](12-proposed-architecture-diagrams.md) | TODO |
 | 13 | Performance and benchmark plan | [13-performance-and-benchmark-plan.md](13-performance-and-benchmark-plan.md) | TODO |

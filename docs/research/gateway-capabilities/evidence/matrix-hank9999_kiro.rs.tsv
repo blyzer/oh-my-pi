@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	Y	Static kiroApiKey credential used as a Bearer token with no refresh	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:try_ensure_token
+A02	Y	Refresh grants for social and IdC (SSO OIDC) tokens; interactive login is not in the repo, tokens are imported	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:refresh_social_token;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:refresh_idc_token
+A03	N	Searched src for device_code, deviceCode, device_authorization: no match	hank9999/kiro.rs@3c9723f:src
+A04	N	No CLI delegation; calls the Kiro IDE's private runtime endpoint with IDE-style client headers	hank9999/kiro.rs@3c9723f:src/kiro/endpoint/ide.rs:4-7
+A05	P	refreshToken, clientSecret and kiroApiKey are inline fields of a plaintext credentials JSON	hank9999/kiro.rs@3c9723f:README.md:234-240;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:persist_credentials
+A06	N	Searched src for keyring and keychain: no match	hank9999/kiro.rs@3c9723f:src
+A07	P	One in-process async refresh_lock with a second expiry check after the lock; no cross-process lock	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:try_ensure_token
+A08	Y	Expired at 5 min before expiry, soon at 10 min; auto-disable on repeated failure or invalid_grant	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:is_token_expired;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:DisabledReason
+A09	P	Admin API resets, re-enables, force-refreshes, adds and deletes credentials; no re-login flow	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:reset_and_enable;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:force_refresh_token_for
+A10	N	One process owns every credential; no separate keeper process	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:MultiTokenManager
+A11	P	Reads per-credential usage limits; quota exhaustion disables the credential	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:get_usage_limits;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:report_quota_exhausted
+A12	P	Per-credential region, authRegion, apiRegion and per-credential proxy	hank9999/kiro.rs@3c9723f:README.md:178-180;hank9999/kiro.rs@3c9723f:README.md:246
+G09	P	authMethod per credential (social, idc, api key) selects the refresh protocol; single provider, no declaration	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:refresh_token
+G10	N	Searched README and src for free tier or anonymous access: no match	hank9999/kiro.rs@3c9723f:README.md
+G11	Y	Rejects duplicates by SHA-256 of kiroApiKey or refreshToken and by id	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:add_credential;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:sha256_hex
+S02	Y	Priority or balanced selection that skips disabled credentials	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:select_next_credential;hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:acquire_context
+O02	P	Admin snapshot of per-credential state, failure counts and refresh-token hash prefix; admin UI	hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:snapshot;hank9999/kiro.rs@3c9723f:src/admin/service.rs
