@@ -10,8 +10,8 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 |---|---|---|---|
 | 1 | Executive architectural assessment | [01-executive-architectural-assessment.md](01-executive-architectural-assessment.md) | TODO |
 | 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | DONE |
-| 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | TODO |
-| 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | DONE |
+| 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | PARTIAL (first pass, see the file's status note) |
+| 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | PARTIAL (first pass, see the file's status note) |
 | 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | TODO |
 | 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | TODO |
 | 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | TODO |
