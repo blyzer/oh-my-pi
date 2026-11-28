@@ -1,99 +1,3 @@
-# Cross-gateway capability matrix
-
-> Part of the [OMP2 gateway-capabilities research](README.md). Deliverable 3. Reference repositories pinned in [`evidence/ref-inventory.md`](evidence/ref-inventory.md). Research proposal: nothing here is implemented.
-
-**How this document is built.** Sections 1 to 3 record what each reference repository is, its pinned commit, its licence and how much code it has, verified directly. Section 4 is assembled mechanically from the per-repository files `evidence/matrix-<owner>_<repo>.tsv`, each row of which carries an `owner/repo@sha7:path` citation; the grids below show only the status letter, so open the TSV for the evidence. Rows an agent did not examine are `.` (no row written) or `U`. The depth of reading differs by repository and is stated in each reading note; a `Y` means the agent read code that implements it, not that it works well.
-
-## 1. Availability
-
-Of the 39 repositories named in the owner's section 3, 37 were cloned shallowly (`git clone --depth 1 --no-tags`) and 2 were unavailable on 2026-11-28:
-
-- `AmethystDev-Labs/QuickCLI`: `git ls-remote` printed `ERROR: Repository not found`; `gh api repos/AmethystDev-Labs/QuickCLI` returned HTTP 404; `gh api users/AmethystDev-Labs/repos` lists no repository with that name. Not assessed.
-- `microsoft/onnxruntime`: same two errors. The sibling repositories `microsoft/onnxruntime-genai`, `-extensions` and `-inference-examples` also returned not found, while `microsoft/vscode` and `pykeio/ort` resolved. ONNX Runtime can therefore only be assessed from its official documentation (labelled "documentation only, code not read") in deliverable 10.
-
-## 2. What each cloned repository is (verified facts only)
-
-Source-file counts are the number of files with a source extension (`.go .rs .ts .tsx .js .py .java .cpp .cc .c .swift .kt .vue .mjs`) found by walking the clone, skipping `.git`, `node_modules`, `vendor` and `target`; the three most common extensions are shown. Licence is the GitHub API `license.spdx_id` plus the licence files present in the clone. The README title is the first Markdown heading. None of this says what the code does; that is the reading in `evidence/ref-*.md`.
-
-
-### Inference gateways
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [QuantumNous/new-api](https://github.com/QuantumNous/new-api) | `04dfcbb` | AGPL-3.0 / LICENSE | .go 1152, .tsx 983, .ts 527 | New API |
-| [Ve-ria/CLIProxyAPIPlus](https://github.com/Ve-ria/CLIProxyAPIPlus) | `60bb379` | AGPL-3.0 / LICENSE, LICENSE-MIT | .go 617, .tsx 40, .ts 4 | CI/CD |
-| [cheaper-inference/OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `3e23a8a` | MIT / LICENSE | .ts 15352, .tsx 1955, .mjs 951 | OmniRoute - The Free AI Gateway |
-| [decolua/9router](https://github.com/decolua/9router) | `5ae63d2` | MIT / LICENSE | .js 1610, .mjs 17 | 9Router - FREE AI Router & Token Saver |
-| [fallencolors/freellmapi](https://github.com/fallencolors/freellmapi) | `b5d8333` | MIT / LICENSE | .ts 612, .tsx 104, .mjs 11 | FreeLLMAPI |
-| [hank9999/proxycast](https://github.com/hank9999/proxycast) | `3ad8ff6` | none detected / no licence file | .rs 203, .tsx 136, .ts 65 | ProxyCast 🚀 |
-| [nicolaeser/llmhub](https://github.com/nicolaeser/llmhub) | `8bdc1de` | MIT / LICENSE | .ts 1083, .tsx 321, .mjs 54 | LLM Hub |
-| [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | `dbe641f` | MIT / LICENSE | .go 2523, .c 16, .rs 15 | CLI Proxy API |
-
-### Provider implementations
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [BenedictKing/kiro.rs](https://github.com/BenedictKing/kiro.rs) | `87a735c` | none detected / no licence file | .rs 71, .tsx 24, .ts 8 | kiro-rs |
-| [Foxfishc/kiro.rs](https://github.com/Foxfishc/kiro.rs) | `15c0a3a` | MIT / LICENSE | .rs 73, .tsx 24, .ts 8 | kiro-rs |
-| [M-JYuan/kiro.rs](https://github.com/M-JYuan/kiro.rs) | `fc35283` | MIT / LICENSE | .rs 70, .tsx 20, .ts 8 | kiro-rs |
-| [cxy2730/CLIProxyAPI-freetier2api-plugin](https://github.com/cxy2730/CLIProxyAPI-freetier2api-plugin) | `0a718a6` | MIT / LICENSE | .go 299 | FreeTier 2API Plugin |
-| [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) | `3c9723f` | MIT / LICENSE | .rs 53, .tsx 19, .ts 6 | kiro-rs |
-| [lzt404/kiro.rs](https://github.com/lzt404/kiro.rs) | `8331585` | MIT / LICENSE | .rs 71, .tsx 23, .ts 8 | kiro-rs |
-| [stark-shadow/cpa-plugin-perplexity](https://github.com/stark-shadow/cpa-plugin-perplexity) | `0d09161` | MIT / LICENSE | .go 15, .js 4, .py 2 | Perplexity - a CLIProxyAPI native provider plugin |
-
-### Configuration and extension management
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [Ve-ria/quickx](https://github.com/Ve-ria/quickx) | `e13db37` | GPL-3.0 / LICENSE | .tsx 25, .ts 21, .js 1 | quickx |
-| [lzt404/EasyCLIProxyAPI](https://github.com/lzt404/EasyCLIProxyAPI) | `faf29b2` | MIT / LICENSE | .ts 102, .rs 73, .tsx 49 | Overview |
-| [stark-shadow/ecpa-plugins-store](https://github.com/stark-shadow/ecpa-plugins-store) | `2d82289` | none detected / no licence file | n/a | ECPA Plugins Store |
-
-### Agent harness and orchestration
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [Ve-ria/cotion](https://github.com/Ve-ria/cotion) | `b7a4307` | MIT / LICENSE | .ts 21, .mjs 3, .tsx 1 | none |
-| [grape-dev/grape](https://github.com/grape-dev/grape) | `b31f8d8` | MIT / LICENSE | .py 2520, .js 210, .vue 48 | 1. What Grape is |
-| [limecloud/lime](https://github.com/limecloud/lime) | `015b878` | GPL-3.0 / LICENSE, licenses, LICENSES.md | .rs 4403, .ts 3445, .tsx 1339 | Lime |
-
-### ABI-independent extension mechanisms
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [bytecodealliance/wasmtime](https://github.com/bytecodealliance/wasmtime) | `b738a89` | Apache-2.0 / LICENSE | .rs 2153, .cc 60, .c 28 | Installation |
-| [bytecodealliance/wit-bindgen](https://github.com/bytecodealliance/wit-bindgen) | `e3b53be` | Apache-2.0 / LICENSE-APACHE, LICENSE-Apache-2.0_WITH_LLVM-exception, LICENSE-MIT | .rs 289, .cpp 67, .c 60 | About |
-| [capnproto/capnproto-rust](https://github.com/capnproto/capnproto-rust) | `d53310e` | MIT / LICENSE | .rs 156 | Cap'n Proto for Rust |
-| [djkoloski/rkyv](https://github.com/djkoloski/rkyv) | `d963abc` | MIT / LICENSE | .rs 169 | Resources |
-| [google/flatbuffers](https://github.com/google/flatbuffers) | `5eb190f` | Apache-2.0 / LICENSE | .ts 198, .rs 169, .py 129 | Quick Start |
-| [hashicorp/go-plugin](https://github.com/hashicorp/go-plugin) | `415e29b` | MPL-2.0 / LICENSE | .go 81, .py 7 | Go Plugin System over RPC |
-| [hyperium/tonic](https://github.com/hyperium/tonic) | `c7e68c5` | MIT / LICENSE | .rs 510, .cc 2, .py 1 | Overview |
-| [tokio-rs/prost](https://github.com/tokio-rs/prost) | `894f4a7` | Apache-2.0 / LICENSE | .rs 107 | *PROST!* |
-
-### Local inference and code intelligence
-
-| Repository | Pinned SHA | Licence (API / files) | Source files (top 3 extensions) | README title |
-|---|---|---|---|---|
-| [apple/coremltools](https://github.com/apple/coremltools) | `a207b1a` | BSD-3-Clause / LICENSE.txt | .py 800, .cc 314, .java 253 | Install |
-| [facebookincubator/Glean](https://github.com/facebookincubator/Glean) | `92ba871` | NOASSERTION / LICENSE | .cpp 283, .py 92, .java 56 | Glean |
-| [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | `8e23278` | MIT / LICENSE, licenses | .cpp 804, .ts 742, .py 272 | llama.cpp |
-| [huggingface/candle](https://github.com/huggingface/candle) | `9c1fcff` | Apache-2.0 / LICENSE-APACHE, LICENSE-MIT | .rs 635, .py 35, .js 14 | candle |
-| [ml-explore/mlx](https://github.com/ml-explore/mlx) | `2e094ae` | MIT / LICENSE | .cpp 243, .py 135, .js 2 | MLX |
-| [ml-explore/mlx-lm](https://github.com/ml-explore/mlx-lm) | `6fe0ce4` | MIT / LICENSE | .py 736, .js 2 | MLX LM |
-| [quickwit-oss/tantivy](https://github.com/quickwit-oss/tantivy) | `c005b68` | MIT / LICENSE | .rs 529, .py 1 | Fast full-text search engine library written in Rust |
-| [scip-code/scip](https://github.com/scip-code/scip) | `8fe5037` | Apache-2.0 / LICENSE | .go 55, .java 37, .kt 15 | SCIP Code Intelligence Protocol |
-
-## 3. Licence consequences for this research
-
-- **AGPL-3.0**: `QuantumNous/new-api`, `Ve-ria/CLIProxyAPIPlus` (the clone also has `LICENSE-MIT`; which files fall under which is not verified). Copyleft over network use: ideas only, no code reuse, no linking, no vendoring.
-- **GPL-3.0**: `Ve-ria/quickx`, `limecloud/lime`. Same: study only.
-- **No licence detected**: `stark-shadow/ecpa-plugins-store`, `hank9999/proxycast`, `BenedictKing/kiro.rs`. Without a licence the default is "all rights reserved", so nothing may be copied.
-- **`facebookincubator/Glean`**: GitHub reports `NOASSERTION`; the `LICENSE` text was read for deliverable 11 (CIX-08): BSD 3-clause under a non-standard heading, which explains GitHub's `NOASSERTION` (an engineering reading, not legal advice).
-- **MIT, Apache-2.0, BSD-3-Clause, MPL-2.0** (`hashicorp/go-plugin` is MPL-2.0, file-level copyleft): permissive or weak copyleft; reuse of a library still goes through `cargo deny` (`deny.toml`) and `THIRD-PARTY-NOTICES.txt`. Not verified against `deny.toml` here.
-
-Deliverable 14 holds the full security and licensing assessment.
-
-
 
 ## 4. Capability matrix
 
@@ -105,90 +9,90 @@ Rows: registry, authentication, scheduling, translation, interfaces, efficiency,
 
 | ID | Dimension |  OMP2 |CLIProxyAPI | CLIProxyAPIPlus | OmniRoute | 9router | freellmapi | llmhub | new-api | ProxyCast |
 |---|---|---|---|---|---|---|---|---|---|---|
-| A01 | API keys | Y | . | . | . | P | Y | Y | . | Y |
-| A02 | OAuth | Y | . | . | . | Y | U | Y | . | Y |
-| A03 | device authorization | Y | . | . | . | U | U | Y | . | Y |
-| A04 | official CLI delegation | P | . | . | . | U | U | N | . | P |
-| A05 | credential references (secret never inline) | Y | . | . | . | N | P | N | . | P |
-| A06 | OS keychain | P | . | . | . | N | N | N | . | N |
-| A07 | refresh coordination | P | . | . | . | U | U | Y | . | P |
-| A08 | credential expiration handling | Y | . | . | . | D | P | Y | . | Y |
-| A09 | credential recovery | P | . | . | . | U | U | Y | . | U |
-| A10 | independent credential keepers | P | . | . | . | U | U | Y | . | U |
-| A11 | authorized subscription entitlements | P | . | . | . | U | U | P | . | P |
-| A12 | account and regional restrictions | P | . | . | . | U | U | P | . | U |
-| E01 | prompt-cache awareness | Y | U | U | P | P | U | P | . | U |
-| E02 | session affinity for cache reuse | P | U | U | U | U | U | Y | . | U |
-| E03 | incremental response chaining | Y | U | U | U | U | U | P | . | U |
-| E04 | provider-side state | Y | U | U | U | U | U | P | . | U |
-| E05 | context retransmission handling | Y | U | U | P | U | U | P | . | U |
-| E06 | semantic compression | P | U | U | P | Y | P | N | . | U |
-| E07 | batch inference | N | U | U | P | U | U | Y | . | U |
-| E08 | connection pooling | Y | U | U | U | U | U | U | . | P |
-| E09 | streaming backpressure | P | U | U | U | U | U | U | . | U |
-| E10 | token accounting | Y | U | U | U | P | P | Y | . | Y |
-| E11 | cache accounting | Y | U | U | U | U | U | Y | . | U |
-| E12 | time-to-first-token and latency measurement | Y | U | U | U | U | U | P | . | U |
-| G01 | canonical provider identity | Y | P | Y | U | Y | Y | P | . | P |
-| G02 | canonical model identity | Y | U | U | U | P | U | P | . | P |
-| G03 | model aliases | Y | U | U | Y | Y | Y | Y | . | Y |
-| G04 | provider-specific deployments | P | U | U | U | P | P | Y | . | P |
-| G05 | dynamic discovery | Y | P | U | P | U | U | Y | . | U |
-| G06 | hosted model catalogs | R | U | U | U | P | D | U | . | U |
-| G07 | catalog synchronization | P | U | U | U | P | U | P | . | U |
-| G08 | provider capability metadata | Y | P | U | U | Y | Y | Y | . | P |
-| G09 | authentication requirements declared per pr... | Y | . | . | . | U | P | Y | . | Y |
-| G10 | free-tier and anonymous discovery | P | . | . | . | D | Y | N | . | U |
-| G11 | connection identity and deduplication | P | . | . | . | U | U | P | . | U |
-| I01 | HTTP | Y | Y | U | U | Y | Y | Y | . | Y |
-| I02 | SSE | Y | P | U | U | Y | Y | Y | . | Y |
-| I03 | WebSocket | Y | Y | P | U | U | U | N | . | Y |
-| I04 | persistent inference sessions | Y | P | U | U | U | U | N | . | U |
-| I05 | gRPC | Y | U | U | U | U | U | N | . | U |
-| I06 | Protobuf | Y | . | . | . | Y | N | N | . | U |
-| I07 | AWS EventStream | Y | U | U | U | Y | U | N | . | Y |
-| I08 | bidirectional streaming | Y | P | U | U | U | U | N | . | U |
-| I09 | WebRTC | Y | U | U | U | U | U | N | . | U |
-| I10 | HTTP/3 and QUIC | N | U | U | U | U | U | N | . | U |
-| I11 | asynchronous inference jobs | P | U | U | U | U | P | Y | . | U |
-| I12 | batch APIs | N | U | U | P | U | U | Y | . | U |
-| I13 | native execution | Y | U | U | U | U | U | N | . | U |
-| I14 | local IPC | Y | . | . | . | U | U | N | . | U |
-| I15 | external agent-harness protocols | P | U | U | U | P | P | P | . | P |
-| O01 | provider health | P | D | U | Y | U | Y | Y | . | Y |
-| O02 | authentication health | P | . | . | . | U | U | Y | . | U |
-| O03 | metrics (sessions, agents, tokens, cache, q... | P | U | P | P | P | P | P | . | P |
-| O04 | cost accounting | Y | U | U | Y | P | P | Y | . | U |
-| O05 | structured runtime events | Y | U | U | U | U | P | Y | . | Y |
-| O06 | management surface (UI or API) | . | . | . | . | Y | Y | Y | . | Y |
-| O07 | artifact reporting | . | . | . | . | U | U | P | . | P |
-| O08 | deterministic execution status | . | . | . | . | N | N | N | . | N |
-| S01 | deterministic provider selection | Y | Y | Y | Y | Y | Y | Y | . | Y |
-| S02 | credential eligibility | Y | . | . | . | Y | Y | Y | . | Y |
-| S03 | availability tracking | P | Y | U | Y | Y | Y | Y | . | Y |
-| S04 | rate-limit awareness | P | Y | U | Y | P | P | Y | . | U |
-| S05 | session affinity | P | P | Y | Y | P | U | Y | . | U |
-| S06 | capability-aware routing | Y | U | U | P | Y | Y | Y | . | P |
-| S07 | cost-aware routing | P | U | U | Y | D | D | Y | . | U |
-| S08 | latency-aware routing | R | U | U | Y | U | Y | Y | . | U |
-| S09 | circuit breakers | N | N | N | Y | Y | Y | Y | . | P |
-| S10 | backpressure | Y | P | U | Y | U | P | Y | . | U |
-| S11 | cancellation | Y | U | U | U | U | U | Y | . | U |
-| S12 | retry policies | Y | P | U | P | Y | Y | Y | . | P |
-| S13 | failure classification | Y | P | U | P | Y | P | Y | . | Y |
-| S14 | quota-aware scheduling | P | P | U | Y | U | P | Y | . | U |
-| T01 | OpenAI Chat Completions | Y | Y | Y | U | Y | Y | Y | . | Y |
-| T02 | OpenAI Responses | Y | Y | U | U | Y | Y | Y | . | P |
-| T03 | Anthropic Messages | Y | Y | U | U | Y | Y | Y | . | Y |
-| T04 | Gemini | Y | Y | U | U | Y | Y | P | . | P |
-| T05 | provider-specific protocols | Y | Y | U | U | Y | Y | Y | . | Y |
-| T06 | reasoning normalization | Y | P | U | P | U | P | Y | . | P |
-| T07 | tool-call correlation | Y | U | U | U | U | P | Y | . | U |
-| T08 | streaming event normalization | Y | Y | U | U | Y | U | Y | . | Y |
-| T09 | multimodal content | P | U | U | U | Y | Y | Y | . | U |
-| T10 | structured output | P | U | U | U | U | P | P | . | U |
-| T11 | error normalization | Y | U | U | U | Y | U | Y | . | U |
-| T12 | translation architecture (pairwise translat... | Y | Y | Y | P | Y | Y | Y | . | Y |
+| A01 | API keys | Y | . | . | . | P | Y | Y | Y | Y |
+| A02 | OAuth | Y | . | . | . | Y | N | Y | P | Y |
+| A03 | device authorization | Y | . | . | . | U | N | Y | U | Y |
+| A04 | official CLI delegation | P | . | . | . | U | N | N | U | P |
+| A05 | credential references (secret never inline) | Y | . | . | . | N | P | N | U | P |
+| A06 | OS keychain | P | . | . | . | N | N | N | U | N |
+| A07 | refresh coordination | P | . | . | . | U | N | Y | P | P |
+| A08 | credential expiration handling | Y | . | . | . | D | P | Y | P | Y |
+| A09 | credential recovery | P | . | . | . | U | P | Y | U | U |
+| A10 | independent credential keepers | P | . | . | . | U | N | Y | U | U |
+| A11 | authorized subscription entitlements | P | . | . | . | U | N | P | P | P |
+| A12 | account and regional restrictions | P | . | . | . | U | P | P | U | U |
+| E01 | prompt-cache awareness | Y | U | U | P | P | P | P | U | U |
+| E02 | session affinity for cache reuse | P | U | U | U | U | P | Y | P | U |
+| E03 | incremental response chaining | Y | U | U | U | U | N | P | U | U |
+| E04 | provider-side state | Y | U | U | U | U | N | P | U | U |
+| E05 | context retransmission handling | Y | U | U | P | U | P | P | U | U |
+| E06 | semantic compression | P | U | U | P | Y | P | N | U | U |
+| E07 | batch inference | N | U | U | P | U | N | Y | U | U |
+| E08 | connection pooling | Y | U | U | U | U | U | U | U | P |
+| E09 | streaming backpressure | P | U | U | U | U | U | U | U | U |
+| E10 | token accounting | Y | U | U | U | P | P | Y | P | Y |
+| E11 | cache accounting | Y | U | U | U | U | P | Y | U | U |
+| E12 | time-to-first-token and latency measurement | Y | U | U | U | U | Y | P | U | U |
+| G01 | canonical provider identity | Y | P | Y | U | Y | Y | P | Y | P |
+| G02 | canonical model identity | Y | U | U | U | P | P | P | U | P |
+| G03 | model aliases | Y | U | U | Y | Y | Y | Y | U | Y |
+| G04 | provider-specific deployments | P | U | U | U | P | P | Y | U | P |
+| G05 | dynamic discovery | Y | P | U | P | U | Y | Y | U | U |
+| G06 | hosted model catalogs | R | U | U | U | P | Y | U | U | U |
+| G07 | catalog synchronization | P | U | U | U | P | Y | P | U | U |
+| G08 | provider capability metadata | Y | P | U | U | Y | Y | Y | U | P |
+| G09 | authentication requirements declared per pr... | Y | . | . | . | U | P | Y | P | Y |
+| G10 | free-tier and anonymous discovery | P | . | . | . | D | Y | N | U | U |
+| G11 | connection identity and deduplication | P | . | . | . | U | P | P | U | U |
+| I01 | HTTP | Y | Y | U | U | Y | Y | Y | Y | Y |
+| I02 | SSE | Y | P | U | U | Y | Y | Y | Y | Y |
+| I03 | WebSocket | Y | Y | P | U | U | N | N | U | Y |
+| I04 | persistent inference sessions | Y | P | U | U | U | N | N | U | U |
+| I05 | gRPC | Y | U | U | U | U | N | N | U | U |
+| I06 | Protobuf | Y | . | . | . | Y | N | N | U | U |
+| I07 | AWS EventStream | Y | U | U | U | Y | N | N | U | Y |
+| I08 | bidirectional streaming | Y | P | U | U | U | N | N | U | U |
+| I09 | WebRTC | Y | U | U | U | U | N | N | U | U |
+| I10 | HTTP/3 and QUIC | N | U | U | U | U | N | N | U | U |
+| I11 | asynchronous inference jobs | P | U | U | U | U | P | Y | Y | U |
+| I12 | batch APIs | N | U | U | P | U | N | Y | U | U |
+| I13 | native execution | Y | U | U | U | U | N | N | N | U |
+| I14 | local IPC | Y | . | . | . | U | P | N | U | U |
+| I15 | external agent-harness protocols | P | U | U | U | P | P | P | U | P |
+| O01 | provider health | P | D | U | Y | U | Y | Y | P | Y |
+| O02 | authentication health | P | . | . | . | U | P | Y | U | U |
+| O03 | metrics (sessions, agents, tokens, cache, q... | P | U | P | P | P | P | P | U | P |
+| O04 | cost accounting | Y | U | U | Y | P | P | Y | Y | U |
+| O05 | structured runtime events | Y | U | U | U | U | P | Y | U | Y |
+| O06 | management surface (UI or API) | . | . | . | . | Y | Y | Y | Y | Y |
+| O07 | artifact reporting | . | . | . | . | U | N | P | U | P |
+| O08 | deterministic execution status | . | . | . | . | N | N | N | N | N |
+| S01 | deterministic provider selection | Y | Y | Y | Y | Y | Y | Y | Y | Y |
+| S02 | credential eligibility | Y | . | . | . | Y | Y | Y | P | Y |
+| S03 | availability tracking | P | Y | U | Y | Y | Y | Y | P | Y |
+| S04 | rate-limit awareness | P | Y | U | Y | P | P | Y | U | U |
+| S05 | session affinity | P | P | Y | Y | P | Y | Y | P | U |
+| S06 | capability-aware routing | Y | U | U | P | Y | Y | Y | U | P |
+| S07 | cost-aware routing | P | U | U | Y | D | D | Y | U | U |
+| S08 | latency-aware routing | R | U | U | Y | U | Y | Y | U | U |
+| S09 | circuit breakers | N | N | N | Y | Y | Y | Y | U | P |
+| S10 | backpressure | Y | P | U | Y | U | P | Y | U | U |
+| S11 | cancellation | Y | U | U | U | U | Y | Y | U | U |
+| S12 | retry policies | Y | P | U | P | Y | Y | Y | Y | P |
+| S13 | failure classification | Y | P | U | P | Y | P | Y | P | Y |
+| S14 | quota-aware scheduling | P | P | U | Y | U | P | Y | U | U |
+| T01 | OpenAI Chat Completions | Y | Y | Y | U | Y | Y | Y | Y | Y |
+| T02 | OpenAI Responses | Y | Y | U | U | Y | Y | Y | Y | P |
+| T03 | Anthropic Messages | Y | Y | U | U | Y | Y | Y | Y | Y |
+| T04 | Gemini | Y | Y | U | U | Y | Y | P | Y | P |
+| T05 | provider-specific protocols | Y | Y | U | U | Y | Y | Y | Y | Y |
+| T06 | reasoning normalization | Y | P | U | P | U | P | Y | P | P |
+| T07 | tool-call correlation | Y | U | U | U | U | P | Y | U | U |
+| T08 | streaming event normalization | Y | Y | U | U | Y | Y | Y | U | Y |
+| T09 | multimodal content | P | U | U | U | Y | Y | Y | Y | U |
+| T10 | structured output | P | U | U | U | U | P | P | U | U |
+| T11 | error normalization | Y | U | U | U | Y | Y | Y | P | U |
+| T12 | translation architecture (pairwise translat... | Y | Y | Y | P | Y | Y | Y | P | Y |
 
 ### 4.2 Provider implementations
 
@@ -314,16 +218,17 @@ Source: [serialization notes](evidence/ref-serialization.md).
 
 | ID | Dimension | OMP2 | Gateways with `Y` |
 |---|---|---|---|
+| I11 | asynchronous inference jobs | P | llmhub, new-api |
 | O01 | provider health | P | OmniRoute, freellmapi, llmhub, ProxyCast |
-| O06 | management surface (UI or API) | . | 9router, freellmapi, llmhub, ProxyCast |
+| O06 | management surface (UI or API) | . | 9router, freellmapi, llmhub, new-api, ProxyCast |
 | S03 | availability tracking | P | CLIProxyAPI, OmniRoute, 9router, freellmapi, llmhub, ProxyCast |
 | S04 | rate-limit awareness | P | CLIProxyAPI, OmniRoute, llmhub |
-| S05 | session affinity | P | CLIProxyAPIPlus, OmniRoute, llmhub |
+| S05 | session affinity | P | CLIProxyAPIPlus, OmniRoute, freellmapi, llmhub |
 | S07 | cost-aware routing | P | OmniRoute, llmhub |
 | S08 | latency-aware routing | R | OmniRoute, freellmapi, llmhub |
 | S09 | circuit breakers | N | OmniRoute, 9router, freellmapi, llmhub |
 | S14 | quota-aware scheduling | P | OmniRoute, llmhub |
-| T09 | multimodal content | P | 9router, freellmapi, llmhub |
+| T09 | multimodal content | P | 9router, freellmapi, llmhub, new-api |
 
 These line up with the provider cards PRV-01 to PRV-03, PRV-06, PRV-07 and PRV-16 ([deliverable 5](05-provider-integration-recommendations.md)): availability and health evidence, rate-limit and quota observation, session affinity for cache reuse, cost- and latency-aware ranking, circuit breakers and metrics. The OMP2 types for most of them exist; the provider audit found the production producers missing. The list is a prompt for reading the cards, not a verdict: a `Y` in a reference repository says nothing about whether the behaviour is safe or allowed (section 3 and [deliverable 14](14-security-and-licensing-assessment.md)).
 
@@ -338,7 +243,7 @@ These line up with the provider cards PRV-01 to PRV-03, PRV-06, PRV-07 and PRV-1
 ## 6. Limits
 
 - Depth varies by repository and is stated in the reading notes. Several rows are `U` or `D`; large repositories (OmniRoute, new-api, llama.cpp, mlx) were read selectively.
-- `QuantumNous/new-api` and `fallencolors/freellmapi` were read last, by a separate agent; their columns may be thin. `hashicorp/go-plugin`, `wasmtime` and `wit-bindgen` are libraries, so only extension rows apply.
+- `QuantumNous/new-api` was read last and shallowly: 56 of its 95 rows are `U` (per-vendor adaptors, stream scanner, affinity store and web UI not read); `fallencolors/freellmapi` was read more fully (only E08 and E09 are `U`). The freellmapi clone's remote is `fallencolors/freellmapi` but its README badges point to `tashfeenahmed/freellmapi`; with a single commit in the shallow clone the original could not be established. `hashicorp/go-plugin`, `wasmtime` and `wit-bindgen` are libraries, so only extension rows apply.
 - A `Y` is not a quality grade, and no performance claim about any repository is made.
 
 Back to the [index](README.md).

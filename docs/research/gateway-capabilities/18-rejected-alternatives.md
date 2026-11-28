@@ -57,6 +57,17 @@ Described neutrally in the reading notes with `repo@sha7:path` evidence: [group 
 | OS machine-identifier rewriting and browser-login interception | 2. hank9999/proxycast (`3ad8ff6`) | Identity manipulation and credential capture; Rejected for security, licensing or operational reasons |
 | Stealth browser pools, TLS fingerprint mimicry, Cloudflare/Turnstile solving | 3. decolua/9router (`5ae63d2`) | Circumvents provider access controls. Rejected for security, licensing or operational reasons |
 | Local MITM with generated certificates for IDE traffic and model rewriting | 3. decolua/9router (`5ae63d2`) | Traffic interception and trust-store changes; Rejected for security, licensing or operational reasons |
+| Disabling a credential by substring search of the error message against an operator keyword list | 4. QuantumNous/new-api (`04dfcbb`) | Violates typed failure classification and providers-as-data in spirit. Rejected for security, licensing or operational reasons |
+| Routing through a consumer-subscription web backend with an official CLI `originator` header | 4. QuantumNous/new-api (`04dfcbb`) | Provider-terms and identity risk (section 4.9). Rejected for security, licensing or operational reasons |
+| One compiled adaptor directory per vendor | 4. QuantumNous/new-api (`04dfcbb`) | Violates providers-as-data. Rejected for security, licensing or operational reasons |
+| `any`-typed request and response conversion at the adaptor interface | 4. QuantumNous/new-api (`04dfcbb`) | Violates typed wire structs. Rejected for security, licensing or operational reasons |
+| Copying code or structure from this repository | 4. QuantumNous/new-api (`04dfcbb`) | AGPL-3.0 with extra attribution terms. Rejected for security, licensing or operational reasons |
+| Stacking free tiers of many providers and rotating many keys per provider to stay under caps | 5. fallencolors/freellmapi... | Designed around provider usage limits (section 5.9). Rejected for security, licensing or operational reasons |
+| Keyless and anonymous endpoints with sentinel key rows | 5. fallencolors/freellmapi... | Anonymous harvesting of community capacity. Rejected for security, licensing or operational reasons |
+| Per-key exit-IP override for geo-ban and risk-control avoidance | 5. fallencolors/freellmapi... | Circumvention by design. Rejected for security, licensing or operational reasons |
+| Provider list as a TypeScript union and quota caps as code constants | 5. fallencolors/freellmapi... | Violates providers-as-data. Rejected for security, licensing or operational reasons |
+| Classifying errors by regex over message text | 5. fallencolors/freellmapi... | Violates typed failure classification. Rejected for security, licensing or operational reasons |
+| Writing plaintext model responses to disk through a cache | 5. fallencolors/freellmapi... | Privacy posture change. Rejected for security, licensing or operational reasons |
 | Provider kinds, cache-rate and tier pricing as code keyed on model-name regexes | 1. nicolaeser/llmhub (`8bdc1de`) | Violates providers-as-data; `cost.ts:CACHE_READ_RATES` is exactly what lintx rejects. Rejected |
 | Untyped `JsonMap` translation | 1. nicolaeser/llmhub (`8bdc1de`) | Violates typed wire structs. Rejected |
 | LLM judge for model equivalence in the registry | 1. nicolaeser/llmhub (`8bdc1de`) | Non-deterministic where a curated catalog or explicit alias works; at most an offline curation aid. Rejected as runtime behaviour |
@@ -70,6 +81,9 @@ Described neutrally in the reading notes with `repo@sha7:path` evidence: [group 
 | Multi-account rotation with proxy pools to maximise free or subscription quota | 3. decolua/9router (`5ae63d2`) | Pooling to stretch limits; Rejected |
 | LLM judge "fusion" on the routing path | 3. decolua/9router (`5ae63d2`) | Non-deterministic and costly; Requires benchmarking at best, outside the owner's deterministic preference |
 | Prompt-style compression modes (caveman, ponytail variants) injected into system prompts | 3. decolua/9router (`5ae63d2`) | Prompt changes break stable-prefix cache rules (volatile text in stable prefix) and are not deterministic filters; Unnecessary or redundant |
+| Database, Redis, consumer billing, payments, social login and a mandatory web console | 4. QuantumNous/new-api (`04dfcbb`) | Contradicts a lightweight native harness (owner brief section 13). Unnecessary or redundant |
+| Vendor-hosted paid catalog tied to a licence key | 5. fallencolors/freellmapi... | A single-vendor dependency for data OMP2 can keep in its own catalog. Suitable as an external integration |
+| Express dashboard, SQLite server and email-password accounts | 5. fallencolors/freellmapi... | Contradicts a lightweight native harness (owner brief section 13). Unnecessary or redundant |
 
 ## 4. Structural alternatives considered and set aside
 

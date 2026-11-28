@@ -68,7 +68,7 @@ Do not add a second provider runtime, scheduler, credential manager, memory syst
 
 ## 8. Limits of this assessment
 
-- Reference repositories were read at different depths (stated per repository); large repositories were read selectively and several matrix cells are `U` or `D`. `QuantumNous/new-api` and `fallencolors/freellmapi` were read last and may be thin.
+- Reference repositories were read at different depths (stated per repository); large repositories were read selectively and several matrix cells are `U` or `D`. `QuantumNous/new-api` was read last and shallowly (56 of its 95 matrix rows are `U`); `fallencolors/freellmapi` more fully.
 - ONNX Runtime was assessed from documentation only; QuickCLI not at all.
 - The Mermaid diagrams were not rendered.
 - Reading was shared between several agents working in parallel; each area document names what it did not examine, and no area audit was independently reviewed by a second reader.

@@ -13,8 +13,8 @@ Five repositories under `/private/tmp/omp-research-refs/inference/`, all read as
 | `nicolaeser/llmhub` | `8bdc1de` | 2026-11-26 | MIT / `LICENSE` | `src/lib/gateway` is the gateway core |
 | `hank9999/proxycast` | `3ad8ff6` | 2025-12-26 | none detected | see section 2 |
 | `decolua/9router` | `5ae63d2` | 2026-11-23 | MIT / `LICENSE` | section 3 |
-| `fallencolors/freellmapi` | `b5d8333` | 2026-09-23 | MIT / `LICENSE` | section 4 |
-| `QuantumNous/new-api` | `04dfcbb` | 2026-11-28 | AGPL-3.0 / `LICENSE` | study only, copy nothing |
+| `fallencolors/freellmapi` | `b5d8333` | 2026-09-23 | MIT / `LICENSE` | section 5 |
+| `QuantumNous/new-api` | `04dfcbb` | 2026-11-28 | AGPL-3.0 / `LICENSE` | section 4; study only, copy nothing |
 
 How size was counted: `git ls-files` in the clone, then newline counts over every tracked non-binary file, grouped by extension (Python one-off, not stored as a script). "Lines" are physical lines, comments and blank lines included; vendored lockfiles and i18n JSON inflate `.json` totals and are called out where they matter.
 
@@ -293,5 +293,226 @@ MIT. Ideas may be reused freely; nothing is copied here. The MITM and cloaking c
 | A4 | Multi-account rotation with proxy pools to maximise free or subscription quota | Pooling to stretch limits; Rejected |
 | A5 | LLM judge "fusion" on the routing path | Non-deterministic and costly; Requires benchmarking at best, outside the owner's deterministic preference |
 | A6 | Prompt-style compression modes (caveman, ponytail variants) injected into system prompts | Prompt changes break stable-prefix cache rules (volatile text in stable prefix) and are not deterministic filters; Unnecessary or redundant |
+
+## 4. QuantumNous/new-api (`04dfcbb`)
+
+Reading depth: architecture, selection, adaptor interface, billing entry points, plugin contract and the codex channel were read. Per-vendor adaptors, the stream scanner, affinity internals, relaykit and the web UI were listed but not read. `evidence/matrix-QuantumNous_new-api.tsv` marks what was not examined as `U`.
+
+### 4.1 What it is
+
+A self-hosted LLM gateway and asset-management console in Go: users, tokens with quotas, channels (one upstream credential or key pool each), model mapping, billing and a React admin UI (`README.en.md`, `model/channel.go`, `service/billing_session.go`). It converts one inbound OpenAI, Claude or Gemini request into the format of dozens of vendors through a compiled-in adaptor per vendor (`relay/channel/adapter.go:Adaptor`). A newer sub-system, `pluginkit`, runs single-file ECMAScript "task plugins" for asynchronous media vendors (`pluginkit/README.md`).
+
+Language and size: Go with gin, gorm (MySQL, PostgreSQL, ClickHouse drivers) and go-redis (`go.mod`). 2,869 tracked files; 1,152 `.go` files (316,705 lines), 983 `.tsx` (235,486), 527 `.ts` (85,754), 47 `.json` (77,873, largely i18n). 345 `*_test.go` files plus an `e2e/` directory; not run. Separate Go modules for `relaykit`, `tokenkit` and `pluginkit` (each has its own `go.mod`).
+
+### 4.2 Entry points and request path
+
+`main.go` is the process entry point (not read); the gin middleware `middleware/distributor.go:Distribute` (line 34) is where a channel is chosen. Request path as far as read:
+
+1. Token auth and group resolution (`middleware/auth.go`, `service/auth_token.go`).
+2. `service/channel_select.go:SelectChannelForRequest` then `CacheGetRandomSatisfiedChannel` pick a channel for the model, honouring the token group, `auto` group lists and an affinity retry offset (`channel_select.go:119-135`).
+3. A `BillingSession` pre-consumes quota (`service/billing_session.go:PreConsume`, line 203).
+4. The adaptor for the channel type builds URL, headers and body (`Adaptor.GetRequestURL`, `SetupRequestHeader`, `Convert*Request`), calls `DoRequest`, then `DoResponse` returns usage (`relay/channel/adapter.go:18-35`).
+5. On failure `ShouldRetryRelayError` decides whether to continue to the next priority tier or group (`service/relay_error.go:59`); `ShouldDisableChannel` may disable the channel (`service/channel.go:65`).
+
+### 4.3 Registry, credentials and secrets
+
+Registry is a database table of channels, not a catalog: each row carries type, base URL, key material, model list, group, priority and weight (`model/channel.go`). Multi-key channels keep a per-key status list, disabled reason, disabled time and a polling index, with a `MultiKeyMode` (`model/channel.go:73-79`). Per-channel model mapping lives in `relay/helper/model_mapped.go` (file name only, not read). OAuth packages under `oauth/` serve dashboard login (Discord, GitHub, OIDC, Telegram, LinuxDo). The codex channel stores an OAuth key JSON including `refresh_token` and refreshes it in `service/codex_credential_refresh.go:22-59`. Whether channel keys are encrypted at rest was not established (searched the model and common packages only by name; treat as unknown).
+
+### 4.4 Scheduling and routing
+
+- Selection: sort distinct priorities, pick the tier by retry index, then weighted random among channels of that tier (`model/channel_cache.go:160-182`).
+- Groups: a token group `auto` walks an ordered list of groups; when a group runs out of priorities the next group starts (`service/channel_select.go:100-135`, a worked example in the comment).
+- Failure handling: retry decision per error (`ShouldRetryRelayError`), disable decision by status plus substring search of the error message against a configurable keyword list (`service/channel.go:90`, `setting/operation_setting/operation_setting.go:8`).
+- Affinity: a channel-affinity retry offset exists in the selector (`channel_select.go:121`); the affinity store was not read.
+- Not read: circuit breaking, latency or cost aware selection, rate-limit header parsing.
+
+### 4.5 Protocol translation
+
+Hub and spoke around the OpenAI request type, with direct entry points for Claude, Gemini, Responses, embeddings, rerank, audio and image on each adaptor (`relay/channel/adapter.go:23-34`). Many methods return `any`, so wire shapes are untyped at the interface. `relaykit/relayconvert` and `relay/chat_completions_via_responses.go` suggest cross-protocol conversion helpers (names only). `relay/helper/reasoning_suffix.go` and `relaykit/reasonmap` handle reasoning variants (not read).
+
+### 4.6 Streaming and errors
+
+`relay/helper/stream_scanner.go` and `stream_result.go` handle streaming; contents not read. Errors are a typed `types.NewAPIError` returned from `DoResponse` (`adapter.go:30`). Idle-timeout and first-byte behaviour were not examined.
+
+### 4.7 Usage, cost, observability, management
+
+Quota is the unit: model and completion ratios, pre-consume, settlement via `BillingSession` (`service/billing_session.go:153-222`, `setting/ratio_setting`), with a tokenizer library for estimates (`go.mod`, `tokenkit`). Management is the React UI under `web/` plus REST controllers under `controller/`. A `setting/perf_metrics_setting` directory exists (metrics content not read). Payment integrations for Stripe, Creem and Waffo are in `setting/`.
+
+### 4.8 Plugin or extension mechanism
+
+Two mechanisms. Vendor adaptors are compiled-in Go (extension means a code change). Task plugins are single-file synchronous ECMAScript modules run by an embedded engine (`github.com/MoeForge/moejs`, `pluginkit/engine.go:18-19`). The contract exports `meta`, `buildSubmitRequest`, `parseSubmitResponse`, `parseTaskResult` (plus query or batch hooks); a JSON schema and a `.d.ts` file are the authoritative contract and it is stated as unreleased (`pluginkit/README.md:3-20`). The host owns connections, persistence, retries, polling, billing and settlement; plugins only transform data and report usage facts; the plugin-returned URL is validated against the channel host (`README.md:22-25`). Calls have a 5 s timeout and concurrency 8 (`engine.go:22-30`). Authorship is self-declared; verified publisher identity is described as a future host record (`README.md:12-14`). Built-in plugins are embedded (`plugins/embed.go`).
+
+### 4.9 Dependencies on unofficial endpoints, pooling and similar (neutral description)
+
+- The `codex` channel sends requests to the ChatGPT web backend path `/backend-api/codex/...` on `chatgpt.com` using an OAuth credential held in the channel, and sets an `originator: codex_cli_rs` header when the caller has not (`relay/channel/codex/adaptor.go:185-186`, test `adaptor_test.go:21-28`). That is a first-party client identity presented by a third-party gateway.
+- A `sub2api` channel directory exists (`relay/channel/sub2api`). Only the package line was read; its purpose was not confirmed.
+- Multi-key channels rotate or poll several keys inside one channel (`model/channel.go:73-79`). Whether that is pooling one person's entitled keys or spreading other people's usage over one subscription depends on who owns the keys; the code does not distinguish.
+- Per `01-method-and-dimension-ids.md` section 2 item 8, none of this is recommended. The codex identity and subscription-credential use is flagged `Rejected`.
+
+### 4.10 What it does well
+
+- A clear host and plugin split: the host owns network, retries, billing and persistence; plugins are pure transforms with a timeout and an admission limit (`pluginkit/README.md:22-25`).
+- Machine-readable plugin contract (JSON schema and type declarations) with a separation of self-declared and verified authorship.
+- Priority tiers, group fallback and a worked example of retry index arithmetic (`channel_select.go:100-118`).
+- Pre-consume billing with a settlement step rather than only after-the-fact accounting.
+- Artifacts are projected on read from persisted task data and never stored as a second source of truth (`pluginkit/README.md:29-31`).
+- Large test footprint (345 Go test files).
+
+### 4.11 Risks
+
+- AGPL-3.0 with extra Section 7 attribution terms (section 4.12).
+- Message-substring matching decides channel disablement (`service/channel.go:90`): a provider wording change silently changes behaviour.
+- Vendor adaptors are code, one directory per vendor; `any` in the adaptor interface.
+- Subscription-credential channel with first-party client identity header (section 4.9).
+- Keys-at-rest protection not established.
+- Breadth (consumer billing, payments, social login, i18n) far exceeds what an agent harness needs.
+- Plugin contract is unreleased, so it may change.
+
+### 4.12 Licence implications
+
+AGPL-3.0 (`LICENSE`), with additional terms under Section 7(b) in `NOTICE` requiring preservation of attribution notices in modified versions' user interface. Study only: copy nothing, and do not link or vendor it into OMP2. Ideas below are described in our own words.
+
+### 4.13 Ideas worth adopting in OMP2's existing provider runtime
+
+Checked against the locked decisions; `fit` says which lock each idea touches.
+
+| # | Idea | Evidence | Fit with locks | Suggested handling |
+|---|---|---|---|---|
+| N1 | Host owns retries, polling, billing and settlement; extension hooks only transform data and report usage facts, under a call timeout and an admission limit | `pluginkit/README.md:22-25`, `engine.go:22-30` | Matches new capabilities defaulting to extensions (T2); keeps vendor code out of T0 and T1 | Shape for any provider-transform extension contract. Suitable as an optional extension |
+| N2 | Validate any extension-returned URL against the configured host before the call | `pluginkit/README.md:22-24` | Fine; an SSRF-style guard in host code | Pair with the SSRF classifier idea in section 5 (F7) |
+| N3 | Machine-readable extension contract (schema plus types) as the single authority; separate self-declared from verified authorship | `pluginkit/README.md:3-14` | Fine; declarative, no vendor code in core | Input to the extension-manifest work (X02, X04); depends on the EXT area |
+| N4 | Priority tiers then weighted choice, with a deterministic retry index that moves through tiers and fallback groups | `model/channel_cache.go:160-182`, `service/channel_select.go:100-135` | Fine if the order and weights are catalog or config data | Compare with OMP2's existing ordering (PRV area); extend only missing tiering |
+| N5 | Reserve budget before the call and settle after (refund behaviour not read) | `service/billing_session.go:203` | Fine; no vendor logic | Relevant to budgets for swarm agents sharing one credential (W09); measure first |
+| N6 | Derive artifact lists from persisted task data on read instead of storing a second copy | `pluginkit/README.md:29-31` | Fine | Cheap rule for O07 artifact reporting |
+
+### 4.14 Ideas to avoid
+
+| # | Idea | Why |
+|---|---|---|
+| A1 | Disabling a credential by substring search of the error message against an operator keyword list | Violates typed failure classification and providers-as-data in spirit. Rejected for security, licensing or operational reasons |
+| A2 | Routing through a consumer-subscription web backend with an official CLI `originator` header | Provider-terms and identity risk (section 4.9). Rejected for security, licensing or operational reasons |
+| A3 | One compiled adaptor directory per vendor | Violates providers-as-data. Rejected for security, licensing or operational reasons |
+| A4 | `any`-typed request and response conversion at the adaptor interface | Violates typed wire structs. Rejected for security, licensing or operational reasons |
+| A5 | Database, Redis, consumer billing, payments, social login and a mandatory web console | Contradicts a lightweight native harness (owner brief section 13). Unnecessary or redundant |
+| A6 | Copying code or structure from this repository | AGPL-3.0 with extra attribution terms. Rejected for security, licensing or operational reasons |
+
+## 5. fallencolors/freellmapi (`b5d8333`)
+
+Reading depth: README, architecture index headings, provider base, router and scoring outlines, fallback loop constants, ratelimit and error-classify outlines, catalog sync, crypto, declarative config, health, cache, MCP and app wiring were read. Individual provider adapters (beyond the base class), the 2,898-line `routes/proxy.ts` body, the compression engines and the clients were not read. `evidence/matrix-fallencolors_freellmapi.tsv` marks the two dimensions still unexamined as `U`. The README badges and links name `tashfeenahmed/freellmapi`; the clone's `origin` is `fallencolors/freellmapi` and the history has one commit, so provenance of the fork is unverified.
+
+### 5.1 What it is
+
+A self-hosted OpenAI-compatible gateway whose stated purpose is to stack the free tiers of about 34 providers behind one `/v1` endpoint with a router that falls over on 429 and 5xx and tracks per-key usage (`README.md:5-7,60-66`). It also exposes Anthropic Messages, OpenAI Responses, Gemini native and Ollama-compatible surfaces, plus an MCP server, a React dashboard, an Electron-style desktop app and a CLI. The README says it is for personal experimentation, not production (`README.md:498-500`).
+
+Language and size: TypeScript on Express 5 with SQLite (`better-sqlite3` optional dependency, `node:sqlite` shim), zod, undici and sharp (`server/package.json`). 1,061 tracked files; 611 `.ts` files (127,475 lines), 104 `.tsx` (20,259), 80 `.json` (93,386), 163 `.md`. Tests: 286 test files under `server/src/__tests__` (about 57,000 lines), 38 in `client`, 6 in `cli`, 8 in `desktop`, run with vitest (`server/package.json` script `test`); not run.
+
+### 5.2 Entry points and request path
+
+`server/src/app.ts` wires helmet, cors, a 10 MB JSON body limit, a client-context middleware, the dashboard `/api/*` routes behind `requireAuth` and a per-IP limiter, then the inference surfaces `/v1` (OpenAI, Anthropic, Responses), `/v1beta` (Gemini) and a `/v1/t/:token` URL-token surface (`app.ts:127-310`).
+
+Request path (OpenAI surface, `routes/proxy.ts`, `lib/fallback-loop.ts`, `services/router.ts`):
+
+1. Authenticate the unified `freellmapi-` bearer key; optional `Idempotency-Key` replay and opt-in exact-match response cache (`proxy.ts:1897-1905`, `services/cache.ts`).
+2. Resolve the model id: `auto:*` sort aliases, named profiles, model groups, fusion models (`router.ts:resolveRoutingChain`, `resolveModelGroupCandidates`, `services/fusion.ts`).
+3. `routeRequest` ranks candidate models and picks a usable key (`router.ts:1969`), after a sticky-session preference (`router.ts:2304`).
+4. The fallback loop calls the provider adapter, classifies errors, applies cooldowns and tries the next candidate, up to 20 attempts inside a 45 s budget with hedging (`fallback-loop.ts:66,169,1214-1440`).
+5. The surface re-encodes the OpenAI-shaped chunks to its own SSE or JSON, then the request log and ratelimit counters are written (`lib/request-log.ts`, `services/ratelimit.ts:recordRequest`).
+
+### 5.3 Registry, credentials and secrets
+
+Providers are TypeScript classes registered in a `Map<Platform, BaseProvider>`; `Platform` is a TypeScript string union, so adding a provider is a code change (`providers/index.ts`, `shared/types.ts:63-110`). Model rows come from SQL migrations plus a signed hosted catalog: an Ed25519 public key is pinned, the signature is checked over the exact received bytes, and a version floor stops a stale catalog from rolling back models (`services/catalog-sync.ts:24-75`). Premium licence holders get the live tier; others get a monthly snapshot (`README.md:31`). Custom OpenAI-compatible endpoints and model discovery against the operator's own `/models` are supported (`services/model-discovery.ts`, `services/custom-endpoint.ts`).
+
+Provider keys are encrypted AES-256-GCM at rest; the master key comes from `ENCRYPTION_KEY`, otherwise a key file beside the database (dev fallback only), and a rotate script exists (`lib/crypto.ts:94-125`, `package.json` script `rotate-encryption-key`). There is no OAuth, device flow, keychain or refresh handling (searched; see rows A02 to A04 in the TSV). A declarative JSON config can carry keys inline (`FREEAPI_CONFIG_JSON` or `FREEAPI_CONFIG_PATH`, `services/declarative-config.ts:34-41,125-133`), so secrets are not references there. Dashboard login is email and password with 30-day sessions (`services/auth.ts`).
+
+### 5.4 Scheduling and routing
+
+- Model choice: a contextual bandit over reliability, speed and intelligence weights with presets `priority`, `balanced`, `smartest`, `fastest`, `reliable`, `custom`, a 10 percent exploration chance, headroom ramp and optional community priors (`services/scoring.ts:34`, `router.ts:377-695`).
+- Key choice, independent of the model choice: `auto` (per-key bandit, else round robin) or `least-remaining` (roomiest key first) (`router.ts:507-540`).
+- Capability filters: vision, tools and a context-fit check with a 1.25 safety factor (`router.ts:1689-1710,2125-2132`).
+- Quota engine: per-key RPM, RPD, TPM, TPD windows, provider-level daily and minute caps held as constants, provisional counts for in-flight requests, concurrency leases (`services/ratelimit.ts:61-147,561-615`).
+- Cooldowns: escalating ladder up to 24 h with a configurable ceiling, sources typed `heuristic`, `authoritative`, `credit`, `tier` (`ratelimit.ts:839-921`). A probe job clears only heuristic cooldowns early (`services/cooldown-probe.ts:1-14`).
+- Benching: 3 failures in 15 min benches a model for 10 min; truncation and empty-completion streaks of 3 bench a model and key (`fallback-loop.ts:83-85,320-343`).
+- Degraded mode: when the healthy-provider ratio stays low the router stops exploring (`services/degradation.ts:3-14`).
+- Sessions: sticky model pin for 30 min keyed by `x-session-id` or a hash of the first user message (`proxy.ts:167-298`).
+
+### 5.5 Protocol translation
+
+OpenAI chat shape is the internal hub; providers implement `chatCompletion` and `streamChatCompletion` returning OpenAI-shaped chunks, with dedicated adapters for Google, Cohere, Cloudflare, Sail, AI Horde and Zhipu (`providers/base.ts:217-242`). Per-surface map files translate Anthropic, Gemini and Responses requests (`services/anthropic-map.ts`, `lib/gemini-wire.ts`, `routes/responses.ts`). Claude family names (`opus`, `sonnet`, `haiku`) are mapped to routed models by name (`anthropic-map.ts:17-75`). Tool-call rescue turns tool calls emitted as text into structured calls and `think-tags.ts` handles reasoning tags (`lib/tool-call-rescue.ts`).
+
+### 5.6 Streaming and errors
+
+Failover happens only before a stream has flushed bytes; after commit, mid-stream errors are surfaced honestly and not retried (`fallback-loop.ts:1165-1166`, `proxy.ts:2276`). Client abort, hedge abort and provider timeout are distinct typed errors (`error-classify.ts:262-306`). Errors are classified by a 694-line module of predicates, many of which match message text with regular expressions (for example `isModelNotFoundError`, `error-classify.ts:514-521`); `Retry-After` is parsed from headers, protobuf durations and prose in the body, then clamped to 24 h (`providers/base.ts:28-125`). Provider error text is redacted before it reaches clients (`lib/error-redaction.ts`).
+
+### 5.7 Usage, cost, observability, management
+
+A `requests` table stores platform, model, key, tokens, latency and time to first byte, plus per-attempt traces (`lib/request-log.ts:60-143`). Quota observations are typed by metric (`requests`, `tokens`, `credits`, `neurons`), reset strategy and source (`header`, `quota_api`, `error_body`, `local_usage`, `documentation`, `probe`) (`shared/types.ts:560-562`), with per-provider header tables (`services/provider-quota.ts:192-216`). Health probes keys every 5 minutes and disables a key after three consecutive invalid results; a Cloudflare challenge is treated as inconclusive (`services/health.ts:13-16`, `providers/base.ts:250-257`). Management is the dashboard, REST under `/api`, `/livez` and `/readyz` probes and an MCP server exposing gateway introspection tools (`routes/mcp.ts`, `routes/status.ts`).
+
+### 5.8 Plugin or extension mechanism
+
+None for code. Extension is by declarative config (zod-validated JSON), custom OpenAI-compatible endpoints, a signed catalog that carries model rows and "quirks" with severity and targets (`services/quirks.ts`), and the MCP server. New providers require a TypeScript class and a `Platform` union entry. There is no capability manifest for code, isolation, or upgrade mechanism beyond SQL migrations with up, down and a round-trip test, a catalog version floor and a backups service.
+
+### 5.9 Dependencies on unofficial endpoints, pooling and similar (neutral description)
+
+- Stated purpose: aggregate the free tiers of many providers into one endpoint and keep usage under each cap (`README.md:5-7,62-64`).
+- Several keys per provider are rotated, with an optional policy that holds back the key closest to its cap (`router.ts:507-516`). Whether those keys belong to one person or several is not checked.
+- Keyless and anonymous access paths: providers flagged `keyless` store a sentinel key row so routing treats them as configured (`providers/base.ts:220-224`); the AI Horde provider uses the documented anonymous key (`fallencolors/freellmapi@b5d8333:docs/en/architecture/00-high-level-index.md:94`); some gateways are reached without a key and rate limited per IP (`providers/index.ts:223-235,279-287`).
+- A per-key outbound proxy override is described in the source as avoiding geo-bans and risk controls by using different exit IPs (`lib/proxy.ts:10-14`, `lib/key-proxy.ts:4-10`).
+- A client classifier recognises coding-agent clients by headers to shape behaviour (`lib/client-classifier.ts`).
+- Several adapters target small gateways whose models are served by unnamed upstreams; the project documents that some silently substituted models and guards against it (`fallencolors/freellmapi@b5d8333:docs/lucidity-airforce-dreamprompting-waterfall-logfare.md:33-47`).
+- The project's own terms-of-service review marks Gemini, NVIDIA NIM, GitHub Models and Z.ai as "Caution" (`fallencolors/freellmapi@b5d8333:docs/en/architecture/00-high-level-index.md:81-91`).
+- Per `01-method-and-dimension-ids.md` section 2 item 8, free-tier stacking, keyless harvesting and exit-IP rotation are flagged `Rejected`; they are not recommended here.
+
+### 5.10 What it does well
+
+- Honest stream semantics: no failover after bytes are committed; distinct abort classes.
+- Typed quota observation (metric, reset strategy, source) and cooldowns that record whether the retry time was authoritative or guessed; probes never override authoritative ones.
+- Signed catalog with a pinned key, a version floor and no rollback.
+- Served-model drift guard that records the upstream id before the routed id overwrites it (`lib/served-model.ts:1-12`).
+- SSRF classification of user-supplied base URLs (metadata, link-local, loopback, private) (`lib/url-guard.ts:38-166`).
+- Idempotency-Key replay and an opt-in exact-match cache with explicit privacy notes about plaintext on disk (`services/cache.ts:1-30`).
+- Large test suite relative to code size.
+
+### 5.11 Risks
+
+- The product premise (free-tier stacking, anonymous access, exit-IP rotation) carries provider-terms exposure (section 5.9).
+- Provider set and quota caps are compiled into code (`Platform` union, `DEFAULT_PROVIDER_DAILY_REQUEST_CAPS` in `ratelimit.ts:561-584`).
+- Message-regex error classification is fragile when providers reword errors.
+- Master key in an env var or a file beside the database; declarative config can hold keys inline.
+- Premium catalog depends on a vendor-hosted service and licence key.
+- Plaintext responses may be written to disk when cache persistence is enabled (`cache.ts:26-30`).
+- Fork provenance is unverified (see the note under the section 5 heading).
+
+### 5.12 Licence implications
+
+MIT (`LICENSE`, `README.md:506`). Ideas may be adopted and small excerpts reused with attribution, subject to the owner's locked decisions; no copying was done for this report.
+
+### 5.13 Ideas worth adopting in OMP2's existing provider runtime
+
+Checked against the locked decisions; `fit` says which lock each idea touches.
+
+| # | Idea | Evidence | Fit with locks | Suggested handling |
+|---|---|---|---|---|
+| F1 | Never fail over once bytes reached the caller; surface the mid-stream error and record the attempt as committed | `fallback-loop.ts:1165-1166,1236,1561` | Fine; works with canonical semantic events | Check OMP2's retry layer for the same rule (PRV area); add a test if missing |
+| F2 | Typed quota observation: metric, reset strategy and source enums, with provider header names held as data | `shared/types.ts:560-562`, `provider-quota.ts:192-216` | Header names are vendor-specific: allowed only as catalog or KDL data, never `.rs` conditionals | Extend only if the PRV audit shows the gap (S04, S14) |
+| F3 | Record whether a cooldown time was provider-stated or guessed, and let a cheap validation probe clear only guessed ones | `ratelimit.ts:854`, `cooldown-probe.ts:1-14` | Fine | Candidate for credential-lifecycle work (S03, S12) |
+| F4 | Served-model drift guard: keep the upstream-reported model id before normalising and flag a mismatch | `lib/served-model.ts:1-12`, `fallencolors/freellmapi@b5d8333:docs/lucidity-airforce-dreamprompting-waterfall-logfare.md:33-47` | Fine; one typed field on the response event | Cheap integrity signal for O02 and gateway trust |
+| F5 | Ed25519-pinned signed catalog with a version floor and no rollback | `catalog-sync.ts:24-75` | Fits providers-as-data; signing infrastructure is an owner decision | Input to hosted-catalog sync (G06, G07, X04) |
+| F6 | SSRF classification of operator-supplied base URLs before any call | `lib/url-guard.ts:38-166` | Fine; host code in a local tool | Check against OMP2's custom-endpoint handling; extend if absent |
+| F7 | Degraded-mode state machine that stops exploration when many providers fail together | `services/degradation.ts:3-14` | Fine; deterministic with hysteresis | Requires benchmarking before adopting |
+| F8 | Validation request that never disables a key on an inconclusive result (Cloudflare challenge, non-401/403) | `providers/base.ts:250-257` | Fine | Cheap rule for A08 handling |
+| F9 | Idempotency-Key replay so a client retry after a timeout does not spend a second upstream call | `proxy.ts:1897-1905`, `services/idempotency.ts` | Fine | Relevant to agent retries; measure first |
+
+### 5.14 Ideas to avoid
+
+| # | Idea | Why |
+|---|---|---|
+| A1 | Stacking free tiers of many providers and rotating many keys per provider to stay under caps | Designed around provider usage limits (section 5.9). Rejected for security, licensing or operational reasons |
+| A2 | Keyless and anonymous endpoints with sentinel key rows | Anonymous harvesting of community capacity. Rejected for security, licensing or operational reasons |
+| A3 | Per-key exit-IP override for geo-ban and risk-control avoidance | Circumvention by design. Rejected for security, licensing or operational reasons |
+| A4 | Provider list as a TypeScript union and quota caps as code constants | Violates providers-as-data. Rejected for security, licensing or operational reasons |
+| A5 | Classifying errors by regex over message text | Violates typed failure classification. Rejected for security, licensing or operational reasons |
+| A6 | Vendor-hosted paid catalog tied to a licence key | A single-vendor dependency for data OMP2 can keep in its own catalog. Suitable as an external integration |
+| A7 | Express dashboard, SQLite server and email-password accounts | Contradicts a lightweight native harness (owner brief section 13). Unnecessary or redundant |
+| A8 | Writing plaintext model responses to disk through a cache | Privacy posture change. Rejected for security, licensing or operational reasons |
 
 Back to the [index](../README.md).
