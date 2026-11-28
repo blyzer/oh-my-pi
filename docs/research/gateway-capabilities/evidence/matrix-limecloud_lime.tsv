@@ -9,7 +9,7 @@ W07	U	Not examined
 W08	P	Sandbox crates for Linux, Windows and others exist; bodies not read	limecloud/lime@015b878:lime-rs/crates/linux-sandbox
 W09	U	Not examined	
 W10	U	Not examined	
-W11	P	Config key max_concurrent_threads_per_session; enforcement not read	limecloud/lime@015b878:lime-rs/crates/config-upstream/src/config_toml.rs:771
+W11	P	Config key max_concurrent_threads_per_session; enforcement not read	limecloud/lime@015b878:lime-rs/crates/config-upstream/src/config_toml.rs
 W12	U	Not examined	
 W13	U	Not examined	
 W14	P	CancellationToken used in transports; no supervisor read	limecloud/lime@015b878:lime-rs/crates/app-server-transport/src/transport/mod.rs

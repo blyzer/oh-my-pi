@@ -213,4 +213,85 @@ No `LICENSE` file, no `license` field in `Cargo.toml` or `package.json`; the REA
 | A5 | Model maps and supported-model lists in `.rs` | Violates providers-as-data (lintx reviewer-reject) |
 | A6 | GPL-3.0 licensed code as a copy source | Licence conflict; study only |
 
+## 3. decolua/9router (`5ae63d2`)
+
+### 3.1 What it is
+
+A local or self-hosted AI router (Next.js dashboard, npm package `9router`, Docker image) that exposes one OpenAI-compatible endpoint (`http://localhost:20128/v1`) over 40+ providers and combines "fallback to cheap and free models", multi-account rotation, quota tracking and an "RTK token saver" that compresses tool output (`README.md:4-42`). Licence MIT (`LICENSE`, "Copyright (c) 2024-2026 decolua and contributors").
+
+Language and size: JavaScript (no TypeScript). 2,024 tracked files; 1,610 `.js` files (255,200 lines), 135 `.md` (52,512), 173 PNG. Core is `open-sse/` (executors 63 files 21,924 lines; translator 54 files 12,057; services 62 files 13,327; handlers 66 files 8,483; provider registry 164 files 10,334), the dashboard and API is `src/` (`src/app` 302 files 55,024 lines), `src/mitm` (3,441 lines) and `cli/` (6,702 lines). Tests: 441 files under `tests/unit` plus 43 under `tests/translator`; not run.
+
+### 3.2 Entry points and request path
+
+Entry points: `custom-server.js`, Next.js route handlers under `src/app/api`, `src/sse/handlers/chat.js` (inbound key extraction at line 68) and `open-sse/handlers/chatCore.js`. Path: inbound request, API-key check, RTK compression of the source-format body (`open-sse/rtk/index.js:compressMessages`, applied "in chatCore ... before translateRequest" per its header comment), model/combo resolution (`open-sse/services/combo.js`), account choice (`src/sse/services/auth.js`), translation source to OpenAI to target (`open-sse/translator/index.js:68 translateRequest`), provider executor (`open-sse/executors/*`), response translators and SSE back to the client.
+
+### 3.3 Registry, credentials and secrets
+
+Provider registry is data-like JavaScript: 152 files in `open-sse/providers/registry/`, each from `REGISTRY_TEMPLATE.js`, plus `capabilities.js`, `pricing.js`, `catalogOverride.js`. `capabilities.js` resolves model capabilities in four layers (provider override, exact id, glob patterns, default floor) and overlays modalities and limits from a models.dev catalog refreshed in the background (file header comment, lines 1-30; refresher body not read). Provider connections are stored in a local database (`src/lib/localDb.js`, `src/lib/db`); a grep for `createCipheriv|aes-256|keytar|safeStorage` hit only `src/mitm/manager.js`, a login helper and a Qoder helper, so no encryption of stored connections was found. OAuth helpers live in `src/lib/oauth/providers/`.
+
+### 3.4 Scheduling and routing
+
+- Account selection: provider-level `fallbackStrategy` (default `fill-first`, also round-robin) with per-provider overrides (`src/sse/services/auth.js:144-146`), plus proxy-pool rotation per connection (`auth.js:50-55`, `pickProxyPoolId`).
+- Error handling is **configuration-driven**: `accountFallback.js:checkFallbackError` walks `ERROR_RULES` top to bottom (text substring or status, optionally provider-specific) and returns `shouldFallback`, `cooldownMs`, exponential `newBackoffLevel` (1 s doubling to a cap) and flags `modelScoped` and `requestScoped`; the second flag separates "credential at fault" from "this request was rejected" so combo rotation still tries the next member (`accountFallback.js:29-56`, `open-sse/config/errorConfig.js`). Per-model locks (`MODEL_LOCK_PREFIX`, `buildModelLockUpdate`) cool one model on one connection without blocking the account.
+- Combos: ordered model lists with `round-robin` and a sticky limit (`combo.js:getRotatedModels`), capability reordering from the request body (`detectRequiredCapabilities`, `reorderByCapabilities`), and zero-content failover that peeks the start of an SSE stream and replays it if content arrives (`combo.js:peekComboResponse`, `emptyFailover.js:scanSSEBuffer`). A "fusion" mode calls several models and a judge model (`combo.js:820 handleFusionChat`), which is LLM-in-the-loop routing.
+- No session affinity for cache locality, no rate-limit-header parsing and no concurrency gates were found in the files read.
+
+### 3.5 Protocol translation
+
+Hub-and-spoke with OpenAI as the intermediate: `translateRequest` goes source to `openai` to target unless a direct pair is registered (`translator/index.js:106-125`). Translators exist for Claude, Gemini, Vertex, Responses, Kiro, Cursor, CommandCode, Antigravity and Ollama (`translator/request/*`, `translator/response/*`). All bodies are untyped JavaScript objects. Provider quirks that affect translation are declared in the provider registry (`PROVIDERS[provider]?.quirks?.preserveCacheControl`, `translator/index.js:102`).
+
+### 3.6 Streaming, usage, management
+
+Streams are SSE with AWS EventStream decoding for Kiro and Bedrock (`utils/awsEventStream.js`, `awsSigv4.js`) and Protobuf for Cursor (`utils/cursorProtobuf.js`). Usage is recorded in `src/lib/usageDb.js` and `requestDetailsDb.js` with pricing in `providers/pricing.js` (cost roll-up not read). Management is the Next.js dashboard and a CLI (`cli/src`), a tunnel module and an updater (`src/lib/tunnel`, `appUpdater.js`).
+
+### 3.7 RTK token saver
+
+`open-sse/rtk/` compresses `tool_result` content in the request body (Chat, Responses `function_call_output`, Kiro history) using filters selected by `autodetect.js` and applied with `safeApply`, guarded by `MIN_COMPRESS_SIZE` and `RAW_CAP` (`rtk/index.js:1-45`). The directory also holds prompt-style modes named `caveman`, `ponytail`, `headroom`, `pxpipe` that inject instructions (`rtk/systemInject.js`), which are prompt changes, not deterministic filters. README claims 20 to 40 percent token saving (`README.md:38`, not measured).
+
+### 3.8 Dependencies on unofficial endpoints, pooling and similar (neutral description)
+
+This repository leans hardest on non-API access of the five. It includes web-cookie providers (`executors/chatgpt-web.js`, `deepseek-web.js`) served through a shared stealth Chromium pool whose header says it exists to satisfy Cloudflare and Turnstile checks that plain HTTP cannot pass (`services/browserPool.js:1-12`); a TLS-impersonating client that sends a Chrome-like handshake to get past Cloudflare for grok.com (`services/grokTlsClient.js:1-10`); Claude request "cloaking" that generates the billing header expected from current Claude Code clients with a fixed CLI entrypoint (`utils/claudeCloaking.js:9-17`, `claudeCliVersion.js`); a local MITM server on port 443 with generated certificates that intercepts IDE traffic for chosen hosts and rewrites model names (`src/mitm/server.js:TARGET_HOSTS`, `MODEL_SYNONYMS`, `cert/generate`); Cursor checksum and Protobuf emulation (`utils/cursorChecksum.js`, `cursorProtobuf.js`); and multi-account rotation with proxy pools. The README's stated goals are to "use every bit before reset" and to fall back to free models (`README.md:38-41`). For OMP2 all of these are classified as rejected (section 3.12).
+
+### 3.9 What it does well
+
+- Error classification as data: one rules table with status, text, provider, cooldown, backoff, model scope and request scope (`errorConfig.js:ERROR_RULES`), the closest match to OMP2's providers-as-data rule among the five.
+- Layered capability resolution with an explicit precedence order and a documented update procedure (`providers/capabilities.js:1-30`).
+- Zero-content failover that peeks a stream without losing bytes (`emptyFailover.js`).
+- Deterministic tool-output compression with a size floor (`rtk/index.js`).
+- Separation of `requestScoped` from credential faults.
+
+### 3.10 Risks
+
+- Anti-bot circumvention, TLS fingerprint mimicry, MITM and client impersonation create provider-terms, account and legal exposure and a large attack surface (section 3.8).
+- Connection secrets stored without found encryption.
+- Untyped translation and ad-hoc quirks across 255 k lines of JavaScript.
+- Fusion mode puts an LLM judge on the routing path.
+- Error rules match message substrings, which are provider-text dependent.
+
+### 3.11 Licence implications
+
+MIT. Ideas may be reused freely; nothing is copied here. The MITM and cloaking components would be a licence-compatible but policy-incompatible import.
+
+### 3.12 Ideas worth adopting in OMP2's existing provider runtime
+
+| # | Idea | Evidence | Fit with locks | Suggested handling |
+|---|---|---|---|---|
+| N1 | Error classification as a declarative rules table (status, text, provider, cooldown, backoff, model scope, request scope) | `config/errorConfig.js`, `accountFallback.js:checkFallbackError` | Matches providers-as-data if the table lives in catalog/KDL, keyed on status and typed codes first; text rules only as data | Compare with OMP2 classifier; extend with a data-driven table if gaps exist |
+| N2 | `requestScoped` versus credential-scoped failure so fallback still tries the next member | `accountFallback.js:21-27` | Fine | Cheap semantic split, deterministic |
+| N3 | Per-model cooldown lock on one credential | `accountFallback.js:131-180` | Fine | Avoids disabling a whole credential for one model's quota |
+| N4 | Capability resolution with explicit precedence and a synced external catalog as data | `providers/capabilities.js:1-30` | Fine if catalog stays KDL and sync is an extension (T2) | Candidate for G06/G07; benchmark nothing, deterministic |
+| N5 | Deterministic tool-output filters selected by content type with a size floor | `rtk/index.js`, `rtk/autodetect.js` | OMP2 already has a minimizer (ADR 0049 D6 class C names it); compare, do not duplicate | Likely `Unnecessary or redundant` unless the PRV/TOK audit finds missing filters |
+| N6 | Zero-content stream detection before committing a response | `emptyFailover.js:scanSSEBuffer` | Fits canonical semantic events (inspect the first events, not text) | Reliability idea for fallback; measure first |
+
+### 3.13 Ideas to avoid
+
+| # | Idea | Why |
+|---|---|---|
+| A1 | Stealth browser pools, TLS fingerprint mimicry, Cloudflare/Turnstile solving | Circumvents provider access controls. Rejected for security, licensing or operational reasons |
+| A2 | Local MITM with generated certificates for IDE traffic and model rewriting | Traffic interception and trust-store changes; Rejected for security, licensing or operational reasons |
+| A3 | Client cloaking (billing header, CLI version, tool-name suffixes) | Official-client impersonation; Rejected |
+| A4 | Multi-account rotation with proxy pools to maximise free or subscription quota | Pooling to stretch limits; Rejected |
+| A5 | LLM judge "fusion" on the routing path | Non-deterministic and costly; Requires benchmarking at best, outside the owner's deterministic preference |
+| A6 | Prompt-style compression modes (caveman, ponytail variants) injected into system prompts | Prompt changes break stable-prefix cache rules (volatile text in stable prefix) and are not deterministic filters; Unnecessary or redundant |
+
 Back to the [index](../README.md).
