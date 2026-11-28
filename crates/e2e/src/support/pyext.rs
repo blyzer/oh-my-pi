@@ -13,6 +13,7 @@ use omp_envd::{
 	exthost::{
 		ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest, ToolDeclarationKey,
 	},
+	policy::Grants,
 	worker::{ExtHostSpec, HostKey},
 };
 use omp_ext::config::{StaticDeclaration, StaticDeclarations};
@@ -23,10 +24,11 @@ use crate::{Context as _, Result, error};
 /// with `@omp.tool(name, rev=1)`.
 #[derive(Clone, Copy, Debug)]
 pub struct PythonExtension {
-	module:  &'static str,
-	source:  &'static str,
-	tools:   &'static [&'static str],
-	trusted: bool,
+	module:      &'static str,
+	source:      &'static str,
+	tools:       &'static [&'static str],
+	trusted:     bool,
+	data_grants: &'static [&'static str],
 }
 
 pub(super) struct ExtensionInstall {
@@ -42,13 +44,21 @@ impl PythonExtension {
 		source: &'static str,
 		tools: &'static [&'static str],
 	) -> Self {
-		Self { module, source, tools, trusted: false }
+		Self { module, source, tools, trusted: false, data_grants: &[] }
 	}
 
 	/// Lets the module publish hooks its manifest does not declare, as an
 	/// operator-trusted module may.
 	pub const fn trusting(mut self) -> Self {
 		self.trusted = true;
+		self
+	}
+
+	/// Grants the extension's host these DATA capabilities, the host half of
+	/// what the DATA gate checks; a tool's effect envelope is the other half.
+	/// An extension built without this holds none.
+	pub const fn with_data_grants(mut self, grants: &'static [&'static str]) -> Self {
+		self.data_grants = grants;
 		self
 	}
 
@@ -117,6 +127,7 @@ impl PythonExtension {
 			manifest.trust_runtime_declarations();
 		}
 		let mut spec = ExtHostSpec::new(key.clone(), manifest);
+		spec.data_grants = Grants::supported(self.data_grants.iter().copied());
 		spec.python_site = Some(root.to_path_buf());
 		spec.entry_path = Some(entry);
 		let mut binding =
