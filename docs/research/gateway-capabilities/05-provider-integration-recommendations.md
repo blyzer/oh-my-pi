@@ -148,4 +148,20 @@ Placement rule used (ADR 0049 D1, D6): provider logic that is vendor-neutral and
 3. PRV-03 waits on PRV-01 and a measurement.
 4. PRV-04 and PRV-05 are optional and independent.
 
+## 4. Reference comparison
+
+Pinned references and the full read notes are in [`evidence/ref-gateways-a.md`](evidence/ref-gateways-a.md); matrices are `evidence/matrix-router-for-me_CLIProxyAPI.tsv`, `matrix-Ve-ria_CLIProxyAPIPlus.tsv` and `matrix-cheaper-inference_OmniRoute.tsv`.
+
+| Card | Reference evidence | What it changes |
+|---|---|---|
+| PRV-01, PRV-06 | `cheaper-inference/OmniRoute@3e23a8a:open-sse/services/routingStrategies.ts:DeterministicRoutingEngine` records per-provider latency samples (bounded at 200) and orders by cost and latency; `Ve-ria/CLIProxyAPIPlus@60bb379:sdk/cliproxy/auth/selector.go:437 SessionAffinitySelector` pins by session | OMP2 already has the ranking fields and a stale-generation guard; the references confirm the producer is small, in-memory and deterministic. Session affinity exists in two gateways, which supports PRV-06. |
+| PRV-02 | `router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/quota_signals.go:ObserveResponseHeadersForProvider` writes response-header quota signals into `QuotaState`; `cheaper-inference/OmniRoute@3e23a8a:open-sse/services/rateLimitManager.ts` | Same producer OMP2 lacks. Header names are provider facts, so keep them in catalog data (providers-as-data), not Rust. |
+| PRV-03 | `cheaper-inference/OmniRoute@3e23a8a:src/shared/utils/circuitBreaker.ts` (CLOSED, DEGRADED, OPEN, HALF_OPEN, adaptive backoff, failure-kind thresholds) and `open-sse/services/connectionCircuitBreaker.ts` (per connection scope); CLIProxyAPI and Plus have none | One reference has a breaker and two do not. The OmniRoute lesson worth taking is scoping by connection and failure kind, so one account's failures do not open the route. Benefit still unmeasured, so the class stays benchmarking. |
+| PRV-04 | `cheaper-inference/OmniRoute@3e23a8a:open-sse/services/batchProcessor.ts:processPendingBatches` is a gateway-side queue; provider batch endpoints were not read | Does not show a provider-batch integration to copy; supports keeping batch as an optional extension. |
+| PRV-07 | `cheaper-inference/OmniRoute@3e23a8a:open-sse/services/routingStrategies.ts` costPriority sorts by USD per 1M input tokens only | A single-unit price sort; OMP2's typed pricing can do better. |
+| PRV-08 | `cheaper-inference/OmniRoute@3e23a8a:open-sse/services/combo.ts` named combos with strategies priority, weighted, round-robin, least-used, cost-optimized, reset-aware, strict-random | Combos are a second config store for what roles plus `FallbackChain` already express; kept `Unnecessary or redundant`. |
+| PRV-09 | `router-for-me/CLIProxyAPI@dbe641f:internal/runtime/executor/claude_executor_cloaking.go` and `claude_fingerprint_policy.go` (names and headers read only); OmniRoute web-session modules such as `open-sse/services/notionThreadSessions.ts` | Described neutrally: client-identity emulation, shared subscriptions and cookie-session providers are outside the authorised-use line and stay rejected. Weighted or fill-first rotation across the user's own keys is the legitimate part and OMP2 already has rotation. |
+
+Not adopted from any of the three: a mandatory dashboard, a database server, a semantic response cache (OmniRoute `open-sse/services/cache/semanticCacheManager.ts`; single-user benefit is small and replaying answers needs per-user namespacing), pairwise translators (see 06).
+
 Back to the [index](README.md).

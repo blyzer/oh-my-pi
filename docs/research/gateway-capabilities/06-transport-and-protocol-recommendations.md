@@ -132,6 +132,18 @@ OMP2 uses a canonical intermediate representation: one sans-I/O `Codec` per wire
 **Acceptance criteria:** RSS stays under a stated bound while the consumer is paused.
 **Follow-up:** Extend limits if the test fails.
 
+## Reference comparison
+
+Notes: [`evidence/ref-gateways-a.md`](evidence/ref-gateways-a.md).
+
+| Topic | Reference evidence | Reading for OMP2 |
+|---|---|---|
+| Translation architecture | `router-for-me/CLIProxyAPI@dbe641f:sdk/translator/helpers.go:TranslateRequestByFormatName(from, to)` with one registration per format pair (38 `init.go` registration lines); `Ve-ria/CLIProxyAPIPlus@60bb379:internal/translator` the same (31); `cheaper-inference/OmniRoute@3e23a8a:open-sse/translator/registry.ts` a registry with many `*-to-openai` and a few cross pairs | Two gateways use pairwise translators and one a hub-like registry. OMP2's canonical IR (PRV-14) needs N codecs, not N squared translators; no change proposed. |
+| Inbound protocols | CLIProxyAPI serves `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1beta/...` (`internal/api`) | Supports PRV-13 only as an optional T2 facade; OMP2 core is not a gateway. |
+| Transports | CLIProxyAPI uses Codex over WebSocket (`internal/runtime/executor/codex_websockets_executor.go`, `internal/wsrelay`); none of the three was found using QUIC or gRPC to providers (not exhaustively searched) | OMP2 already has the WebSocket path; supports PRV-10 and PRV-12 as unnecessary. |
+| Streaming | Per-provider `*_executor_stream.go` files (CLIProxyAPI), SSE not read in depth | No new evidence; PRV-17 stays a measurement. |
+| Reasoning and caching | CLIProxyAPI `internal/thinking` and `claude_thinking_replay.go`; OmniRoute `open-sse/services/reasoningCache.ts`, `signatureCache.ts` | OMP2 already normalizes thinking per catalog policy and recovery module (T06); not read deeply in references. |
+
 ## Part B
 
 IPC and serialization formats (Protobuf, JSON-RPC, shared memory and the rest) are assessed in [`06b-ipc-and-serialization.md`](06b-ipc-and-serialization.md).
