@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	U	API-key credential type not examined in this fork; shares ancestor code with hank9999	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs
+A02	Y	Social and IdC refresh grants; usage and balance also read through a cookie-based web portal client	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:refresh_social_token;BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:refresh_idc_token
+A03	N	Searched src for device_code, deviceCode, device_authorization: no match	BenedictKing/kiro.rs@87a735c:src
+A04	N	No CLI delegation; calls Kiro IDE runtime and web portal endpoints directly	BenedictKing/kiro.rs@87a735c:src/kiro/web_portal.rs:1-4
+A05	P	Credentials are inline fields of a plaintext JSON file; written by temp file plus rename	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:persist_credentials
+A06	N	Searched src for keyring and keychain: no match	BenedictKing/kiro.rs@87a735c:src
+A07	P	In-process tokio mutex around refresh with recheck; no cross-process lock; atomic file replace	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:refresh_lock
+A08	Y	Expiry windows; invalid_grant detected by matching error text and disabled at once	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:is_invalid_grant_error
+A09	P	Admin operations to reset, re-enable and force refresh; persisted cooldown state reloaded on start	BenedictKing/kiro.rs@87a735c:src/kiro/cooldown.rs:load_persistent_cooldowns
+A10	N	One process owns all credentials; no separate keeper	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:MultiTokenManager
+A11	P	Reads usage limits per credential; quota exhaustion tracked as a cooldown reason	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:get_usage_limits_for;BenedictKing/kiro.rs@87a735c:src/kiro/cooldown.rs:CooldownReason
+A12	U	Region fields exist as in the ancestor; not re-checked in this fork	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs
+G09	P	Per-credential auth method selects the refresh protocol; single provider	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:refresh_social_token
+G10	N	Searched src for free tier or anonymous access: no match	BenedictKing/kiro.rs@87a735c:src
+G11	U	Duplicate detection not re-checked; ancestor rejects duplicates by SHA-256	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs
+S02	Y	Cooldown-aware acquire with typed reasons: rate limit, suspended, quota, refresh failure	BenedictKing/kiro.rs@87a735c:src/kiro/cooldown.rs:CooldownReason;BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:acquire_context
+O02	P	Snapshot of credential and cooldown state through an admin API	BenedictKing/kiro.rs@87a735c:src/kiro/token_manager.rs:snapshot

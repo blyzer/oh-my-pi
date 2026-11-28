@@ -1,0 +1,18 @@
+dim_id	status	note	evidence
+A01	U	API-key credential type not examined in this fork; shares ancestor code with hank9999	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs
+A02	Y	Social and IdC refresh grants inherited from the ancestor; interactive login not in the repo	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:refresh_token
+A03	N	Searched src for device_code, deviceCode, device_authorization: no match	M-JYuan/kiro.rs@fc35283:src
+A04	N	No CLI delegation; calls the Kiro IDE runtime endpoint directly	M-JYuan/kiro.rs@fc35283:src/kiro/endpoint
+A05	P	Credentials are inline fields of a plaintext JSON file; written by temp file plus rename	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:persist_credentials
+A06	N	Searched src for keyring and keychain: no match	M-JYuan/kiro.rs@fc35283:src
+A07	P	In-process tokio mutex around refresh with recheck; no cross-process lock	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:refresh_lock
+A08	Y	invalid_grant matched by error text and disabled at once; quota-disabled credentials are not auto-recovered	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:is_invalid_grant_error
+A09	P	Admin reset, re-enable and force refresh; no re-login flow	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs
+A10	P	A periodic balance-refresh task runs inside the same process; no separate keeper	M-JYuan/kiro.rs@fc35283:src/kiro/provider.rs:start_periodic_balance_refresh
+A11	P	Periodic per-credential balance refresh feeds selection	M-JYuan/kiro.rs@fc35283:src/kiro/provider.rs:start_periodic_balance_refresh
+A12	U	Region fields exist as in the ancestor; tests cover credential region over config region	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs
+G09	P	Per-credential auth method selects the refresh protocol; single provider	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:refresh_token
+G10	N	Searched src for free tier or anonymous access: no match	M-JYuan/kiro.rs@fc35283:src
+G11	U	Duplicate detection not re-checked; ancestor rejects duplicates by SHA-256	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs
+S02	Y	Priority or balanced selection with cooldown classification	M-JYuan/kiro.rs@fc35283:src/kiro/token_manager.rs:acquire_context
+O02	P	Snapshot of credential state through an admin API	M-JYuan/kiro.rs@fc35283:src/admin
