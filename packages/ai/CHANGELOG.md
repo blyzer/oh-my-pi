@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Kiro is off until you set `OMP_KIRO_THIRD_PARTY_OPT_IN=1`: Kiro's FAQ does not permit its subscription through third-party harnesses, so `/login kiro` and token refresh now stop with that notice and send nothing until you opt in
+
 ### Fixed
 
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge

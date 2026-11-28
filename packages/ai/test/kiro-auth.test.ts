@@ -5,6 +5,9 @@ import type { OAuthController, OAuthCredentials, OAuthPrompt } from "@oh-my-pi/p
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { decodeKiroCredential, encodeKiroOAuthRow } from "@oh-my-pi/pi-catalog/wire/kiro";
 
+// These tests exercise the opted-in Kiro provider. The gate itself is tested in kiro-optin.test.ts.
+process.env.OMP_KIRO_THIRD_PARTY_OPT_IN = "1";
+
 const PROFILE_US = "arn:aws:codewhisperer:us-east-1:123456789012:profile/one";
 const PROFILE_EU = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/two";
 const SOCIAL_DEFAULT = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK";

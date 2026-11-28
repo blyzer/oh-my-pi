@@ -2,9 +2,21 @@
 
 Kiro is a native provider backed by the Kiro API (`kiro-api`). For general credential precedence and provider configuration, see [Providers](./providers.md); for transport details, see [Provider quirks](./provider-quirks.md#kiro).
 
+## Opt-in required
+
+Kiro is **off by default**. Kiro's FAQ ([kiro.dev/faq](https://kiro.dev/faq), "With which tools can I use my Kiro subscription?") lists Kiro's own interfaces and ACP-compatible IDEs, and says use through third-party harnesses that route requests outside Kiro's native interfaces is not permitted. This provider calls Kiro's service directly and presents the official Kiro CLI's identity, so it stays disabled until you opt in and accept that risk to your Kiro account:
+
+```sh
+export OMP_KIRO_THIRD_PARTY_OPT_IN=1   # also accepted: true, yes
+```
+
+Without it, every Kiro login, model discovery and request fails with a message that names this variable. With it, `/login kiro` shows the same notice before the login method prompt. Credentials you stored earlier stay in place but are not used until you opt in.
+
+The documented route for other clients is ACP: `kiro-cli acp` (see the [Kiro ACP docs](https://kiro.dev/docs/cli/acp)). It runs Kiro CLI itself, so the requests are Kiro's own.
+
 ## Quick start
 
-1. Run `/login kiro`.
+1. Opt in (above), then run `/login kiro`.
 2. Choose **Identity Center** for an AWS organization, **Builder ID** for a personal AWS Builder ID, **API key** for a `ksk_…` key, or **Google** / **GitHub** to sign in with that account.
 3. Choose a `kiro/<model-id>` model from the discovered catalog.
 

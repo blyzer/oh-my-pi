@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Kiro model discovery and request headers are refused until `OMP_KIRO_THIRD_PARTY_OPT_IN=1` is set; `@oh-my-pi/pi-catalog/wire/kiro-optin` exports the check and the notice
+
 ### Added
 
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
