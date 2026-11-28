@@ -4637,11 +4637,13 @@ fn model_ref(model: Option<&Str>) -> serde_json::Value {
 
 /// The requested reasoning effort as the hook `Effort` string.
 fn reasoning_effort(reasoning: &Setting<ReasoningRequest>) -> &'static str {
+	// The extension host decodes this as an `omp.Effort`, which has no `none`:
+	// a request that names no effort is reported as `off`.
 	match reasoning {
 		Setting::Prefer(reasoning) | Setting::Require(reasoning) => {
-			reasoning.effort.map_or("none", |effort| effort.into())
+			reasoning.effort.map_or("off", |effort| effort.into())
 		},
-		Setting::Unset => "none",
+		Setting::Unset => "off",
 	}
 }
 
