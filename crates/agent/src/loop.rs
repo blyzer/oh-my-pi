@@ -12,8 +12,8 @@ use std::{
 use futures::StreamExt as _;
 use omp_ai::{
 	ArtifactBody, BlockKind, ChatEvent, ChatRequest, ChatStream, Client, Completion, FinishReason,
-	Message as InferenceMessage, NegotiationPolicy, Planner, RecoveryKind, RecoveryRecord,
-	SafetySetting, Sampling, Setting, Usage,
+	Message as InferenceMessage, NegotiationPolicy, Planner, ReasoningRequest, RecoveryKind,
+	RecoveryRecord, SafetySetting, Sampling, Setting, Usage,
 };
 use omp_core::{FastHashMap, Hash32, Str, sf};
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
@@ -1545,7 +1545,7 @@ impl<C: Inference> Kernel<C> {
 									"provider": model.as_deref().and_then(|model| model.split_once('/')).map_or("", |(provider, _)| provider),
 									"route": model.as_deref().unwrap_or(""),
 								},
-								"thinking": reasoning_effort(&request),
+								"thinking": reasoning_effort(&request.reasoning),
 								"deadline": serde_json::Value::Null,
 								"attempt": requests_started,
 								"prompt_changed": requests_started == 0,
@@ -4636,8 +4636,8 @@ fn model_ref(model: Option<&Str>) -> serde_json::Value {
 }
 
 /// The requested reasoning effort as the hook `Effort` string.
-fn reasoning_effort(request: &ChatRequest) -> &'static str {
-	match &request.reasoning {
+fn reasoning_effort(reasoning: &Setting<ReasoningRequest>) -> &'static str {
+	match reasoning {
 		Setting::Prefer(reasoning) | Setting::Require(reasoning) => {
 			reasoning.effort.map_or("none", |effort| effort.into())
 		},
@@ -5543,5 +5543,61 @@ pub(crate) const fn cancelled_outcome() -> TurnOutcome {
 		assistant_text: Str::new_static(""),
 		tokens_in:      0,
 		tokens_out:     0,
+	}
+}
+
+#[cfg(test)]
+mod turn_start_payload_tests {
+	use std::str::FromStr as _;
+
+	use omp_ai::{ReasoningRequest, ReasoningVisibility, Setting};
+	use omp_catalog::ReasoningEffort;
+
+	use super::reasoning_effort;
+
+	fn requested(effort: Option<ReasoningEffort>) -> ReasoningRequest {
+		ReasoningRequest {
+			visibility: ReasoningVisibility::Hidden,
+			effort,
+			max_tokens: None,
+			preserve_signatures: false,
+		}
+	}
+
+	/// The `turn_start` payload's `thinking` is decoded by the extension host as
+	/// an `omp.Effort`, whose values are `ReasoningEffort`'s. A value outside
+	/// that vocabulary makes the host reject the whole event before any hook
+	/// runs, and an observe hook's failure is dropped, so the hook never runs.
+	#[test]
+	fn the_thinking_a_hook_receives_is_always_a_reasoning_effort() {
+		let mut cases =
+			vec![Setting::Unset, Setting::Prefer(requested(None)), Setting::Require(requested(None))];
+		for effort in [
+			ReasoningEffort::Off,
+			ReasoningEffort::Minimal,
+			ReasoningEffort::Low,
+			ReasoningEffort::Medium,
+			ReasoningEffort::High,
+			ReasoningEffort::Xhigh,
+			ReasoningEffort::Max,
+		] {
+			cases.push(Setting::Prefer(requested(Some(effort))));
+			cases.push(Setting::Require(requested(Some(effort))));
+		}
+		for case in &cases {
+			let thinking = reasoning_effort(case);
+			assert!(
+				ReasoningEffort::from_str(thinking).is_ok(),
+				"{case:?} reports `{thinking}`, which is not a reasoning effort"
+			);
+		}
+	}
+
+	#[test]
+	fn a_requested_effort_is_reported_unchanged() {
+		for effort in [ReasoningEffort::Off, ReasoningEffort::Low, ReasoningEffort::Max] {
+			let reported = reasoning_effort(&Setting::Prefer(requested(Some(effort))));
+			assert_eq!(ReasoningEffort::from_str(reported), Ok(effort));
+		}
 	}
 }
