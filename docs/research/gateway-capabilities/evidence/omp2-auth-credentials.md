@@ -36,11 +36,12 @@ Masking of secrets in model-bound text is a different mechanism (`crates/secrets
 - Authorization code with S256 PKCE, loopback callback, paste-code and device flows are catalog data (`AuthSpec::{OAuthPkce,OAuthDevice,OAuthPaste,OAuthCustom}`, `spec.rs:35-43`; `OAuthFlowSpec::Pkce` at `crates/catalog/src/provider.rs:364`).
 - Per-provider exchanges that do not fit the generic shapes are typed handlers registered by catalog enum, not extension code (`oauth.rs:104,136,147`, files under `auth/oauth/custom/`). This matches ADR 0049 D6 class B ("`ai/src/auth/**` (OAuth flows, including `github_copilot`, `gitlab`, `devin`) stays").
 - Remote login: `omp auth-broker login <provider> --via <ssh-alias>` forwards the loopback callback port over the native SSH service and runs the login on the remote host (`crates/app/src/auth_broker_cmd.rs:70,106-133`). The broker proto states the browser step happens on the client host and the exchange broker-side (`auth.proto:44-52`, unverified end to end, see 6.9).
+- A custom handler reads another application's stored token by default: `crates/ai/src/auth/oauth/custom/perplexity.rs:456-475` `borrow_native_token` runs `defaults read ai.perplexity.mac authToken` on macOS and is tried first unless `OMP_AUTH_NO_BORROW=1` (`perplexity.rs:77-79`). It is not described in ADR 0059 (`0059:23` lists the file only) and sits against ADR 0043's rule "No token/key extraction from Keychain, credential files or private caches" (`0043:19`), which is written for native CLIs. Card AUTH-10 in `05b`.
 - MCP OAuth is separate (`omp_envd::mcp::oauth::McpOAuth`, constructed at `crates/driver/src/registry.rs` after `auth_control`); not audited here.
 
 ### A03 Device authorization: Implemented
 
-- RFC 8628 device grant: `DEVICE_GRANT` (`oauth.rs:54`), `OAuthEngine::begin_device:387` and `poll_device:452`, primitives `crates/oauth/src/device.rs`, catalog shape `OAuthFlowSpec::DeviceCode` (`provider.rs:~375`, field `device_authorization_url`). Which bundled providers use it was not enumerated (6.5).
+- RFC 8628 device grant: `DEVICE_GRANT` (`oauth.rs:54`), `OAuthEngine::begin_device:387` and `poll_device:452`, primitives `crates/oauth/src/device.rs`, catalog shape `OAuthFlowSpec::DeviceCode` (`provider.rs:~375`, field `device_authorization_url`). The catalog flow table `fixtures/llm-oracle/catalog/oauth.toml` has 20 flows: 3 `device-code` (lines 78, 88, 98), 2 `pkce` (28, 108) and 15 `custom-exchange`; which providers own the device rows was not mapped (6.5).
 
 ### A04 Official CLI delegation: Partial (ADR 0043 status "Partially implemented")
 
@@ -179,6 +180,7 @@ Consequences for the owner's rule "do not duplicate credential managers":
 | X3 | ADR 0018 decision 1 "an extension NEVER holds or refreshes a provider credential itself"; the status section marks it "Unverified" | `omp.creds.reveal` and `import_oauth` exist in the CONTROL authority (`auth_backend.rs:163-180`) but their grant scopes are empty by construction (`secrets/mod.rs:43-45`) and the domain is unbound in production | Consistent today. Keep an e2e check so that wiring the domain cannot grant `reveal` |
 | X4 | ADR 0049 D6 class A: vendor integration never enters T0/T1 | `GithubCredentialAuthority` and `github_authority` live in `crates/driver/src/auth_backend.rs:66-95` (adapter to `omp_envd::forge_url::CredentialAuthority`) | A vendor name in a core crate; it acts only as a credential adapter. Flag for the ADR 0049 owner; not asserted as a violation |
 | X5 | STATUS row 0043 cites `crates/agent/src/delegated/` | The contract lives in `crates/contract/src/delegated` (parent record D2) | Citation refresh only |
+| X7 | ADR 0043 "no token extraction" and ADR 0059 listing of `perplexity.rs` | `perplexity.rs:456-475` reads the desktop app token by default | An undocumented default-on borrow; ADR 0043 is written for native CLIs, so the owner must say whether it covers this (AUTH-10) |
 | X6 | ADR 0039 row: TCP gateway has no TLS | `daemon.rs:417` requires a bearer token; `auth_gateway_cmd.rs:39` prints `http://` | Consistent for the part I read; TLS absence not re-verified (6.8) |
 
 ## 6. Not verified
@@ -197,8 +199,8 @@ Consequences for the owner's rule "do not duplicate credential managers":
 12. Whether any observability crate consumes `RefreshReceipt` or account-pool events.
 13. Windows and Linux behaviour of every keychain and sandbox claim (ADR 0075 verified macOS Seatbelt only).
 
-## 7. Candidate gaps carried to stage 2 (not cards yet)
+## 7. Candidate gaps (now cards AUTH-01 to AUTH-13 in `05b`)
 
-Derived from sections 2 to 4, in the order they affect other areas: (a) per-process refresh owner token; (b) one shared auth stack across in-process subagents; (c) refresh-on-expiry keeper behaviour inside an existing broker rather than a new service; (d) unify disable-on-refresh-failure between the extension and built-in paths; (e) health surface for refresh and lease events through existing observability; (f) entitlement and region facts as catalog data feeding existing `Eligibility`; (g) platform keychain parity for key sources; (h) ADR 0049 D4 conformance for any credential-bearing extension proposal.
+Derived from sections 2 to 4, in the order they affect other areas: (a) per-process refresh owner token; (b) one shared auth stack across in-process subagents; (c) refresh-on-expiry keeper behaviour inside an existing broker rather than a new service; (d) unify disable-on-refresh-failure between the extension and built-in paths; (e) health surface for refresh and lease events through existing observability; (f) entitlement and region facts as catalog data feeding existing `Eligibility`; (g) platform keychain parity for key sources; (h) ADR 0049 D4 conformance for any credential-bearing extension proposal. Two further gaps found during the reference reading: (i) at-most-once refresh send for single-use refresh tokens (AUTH-11); (j) refresh lead as catalog data (AUTH-12). The Perplexity token borrowing (section 2, A02) is AUTH-10.
 
 Back to the [index](../README.md).

@@ -14,7 +14,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | PARTIAL (first pass, see the file's status note) |
 | 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | PARTIAL (first pass, see the file's status note) |
 | 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | PARTIAL (first pass, see the file's status note) |
-| 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | PARTIAL (first pass, see the file's status note) |
+| 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | DONE |
 | 8 | Python runtime comparative assessment | [08-python-runtime-comparative-assessment.md](08-python-runtime-comparative-assessment.md) | DONE |
 | 9 | Single-session swarm assessment | [09-single-session-swarm-assessment.md](09-single-session-swarm-assessment.md) | DONE |
 | 10 | Local inference assessment | [10-local-inference-assessment.md](10-local-inference-assessment.md) | DONE |

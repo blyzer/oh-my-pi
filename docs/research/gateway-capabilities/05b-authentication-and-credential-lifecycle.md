@@ -142,6 +142,58 @@ An in-process subagent inherits the parent's convar context (including the crede
 **Acceptance criteria:** a forced refresh in a test emits one event with its step list; a locked store emits one `storage_locked` health event per launch.
 **Follow-up:** hand the event schema to the observability owner.
 
+### AUTH-10 Perplexity desktop-token borrowing is on by default
+**Decision class:** Requires ADR reconsideration
+**Existing implementation evidence:** `crates/ai/src/auth/oauth/custom/perplexity.rs:456-475` `borrow_native_token` runs `defaults read ai.perplexity.mac authToken` on macOS and `:77-79` tries it before the email one-time-password login, skipped only when `OMP_AUTH_NO_BORROW=1` (Implemented, opt-out). ADR 0059 names the file (`docs/adr/0059-provider-catalog-additions.md:23`) but not the borrowing; ADR 0043 states "No token/key extraction from Keychain, credential files or private caches" for native CLIs (`0043:19`).
+**Actual missing capability:** an owner decision on reading another application's stored token, and a rule consistent with ADR 0043: either opt-in only (an explicit setting or a prompt naming the source), or removal and a native login only.
+**Alternatives considered:** keep opt-out (current); opt-in with a named confirmation; remove the borrow path and keep the one-time-password login.
+**Expected benefit:** security and provider-terms posture; no loss of function for users who can log in with the one-time password.
+**Implementation complexity:** low.
+**Security implications:** a default read of another product's credential store is credential extraction by the ADR 0043 definition; the borrowed token is a full account credential and is then held in OMP's store; the code path is macOS-only.
+**Maintenance cost:** low (removal) or low (a setting).
+**Performance measurement strategy:** not applicable.
+**Acceptance criteria:** the decision is recorded in an ADR 0059 or ADR 0043 amendment; with the chosen rule, a fresh login never reads the desktop application's preferences unless the user opted in; the unit tests that inject `borrow` (`perplexity.rs:571-576`) keep passing.
+**Follow-up:** the research reference `stark-shadow/cpa-plugin-perplexity` solves a related problem by cookie capture and is rejected (section 5 below); do not use it as justification.
+
+### AUTH-11 At-most-once refresh send for single-use refresh tokens
+**Decision class:** Partially implemented: extend
+**Existing implementation evidence:** the lease expires after 30 s and a waiter that sees `LeaseExpired` loops and acquires the lease again (`crates/ai/src/account/refresh.rs:566-572,528`); the refresh then loads the stored bundle and sends the stored refresh token (`crates/ai/src/auth/oauth.rs:814-860`). A leader that dies after the provider consumed the token and before the new bundle is written leaves the old token in the store; the next attempt re-sends it (Partial; behaviour with a real rotating provider not tested).
+**Actual missing capability:** a consumed marker written before the grant is sent (for example a generation-scoped flag in the existing `leases` row or credential metadata) so that an unknown outcome stops further sends for that token and reports a typed "outcome unknown, re-login may be needed" failure instead of replaying the old token. The reference design is CLIProxyAPI's write-ahead refresh claim, which never reclaims an incomplete claim (section 5 below).
+**Alternatives considered:** keep lease-expiry handoff (simplest, risks replaying a spent token against providers with reuse detection); a separate journal directory (a second store, rejected); accept the risk and document it.
+**Expected benefit:** reliability (fewer revoked token families and forced re-logins), security (no replay of a spent refresh token).
+**Implementation complexity:** medium: a schema change in `credentials.db` (migration), a new typed failure, and tests for crash points (before send, after send before write).
+**Security implications:** the consumed marker is non-secret; the receipt design in the reference stores credentials, which OMP does not need because the generation CAS already carries the new bundle on success.
+**Maintenance cost:** medium.
+**Performance measurement strategy:** crash-injection tests at three points with a stub endpoint that rotates and enforces reuse detection; count revoked families with and without the marker. Not measured.
+**Acceptance criteria:** after a crash between send and write, no second grant is sent for the same refresh token and the account reports the typed unknown-outcome failure; a peer that waits sees the new generation when the write did land.
+**Follow-up:** do together with AUTH-01 (same files); requires an ADR 0018 amendment sentence on the changed handoff rule.
+
+### AUTH-12 Refresh lead as per-provider catalog data
+**Decision class:** Partially implemented: extend
+**Existing implementation evidence:** one global 60 s pre-expiry skew (`crates/ai/src/auth/manager.rs:1322` `RefreshingCredentialSource::new`); AWS has its own constant (`crates/ai/src/auth/aws.rs:46`) (Partial). The catalog already carries per-provider auth data (`crates/ai/src/auth/spec.rs:547` `OAuthRefreshSpec`, not read in detail).
+**Actual missing capability:** an optional lead (and "do not refresh early" flag for providers where one account's refresh can invalidate its siblings) in catalog OAuth data, read by the existing refresh path. References: OmniRoute keeps a code table with 1, 5 and 15 minute leads and documents why (`cheaper-inference/OmniRoute@3e23a8a:open-sse/services/tokenRefresh.ts:125-137`); CLIProxyAPI uses a 96 hour lead for one provider's outer token (`router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/types.go:1131-1138`). OMP's locked rule is providers-as-data, so the table must live in the catalog, not in `.rs`.
+**Alternatives considered:** keep one constant; per-provider constants in Rust (reviewer-reject under AGENTS.md "Inference").
+**Expected benefit:** reliability (no expiry mid-request for long-lived-session providers), latency, fewer refreshes where early refresh is harmful.
+**Implementation complexity:** low to medium (catalog schema field, lintx and catalog conformance tests).
+**Security implications:** none beyond refresh traffic volume.
+**Maintenance cost:** low.
+**Performance measurement strategy:** not applicable.
+**Acceptance criteria:** a provider with a configured lead refreshes inside that window and one without keeps today's 60 s; a provider flagged "no early refresh" never refreshes before the skew window.
+**Follow-up:** prerequisite for the keeper in AUTH-05.
+
+### AUTH-13 Allowance pooling, free-credit automation, client impersonation and cross-application token import
+**Decision class:** Rejected for security, licensing or operational reasons
+**Existing implementation evidence:** none of these are implemented as such in OMP2 except the two imports covered by AUTH-06 and AUTH-10. `AccountPool` rotates among accounts the user holds and respects cooldowns and quotas (`crates/ai/src/account/pool.rs:356,86-132`) (Implemented, legitimate use).
+**Actual missing capability:** none proposed. The reference patterns are: many accounts per vendor with automated daily check-ins to restore free credits and randomised desktop client profiles (`cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/vendors/zcode/credential.go:497`, `internal/tasks/checkin.go`); IDE-style user agents and device fingerprints for a private runtime endpoint (`hank9999/kiro.rs@3c9723f:src/kiro/endpoint/ide.rs:4-7`, `src/kiro/machine_id.rs`); sessions of a consumer web application reused as an API (`stark-shadow/cpa-plugin-perplexity@0d09161:README.md:5,64-74`); importers for other tools' credential files and "TLS stealth" for blocked regions (`cheaper-inference/OmniRoute@3e23a8a:src/lib/oauth/utils/codexAuthImport.ts`, README only for the stealth claim).
+**Alternatives considered:** none; the owner's rule is that routing may spread load across credentials the user is entitled to use and must not circumvent usage limits or use an unauthorised private API.
+**Expected benefit:** not applicable.
+**Implementation complexity:** not applicable.
+**Security implications:** account termination risk, provider-terms violation, and exposure of full-account credentials; plaintext credential files in the references.
+**Maintenance cost:** not applicable.
+**Performance measurement strategy:** not applicable.
+**Acceptance criteria:** no OMP2 feature, extension or documentation recommends these patterns; any future proposal must name an authorised-use case recorded by the owner.
+**Follow-up:** the adoptable ideas from the same repositories are carried in AUTH-07, AUTH-11 and AUTH-12 instead.
+
 ## 4. Draft ADR needed?
 
 Propose only; nothing below is drafted or applied.
@@ -151,11 +203,31 @@ Propose only; nothing below is drafted or applied.
 | ADR 0018 amendment | Needed (small) | Status text claims persistent lease coordination is Implemented while the production owner token is constant (F1). The amendment would record the per-process owner decision (AUTH-01), state the cross-process guarantee precisely and add the shared-stack rule for subagents (AUTH-03). Owner approval required before editing the ADR. |
 | ADR 0075 amendment | Needed if AUTH-02 proceeds | Records whether `omp.creds.*` is bound (which operations) or removed, and aligns D9/O5 and ADR 0049 D4 with the code. |
 | ADR 0043 note or successor | Needed for AUTH-06 | The import command and the "no credential migration" rule must be reconciled by an owner decision on provider terms. |
+| ADR 0059 or ADR 0043 amendment for AUTH-10 | Needed | Records the rule for reading another application's stored token (opt-in or removal). |
+| ADR 0018 amendment sentence for AUTH-11 | Needed with AUTH-01 | States the handoff rule for an unknown refresh outcome. |
 | ADR for a refresh keeper | Not needed now | AUTH-05 is gated by measurement and stays inside the existing broker daemon. |
 | ADR for entitlement facts | Not needed now | AUTH-08 extends data in the existing account store; reconsider if it needs a new catalog schema field. |
 
 ## 5. Reference comparison
 
-To be completed from the reference repositories in the next step of this deliverable; see [`evidence/ref-providers.md`](evidence/ref-providers.md).
+Full notes: [`evidence/ref-providers.md`](evidence/ref-providers.md) (seven provider repositories, CLIProxyAPI and OmniRoute auth parts) and the seven matrix files `evidence/matrix-<owner>_<repo>.tsv`. All code was read, not run; nothing was copied (several licences are permissive, one has none).
+
+| Dimension | OMP2 (audited commit) | References (owner/repo@sha7) | Reading |
+|---|---|---|---|
+| A01 API keys | Catalog-ordered sources, sealed storage (`crates/ai/src/auth/spec.rs:440`, `store.rs:591`) | `hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:try_ensure_token` (static key skips refresh); plaintext JSON files in all kiro forks; `cheaper-inference/OmniRoute@3e23a8a:src/lib/db/encryption.ts` (AES-256-GCM, plaintext if no key) | OMP stronger: fails closed without a key source |
+| A02/A03 OAuth, device | PKCE, paste, device and custom exchanges as data; 3 device-code, 2 PKCE and 15 custom flows in `fixtures/llm-oracle/catalog/oauth.toml` | `Foxfishc/kiro.rs@15c0a3a:src/kiro/sso.rs` (vendor sign-in reproduced); `cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:README.md:36-50` (device flows per vendor); `cheaper-inference/OmniRoute@3e23a8a:src/lib/oauth/providers/*` (about 40 provider files) | Breadth exists in references by reproducing vendor clients; OMP's flows are data plus typed handlers (ADR 0049 D6 class B) |
+| A04 CLI delegation | ACP and Codex delegated executors, no token reading (ADR 0043) | None of the seven repositories delegates to an official CLI | OMP2 differs by design |
+| A05 references, A06 keychain | Names only in catalog; macOS keychain for the master key | `cxy2730/CLIProxyAPI-freetier2api-plugin@0a718a6:internal/state/state.go:435` (0600 state file); no keychain in any of the seven (searched); OmniRoute VS Code client uses SecretStorage (README only) | OMP ahead on macOS, behind nowhere; Linux and Windows gap is AUTH-04 |
+| A07 refresh coordination | In-process single flight plus SQLite lease; inert cross-process owner (AUTH-01) | `hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:try_ensure_token` (async mutex plus recheck); `cxy2730/...@0a718a6:internal/tasks/keepalive.go:refreshGate`; `router-for-me/CLIProxyAPI@dbe641f:internal/auth/codex/refresh_journal.go:journalRefresh` (write-ahead claim, never reclaimed) | The only cross-process design in the references is CLIProxyAPI's journal; it motivates AUTH-01 and AUTH-11 |
+| A08 expiry | 60 s skew, typed failures, extension-path disable | kiro 5 and 10 minute windows and `invalid_grant` disable (`hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:is_token_expired`); OmniRoute lead table (`open-sse/services/tokenRefresh.ts:125-137`); CLIProxyAPI leads (`sdk/cliproxy/auth/types.go:1131-1138`) | References are per-provider; OMP is global (AUTH-12) |
+| A09 recovery | CLI verbs, key rotation, repair, import | `BenedictKing/kiro.rs@87a735c:src/kiro/cooldown.rs:load_persistent_cooldowns`; corrupt-state quarantine in `cxy2730/...@0a718a6:internal/state/state.go:480` | OMP covers storage corruption by SQLite; no gap |
+| A10 keepers | Broker daemon, lazy refresh | `router-for-me/CLIProxyAPI@dbe641f:sdk/cliproxy/auth/conductor_refresh.go:29-32` (5 s check, 16 workers, 1 and 5 minute backoffs); Home mode; `cxy2730/...@0a718a6:internal/tasks/keepalive.go:Keepalive`; `M-JYuan/kiro.rs@fc35283:src/kiro/provider.rs:start_periodic_balance_refresh` | Keepers are common in references; AUTH-05 keeps it inside the existing broker and behind a benchmark |
+| A11 entitlements | Usage RPCs, plan discovery, learned model denial | `Foxfishc/kiro.rs@15c0a3a:src/admin/handlers.rs:get_overage_status`; `cxy2730/...@0a718a6:internal/tasks/checkin.go` (credit automation, rejected) | AUTH-08 adopts only the legitimate part (read entitlement, do not automate claims) |
+| A12 regional | Endpoint and claim based | `Foxfishc/kiro.rs@15c0a3a:src/kiro/profile_resolver.rs:resolve_across_regions`; separate cn and global vendor instances in the freetier plugin | Region resolution from account data is a legitimate idea (AUTH-08) |
+| G10 free tier | `None` and `OptionalBearer` only | The freetier plugin's whole purpose, with credit farming (rejected, AUTH-13) | Do not copy; a neutral "anonymous allowed" flag already exists |
+| G11 identity, dedup | Typed ids, rebind refusal | `hank9999/kiro.rs@3c9723f:src/kiro/token_manager.rs:add_credential` (SHA-256 duplicate rejection); `stark-shadow/cpa-plugin-perplexity@0d09161:README.md:137` (name from session hash) | Possible small gap: duplicate upstream identity (audit 6.11) |
+| O02 health | Per-credential state, probes, no metrics | Admin snapshots in all references; `cheaper-inference/OmniRoute@3e23a8a:src/lib/tokenRefreshCircuit.ts` (health sweep and backoff window) | AUTH-09 |
+
+Provider-terms classification of the repositories themselves (rule 8): the five `kiro.rs` repositories, the free-tier plugin and the Perplexity plugin are described neutrally in `evidence/ref-providers.md` and classified `Rejected for security, licensing or operational reasons` as products; the generic lifecycle mechanisms listed above are the only reusable material. CLIProxyAPI and OmniRoute are gateways whose normal use is pooling many accounts; only their refresh and storage mechanisms are compared here.
 
 Back to the [index](README.md).
