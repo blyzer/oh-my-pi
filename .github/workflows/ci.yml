@@ -671,6 +671,7 @@ jobs:
             --test p9_isolation \
             --test p9_extension_control \
             --test p9_agent_settled \
+            --test p9_hook_data_authority \
             --test p9_continuation_grants \
             --test p10_lift_idempotence \
             --test p11_collab_spectator \
