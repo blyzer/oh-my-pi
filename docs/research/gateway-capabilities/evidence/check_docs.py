@@ -191,7 +191,7 @@ else:
     ok("no em dashes")
 
 # 6. OMP2 path:line citations
-cite_re = re.compile(r"((?:crates|extensions|docs|packages|scripts|vendor|fixtures|tools)/[A-Za-z0-9_./+\-]+\.[A-Za-z0-9]+):(\d+)(?:[-,](\d+))?(?:\s+((?:`[^`]+`)))?")
+cite_re = re.compile(r"(?<!@[0-9a-f]{7}:)((?:crates|extensions|docs|packages|scripts|vendor|fixtures|tools)/[A-Za-z0-9_./+\-]+\.[A-Za-z0-9]+):(\d+)(?:[-,](\d+))?(?:\s+((?:`[^`]+`)))?")
 tot = good = 0
 problems = []
 cache = {}

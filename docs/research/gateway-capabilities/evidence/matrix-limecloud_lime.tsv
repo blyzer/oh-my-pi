@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+W01	P	Durable parent and child thread-spawn edges with open and closed status; owner in app server	limecloud/lime@015b878:lime-rs/crates/agent-graph-store/src/types.rs
+W02	P	spawn_agent tool contract; concrete owner supplied per turn by the app server; body not read	limecloud/lime@015b878:lime-rs/crates/tool-runtime/src/agent_control.rs
+W03	U	Not examined	
+W04	U	Not examined	
+W05	U	App server and exec-server crates exist; role of each not read	limecloud/lime@015b878:lime-rs/crates/exec-server/src/lib.rs
+W06	U	Not examined	
+W07	U	Not examined	
+W08	P	Sandbox crates for Linux, Windows and others exist; bodies not read	limecloud/lime@015b878:lime-rs/crates/linux-sandbox
+W09	U	Not examined	
+W10	U	Not examined	
+W11	P	Config key max_concurrent_threads_per_session; enforcement not read	limecloud/lime@015b878:lime-rs/crates/config-upstream/src/config_toml.rs:771
+W12	U	Not examined	
+W13	U	Not examined	
+W14	P	CancellationToken used in transports; no supervisor read	limecloud/lime@015b878:lime-rs/crates/app-server-transport/src/transport/mod.rs
+W15	P	Managed worktree crate with root, source root, head sha and branch; keep-count setting	limecloud/lime@015b878:lime-rs/crates/worktree/src/lib.rs
+W16	U	Not examined	

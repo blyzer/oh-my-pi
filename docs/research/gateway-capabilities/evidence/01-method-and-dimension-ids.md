@@ -68,7 +68,7 @@ Each proposed capability is a level-3 heading `### <ID> <title>` followed by the
 > Part of the [OMP2 gateway-capabilities research](README.md). Deliverable <N>. Audited commit `85d219ae7f` (`origin/omp2`). Research proposal: nothing here is implemented.
 ```
 
-and a final line `Back to the [index](README.md).` Evidence files under `evidence/` use `../README.md`; diagrams under `diagrams/` use `../README.md`.
+and a final back-link line to the index (`Back to the index` with the README link). Documents at the top level link `README.md`; files under `evidence/` and `diagrams/` link `../README.md`.
 
 ## 6. Dimension IDs
 

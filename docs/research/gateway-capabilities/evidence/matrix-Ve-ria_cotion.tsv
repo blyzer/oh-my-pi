@@ -1,0 +1,17 @@
+dim_id	status	note	evidence
+W01	N	Searched src/*.ts: no in-process agents; each workflow launches an external agent binary	Ve-ria/cotion@b7a4307:src/run.ts
+W02	P	Workflows run concurrently with Promise.allSettled in one Node process	Ve-ria/cotion@b7a4307:src/run.ts:27
+W03	U	Not examined	
+W04	U	Not examined	
+W05	N	No headless worker of its own; it launches the user's agent CLI per workflow	Ve-ria/cotion@b7a4307:src/run.ts:70
+W06	N	Searched src/*.ts for nested spawning: not present	Ve-ria/cotion@b7a4307:src/run.ts
+W07	Y	Spawns an external agent binary with execa, selectable by agentBin option	Ve-ria/cotion@b7a4307:src/run.ts:70
+W08	N	Passes a flag that bypasses approvals and sandbox to the child agent	Ve-ria/cotion@b7a4307:src/run.ts:162
+W09	N	No shared services; config loaded from the working directory	Ve-ria/cotion@b7a4307:src/config.ts
+W10	U	Not examined	
+W11	N	No pool or limit; every selected workflow starts	Ve-ria/cotion@b7a4307:src/run.ts:27
+W12	P	Workflow files drive the run; planning logic not read	Ve-ria/cotion@b7a4307:src/workflow.ts
+W13	U	Not examined	
+W14	P	AbortSignal option; SIGTERM to the child process group on abort; no restart or resource limit	Ve-ria/cotion@b7a4307:src/run.ts:119
+W15	N	Searched src/*.ts for worktree: not present	Ve-ria/cotion@b7a4307:src/run.ts
+W16	N	No workspace revision identity; JSONL run log only	Ve-ria/cotion@b7a4307:src/runlog.ts
