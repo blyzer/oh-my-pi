@@ -9,7 +9,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | # | Deliverable | File | Status |
 |---|---|---|---|
 | 1 | Executive architectural assessment | [01-executive-architectural-assessment.md](01-executive-architectural-assessment.md) | TODO |
-| 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | TODO |
+| 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | DONE |
 | 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | TODO |
 | 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | TODO |
 | 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | TODO |

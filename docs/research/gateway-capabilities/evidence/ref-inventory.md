@@ -45,3 +45,5 @@ Command used for the clones and the table: see `evidence/ref-inventory-commands.
 | provider | [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) | cloned | `3c9723fc8968c2aa1c4a5eb131bf2bcd45358117` | 2026-11-25 | master | MIT / LICENSE | False | 2024 |
 | provider | [lzt404/kiro.rs](https://github.com/lzt404/kiro.rs) | cloned | `833158518a21f749ff61121b35dd5b16c73e19ad` | 2026-05-29 | master | MIT / LICENSE | False | 0 |
 | provider | [stark-shadow/cpa-plugin-perplexity](https://github.com/stark-shadow/cpa-plugin-perplexity) | cloned | `0d0916126fa24eb8a469d87a9b62c5e0ce4221c9` | 2026-11-10 | main | MIT / LICENSE | False | 2 |
+
+Back to the [index](../README.md).

@@ -158,7 +158,7 @@ card_re = re.compile(r"^### ((?:PRV|AUTH|EXT|PY|IPC|SWM|INF|CIX|GWY|OBS|SEC)-\d+
 cards = 0
 badcards = []
 for p in files:
-    txt = read(p)
+    txt = strip_code(read(p))
     ms = list(card_re.finditer(txt))
     for i, m in enumerate(ms):
         cards += 1

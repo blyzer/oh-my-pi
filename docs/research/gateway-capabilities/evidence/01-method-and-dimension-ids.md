@@ -15,7 +15,7 @@ Back to the [index](../README.md). This file fixes the vocabulary every document
 
 ## 2. Evidence rules
 
-1. **OMP2 claims** cite `path:line` and the symbol (`crates/ai/src/foo.rs:42 fn bar`), at the audited commit. A claim about behaviour needs a test, a doc-comment contract or the code path that enforces it; a name alone is not evidence.
+1. **OMP2 claims** cite `path:line` and the symbol (`crates/ai/src/router.rs:148 struct Router`), at the audited commit. A claim about behaviour needs a test, a doc-comment contract or the code path that enforces it; a name alone is not evidence.
 2. **Reference-repository claims** cite `owner/repo@<first 7 of SHA>:path` and a symbol or line, using the SHA in `ref-inventory.md`. Say plainly when only the README was read ("README only, code not read").
 3. **Maturity labels** for anything about OMP2: `Implemented` (code on `omp2` and reachable from a production path), `Partial` (named parts missing), `Prototype` (code exists but is off by default, test-only or not wired), `Proposed` (ADR or design text only, status `Proposed`/`Accepted` with no code), `Unmerged` (open PR or branch only), `Absent` (searched, not found; say how you searched).
 4. The ADR status table is `docs/adr/STATUS.md`; the follow-up ledger is `docs/adr/TASKS.md`. Where code departs from an ADR, say so.
@@ -48,7 +48,7 @@ Each proposed capability is a level-3 heading `### <ID> <title>` followed by the
 ```
 ### PRV-03 Typed failure classification for retry and fallback
 **Decision class:** Partially implemented: extend
-**Existing implementation evidence:** crates/ai/src/recovery.rs:120 `fn classify` ... (maturity label)
+**Existing implementation evidence:** crates/ai/src/layer/retry.rs:1 `TransportRetryLayer` ... (maturity label)
 **Actual missing capability:** ...
 **Alternatives considered:** ...
 **Expected benefit:** ... (say which of: reduced network transmission, reduced inference computation, reduced billable tokens, latency, reliability, security, memory)

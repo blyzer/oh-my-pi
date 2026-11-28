@@ -8,3 +8,5 @@ gh api repos/$repo --jq '[.license.spdx_id,.archived,.pushed_at,.stargazers_coun
 ```
 
 Outcome on 2026-11-28: 37 of 39 cloned. `AmethystDev-Labs/QuickCLI` and `microsoft/onnxruntime` returned `ERROR: Repository not found` from `git ls-remote` and HTTP 404 from `gh api`. For ONNX Runtime the sibling repositories `microsoft/onnxruntime-genai`, `-extensions` and `-inference-examples` also returned not found, while `microsoft/vscode` and `pykeio/ort` resolved, so the failure is specific to those names and not a network or credential fault. `gh api users/AmethystDev-Labs/repos` lists no repository named QuickCLI.
+
+Back to the [index](../README.md).
