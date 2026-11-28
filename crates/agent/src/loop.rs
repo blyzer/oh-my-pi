@@ -5595,6 +5595,40 @@ mod turn_start_payload_tests {
 		}
 	}
 
+	/// Every payload that carries a `ReasoningEffort` (`turn_start`,
+	/// `model_changed`) serializes it with these names, and the extension host
+	/// decodes them as `omp.Effort`; `crates/py/tests/
+	/// hook_payload_vocabulary_contract.rs` pins the same list on the Python
+	/// side. The `match` is exhaustive on purpose: a new variant must be added
+	/// to both lists.
+	#[test]
+	fn reasoning_effort_wire_names() {
+		const NAMES: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+		let position = |effort: ReasoningEffort| match effort {
+			ReasoningEffort::Off => 0,
+			ReasoningEffort::Minimal => 1,
+			ReasoningEffort::Low => 2,
+			ReasoningEffort::Medium => 3,
+			ReasoningEffort::High => 4,
+			ReasoningEffort::Xhigh => 5,
+			ReasoningEffort::Max => 6,
+		};
+		for effort in [
+			ReasoningEffort::Off,
+			ReasoningEffort::Minimal,
+			ReasoningEffort::Low,
+			ReasoningEffort::Medium,
+			ReasoningEffort::High,
+			ReasoningEffort::Xhigh,
+			ReasoningEffort::Max,
+		] {
+			assert_eq!(
+				serde_json::to_value(effort).expect("an effort serializes"),
+				serde_json::Value::String(NAMES[position(effort)].to_owned())
+			);
+		}
+	}
+
 	#[test]
 	fn a_requested_effort_is_reported_unchanged() {
 		for effort in [ReasoningEffort::Off, ReasoningEffort::Low, ReasoningEffort::Max] {
