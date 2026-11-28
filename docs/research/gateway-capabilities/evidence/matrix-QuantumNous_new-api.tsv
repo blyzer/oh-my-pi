@@ -1,0 +1,96 @@
+dim_id	status	note	evidence
+G01	Y	Each channel row has a type and an adaptor under relay/channel (46 vendor directories); compiled-in Go	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:18 Adaptor;QuantumNous/new-api@04dfcbb:model/channel.go
+G02	U	relay/helper/model_mapped.go exists; file name only, not read	QuantumNous/new-api@04dfcbb:relay/helper/model_mapped.go
+G03	U	Model mapping helper exists (file name only; not read)	QuantumNous/new-api@04dfcbb:relay/helper/model_mapped.go
+G04	U	Not examined in this pass	
+G05	U	Not examined in this pass	
+G06	U	Not examined in this pass	
+G07	U	Not examined in this pass	
+G08	U	Not examined in this pass	
+G09	P	Each channel stores its own key and base URL; no declared per-provider auth requirement read	QuantumNous/new-api@04dfcbb:model/channel.go:73-79
+G10	U	Not examined in this pass	
+G11	U	Not examined in this pass	
+A01	Y	API keys stored per channel; multi-key channels keep status, disabled reason and a polling index per key	QuantumNous/new-api@04dfcbb:model/channel.go:73-79
+A02	P	OAuth packages serve dashboard login; the codex channel stores an OAuth key JSON with refresh_token	QuantumNous/new-api@04dfcbb:oauth/provider.go;QuantumNous/new-api@04dfcbb:relay/channel/codex/oauth_key.go:12
+A03	U	Not examined in this pass	
+A04	U	Not examined in this pass	
+A05	U	Not examined in this pass	
+A06	U	Not examined in this pass	
+A07	P	Codex credential refresh service exists; cross-process coordination not read	QuantumNous/new-api@04dfcbb:service/codex_credential_refresh.go:22-59
+A08	P	Refresh path errors when refresh_token is missing; wider expiry handling not read	QuantumNous/new-api@04dfcbb:service/codex_credential_refresh.go:59
+A09	U	Not examined in this pass	
+A10	U	Not examined in this pass	
+A11	P	Codex channel uses a ChatGPT account credential; entitlement checks not read (see neutral section)	QuantumNous/new-api@04dfcbb:relay/channel/codex/adaptor.go:185-186
+A12	U	Not examined in this pass	
+S01	Y	Priority tiers first, then weighted random inside the tier; retry index advances through tiers and auto groups	QuantumNous/new-api@04dfcbb:model/channel_cache.go:160-182;QuantumNous/new-api@04dfcbb:service/channel_select.go:100-135
+S02	P	Channel candidates filtered by group, model ability and request constraints	QuantumNous/new-api@04dfcbb:service/channel_select.go:119-121 CacheGetRandomSatisfiedChannel
+S03	P	Channels auto-disabled on error status or message keywords; recovery path not read	QuantumNous/new-api@04dfcbb:service/channel.go:65-90;QuantumNous/new-api@04dfcbb:setting/operation_setting/operation_setting.go:8
+S04	U	Not examined in this pass	
+S05	P	Channel affinity feeds a retry offset into selection; affinity store code not read	QuantumNous/new-api@04dfcbb:service/channel_select.go:121;QuantumNous/new-api@04dfcbb:service/channel_affinity_template_test.go
+S06	U	Not examined in this pass	
+S07	U	Not examined in this pass	
+S08	U	Not examined in this pass	
+S09	U	Not examined in this pass	
+S10	U	Not examined in this pass	
+S11	U	Not examined in this pass	
+S12	Y	Retry walks priorities then groups up to RetryTimes; ShouldRetryRelayError decides per error	QuantumNous/new-api@04dfcbb:service/channel_select.go:100-118;QuantumNous/new-api@04dfcbb:service/relay_error.go:59
+S13	P	Retry and disable decisions from NewAPIError; disable uses substring keyword search on message text	QuantumNous/new-api@04dfcbb:service/relay_error.go:59;QuantumNous/new-api@04dfcbb:service/channel.go:90
+S14	U	Not examined in this pass	
+T01	Y	ConvertOpenAIRequest on every adaptor from GeneralOpenAIRequest	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:23
+T02	Y	ConvertOpenAIResponsesRequest on adaptor; Responses finalizer hook	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:28,39
+T03	Y	ConvertClaudeRequest on adaptor; relay/claude_handler.go	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:33
+T04	Y	ConvertGeminiRequest on adaptor	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:34
+T05	Y	46 vendor adaptors including aws, vertex, baidu, xunfei, tencent, ollama, replicate	QuantumNous/new-api@04dfcbb:relay/channel
+T06	P	Reasoning suffix and reasonmap helpers exist; contents not read	QuantumNous/new-api@04dfcbb:relay/helper/reasoning_suffix.go;QuantumNous/new-api@04dfcbb:relaykit/reasonmap
+T07	U	Not examined in this pass	
+T08	U	Not examined in this pass	
+T09	Y	Audio, image, embedding and rerank conversion methods on the adaptor interface	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:24-27
+T10	U	Not examined in this pass	
+T11	P	Adaptors return a typed NewAPIError; error mapping per vendor not read	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:30
+T12	P	OpenAI request type as hub plus direct Claude and Gemini entry points per adaptor; relaykit/relayconvert not read	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:18-35;QuantumNous/new-api@04dfcbb:relaykit/relayconvert
+I01	Y	Gin HTTP server	QuantumNous/new-api@04dfcbb:go.mod:gin-gonic/gin
+I02	Y	SSE stream scanner helper	QuantumNous/new-api@04dfcbb:relay/helper/stream_scanner.go
+I03	U	Not examined in this pass	
+I04	U	Not examined in this pass	
+I05	U	Not examined in this pass	
+I06	U	Not examined in this pass	
+I07	U	Not examined in this pass	
+I08	U	Not examined in this pass	
+I09	U	Not examined in this pass	
+I10	U	Not examined in this pass	
+I11	Y	TaskAdaptor and task channel for asynchronous vendor jobs with polling	QuantumNous/new-api@04dfcbb:relay/channel/adapter.go:43 TaskAdaptor;QuantumNous/new-api@04dfcbb:pluginkit/README.md:22-25
+I12	U	Not examined in this pass	
+I13	N	Go gateway; no native inference seen	
+I14	U	Not examined in this pass	
+I15	U	Not examined in this pass	
+E01	U	Not examined in this pass	
+E02	P	Channel affinity can pin a conversation to a channel; purpose not confirmed as cache reuse	QuantumNous/new-api@04dfcbb:service/channel_select.go:121
+E03	U	Not examined in this pass	
+E04	U	Not examined in this pass	
+E05	U	Not examined in this pass	
+E06	U	Not examined in this pass	
+E07	U	Not examined in this pass	
+E08	U	Not examined in this pass	
+E09	U	Not examined in this pass	
+E10	P	Pre-consume billing session with a tokenizer library; counting code not read	QuantumNous/new-api@04dfcbb:service/billing_session.go:203;QuantumNous/new-api@04dfcbb:go.mod:tiktoken-go/tokenizer
+E11	U	Not examined in this pass	
+E12	U	Not examined in this pass	
+X01	Y	Script: single-file ECMAScript task plugins on an embedded engine; vendor adaptors are compiled-in Go	QuantumNous/new-api@04dfcbb:pluginkit/README.md:1-27;QuantumNous/new-api@04dfcbb:pluginkit/engine.go:18-19
+X02	Y	Plugin exports meta; v1.schema.json and v1.d.ts are the contract; routes and protocols declared in meta	QuantumNous/new-api@04dfcbb:pluginkit/README.md:9-20
+X03	P	Built-in plugins embedded in the binary; a marketplace is referred to as future	QuantumNous/new-api@04dfcbb:plugins/embed.go;QuantumNous/new-api@04dfcbb:pluginkit/README.md:12-14
+X04	N	Author is self-declared; verified publisher identity is stated as a future host record	QuantumNous/new-api@04dfcbb:pluginkit/README.md:12-14
+X05	P	Host owns HTTP, validates plugin URL against channel host; 5 s call timeout, concurrency 8	QuantumNous/new-api@04dfcbb:pluginkit/README.md:22-25;QuantumNous/new-api@04dfcbb:pluginkit/engine.go:22-30
+X06	N	Plugins run in-process on the host engine	QuantumNous/new-api@04dfcbb:pluginkit/engine.go
+X07	U	Not examined in this pass	
+X08	U	Not examined in this pass	
+X09	U	Not examined in this pass	
+X10	U	Not examined in this pass	
+X11	P	Plugin contract v1 declared but stated as unreleased	QuantumNous/new-api@04dfcbb:pluginkit/README.md:3-5
+O01	P	Channel test and auto-disable keywords; health dashboard not read	QuantumNous/new-api@04dfcbb:service/channel.go:65
+O02	U	Not examined in this pass	
+O03	U	Not examined in this pass	
+O04	Y	Quota billing with pre-consume, ratio settings and billing session	QuantumNous/new-api@04dfcbb:service/billing_session.go:153-222;QuantumNous/new-api@04dfcbb:service/billing.go
+O05	U	Not examined in this pass	
+O06	Y	React admin UI under web plus REST controllers	QuantumNous/new-api@04dfcbb:web;QuantumNous/new-api@04dfcbb:controller
+O07	U	Not examined in this pass	
+O08	N	Not an agent harness	

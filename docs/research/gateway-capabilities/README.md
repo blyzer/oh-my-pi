@@ -8,12 +8,12 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 
 | # | Deliverable | File | Status |
 |---|---|---|---|
-| 1 | Executive architectural assessment | [01-executive-architectural-assessment.md](01-executive-architectural-assessment.md) | TODO |
+| 1 | Executive architectural assessment | [01-executive-architectural-assessment.md](01-executive-architectural-assessment.md) | DONE |
 | 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | DONE |
 | 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | DONE |
 | 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | DONE |
 | 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | DONE |
-| 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | PARTIAL (first pass, see the file's status note) |
+| 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | DONE |
 | 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | DONE |
 | 8 | Python runtime comparative assessment | [08-python-runtime-comparative-assessment.md](08-python-runtime-comparative-assessment.md) | DONE |
 | 9 | Single-session swarm assessment | [09-single-session-swarm-assessment.md](09-single-session-swarm-assessment.md) | DONE |
