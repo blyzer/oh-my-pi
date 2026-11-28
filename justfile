@@ -210,6 +210,7 @@ ci-p9-p10-linux:
         --test p9_isolation \
         --test p9_extension_control \
         --test p9_agent_settled \
+        --test p9_hook_data_authority \
         --test p9_continuation_grants \
         --test p10_lift_idempotence \
         --test p11_collab_spectator \
@@ -382,6 +383,7 @@ e2e-p9:
         --test p9_isolation \
         --test p9_extension_control \
         --test p9_agent_settled \
+        --test p9_hook_data_authority \
         --test p9_continuation_grants \
         --test p9_extension_isolation \
         --test p9_credential_placement \
