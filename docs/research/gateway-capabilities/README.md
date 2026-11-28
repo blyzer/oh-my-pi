@@ -24,7 +24,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 14 | Security and licensing assessment | [14-security-and-licensing-assessment.md](14-security-and-licensing-assessment.md) | DONE |
 | 15 | Prioritized architectural backlog | [15-prioritized-architectural-backlog.md](15-prioritized-architectural-backlog.md) | DONE |
 | 16 | Draft ADRs (only where justified) | [16-draft-adrs.md](16-draft-adrs.md) | TODO |
-| 17 | Incremental implementation roadmap | [17-incremental-implementation-roadmap.md](17-incremental-implementation-roadmap.md) | TODO |
+| 17 | Incremental implementation roadmap | [17-incremental-implementation-roadmap.md](17-incremental-implementation-roadmap.md) | DONE |
 | 18 | Explicitly rejected alternatives and reasons | [18-rejected-alternatives.md](18-rejected-alternatives.md) | DONE |
 | 19 | Source references with pinned commits and paths | [19-source-references.md](19-source-references.md) | DONE |
 | 20 | Open questions requiring architectural approval | [20-open-questions.md](20-open-questions.md) | DONE |

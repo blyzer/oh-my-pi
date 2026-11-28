@@ -31,7 +31,7 @@ Evidence base: [`evidence/omp2-extensions.md`](evidence/omp2-extensions.md) (cod
 | C ABI | The platform calling convention and data layout (`extern "C"`, `#[no_mangle]`). A shared library exports symbols a host resolves with `dlopen`/`dlsym` or `libloading`. Both sides run in one address space with the host's privileges. | The mechanism the owner excludes. OMP code uses it only to bind operating-system frameworks (`crates/ai/src/local/applefm/platform.rs:124-144`) and to let CPython native wheels resolve the CPython C-API (`crates/py/src/lib.rs:25-31`). |
 | Rust ABI | Rust has no stable ABI across compiler versions. Crates such as `abi_stable` or `savefile-abi` layer one on top of the C ABI. | Not used and not needed when everything is compiled together or crosses a message boundary. |
 | CPython ABI (`cp314t`, `abi3t`) | The binary interface native wheels target. OMP accepts these tags only (`crates/ext/src/resolver.rs:19`). | A third party's native code can enter an extension host child through this interface. OMP does not own or version it. |
-| WebAssembly Component Model Canonical ABI | A specified lowering and lifting of interface-typed values (WIT types) to core Wasm values and linear memory, used between a component and its host or between components. It is neither the C calling convention nor a native pointer ABI; a component sees only its own linear memory and imports it was given. Section 9 cites `wit-bindgen` and `wasmtime` for what the tools generate and enforce. | The only "plugin ABI" that is both language-neutral and memory-isolated. Absent in OMP2 and outside the locked extension language. |
+| WebAssembly Component Model Canonical ABI | A specified lowering and lifting of component-level values (WIT types) to core Wasm values and linear memory: at most 16 flat parameters and 1 flat result, larger values through the callee's memory, components linked by generated adapter trampolines (`bytecodealliance/wasmtime@b738a89:crates/environ/src/component.rs:21-34`, `fact.rs:1-13`). It is not the platform C calling convention and no native pointer crosses a component boundary. The same ABI can be emitted for a native `cdylib` loaded with `dlopen` (`bytecodealliance/wit-bindgen@e3b53be:crates/guest-rust/NATIVE.md:3-8`), but then it is a C symbol table again and the isolation is gone. | The only "plugin ABI" that is both language-neutral and memory-isolated, in its Wasm form. Absent in OMP2 and outside the locked extension language. |
 | Message contract | A serialized, versioned schema carried over a pipe, socket or stdio (JSON frames, protobuf, JSON-RPC, and so on). Only bytes cross. | The existing boundary. Independent compilation and distribution need nothing else. |
 
 ## 4. Option comparison
@@ -235,6 +235,34 @@ Cards use the capability-card template from [`evidence/01-method-and-dimension-i
 **Follow-up:** Close as unnecessary if not shown.
 **Draft ADR needed?** No.
 
+### EXT-13 A curated or community registry as an additional signed index
+**Decision class:** Already implemented: reuse
+**Existing implementation evidence:** `omp ext index` manages "the ordered extension index list" (`crates/app/src/ext_cli/mod.rs:279-340`); the lock records `indexes` and a dependency-confusion-safe `index_strategy` (`crates/ext/src/lock.rs:121-124`); each index is Ed25519-signed with an expiry window (`crates/ext/src/index.rs:235-351`). Implemented.
+**Actual missing capability:** None in mechanism. A published community index with its own key and a documented publish flow does not exist in the tree (`docs/adr/STATUS.md:54`: "first-party extension repository ... not started"). Reference: `stark-shadow/ecpa-plugins-store@2d82289:README.md` shows a hand-maintained, unsigned, metadata-only registry; OMP2's design is stronger.
+**Alternatives considered:** Unsigned registry of release pointers (ecpa store, `router-for-me/CLIProxyAPI@dbe641f:internal/pluginstore/registry.go:36-83`).
+**Expected benefit:** Security (signature and expiry instead of a mutable GitHub file) and reliability (hash in the signed snapshot).
+**Implementation complexity:** low (operational: a key, a publish job).
+**Security implications:** TOFU pins and revocations apply per extension id; a second index adds a second trust root that the operator must opt into.
+**Maintenance cost:** Operational only.
+**Performance measurement strategy:** not applicable.
+**Acceptance criteria:** A second index is added with `omp ext index`, an extension from it installs with a verified signature, and a stale snapshot is refused.
+**Follow-up:** None.
+**Draft ADR needed?** No.
+
+### EXT-14 Registry entries or plugins whose purpose is to circumvent provider usage limits
+**Decision class:** Rejected for security, licensing or operational reasons
+**Existing implementation evidence:** Not in OMP2. In the reference registry (`stark-shadow/ecpa-plugins-store@2d82289:registry.json`) entry descriptions advertise turning free-tier quotas of several coding assistants into API endpoints with check-in and cross-provider load balancing, an unofficial provider with desktop session import, and shared model pools. Only descriptions were read; no plugin was inspected.
+**Actual missing capability:** Not desired.
+**Alternatives considered:** Routing across credentials the user is entitled to use (allowed by method rule 8, covered in the provider and scheduling deliverables).
+**Expected benefit:** None that is compatible with provider terms.
+**Implementation complexity:** not applicable.
+**Security implications:** Credential pooling and private-API use expose credentials and violate provider terms; an extension of this kind would also need CONTROL and credential grants that ADR 0075 deliberately withholds from extension code.
+**Maintenance cost:** not applicable.
+**Performance measurement strategy:** not applicable.
+**Acceptance criteria:** The OMP2 index policy documents that an extension whose declared purpose is limit circumvention is refused or revoked through the existing revocation path (`crates/ext/src/trust.rs:1060-1180`).
+**Follow-up:** The registry mechanism itself is not rejected (EXT-13).
+**Draft ADR needed?** No.
+
 ## 7. Open questions for the owner
 
 1. **O-EXT-1.** Which artifacts does "existing Go executable adapters" name? None exist at `85d219ae7f` (`evidence/omp2-extensions.md` section 6.1).
@@ -253,6 +281,33 @@ Cards use the capability-card template from [`evidence/01-method-and-dimension-i
 
 ## 9. Reference comparison
 
-(Written after reading the reference repositories; see [`evidence/ref-extension-mgmt.md`](evidence/ref-extension-mgmt.md).) Pending at the time of the first save of this file.
+Full notes, with the exact files read, are in [`evidence/ref-extension-mgmt.md`](evidence/ref-extension-mgmt.md); matrices are `evidence/matrix-<owner>_<repo>.tsv` (`I` implemented, `P` partial, `Pr` prototype, `Pp` proposed, `Um` unmerged, `A` absent for OMP2; `Y`, `P`, `N`, `D`, `U` as defined in the method file for references). `AmethystDev-Labs/QuickCLI` is unavailable (404) and was not read.
+
+| Dim | omp2 | CLIProxyAPI | CPA Plus | ecpa store | EasyCLIProxyAPI | quickx | go-plugin | wasmtime | wit-bindgen |
+|---|---|---|---|---|---|---|---|---|---|
+| X01 | I | Y | Y | D | N | Y | Y | Y | Y |
+| X02 | P | P | N | P | N | P | N | D | Y |
+| X03 | P | Y | N | Y | N | Y | N | N | N |
+| X04 | I | P | N | P | P | N | P | N | N |
+| X05 | P | N | N | N | N | N | P | Y | N |
+| X06 | I | P | N | N | Y | N | Y | P | N |
+| X07 | P | U | U | N | P | N | Y | N | N |
+| X08 | I | P | N | P | P | N | N | N | N |
+| X09 | P | Y | N | D | P | N | N | D | P |
+| X10 | I | N | N | N | N | P | N | D | N |
+| X11 | P | P | N | P | P | N | Y | D | D |
+
+| Reference | Mechanism | Best idea | Why OMP2 does not copy the mechanism |
+|---|---|---|---|
+| `router-for-me/CLIProxyAPI@dbe641f` (MIT) | Native shared library, `dlopen`, `cliproxy_plugin_init`, JSON buffers across a C struct (`internal/pluginhost/loader_unix.go:22-49, 194-214`) | Per-platform artifact table with url, sha256, size (`internal/pluginstore/registry.go:77-83`); method-name vocabulary with `quiesce` and `reconfigure` (`sdk/pluginabi/types.go:79-82`); store credentials by environment-variable reference (`config.example.yaml:1423-1445`) | In-process native code, an image that "must never be unloaded" (`loader_unix.go:188-192`), probe-by-reexec, CPU-baseline pinning (`examples/plugin/README.md:175-178`), SHA-256 only (`internal/pluginstore/checksum.go:34`) |
+| `Ve-ria/CLIProxyAPIPlus@60bb379` (AGPL-3.0) | Compile-time Go executors plus config-declared endpoints (`examples/custom-provider/main.go:65-171`) | A large provider set without a plugin ABI | None to copy; confirms the static and declarative options |
+| `stark-shadow/ecpa-plugins-store@2d82289` (no licence) | Hand-maintained metadata registry; artifacts from publisher releases (`README.md`, "Release Requirements") | Strict zip layout rules and id grammar | Unsigned, mutable, checksum shares trust with the artifact; descriptions of limit-circumvention plugins (EXT-14) |
+| `lzt404/EasyCLIProxyAPI@faf29b2` (MIT) | Rust GUI supervising the Go core as a child process (`src-tauri/src/core_runtime.rs:434-471`) | Pin, verify and supervise an external gateway; provider health probes with bounded concurrency | Not an extension system; supports EXT-08 |
+| `Ve-ria/quickx@e13db37` (GPL-3.0, study only) | Declarative provider templates fetched from a mutable GitHub branch (`src/lib/templates.ts:14-19, 239-248`) | "Preview what a template needs" before activation | No verification, plaintext keys in profile JSON (`src/lib/store.ts:29, 109-113`) |
+| `hashicorp/go-plugin@415e29b` (MPL-2.0) | Subprocess plus stdout handshake plus gRPC or net/rpc (`docs/internals.md`; `client.go:834-868`) | Version negotiation across a set (`VersionedPlugins`, `client.go:150-153`); standard health service (`grpc_server.go:78-93`); optional binary checksum (`client.go:327-356`) | OMP2 already has the stronger boundary (inherited descriptor, sandbox, signed supply chain); adopt only the negotiation and health ideas (EXT-04, EXT-06) |
+| `bytecodealliance/wasmtime@b738a89` (Apache-2.0) | Component Model embedding, Canonical ABI trampolines, `ResourceLimiter`, fuel and epoch interruption (`crates/environ/src/component.rs:21-34`, `limits.rs:30-60`, `config.rs:652, 797`) | In-process isolation with host-controlled resource limits | A second runtime and dependency graph; contradicts ADR 0036 decision 2 (EXT-10) |
+| `bytecodealliance/wit-bindgen@e3b53be` (Apache-2.0 with LLVM exception) | WIT-driven guest bindings; guest half of the Canonical ABI (`crates/guest-rust/NATIVE.md:3-8`) | One interface description language for multi-language guests | Needs a Wasm host first; the native `cdylib` mode re-creates the C symbol interface (EXT-09) |
+
+Reading across the matrices: no reference implements all of X02, X04, X05, X06 and X08 together. OMP2's row is the only one with a static signed capability table, a signed index with expiry, a sandboxed child, a cancel ladder and generation rollback. The reference strengths that OMP2 lacks are small and specific: version negotiation over a set (go-plugin), a standard health probe (go-plugin), a per-platform executable artifact table (CLIProxyAPI, ecpa store), and an interface description language shared across languages (WIT).
 
 Back to the [index](README.md).

@@ -86,6 +86,6 @@ receivers skip unknown fields. Common distribution rule: signed index, hashes, l
 Evidence
 - Ladder source: `docs/adr/0049-tiered-integration-architecture.md:41-54` (lowest tier that satisfies the requirement) and `docs/adr/0036-python-for-extensions.md:40-41`.
 - Wire rule: `crates/proto/proto/omp/env/v1/env.proto:17-23`, `crates/proto/proto/omp/gateway/v1/gateway.proto:9-17`.
-- Cards: EXT-01 to EXT-12 in [`07-abi-independent-extension-assessment.md`](../07-abi-independent-extension-assessment.md).
+- Cards: EXT-01 to EXT-14 in [`07-abi-independent-extension-assessment.md`](../07-abi-independent-extension-assessment.md).
 
 Legend: boxes are decision points; the last box is an owner decision, not a design.

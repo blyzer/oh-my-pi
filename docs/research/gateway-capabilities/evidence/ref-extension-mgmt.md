@@ -111,3 +111,17 @@ Read: `README.md` opening, `crates/` listing, `crates/guest-rust/NATIVE.md`, `cr
 - **Not present (X03 to X10).** No registry, signatures, health, rollback or dependency resolution; those belong to the host and to the component registries outside this repository (not read).
 - **Lesson for OMP2.** If a Wasm option were ever pursued, `wit-bindgen` would be the guest-side tool and WIT the contract language, replacing OMP2's per-boundary protobuf and JSON frame definitions with one interface description. That replacement is not justified by evidence collected here.
 
+## 9. Cross-reference summary
+
+The X01 to X11 comparison table across OMP2 and the eight readable references is in [`../07-abi-independent-extension-assessment.md`](../07-abi-independent-extension-assessment.md) section 9, generated from the matrix TSVs in this directory.
+
+### Not read, and why
+
+- `AmethystDev-Labs/QuickCLI`: unavailable (404 on 2026-11-28). The `quickx` client shows it is a `templates/<id>/template.yaml` repository (`Ve-ria/quickx@e13db37:src/lib/templates.ts:14-19, 239`); nothing else is claimed about it.
+- `router-for-me/CLIProxyAPI`: health reporting (X07), the Management API and the host-callback surface were not examined; the `shadow.go` copy-before-load logic was read only by its size and the loader's use of it.
+- `Ve-ria/CLIProxyAPIPlus`: only the plugin-related files were read; it is an older head (2026-05-09) than the upstream repository.
+- `stark-shadow/ecpa-plugins-store`: no plugin it lists was inspected; behaviours are known only from registry descriptions.
+- `hashicorp/go-plugin`: gRPC broker, mux broker and `runner` packages not read.
+- `bytecodealliance/wasmtime`, `wit-bindgen`: component linking, the WASI crates and the WIT language definition were not read; Component Model semantics are documentation-level except the constants and files cited.
+
+Back to the [index](../README.md).
