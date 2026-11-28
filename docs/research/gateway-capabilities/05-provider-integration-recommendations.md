@@ -117,7 +117,7 @@ Placement rule used (ADR 0049 D1, D6): provider logic that is vendor-neutral and
 
 ### PRV-08 Cross-provider virtual model names
 **Decision class:** Unnecessary or redundant
-**Existing implementation evidence:** Exact provider-scoped aliases (`crates/catalog/src/compile.rs:1048`, `snapshot.rs:716`), ordered `FallbackChain` with revert policy (`crates/catalog/src/resolve.rs:84,107`), roles (`crates/catalog/src/selection.rs:24 ModelRole`). Maturity: Implemented.
+**Existing implementation evidence:** Compiled catalog aliases are provider-agnostic (`crates/catalog/src/compile.rs:1048` `CatalogAlias`, `snapshot.rs:716` `resolve_alias`); provider-scoped alias selection is `AliasSelector` (`crates/catalog/src/resolve.rs:51`, applied at `:1001-1010`); ordered `FallbackChain` with revert policy (`crates/catalog/src/resolve.rs:84,107`), roles (`crates/catalog/src/selection.rs:24 ModelRole`). Maturity: Implemented.
 **Actual missing capability:** None: a name that fans out to several providers is a role plus fallback chain.
 **Alternatives considered:** A gateway-style combo registry; rejected as a second config store.
 **Expected benefit:** None beyond current.

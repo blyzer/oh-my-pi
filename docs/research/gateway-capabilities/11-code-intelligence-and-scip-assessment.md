@@ -119,7 +119,7 @@ Yes, one: "Shared code index: workspace identity, revision key and result contra
 
 ### CIX-04 Do not write a SCIP exporter for the derived index
 **Decision class:** Unnecessary or redundant
-**Existing implementation evidence:** No SCIP writer exists (`git grep write_to crates/kb` empty). The `scip` crate 0.10.0 already provides `write_message_to_file` (`scip-code/scip@8fe5037:bindings/rust/src/mod.rs`). `Index::decode` discards the raw protobuf after merging (`store.rs:194`).
+**Existing implementation evidence:** No SCIP writer exists (`git grep write_to crates/kb` empty). The `scip` crate 0.10.0 already provides `write_message_to_file` (`scip-code/scip@8fe5037:bindings/rust/src/mod.rs`). `Store::build` reads each producer's SCIP from a temporary file and merges it into one `combined` index (`crates/kb/src/store.rs:186-196`); `Index::decode` (`crates/kb/src/graph.rs:423`) derives the JSON from the merged index; the raw producer SCIP is not persisted, so an exporter would have to retain or write the merged `combined` index.
 **Actual missing capability:** Nothing is missing that an exporter would supply. The raw producer SCIP is the exportable artifact; the derived JSON adds only syntactic call edges that SCIP has no field for, and exporting syntactic data as SCIP would blur provenance.
 **Alternatives considered:** Re-encode the derived index as SCIP (rejected: lossy and mislabels `Resolution::Syntactic`); keep each producer's `.scip` as a content-addressed artifact (cheap, see follow-up); feed Glean or Sourcegraph (external, no current consumer).
 **Expected benefit:** None identified; avoids code and a provenance risk.

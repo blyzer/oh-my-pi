@@ -8,7 +8,7 @@ OMP2 already has a gateway-class native provider runtime, so the question is not
 
 ## 2. What was established, and how sure we are
 
-**Verified by reading code at `85d219ae7f`** ([deliverable 2](02-verified-current-state.md), eight area audits in `evidence/omp2-*.md`, 154 audited dimension rows in [deliverable 4](04-existing-vs-missing-matrix.md)). A mechanical checker confirmed that every cited `path:line` exists and that cited symbols occur in the file (1,000+ OMP2 citations and about 100 reference citations at the last full run); it does not confirm that a claim is true.
+**Verified by reading code at `85d219ae7f`** ([deliverable 2](02-verified-current-state.md), eight area audits in `evidence/omp2-*.md`, 154 audited dimension rows in [deliverable 4](04-existing-vs-missing-matrix.md)). A mechanical checker confirmed that every cited `path:line` exists and that cited symbols occur in the file (1,000+ OMP2 citations and about 100 reference citations at the last full run); it does not confirm that a claim is true. A separate read-only spot check of 32 randomly sampled cards found 27 supported and 5 partly supported (precision errors, all corrected; none reversed a conclusion); the other 71 cards were not individually re-read ([`evidence/review-sample.md`](evidence/review-sample.md)).
 
 **Measured** (four files, command and raw output stored; [deliverable 13](13-performance-and-benchmark-plan.md)): a count of the embedded catalog (125 providers, 171 routes, 5,289 models, 230 aliases); the size of the vendored interpreter trees (182 MB release, 166 MB debug); `python3 -c pass` startup (median 49.4 ms homebrew, 27.3 ms vendored 3.14t, 30 runs); a JSON-lines pipe round trip to a persistent child (median 14 to 17 us, 1,000 calls). All were taken on a busy shared host (load averages 7 to 24 on 10 cores) and none is a true cold start.
 
@@ -71,7 +71,7 @@ Do not add a second provider runtime, scheduler, credential manager, memory syst
 - Reference repositories were read at different depths (stated per repository); large repositories were read selectively and several matrix cells are `U` or `D`. `QuantumNous/new-api` was read last and shallowly (56 of its 95 matrix rows are `U`); `fallencolors/freellmapi` more fully.
 - ONNX Runtime was assessed from documentation only; QuickCLI not at all.
 - The Mermaid diagrams were not rendered.
-- Reading was shared between several agents working in parallel; each area document names what it did not examine, and no area audit was independently reviewed by a second reader.
+- Reading was shared between several agents working in parallel; each area document names what it did not examine, and apart from the 32-card sample just described, no area audit was independently reviewed by a second reader.
 - Behavioural claims (for example double refresh of a rotating token) are inferences from code, not test results.
 
 Back to the [index](README.md).
