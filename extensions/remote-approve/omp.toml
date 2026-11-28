@@ -21,3 +21,26 @@ default = "ask"
 [settings.allow_fail_open]
 type = "boolean"
 default = false
+
+# The approver is registered by `@omp.approver` in `device` and has no row of
+# its own. The two hooks below are the ones `device` registers: the first
+# upserts the poll schedule and reconciles pending tickets when the extension
+# activates, the second polls on each turn start.
+
+[[declarations]]
+id = "activate_remote_approval"
+kind = "hook"
+module = "omp_remote_approve"
+key = "extension_activate/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
+
+[[declarations]]
+id = "poll_remote_approval"
+kind = "hook"
+module = "omp_remote_approve"
+key = "turn_start/observe"
+trigger = "lazy"
+api = 1
+failure = "fail-open"
