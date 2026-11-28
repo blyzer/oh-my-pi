@@ -1,0 +1,85 @@
+dim_id	status	note	evidence
+G01	Y	Providers registered in a Map<Platform, BaseProvider>; Platform is a TS union	fallencolors/freellmapi@b5d8333:server/src/providers/index.ts:register;fallencolors/freellmapi@b5d8333:shared/types.ts:Platform
+G02	U	Not examined in this pass	
+G03	Y	auto:* sort aliases, named profiles and fallback chains resolve to model chains	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:resolveRoutingChain;fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:22-29
+G04	P	Custom OpenAI-compatible endpoints with endpoint scope; services read by name only	fallencolors/freellmapi@b5d8333:server/src/services/custom-endpoint.ts;fallencolors/freellmapi@b5d8333:server/src/lib/endpoint-scope.ts
+G05	U	services/model-discovery.ts exists (715 lines); not read	fallencolors/freellmapi@b5d8333:server/src/services/model-discovery.ts
+G06	D	README: signed catalog feed from freellmapi.co (paid live tier); client side not read	fallencolors/freellmapi@b5d8333:README.md:259-295
+G07	U	services/catalog-sync.ts exists (866 lines); not read	fallencolors/freellmapi@b5d8333:server/src/services/catalog-sync.ts
+G08	Y	Routing requires vision/tools support and checks context-window fit with a safety factor	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:fitsContextWindow
+G09	P	BaseProvider.keyless flag marks providers needing no key	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:224
+G10	Y	Keyless/anonymous free providers registered with sentinel key row (e.g. 200 req/hr per IP gateway, AI Horde)	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:220-224;fallencolors/freellmapi@b5d8333:server/src/providers/index.ts:223-235;fallencolors/freellmapi@b5d8333:server/src/providers/aihorde.ts:keyless
+G11	U	Not examined in this pass	
+A01	Y	Provider keys encrypted AES-256-GCM at rest; key from ENCRYPTION_KEY or a 0600 key file next to the DB	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:ALGORITHM;fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:KEY_FILE_NAME
+A02	U	Not examined in this pass	
+A03	U	Not examined in this pass	
+A04	U	Not examined in this pass	
+A05	P	Master key referenced by env var or file; provider secrets themselves stored in the DB (encrypted)	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:7-27
+A06	N	No OS keychain; key file chmod 0600 beside the DB per code comment	fallencolors/freellmapi@b5d8333:server/src/lib/crypto.ts:22-27
+A07	U	Not examined in this pass	
+A08	P	validateKey surfaces 401/403 reasons; health service persists them; Cloudflare challenge treated as inconclusive	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:validationResult;fallencolors/freellmapi@b5d8333:server/src/services/health.ts
+A09	U	Not examined in this pass	
+A10	U	Not examined in this pass	
+A11	U	Not examined in this pass	
+A12	U	Not examined in this pass	
+S01	Y	Contextual bandit: reliability, speed, intelligence weights times headroom and rate-limit factors; priority strategy	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest;fallencolors/freellmapi@b5d8333:server/src/services/scoring.ts;fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:9-16
+S02	Y	Only models with a usable, non-cooling key are candidates; separate key-selection strategy (auto, least-remaining)	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:hasUsableKeyForModel;fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routableKeyIdsForModel
+S03	Y	Per-model penalties and per-key cooldown map with escalating 24 h hit history	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:recordModelFailure;fallencolors/freellmapi@b5d8333:server/src/services/ratelimit.ts:cooldowns
+S04	P	Per-key quota and rate-limit engine (1,511 lines); only cooldown section read	fallencolors/freellmapi@b5d8333:server/src/services/ratelimit.ts:839-870
+S05	U	Not examined in this pass	
+S06	Y	requireVision, requireTools and context-fit filters in route selection	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:routeRequest
+S07	D	Docs list auto:cheap sort alias	fallencolors/freellmapi@b5d8333:docs/en/architecture/01-routing-and-bandit-scoring.md:28
+S08	Y	Observed speed ranks written back from traffic, speed weight in score	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:writeObservedSpeedRanks
+S09	Y	3 failures in 15 min benches a model for 10 min; truncation and empty-completion streak benches	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:MODEL_FAILURE_THRESHOLD;fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:TRUNCATION_BENCH_MS
+S10	P	Inbound per-IP request limiter on /v1; no upstream concurrency gates seen	fallencolors/freellmapi@b5d8333:server/src/middleware/rateLimit.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:297
+S11	U	Not examined in this pass	
+S12	Y	Up to 20 attempts under a 45 s time budget with hedging	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:FALLBACK_MAX_RETRIES;fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:DEFAULT_FALLBACK_TIME_BUDGET_MS
+S13	P	cooldownDecisionForError and a 694-line error classifier; internals not read	fallencolors/freellmapi@b5d8333:server/src/lib/fallback-loop.ts:cooldownDecisionForError;fallencolors/freellmapi@b5d8333:server/src/lib/error-classify.ts
+S14	P	Headroom ramp and quota forecast feed the score; forecast code not read	fallencolors/freellmapi@b5d8333:server/src/services/router.ts:HEADROOM_RAMP_START_KEY;fallencolors/freellmapi@b5d8333:server/src/services/quota-forecast.ts
+T01	Y	OpenAI chat completions proxy route	fallencolors/freellmapi@b5d8333:server/src/routes/proxy.ts
+T02	Y	Responses API shim for Codex CLI	fallencolors/freellmapi@b5d8333:server/src/routes/responses.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:305
+T03	Y	Anthropic Messages surface with content negotiation on /v1/models	fallencolors/freellmapi@b5d8333:server/src/routes/anthropic.ts;fallencolors/freellmapi@b5d8333:server/src/services/anthropic-map.ts
+T04	Y	Native Gemini surface on /v1beta	fallencolors/freellmapi@b5d8333:server/src/routes/gemini.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:310
+T05	Y	Dedicated adapters for Google, Cohere, Cloudflare, Sail, AI Horde, Zhipu and others	fallencolors/freellmapi@b5d8333:server/src/providers/google.ts;fallencolors/freellmapi@b5d8333:server/src/providers/sail.ts;fallencolors/freellmapi@b5d8333:server/src/providers/cohere.ts
+T06	P	think-tag handling lib	fallencolors/freellmapi@b5d8333:server/src/lib/think-tags.ts
+T07	P	Tool-call rescue, argument repair and validation libs	fallencolors/freellmapi@b5d8333:server/src/lib/tool-call-rescue.ts;fallencolors/freellmapi@b5d8333:server/src/lib/tool-validate.ts
+T08	U	Not examined in this pass	
+T09	Y	Image, audio and embeddings services and routes	fallencolors/freellmapi@b5d8333:server/src/services/media.ts;fallencolors/freellmapi@b5d8333:server/src/routes/embeddings.ts
+T10	P	structured-output lib	fallencolors/freellmapi@b5d8333:server/src/lib/structured-output.ts
+T11	U	Not examined in this pass	
+T12	Y	OpenAI chat shape (ChatMessage) as internal hub; per-surface map files for Anthropic and Gemini	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:chatCompletion;fallencolors/freellmapi@b5d8333:server/src/services/anthropic-map.ts;fallencolors/freellmapi@b5d8333:server/src/services/gemini-map.ts
+I01	Y	Express 4-style app with helmet, cors and body limit	fallencolors/freellmapi@b5d8333:server/src/app.ts:127-199
+I02	Y	SSE streaming adapters and AsyncGenerator<ChatCompletionChunk> provider interface	fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:streamChatCompletion;fallencolors/freellmapi@b5d8333:server/src/providers/base.ts:SseStreamOptions
+I03	U	Not examined in this pass	
+I04	U	Not examined in this pass	
+I05	U	Not examined in this pass	
+I06	N	No Protobuf in server/src file list	
+I07	U	Not examined in this pass	
+I08	U	Not examined in this pass	
+I09	U	Not examined in this pass	
+I10	U	Not examined in this pass	
+I11	P	Sail provider submits background jobs and polls Responses	fallencolors/freellmapi@b5d8333:server/src/providers/sail.ts
+I12	U	Not examined in this pass	
+I13	U	Not examined in this pass	
+I14	U	Not examined in this pass	
+I15	P	Stateless Streamable-HTTP MCP server exposing gateway introspection tools	fallencolors/freellmapi@b5d8333:server/src/routes/mcp.ts;fallencolors/freellmapi@b5d8333:server/src/app.ts:315
+E01	U	Not examined in this pass	
+E02	U	Not examined in this pass	
+E03	U	Not examined in this pass	
+E04	U	Not examined in this pass	
+E05	U	Not examined in this pass	
+E06	P	Compression pipeline with engines (aging, dedup, jsoncompact, toolfilter, hard-budget) and a fidelity gate; internals not read	fallencolors/freellmapi@b5d8333:server/src/services/compression/pipeline.ts;fallencolors/freellmapi@b5d8333:server/src/services/compression/fidelity-gate.ts
+E07	U	Not examined in this pass	
+E08	U	Not examined in this pass	
+E09	U	Not examined in this pass	
+E10	P	Model pricing table and request log; counting not read	fallencolors/freellmapi@b5d8333:server/src/db/model-pricing.ts;fallencolors/freellmapi@b5d8333:server/src/lib/request-log.ts
+E11	U	Not examined in this pass	
+E12	U	Not examined in this pass	
+O01	Y	Health service and /livez /readyz probes	fallencolors/freellmapi@b5d8333:server/src/services/health.ts;fallencolors/freellmapi@b5d8333:server/src/routes/status.ts
+O02	U	Not examined in this pass	
+O03	P	Analytics routes, error chart, attempt traces	fallencolors/freellmapi@b5d8333:server/src/routes/analytics.ts;fallencolors/freellmapi@b5d8333:server/src/lib/attempt-trace.ts
+O04	P	Per-key budget and quota services; cost roll-up not read	fallencolors/freellmapi@b5d8333:server/src/services/key-budget.ts;fallencolors/freellmapi@b5d8333:server/src/lib/budget.ts
+O05	P	Server log buffer and redaction libs	fallencolors/freellmapi@b5d8333:server/src/lib/server-logs.ts;fallencolors/freellmapi@b5d8333:server/src/lib/log-redaction.ts
+O06	Y	React dashboard, REST under /api, desktop app (Electron-style) and CLI	fallencolors/freellmapi@b5d8333:server/src/app.ts:230-271;fallencolors/freellmapi@b5d8333:desktop/src;fallencolors/freellmapi@b5d8333:cli/src
+O07	U	Not examined in this pass	
+O08	N	Not an agent harness	
