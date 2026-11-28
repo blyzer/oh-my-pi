@@ -8,14 +8,12 @@ A draft ADR is written only when the evidence shows a decision that (a) crosses 
 
 ## 2. Drafts written
 
-The four draft files are submitted in a separate pull request after this research is merged, because each draft links back to these documents. The table below names the files they will occupy.
-
 | Draft | Title | Cards | Would amend | Gate |
 |---|---|---|---|---|
-| 0077 (draft file docs/adr/0077-route-runtime-evidence-producers.md, proposed separately) | Route runtime evidence gets production producers; a circuit breaker is a health state | PRV-01, PRV-02, PRV-03 | ADR 0018 (records the provider runtime as Implemented while its evidence inputs are inert) | OQ-02, OQ-11; breaker only after its benchmark |
-| 0078 (draft file docs/adr/0078-credential-refresh-owner-and-shared-auth-stack.md, proposed separately) | Credential refresh has a per-process owner, and in-process subagents share the parent auth stack | AUTH-01, AUTH-03, AUTH-07, AUTH-11 | ADR 0018 (credentials amendment), touches ADR 0075 | OQ-03 |
-| 0079 (draft file docs/adr/0079-shared-code-index-and-query-result.md, proposed separately) | A shared code index is keyed by workspace identity and revision, and queries return one typed result | CIX-02, CIX-03, CIX-05, CIX-10, CIX-11, CIX-12 | ADR 0007 and ADR 0049 are read, not changed; ADR 0060 context | OQ-17 |
-| 0080 (draft file docs/adr/0080-local-inference-placement-and-shared-residency.md, proposed separately) | Local inference placement and shared residency: out-of-process C and C++ runtimes, one memory budget per process | INF-01, INF-02, INF-03, INF-04, INF-05, INF-07, INF-10 | ADR 0023 and ADR 0042 read, not changed; interacts with the locked "candle only" rule | OQ-07, OQ-08, OQ-09 |
+| [0077](../../adr/0077-route-runtime-evidence-producers.md) | Route runtime evidence gets production producers; a circuit breaker is a health state | PRV-01, PRV-02, PRV-03 | ADR 0018 (records the provider runtime as Implemented while its evidence inputs are inert) | OQ-02, OQ-11; breaker only after its benchmark |
+| [0078](../../adr/0078-credential-refresh-owner-and-shared-auth-stack.md) | Credential refresh has a per-process owner, and in-process subagents share the parent auth stack | AUTH-01, AUTH-03, AUTH-07, AUTH-11 | ADR 0018 (credentials amendment), touches ADR 0075 | OQ-03 |
+| [0079](../../adr/0079-shared-code-index-and-query-result.md) | A shared code index is keyed by workspace identity and revision, and queries return one typed result | CIX-02, CIX-03, CIX-05, CIX-10, CIX-11, CIX-12 | ADR 0007 and ADR 0049 are read, not changed; ADR 0060 context | OQ-17 |
+| [0080](../../adr/0080-local-inference-placement-and-shared-residency.md) | Local inference placement and shared residency: out-of-process C and C++ runtimes, one memory budget per process | INF-01, INF-02, INF-03, INF-04, INF-05, INF-07, INF-10 | ADR 0023 and ADR 0042 read, not changed; interacts with the locked "candle only" rule | OQ-07, OQ-08, OQ-09 |
 
 Each draft ends with the owner questions it needs answered. None proposes an implementation date.
 
