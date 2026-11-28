@@ -11,19 +11,19 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 1 | Executive architectural assessment | [01-executive-architectural-assessment.md](01-executive-architectural-assessment.md) | TODO |
 | 2 | Verified current-state architecture | [02-verified-current-state.md](02-verified-current-state.md) | DONE |
 | 3 | Cross-gateway capability matrix | [03-gateway-capability-matrix.md](03-gateway-capability-matrix.md) | DONE |
-| 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | PARTIAL (first pass, see the file's status note) |
+| 4 | OMP2 existing-versus-missing capability matrix | [04-existing-vs-missing-matrix.md](04-existing-vs-missing-matrix.md) | DONE |
 | 5 | Provider integration recommendations | [05-provider-integration-recommendations.md](05-provider-integration-recommendations.md) | DONE |
 | 6 | Transport and protocol recommendations | [06-transport-and-protocol-recommendations.md](06-transport-and-protocol-recommendations.md) | PARTIAL (first pass, see the file's status note) |
 | 7 | ABI-independent extension assessment | [07-abi-independent-extension-assessment.md](07-abi-independent-extension-assessment.md) | DONE |
 | 8 | Python runtime comparative assessment | [08-python-runtime-comparative-assessment.md](08-python-runtime-comparative-assessment.md) | DONE |
 | 9 | Single-session swarm assessment | [09-single-session-swarm-assessment.md](09-single-session-swarm-assessment.md) | DONE |
 | 10 | Local inference assessment | [10-local-inference-assessment.md](10-local-inference-assessment.md) | DONE |
-| 11 | Shared code intelligence and SCIP assessment | [11-code-intelligence-and-scip-assessment.md](11-code-intelligence-and-scip-assessment.md) | TODO |
+| 11 | Shared code intelligence and SCIP assessment | [11-code-intelligence-and-scip-assessment.md](11-code-intelligence-and-scip-assessment.md) | DONE |
 | 12 | Proposed architecture diagrams | [12-proposed-architecture-diagrams.md](12-proposed-architecture-diagrams.md) | TODO |
 | 13 | Performance and benchmark plan | [13-performance-and-benchmark-plan.md](13-performance-and-benchmark-plan.md) | DONE |
 | 14 | Security and licensing assessment | [14-security-and-licensing-assessment.md](14-security-and-licensing-assessment.md) | DONE |
 | 15 | Prioritized architectural backlog | [15-prioritized-architectural-backlog.md](15-prioritized-architectural-backlog.md) | DONE |
-| 16 | Draft ADRs (only where justified) | [16-draft-adrs.md](16-draft-adrs.md) | TODO |
+| 16 | Draft ADRs (only where justified) | [16-draft-adrs.md](16-draft-adrs.md) | DONE |
 | 17 | Incremental implementation roadmap | [17-incremental-implementation-roadmap.md](17-incremental-implementation-roadmap.md) | DONE |
 | 18 | Explicitly rejected alternatives and reasons | [18-rejected-alternatives.md](18-rejected-alternatives.md) | DONE |
 | 19 | Source references with pinned commits and paths | [19-source-references.md](19-source-references.md) | DONE |
