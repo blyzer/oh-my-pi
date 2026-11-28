@@ -1,0 +1,12 @@
+dim_id	status	note	evidence
+X01	Y	WebAssembly runtime with a Component Model embedding API, bindgen! host bindings, WASI crates and a C embedding API	bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/runtime/component/mod.rs:1; bytecodealliance/wasmtime@b738a89:crates/component-macro/src/lib.rs:bindgen
+X02	D	Component imports and exports (WIT worlds) act as the capability surface; WIT semantics from component-model docs, code not read	bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/runtime/component/mod.rs:1
+X03	N	Runtime library; no extension registry or distribution	bytecodealliance/wasmtime@b738a89:README.md
+X04	N	No component signature verification in the runtime; supply-chain/ covers its own Cargo dependencies	bytecodealliance/wasmtime@b738a89:supply-chain
+X05	Y	Linear-memory sandbox with host-granted imports, ResourceLimiter, fuel and epoch interruption; WASI capability docs only pointer	bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/runtime/limits.rs:ResourceLimiter; bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/config.rs:epoch_interruption
+X06	P	Epoch and fuel let a host interrupt a guest without killing the process; instantiation timing is an embedder choice	bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/config.rs:consume_fuel
+X07	N	No health reporting in the runtime	bytecodealliance/wasmtime@b738a89:crates/wasmtime/src/runtime
+X08	N	No upgrade or rollback; embedder replaces the component	bytecodealliance/wasmtime@b738a89:README.md
+X09	D	Components are platform-neutral artifacts per component-model docs; code not read	bytecodealliance/wasmtime@b738a89:crates/environ/src/component.rs:1
+X10	D	Components declare imports as their dependencies per component-model docs; code not read	bytecodealliance/wasmtime@b738a89:crates/environ/src/component.rs:1
+X11	D	WIT package versions and Canonical ABI constants define compatibility; semantics from docs, constants read	bytecodealliance/wasmtime@b738a89:crates/environ/src/component.rs:MAX_FLAT_PARAMS

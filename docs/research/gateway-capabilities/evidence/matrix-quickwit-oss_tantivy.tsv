@@ -1,0 +1,7 @@
+dim_id	status	note	evidence
+C07	P	Inverted-index engine with tokenizers, not a trigram or regex-over-source engine; code search needs custom tokenizers	quickwit-oss/tantivy@c005b68:README.md:Full-text search
+C08	Y	Embeddable Rust full-text engine, version 0.27.0, MIT, rust-version 1.91	quickwit-oss/tantivy@c005b68:Cargo.toml:version;LICENSE:1
+C09	Y	BM25 scoring, phrase and boolean query language, multithreaded indexing	quickwit-oss/tantivy@c005b68:README.md:Full-text search
+C19	P	ReloadPolicy (Manual or OnCommitWithDelay) controls when a reader sees a commit; no link to source document versions	quickwit-oss/tantivy@c005b68:src/reader/mod.rs:21 ReloadPolicy
+C20	Y	Index is a set of immutable UUID segments; incremental indexing, deletes and merges are in the design	quickwit-oss/tantivy@c005b68:ARCHITECTURE.md:41;README.md:Incremental indexing
+C18	P	MmapDirectory loads by mmapping files so readers need little anonymous memory; cross-process use is by file sharing	quickwit-oss/tantivy@c005b68:ARCHITECTURE.md:136;src/directory/mod.rs:49 MmapDirectory

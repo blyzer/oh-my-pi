@@ -27,7 +27,7 @@ Question (owner brief, section 1): which gateway capabilities would give measura
 | 17 | Incremental implementation roadmap | [17-incremental-implementation-roadmap.md](17-incremental-implementation-roadmap.md) | TODO |
 | 18 | Explicitly rejected alternatives and reasons | [18-rejected-alternatives.md](18-rejected-alternatives.md) | DONE |
 | 19 | Source references with pinned commits and paths | [19-source-references.md](19-source-references.md) | DONE |
-| 20 | Open questions requiring architectural approval | [20-open-questions.md](20-open-questions.md) | TODO |
+| 20 | Open questions requiring architectural approval | [20-open-questions.md](20-open-questions.md) | DONE |
 
 Companion files linked from the deliverables: `05b-authentication-and-credential-lifecycle.md` (part of 5), `06b-ipc-and-serialization.md` (Part B of 6), `adr-drafts/` (draft ADRs, deliverable 16), `diagrams/` (the 19 diagrams of owner section 14, indexed in deliverable 12).
 
