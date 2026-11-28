@@ -1,0 +1,11 @@
+dim_id	status	note	evidence
+X01	Implemented	Plugin mechanism: killable child processes embedding static CPython 3.14t; no JS/Wasm/native-lib runtime	crates/envd/src/exthost/spawn.rs:746 run_ext_host_entry;crates/py/src/lib.rs:179 init
+X05	Partial	Sandboxed tier has no network and a scoped read/write list; trusted tier is unsandboxed; eval sandbox optional	crates/envd/src/exthost/spawn.rs:553 sandbox
+X06	Implemented	Child per host or eval session, kill_on_drop, TERM-grace-KILL; startup latency of embedded child not measured	crates/envd/src/eval/process.rs:569 spawn
+X07	Implemented	Named worker answers Ping with Pong from a separate health thread	crates/envd/src/worker_child.rs:95 health_loop
+X09	Partial	Embedded interpreter builds only for aarch64-apple-darwin and x86_64-unknown-linux-gnu; compile_error elsewhere	crates/py/src/lib.rs:100 compile_error
+X11	Partial	Worker hello carries python_rev and api_level; eval external runner needs Python 3.10+; no wheel-ABI manifest field checked	crates/envd/src/worker_child.rs:56 python_rev
+W08	Implemented	Eval and extension children can run inside the native sandbox wrapper	crates/envd/src/eval/process.rs:586 command_for
+Z01	Implemented	Eval child protocol is newline-delimited JSON, 64 MiB cap	crates/envd/src/eval/process.rs:1804 write_frame
+Z02	Implemented	Named worker protocol is varint-length protobuf WorkerFrame	crates/envd/src/worker_child.rs:142 write_frame
+Z09	Absent	No JSON-RPC 2.0 framing in the Python child protocols (custom JSON frames); searched read of the three entry points	crates/envd/src/exthost/control.rs:3780 from_be_bytes

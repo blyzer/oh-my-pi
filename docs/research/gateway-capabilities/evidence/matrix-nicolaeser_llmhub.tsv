@@ -1,0 +1,85 @@
+dim_id	status	note	evidence
+G01	P	Provider kinds are a hardcoded TS array, not data; one connection row per account/endpoint	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG
+G02	P	Public alias maps to per-provider model ids; an LLM judge proposes same-model matches at sync time	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:loadGroup;nicolaeser/llmhub@8bdc1de:src/lib/gateway/catalog/jev.ts:jevRequest
+G03	Y	Model group = alias with several deployments, strategy, retries, overflow group	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:loadGroup;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:withDeployment
+G04	Y	ResolvedDeployment binds alias entry to a provider connection, model id, weight and cost	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:mapDeployment
+G05	Y	GET /models discovery per provider URL, with kind-specific URL rules	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/discovery.ts:modelsUrl
+G06	U	Not examined whether any hosted/external catalog feed is read	
+G07	P	Periodic catalog sync with lock and refresh interval; only imports/state read, body not read in full	nicolaeser/llmhub@8bdc1de:src/lib/gateway/catalog/catalog-sync.ts:imports;nicolaeser/llmhub@8bdc1de:src/worker/model-sync.ts
+G08	Y	Per-model facts: service tiers, variants, reported context length; context windows indexed	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/model-facts.ts:factsByModel
+G09	Y	Provider kind spec flags sign_in versus API key auth	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG
+G10	N	grep for free.tier|anonymous in src/lib/gateway found nothing about free-tier harvesting	
+G11	P	Subscription accounts keyed by provider id; sameAccount check on refresh; no cross-source dedup read	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:sameAccount
+A01	Y	API keys stored AES-256-GCM sealed (enc1:) in PostgreSQL, key derived by HKDF from APP_SECRET	nicolaeser/llmhub@8bdc1de:src/lib/crypto.ts:seal
+A02	Y	Subscription sign-in with PKCE and local callback redirect (Claude, Codex, Antigravity, Devin)	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/subscription-sign-in.ts:CLAUDE_REDIRECT_URI;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/subscription-sign-in.ts:pkceChallenge
+A03	Y	OAuth device-code grant for ChatGPT/Codex and Kimi sign-ins	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/subscription-sign-in.ts:DEVICE_GRANT_TYPE
+A04	N	grep child_process|spawn( in src/lib src/app src/worker: none; no delegation to an official CLI	
+A05	N	Secrets are stored inline (sealed) in the database, not referenced; no keychain/vault reference type	nicolaeser/llmhub@8bdc1de:src/lib/crypto.ts:seal;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:sealTokens
+A06	N	Server product; grep keychain|keytar matched no OS keychain use	
+A07	Y	Single-flight refresh map plus DB lease (30 s) so replicas do not double-refresh one-shot refresh tokens	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:LEASE_MS;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:refreshing
+A08	Y	Per-kind refresh lead times, 5 min skew, exponential retry 1 to 30 min	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:REFRESH_LEAD_MS;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:retryDelay
+A09	Y	Login journal keeps the newest refresh token so a lost write does not force re-login	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:journalLogin;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/login-journal.ts
+A10	Y	Separate keeper process refreshes due sign-ins on a cycle with heartbeat, needing only PostgreSQL	nicolaeser/llmhub@8bdc1de:src/keeper/main.ts;nicolaeser/llmhub@8bdc1de:src/keeper/cycle.ts:runKeeperCycle
+A11	P	Subscription sign-ins through first-party client flows; whether providers authorise gateway use is not established here	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:CODEX_ORIGINATOR
+A12	P	Regional endpoints modelled as separate kinds (openrouter_eu, moonshot_cn); per-key region/ZDR templates per README	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG
+S01	Y	Strategies: least in-flight, weighted random, cost, priority, round robin, latency EWMA, quota balanced/expiring/smart	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:pick;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/router.ts:pickWeighted
+S02	Y	Candidate filter chain: enabled, account allowed, signed in, healthy, not yet tried, within quota, concurrency room	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:acquireGroup
+S03	Y	Per-deployment success/fail counts and cooldown state in memory, shared through Redis when set	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:recordFailure;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:cooldownEnds
+S04	Y	Parses provider rate-limit headers (anthropic-ratelimit-unified-*, x-codex-*) into 5h/7d windows	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/observed-limits.ts:OBSERVED_WINDOWS;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/upstream.ts:observeUpstreamLimits
+S05	Y	Deployment pin per session (30 min TTL, spill margin) and account pin (6 h); keys: client key, header, fingerprint	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/deployment-affinity.ts:DEPLOYMENT_PIN_TTL_MS;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/session-fingerprint.ts:affinitySession
+S06	Y	Pre-flight rejection of requests a non-Anthropic deployment cannot serve; context-window fit planning	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:chatIncompatibility;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:ContextFit
+S07	Y	pickCostLowest and per-request cost filter and max-cost header	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/router.ts:pickCostLowest;nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/cost-cap.ts
+S08	Y	Latency EWMA (alpha 0.3) strategy 'fast'	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/router.ts:pickLatencyEwma;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/router.ts:nextLatencyEwma
+S09	Y	2 consecutive failures trip a 15 s cooldown; limit errors cool until retryAt (cap 7 days); rejected cooldowns	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:ALLOWED_FAILS;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:recordFailure
+S10	Y	Per-deployment concurrency gates with bounded wait queues (16..1024) and 429 when full	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/concurrency.ts:queueCapacity;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/concurrency.ts:concurrencyLimitedError
+S11	Y	Client abort propagates via AbortSignal into acquire/retry loop; idle-timeout on streams	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:withDeployment;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:openUpstreamStream
+S12	Y	num_retries+1 attempts per alias, alias chain fallbacks, overflow group, one reconnect retry, reasoning-drop retry	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:withDeployment
+S13	Y	Typed FailureClass: request, context, depleted, limit, rejected, signed_out, model, overloaded, connection, transient, caller	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:failureClass
+S14	Y	withinQuota and quota-balanced/expiring/smart pickers use stored plan-limit windows	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/runtime.ts:withinQuota;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/router.ts:pickQuotaBalanced
+T01	Y	OpenAI Chat Completions is the internal canonical shape	nicolaeser/llmhub@8bdc1de:src/lib/gateway/endpoints/chat-completions-route.ts:chatCompletionsRoute
+T02	Y	Responses API converted to Chat and back, with stored response objects	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:responsesToChat;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:chatToResponse
+T03	Y	Anthropic Messages converted to Chat and back; native pass-through when deployment speaks Messages	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:messagesToChat;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:chatToMessage;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/messages-dispatch.ts:NATIVE_PATH
+T04	P	Gemini/Vertex only as upstream kinds; no inbound Gemini-native route seen under src/app/api/v1	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/google.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG
+T05	Y	Dedicated upstream adapters for Codex, Antigravity, Devin (own wire), Kimi, Muse	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/devin-wire.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/codex.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/antigravity.ts
+T06	Y	Thinking blocks encoded into Responses items; thinking budget mapped to effort; foreign reasoning dropped on reject	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:encodeThinking;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:reasoningEffort;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:withDeployment
+T07	Y	Streaming tool-call delta accumulator shared across encoders	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/chat-stream.ts:ToolCallDeltas
+T08	Y	Chat SSE chunks piped through per-protocol stream encoders (Messages, Responses)	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/chat-stream.ts:pipeChatStream;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:MessagesStreamEncoder
+T09	Y	Image/audio/file/document parts validated and mapped; images, audio, video, OCR routes	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:sourceIssue;nicolaeser/llmhub@8bdc1de:src/app/api/v1/images/generations/route.ts
+T10	P	response_format/json_schema handled in several adapters; no single normaliser read	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/codex.ts
+T11	Y	GateError carries status/code/retryAt; Anthropic-shaped error body for Messages clients	nicolaeser/llmhub@8bdc1de:src/lib/gateway/errors.ts:anthropicErrorBody;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/upstream.ts:upstreamError
+T12	Y	Hub-and-spoke on OpenAI Chat as untyped JsonMap, plus native passthrough for same-protocol deployments	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/messages-dispatch.ts:chatFallback;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/messages.ts:messagesToChat
+I01	Y	HTTP via Next.js route handlers and global fetch	nicolaeser/llmhub@8bdc1de:src/app/api/v1/chat/completions/route.ts
+I02	Y	SSE relay with idle timeout	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/sse.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:openUpstreamStream
+I03	N	grep WebSocket|wss:// in src/lib src/app matched only a Codex instruction string	
+I04	N	No persistent inference sessions; session affinity is routing state only	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/deployment-affinity.ts:readDeploymentPin
+I05	N	grep grpc matched only integrations code, not an inference path	
+I06	N	No Protobuf inference path found	
+I07	N	No AWS EventStream path found in gateway dir listing; Bedrock not among provider kinds	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/provider-kinds.ts:PROVIDER_CATALOG
+I08	N	No bidirectional streaming interface found	
+I09	N	No WebRTC found	
+I10	N	No HTTP/3 or QUIC use found	
+I11	Y	Async video jobs and batches endpoints	nicolaeser/llmhub@8bdc1de:src/app/api/v1/videos/route.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/endpoints/batches.ts
+I12	Y	OpenAI-style batches create/get/cancel	nicolaeser/llmhub@8bdc1de:src/lib/gateway/endpoints/batches.ts;nicolaeser/llmhub@8bdc1de:src/app/api/v1/batches/route.ts
+I13	N	Not a native-execution product; no in-process inference	
+I14	N	No local IPC; keeper shares only PostgreSQL with the app	nicolaeser/llmhub@8bdc1de:src/keeper/main.ts
+I15	P	Claude Code / Codex gateway-mode headers and MCP hub; no ACP-style harness protocol	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/account-affinity.ts:CLAUDE_CODE_SESSION_HEADER;nicolaeser/llmhub@8bdc1de:src/lib/mcp/hub.ts
+E01	P	Sets xAI conversation header from prompt_cache_key and cache_control for Claude via OpenRouter	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/prompt-cache.ts:promptCacheHeaders;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/prompt-cache.ts:withOpenRouterClaudeCache
+E02	Y	Session fingerprint or client key pins conversation to one replica to reuse its KV prefix cache	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/session-fingerprint.ts;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/deployment-affinity.ts
+E03	P	Responses chaining rebuilt in the hub by expanding stored history into Chat, not provider-side	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:responseMessages;nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:storedResponse
+E04	P	Hub keeps stored Responses objects and files itself; no provider-side state reuse seen	nicolaeser/llmhub@8bdc1de:src/lib/gateway/protocols/responses.ts:storedResponse
+E05	P	Fingerprint uses only conversation opening so full retransmission still maps to same pin	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/session-fingerprint.ts:FINGERPRINT_VERSION
+E06	N	No prompt compression found (grep compress: only zip code); semantic response cache exists instead	nicolaeser/llmhub@8bdc1de:src/lib/gateway/cache/chat-cache.ts:semanticFind
+E07	Y	Batches endpoint forwards to provider batch APIs	nicolaeser/llmhub@8bdc1de:src/lib/gateway/endpoints/batches.ts
+E08	U	Connection pooling is Node fetch default; not examined	
+E09	U	Not examined beyond idle-timeout wrapper on upstream stream	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:openUpstreamStream
+E10	Y	Token usage normalised per request and recorded, with estimate fallback	nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/billing.ts:recordUsage;nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/tokens.ts:estimateTokens
+E11	Y	Cache read/write rates per model via regex table, tier multipliers	nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/cost.ts:cacheReadRate;nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/cost.ts:CACHE_READ_RATES
+E12	P	Latency histogram buckets and percentiles per deployment; grep ttft|first_token found no TTFT metric	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:latencyPercentile;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:LATENCY_BOUNDS_MS
+O01	Y	Health summary and cooldown state per deployment, surfaced in console	nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/provider-health.ts:summarizeHealth;nicolaeser/llmhub@8bdc1de:src/lib/gateway/routing/health-report.ts
+O02	Y	Sign-in status, refresh failures, usage windows per account pushed to consoles	nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/credentials.ts:loginData;nicolaeser/llmhub@8bdc1de:src/lib/gateway/upstreams/subscription-limits.ts
+O03	P	Request/session stats in DB and Sentry; grep prometheus|opentelemetry found none	nicolaeser/llmhub@8bdc1de:src/lib/gateway/request-logs/session-stats.ts
+O04	Y	Per-request cost, budgets at key/user/member/team/org/project levels, pre-request holds	nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/billing.ts:recordUsage;nicolaeser/llmhub@8bdc1de:src/lib/gateway/billing/budget-hold.ts:reserveBudget
+O05	Y	Structured logger events with field objects (e.g. gateway.connection_retry)	nicolaeser/llmhub@8bdc1de:src/lib/gateway/dispatch/chat.ts:withDeployment;nicolaeser/llmhub@8bdc1de:src/lib/logging/logger.ts
+O06	Y	Admin console (Next.js) plus /api/mgmt REST for keys, budgets, providers, models, logs	nicolaeser/llmhub@8bdc1de:src/app/api/mgmt/keys/route.ts;nicolaeser/llmhub@8bdc1de:src/lib/management/http.ts
+O07	P	Compliance archive export of request content to S3/zip	nicolaeser/llmhub@8bdc1de:src/lib/compliance-archive/runner.ts
+O08	N	No deterministic execution-status concept (not an agent harness)	
