@@ -6,7 +6,7 @@
 //! authority of a hook or lifecycle callback sets `data: None`, and that
 //! `AuthorityTable::open` is called in production only for a routed tool call.
 //! This proof runs it. It registers one extension behind the environment
-//! authority's CONTROL host and lets three callers make the identical request,
+//! authority's CONTROL host and lets four callers make the identical request,
 //! `omp.env.http_get(url, timeout=10s)`, which is the call `remote-approve`'s
 //! `_request` makes:
 //!
@@ -15,15 +15,18 @@
 //!   reconcile its tickets, which the host dispatches from the lifecycle with
 //!   no DATA authority; and
 //! - an `agent_settled` **hook**, which the host's hook gate dispatches with no
-//!   DATA authority either.
+//!   DATA authority either; and
+//! - a `turn_start` **hook** in the `observe` phase, the other event
+//!   `remote-approve` subscribes to, which the same gate dispatches once per
+//!   turn with no DATA authority either.
 //!
 //! The endpoint is a loopback server that counts the requests it receives. The
-//! tool's request arrives; neither hook's does, and each hook records the error
+//! tool's request arrives; no hook's does, and each hook records the error
 //! it got, so the refusal is observed and not inferred from a missing request.
 //!
 //! The extension is a trusted workspace fixture (`PythonExtension::trusting`),
 //! as in `p9_agent_settled`, not an operator-installed user extension in the
-//! sandboxed tier. Neither hook authority depends on the tier.
+//! sandboxed tier. No hook authority depends on the tier.
 #![cfg(unix)]
 
 use std::{
@@ -41,7 +44,7 @@ use omp_e2e::{
 	support::{InProcessEnvHarness, PythonExtension, Scratch, within},
 };
 use omp_env::{EnvClient, InvocationEvent};
-use omp_proto::env::v1::InvokeTool;
+use omp_proto::{env::v1::InvokeTool, toolhost::v1::HookEventId};
 use omp_tool::CallOutcome;
 use serde_json::{Value, json};
 use tokio::{
@@ -96,6 +99,12 @@ async def probe_on_activate(event, ctx):
     HOOK["activate"] = await attempt()
 
 
+@omp.hook("turn_start", phase=omp.HookPhase.OBSERVE)
+async def probe_on_turn_start(event, ctx):
+    del event
+    HOOK["turn_start"] = await attempt()
+
+
 @omp.hook("agent_settled")
 async def probe_on_settled(event, ctx):
     del event
@@ -140,6 +149,26 @@ async fn endpoint() -> Result<(u16, Arc<AtomicUsize>)> {
 		}
 	});
 	Ok((port, accepted))
+}
+
+/// A `turn_start` payload shaped like the one the agent loop publishes, with
+/// `thinking` as `reasoning_effort` reports it for a request that names none.
+fn turn_start_payload() -> Value {
+	json!({
+		"turn_id": "t1",
+		"turn_index": 0,
+		"prompt_hash": "p",
+		"toolset_hash": "t",
+		"enabled_tools": [],
+		"input_mode": "full",
+		"model": {"provider": "acme", "api": "", "model": "m"},
+		"route": {"provider": "acme", "route": "acme/m"},
+		"thinking": "off",
+		"deadline": null,
+		"attempt": 0,
+		"prompt_changed": true,
+		"toolset_changed": false,
+	})
 }
 
 fn settled_payload() -> Value {
@@ -239,9 +268,21 @@ async fn a_tool_reaches_the_endpoint_and_the_same_request_from_a_hook_does_not()
 		AgentSettled::Settle,
 		"the agent_settled hook did not answer Settle"
 	);
+	// The agent loop publishes `turn_start` through the same gate once per turn;
+	// the extension subscribed it when it registered, so it is delivered at once.
+	assert!(
+		hooks.subscribed(HookEventId::HookEventTurnStart),
+		"the gate holds no turn_start subscription for the extension"
+	);
+	hooks
+		.notify(HookEventId::HookEventTurnStart, turn_start_payload())
+		.context("publishing turn_start")?;
 	let mut report = call_tool(harness.client(), &extension, "report", "p9-hook-report-0").await?;
 	for round in 1..40 {
-		if report["hook"]["activate"].is_object() && report["hook"]["settled"].is_object() {
+		if ["activate", "settled", "turn_start"]
+			.iter()
+			.all(|hook| report["hook"][hook].is_object())
+		{
 			break;
 		}
 		tokio::time::sleep(Duration::from_millis(250)).await;
@@ -255,6 +296,7 @@ async fn a_tool_reaches_the_endpoint_and_the_same_request_from_a_hook_does_not()
 		"the extension_activate hook never ran: {report}"
 	);
 	assert!(report["hook"]["settled"].is_object(), "the agent_settled hook never ran: {report}");
+	assert!(report["hook"]["turn_start"].is_object(), "the turn_start hook never ran: {report}");
 	let before_tool = accepted.load(Ordering::SeqCst);
 
 	let tool = call_tool(harness.client(), &extension, "from_tool", "p9-hook-from-tool").await?;
@@ -269,7 +311,7 @@ async fn a_tool_reaches_the_endpoint_and_the_same_request_from_a_hook_does_not()
 
 	// Neither hook's request was sent: each was refused, and none reached the
 	// endpoint.
-	for hook in ["activate", "settled"] {
+	for hook in ["activate", "settled", "turn_start"] {
 		assert_eq!(
 			report["hook"][hook]["outcome"], "refused",
 			"the {hook} hook's request was not refused: {report}"
